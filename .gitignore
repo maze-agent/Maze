@@ -23,7 +23,6 @@ htmlcov/
 *.swo
 
 # Logs and databases
-*.log
 *.sqlite
 *.db
 
@@ -37,7 +36,6 @@ env/
 log.txt
 
 # Ignore sensitive configuration files
-config.py
 secrets.py
 
 # macOS

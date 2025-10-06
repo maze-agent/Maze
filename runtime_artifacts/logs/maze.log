@@ -1,0 +1,1230 @@
+2025-10-06 08:32:11 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 08:32:18 - INFO - [__main__:main:384] - ✅ Ray connected successfully.
+2025-10-06 08:32:18 - INFO - [__main__:main:386] - 🚀 Initializing core services...
+2025-10-06 08:32:23 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:32:28 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:32:28 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 08:32:28 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759710743.2070372}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759710748.4429133}], 'io_task': 20}}
+2025-10-06 08:32:28 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 08:32:28 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 08:32:28 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 08:32:28 - INFO - [__main__:main:405] - ✅ All services initialized.
+2025-10-06 08:32:28 - INFO - [__main__:main:414] - 🚀 Starting background scheduler thread...
+2025-10-06 08:32:28 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 08:32:28 - INFO - [__main__:main:435] - ✅ Background scheduler is running.
+2025-10-06 08:32:28 - INFO - [__main__:main:439] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 08:32:28 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 08:32:28 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 08:32:28 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 08:32:28 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 08:33:00 - INFO - [__main__:submit_agent:160] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 08:33:00 - INFO - [__main__:submit_agent:173] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 08:33:02 - INFO - [__main__:submit_agent:184] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/f0733afa-6cd4-47d9-99d0-10bd980881b1'
+2025-10-06 08:33:02 - INFO - [__main__:submit_agent:194] -   - Submission package for run_id 'f0733afa-6cd4-47d9-99d0-10bd980881b1' has been enqueued.
+2025-10-06 08:33:02 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759710782.96, PerfScore: 1.61)
+2025-10-06 08:33:02 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 08:33:03 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:03] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 08:33:04 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_74acffd4
+2025-10-06 08:33:04 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID f0733afa
+2025-10-06 08:33:04 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:33:04 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 08:33:04 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 08:33:06 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 08:33:06 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG f0733afa-6cd4-47d9-99d0-10bd980881b1...
+2025-10-06 08:33:06 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_cb53d8b8 (run_id, f0733afa-6cd4-47d9-99d0-10bd980881b1) is ready.
+2025-10-06 08:33:06 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:33:13 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:13] "GET /files/hashes/f0733afa-6cd4-47d9-99d0-10bd980881b1 HTTP/1.1" 200 -
+2025-10-06 08:33:14 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:14 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:14] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:15 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:15 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:15] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:27 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:27] "POST /files/download/f0733afa-6cd4-47d9-99d0-10bd980881b1 HTTP/1.1" 200 -
+2025-10-06 08:33:27 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:27 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:27] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:29 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:29 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:29] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:36 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:36 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:36] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:41 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1
+2025-10-06 08:33:41 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:33:41] "GET /runs/f0733afa-6cd4-47d9-99d0-10bd980881b1/summary HTTP/1.1" 200 -
+2025-10-06 08:33:52 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_74acffd4 ('load_source_pdf') completed.
+2025-10-06 08:33:52 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 08:33:52 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759710782.96, PerfScore: 1.70)
+2025-10-06 08:33:52 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 08:33:52 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_65fc9161
+2025-10-06 08:33:52 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID f0733afa
+2025-10-06 08:33:52 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:33:52 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:33:52] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:33:52 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: f0733afa-6cd4-47d9-99d0-10bd980881b1) Priority: (1759710782.963222, -1.7000000000000002, 1)
+2025-10-06 08:33:52 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:34:02 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:34:02] "GET /files/hashes/f0733afa-6cd4-47d9-99d0-10bd980881b1 HTTP/1.1" 200 -
+2025-10-06 08:35:04 - INFO - [__main__:main:446] - 👋 Shutting down Ray...
+2025-10-06 08:36:41 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 08:36:57 - INFO - [__main__:main:384] - ✅ Ray connected successfully.
+2025-10-06 08:36:57 - INFO - [__main__:main:386] - 🚀 Initializing core services...
+2025-10-06 08:37:02 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:37:05 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:37:05 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 08:37:05 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759711022.6915166}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759711025.026695}], 'io_task': 20}}
+2025-10-06 08:37:05 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 08:37:05 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 08:37:05 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 08:37:05 - INFO - [__main__:main:405] - ✅ All services initialized.
+2025-10-06 08:37:05 - INFO - [__main__:main:414] - 🚀 Starting background scheduler thread...
+2025-10-06 08:37:05 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 08:37:05 - INFO - [__main__:main:435] - ✅ Background scheduler is running.
+2025-10-06 08:37:05 - INFO - [__main__:main:439] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 08:37:05 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 08:37:05 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 08:37:05 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 08:37:05 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 08:37:44 - INFO - [__main__:submit_agent:160] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 08:37:45 - INFO - [__main__:submit_agent:173] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 08:37:51 - INFO - [__main__:submit_agent:184] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b'
+2025-10-06 08:37:51 - INFO - [__main__:submit_agent:194] -   - Submission package for run_id 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b' has been enqueued.
+2025-10-06 08:37:51 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759711071.58, PerfScore: 1.61)
+2025-10-06 08:37:51 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 08:37:51 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_e7f0e341
+2025-10-06 08:37:51 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID a34ddca5
+2025-10-06 08:37:51 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:37:51 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 08:37:51 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 08:37:51 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:37:51] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 08:37:52 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 08:37:52 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG a34ddca5-e04e-45e9-b294-ac34d03d8e3b...
+2025-10-06 08:37:52 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_1c818a9a (run_id, a34ddca5-e04e-45e9-b294-ac34d03d8e3b) is ready.
+2025-10-06 08:37:52 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:37:56 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:37:56] "GET /files/hashes/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:38:12 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:38:12] "POST /files/download/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:38:33 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_e7f0e341 ('load_source_pdf') completed.
+2025-10-06 08:38:33 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 08:38:33 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759711071.58, PerfScore: 1.70)
+2025-10-06 08:38:33 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 08:38:33 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_07661fd4
+2025-10-06 08:38:33 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID a34ddca5
+2025-10-06 08:38:33 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:38:33 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:38:33] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:38:33 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b) Priority: (1759711071.5793383, -1.7000000000000002, 1)
+2025-10-06 08:38:33 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:38:40 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:38:40] "GET /files/hashes/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:39:39 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_07661fd4 ('extract_toc_text_with_ocr') completed.
+2025-10-06 08:39:39 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'extract_toc_text_with_ocr' via in-memory queue.
+2025-10-06 08:39:39 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'parse_toc_to_json'. (Arrival: 1759711071.58, PerfScore: 1.90)
+2025-10-06 08:39:39 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'parse_toc_to_json' for submission.
+2025-10-06 08:39:39 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_bc7c5f47
+2025-10-06 08:39:39 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'parse_toc_to_json' from Run ID a34ddca5
+2025-10-06 08:39:39 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:39:39 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:39:39] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:39:39 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'parse_toc_to_json' (run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b) Priority: (1759711071.5793383, -1.9000000000000001, 2)
+2025-10-06 08:39:39 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'parse_toc_to_json' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:39:45 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:39:45] "GET /files/hashes/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:39:55 - ERROR - [maze.core.path.task_dispatcher:monitor:537] - ❌ [FAILED] Task task_bc7c5f47 ('parse_toc_to_json') failed: Error in remote_task_runner: LLM did not return a valid JSON object for the ToC ranges.
+Traceback (most recent call last):
+  File "/tmp/ray/session_2025-10-05_07-55-22_536668_1400/runtime_resources/working_dir_files/_ray_pkg_9ed6cd2f210d321c/maze/library/tools/llm_tools.py", line 295, in parse_toc_with_llm
+    logical_toc_with_ranges = json.loads(response_str)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/decoder.py", line 355, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 184, in remote_task_runner
+    user_function_result = func(**resolved_kwargs)
+  File "/tmp/ray/session_2025-10-05_07-55-22_536668_1400/runtime_resources/working_dir_files/_ray_pkg_9ed6cd2f210d321c/maze/library/tools/llm_tools.py", line 301, in parse_toc_with_llm
+    raise ValueError("LLM did not return a valid JSON object for the ToC ranges.")
+ValueError: LLM did not return a valid JSON object for the ToC ranges.
+
+2025-10-06 08:39:55 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'parse_toc_to_json' via in-memory queue.
+2025-10-06 08:39:55 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'calculate_page_offset'. (Arrival: 1759711071.58, PerfScore: 1.82)
+2025-10-06 08:39:55 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'calculate_page_offset' for submission.
+2025-10-06 08:39:55 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_b5691ab7
+2025-10-06 08:39:55 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'calculate_page_offset' from Run ID a34ddca5
+2025-10-06 08:39:55 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 08:39:55 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'calculate_page_offset' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:39:57 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b
+2025-10-06 08:39:57 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:39:57] "GET /runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b/summary HTTP/1.1" 200 -
+2025-10-06 08:40:04 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:04] "GET /files/hashes/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:40:09 - ERROR - [maze.core.path.task_dispatcher:monitor:537] - ❌ [FAILED] Task task_b5691ab7 ('calculate_page_offset') failed: Error in remote_task_runner: [36mray::DAGContext.get()[39m (pid=18136, ip=10.18.108.31, actor_id=055d7f04a7d1a00f64c1e8341c000000, repr=<maze.core.path.dag_context.DAGContext object at 0x7fac31e7b400>)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/path/dag_context.py", line 47, in get
+    raise KeyError(f"Key '{key}' not found.")
+KeyError: "Key 'task_bc7c5f47.output' not found."
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 160, in remote_task_runner
+    resolved_kwargs[param_name] = _resolve_single_source_remote(source, ctx_actor)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 127, in _resolve_single_source_remote
+    upstream_result_obj = ray.get(context_actor.get.remote(f"{upstream_task_id}.output"))
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/worker.py", line 2858, in get
+    values, debugger_breakpoint = worker.get_objects(object_refs, timeout=timeout)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/worker.py", line 958, in get_objects
+    raise value.as_instanceof_cause()
+ray.exceptions.RayTaskError(KeyError): [36mray::DAGContext.get()[39m (pid=18136, ip=10.18.108.31, actor_id=055d7f04a7d1a00f64c1e8341c000000, repr=<maze.core.path.dag_context.DAGContext object at 0x7fac31e7b400>)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/path/dag_context.py", line 47, in get
+    raise KeyError(f"Key '{key}' not found.")
+KeyError: "Key 'task_bc7c5f47.output' not found."
+
+2025-10-06 08:40:09 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'calculate_page_offset' via in-memory queue.
+2025-10-06 08:40:09 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'split_pdf_into_chunks'. (Arrival: 1759711071.58, PerfScore: 1.82)
+2025-10-06 08:40:09 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'split_pdf_into_chunks' for submission.
+2025-10-06 08:40:09 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_8df39f86
+2025-10-06 08:40:09 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'split_pdf_into_chunks' from Run ID a34ddca5
+2025-10-06 08:40:10 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 08:40:10 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'split_pdf_into_chunks' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:40:15 - DEBUG - [__main__:get:216] - Querying status for task 'task_07661fd4' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': finished
+2025-10-06 08:40:15 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:15] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:40:22 - DEBUG - [__main__:get:216] - Querying status for task 'task_e7f0e341' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': finished
+2025-10-06 08:40:22 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:22] "GET /files/hashes/a34ddca5-e04e-45e9-b294-ac34d03d8e3b HTTP/1.1" 200 -
+2025-10-06 08:40:31 - DEBUG - [__main__:get:216] - Querying status for task 'task_07661fd4' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': finished
+2025-10-06 08:40:34 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:34] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:40:41 - DEBUG - [__main__:get:216] - Querying status for task 'task_bc7c5f47' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': failed
+2025-10-06 08:40:41 - ERROR - [__main__:get:256] - An unexpected error occurred in /get/ endpoint for run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b'.
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/main.py", line 248, in get
+    failed_info = status_mgr.get_failed_task_info(run_id, task_id)
+AttributeError: 'TaskStatusManager' object has no attribute 'get_failed_task_info'
+2025-10-06 08:40:41 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:41] "[35m[1mPOST /get/ HTTP/1.1[0m" 500 -
+2025-10-06 08:40:44 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:44] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:40:44 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b
+2025-10-06 08:40:44 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:44] "GET /runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b/summary HTTP/1.1" 200 -
+2025-10-06 08:40:46 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b
+2025-10-06 08:40:46 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:46] "GET /runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b/summary HTTP/1.1" 200 -
+2025-10-06 08:40:47 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b
+2025-10-06 08:40:47 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:40:47] "GET /runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b/summary HTTP/1.1" 200 -
+2025-10-06 08:40:51 - ERROR - [maze.core.path.task_dispatcher:monitor:537] - ❌ [FAILED] Task task_8df39f86 ('split_pdf_into_chunks') failed: Error in remote_task_runner: [36mray::DAGContext.get()[39m (pid=18136, ip=10.18.108.31, actor_id=055d7f04a7d1a00f64c1e8341c000000, repr=<maze.core.path.dag_context.DAGContext object at 0x7fac31e7b400>)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/path/dag_context.py", line 47, in get
+    raise KeyError(f"Key '{key}' not found.")
+KeyError: "Key 'task_bc7c5f47.output' not found."
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 160, in remote_task_runner
+    resolved_kwargs[param_name] = _resolve_single_source_remote(source, ctx_actor)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 127, in _resolve_single_source_remote
+    upstream_result_obj = ray.get(context_actor.get.remote(f"{upstream_task_id}.output"))
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/worker.py", line 2858, in get
+    values, debugger_breakpoint = worker.get_objects(object_refs, timeout=timeout)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/site-packages/ray/_private/worker.py", line 958, in get_objects
+    raise value.as_instanceof_cause()
+ray.exceptions.RayTaskError(KeyError): [36mray::DAGContext.get()[39m (pid=18136, ip=10.18.108.31, actor_id=055d7f04a7d1a00f64c1e8341c000000, repr=<maze.core.path.dag_context.DAGContext object at 0x7fac31e7b400>)
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/path/dag_context.py", line 47, in get
+    raise KeyError(f"Key '{key}' not found.")
+KeyError: "Key 'task_bc7c5f47.output' not found."
+
+2025-10-06 08:40:51 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'split_pdf_into_chunks' via in-memory queue.
+2025-10-06 08:41:05 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: a34ddca5-e04e-45e9-b294-ac34d03d8e3b
+2025-10-06 08:41:05 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:41:05] "GET /runs/a34ddca5-e04e-45e9-b294-ac34d03d8e3b/summary HTTP/1.1" 200 -
+2025-10-06 08:41:23 - DEBUG - [__main__:get:216] - Querying status for task 'task_07661fd4' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': finished
+2025-10-06 08:41:23 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:41:23] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:41:52 - DEBUG - [__main__:get:216] - Querying status for task 'task_bc7c5f47' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': failed
+2025-10-06 08:41:52 - ERROR - [__main__:get:256] - An unexpected error occurred in /get/ endpoint for run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b'.
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/main.py", line 248, in get
+    failed_info = status_mgr.get_failed_task_info(run_id, task_id)
+AttributeError: 'TaskStatusManager' object has no attribute 'get_failed_task_info'
+2025-10-06 08:41:52 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:41:52] "[35m[1mPOST /get/ HTTP/1.1[0m" 500 -
+2025-10-06 08:43:01 - DEBUG - [__main__:get:216] - Querying status for task 'task_bc7c5f47' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': failed
+2025-10-06 08:43:01 - ERROR - [__main__:get:256] - An unexpected error occurred in /get/ endpoint for run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b'.
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/main.py", line 248, in get
+    failed_info = status_mgr.get_failed_task_info(run_id, task_id)
+AttributeError: 'TaskStatusManager' object has no attribute 'get_failed_task_info'
+2025-10-06 08:43:01 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:43:01] "[35m[1mPOST /get/ HTTP/1.1[0m" 500 -
+2025-10-06 08:43:06 - DEBUG - [__main__:get:216] - Querying status for task 'task_07661fd4' in run 'a34ddca5-e04e-45e9-b294-ac34d03d8e3b': finished
+2025-10-06 08:43:06 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:43:06] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:48:30 - INFO - [__main__:main:446] - 👋 Shutting down Ray...
+2025-10-06 08:48:30 - INFO - [__main__:main:448] - Exiting.
+2025-10-06 08:49:21 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 08:49:34 - INFO - [__main__:main:384] - ✅ Ray connected successfully.
+2025-10-06 08:49:34 - INFO - [__main__:main:386] - 🚀 Initializing core services...
+2025-10-06 08:49:47 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:49:49 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:49:49 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 08:49:49 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759711787.1869888}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759711789.256052}], 'io_task': 20}}
+2025-10-06 08:49:49 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 08:49:49 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 08:49:49 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 08:49:49 - INFO - [__main__:main:405] - ✅ All services initialized.
+2025-10-06 08:49:49 - INFO - [__main__:main:414] - 🚀 Starting background scheduler thread...
+2025-10-06 08:49:49 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 08:49:49 - INFO - [__main__:main:435] - ✅ Background scheduler is running.
+2025-10-06 08:49:49 - INFO - [__main__:main:439] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 08:49:49 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 08:49:49 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 08:49:49 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 08:49:49 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 08:49:59 - INFO - [__main__:submit_agent:160] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 08:50:00 - INFO - [__main__:submit_agent:173] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 08:50:06 - INFO - [__main__:submit_agent:184] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/9a5c0d41-01ad-4682-9115-769e42ecfca3'
+2025-10-06 08:50:06 - INFO - [__main__:submit_agent:194] -   - Submission package for run_id '9a5c0d41-01ad-4682-9115-769e42ecfca3' has been enqueued.
+2025-10-06 08:50:06 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759711806.29, PerfScore: 1.61)
+2025-10-06 08:50:06 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 08:50:06 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_82fb6703
+2025-10-06 08:50:06 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID 9a5c0d41
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 08:50:06 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:50:06] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG 9a5c0d41-01ad-4682-9115-769e42ecfca3...
+2025-10-06 08:50:06 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_9fb8f3b9 (run_id, 9a5c0d41-01ad-4682-9115-769e42ecfca3) is ready.
+2025-10-06 08:50:06 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:50:14 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:50:14] "GET /files/hashes/9a5c0d41-01ad-4682-9115-769e42ecfca3 HTTP/1.1" 200 -
+2025-10-06 08:50:30 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:50:30] "POST /files/download/9a5c0d41-01ad-4682-9115-769e42ecfca3 HTTP/1.1" 200 -
+2025-10-06 08:51:01 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_82fb6703 ('load_source_pdf') completed.
+2025-10-06 08:51:01 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 08:51:01 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759711806.29, PerfScore: 1.70)
+2025-10-06 08:51:01 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 08:51:01 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_02ea349d
+2025-10-06 08:51:01 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID 9a5c0d41
+2025-10-06 08:51:01 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:51:01 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:51:01] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:51:01 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: 9a5c0d41-01ad-4682-9115-769e42ecfca3) Priority: (1759711806.28681, -1.7000000000000002, 1)
+2025-10-06 08:51:01 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:51:17 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:51:17] "GET /files/hashes/9a5c0d41-01ad-4682-9115-769e42ecfca3 HTTP/1.1" 200 -
+2025-10-06 08:53:16 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_02ea349d ('extract_toc_text_with_ocr') completed.
+2025-10-06 08:53:16 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'extract_toc_text_with_ocr' via in-memory queue.
+2025-10-06 08:53:16 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'parse_toc_to_json'. (Arrival: 1759711806.29, PerfScore: 1.90)
+2025-10-06 08:53:16 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'parse_toc_to_json' for submission.
+2025-10-06 08:53:16 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_301481a9
+2025-10-06 08:53:16 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'parse_toc_to_json' from Run ID 9a5c0d41
+2025-10-06 08:53:16 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:53:16 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:53:16] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:53:16 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'parse_toc_to_json' (run_id: 9a5c0d41-01ad-4682-9115-769e42ecfca3) Priority: (1759711806.28681, -1.9000000000000001, 2)
+2025-10-06 08:53:16 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'parse_toc_to_json' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:53:25 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:53:25] "GET /files/hashes/9a5c0d41-01ad-4682-9115-769e42ecfca3 HTTP/1.1" 200 -
+2025-10-06 08:53:37 - ERROR - [maze.core.path.task_dispatcher:monitor:537] - ❌ [FAILED] Task task_301481a9 ('parse_toc_to_json') failed: Error in remote_task_runner: LLM did not return a valid JSON object for the ToC ranges.
+Traceback (most recent call last):
+  File "/tmp/ray/session_2025-10-05_07-55-22_536668_1400/runtime_resources/working_dir_files/_ray_pkg_be9eff142869843b/maze/library/tools/llm_tools.py", line 295, in parse_toc_with_llm
+    logical_toc_with_ranges = json.loads(response_str)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+  File "/root/miniconda3/envs/agentos/lib/python3.10/json/decoder.py", line 355, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/core/worker/executor.py", line 184, in remote_task_runner
+    user_function_result = func(**resolved_kwargs)
+  File "/tmp/ray/session_2025-10-05_07-55-22_536668_1400/runtime_resources/working_dir_files/_ray_pkg_be9eff142869843b/maze/library/tools/llm_tools.py", line 301, in parse_toc_with_llm
+    raise ValueError("LLM did not return a valid JSON object for the ToC ranges.")
+ValueError: LLM did not return a valid JSON object for the ToC ranges.
+
+2025-10-06 08:53:37 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'parse_toc_to_json' via in-memory queue.
+2025-10-06 08:53:37 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'calculate_page_offset'. (Arrival: 1759711806.29, PerfScore: 1.82)
+2025-10-06 08:53:37 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'calculate_page_offset' for submission.
+2025-10-06 08:53:37 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_ef240f2c
+2025-10-06 08:53:37 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'calculate_page_offset' from Run ID 9a5c0d41
+2025-10-06 08:53:37 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 08:53:37 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'calculate_page_offset' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:53:44 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:53:44] "GET /files/hashes/9a5c0d41-01ad-4682-9115-769e42ecfca3 HTTP/1.1" 200 -
+2025-10-06 08:53:48 - INFO - [__main__:main:446] - 👋 Shutting down Ray...
+2025-10-06 08:53:55 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 08:54:09 - INFO - [__main__:main:384] - ✅ Ray connected successfully.
+2025-10-06 08:54:09 - INFO - [__main__:main:386] - 🚀 Initializing core services...
+2025-10-06 08:54:16 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:54:19 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 08:54:19 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 08:54:19 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759712056.1815226}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759712059.9631224}], 'io_task': 20}}
+2025-10-06 08:54:19 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 08:54:19 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 08:54:19 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 08:54:19 - INFO - [__main__:main:405] - ✅ All services initialized.
+2025-10-06 08:54:19 - INFO - [__main__:main:414] - 🚀 Starting background scheduler thread...
+2025-10-06 08:54:19 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 08:54:19 - INFO - [__main__:main:435] - ✅ Background scheduler is running.
+2025-10-06 08:54:19 - INFO - [__main__:main:439] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 08:54:19 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 08:54:19 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 08:54:19 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 08:54:19 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 08:54:20 - INFO - [__main__:submit_agent:160] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 08:54:21 - INFO - [__main__:submit_agent:173] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 08:54:30 - INFO - [__main__:submit_agent:184] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567'
+2025-10-06 08:54:30 - INFO - [__main__:submit_agent:194] -   - Submission package for run_id 'aa62a47c-9acd-4407-bd1e-b1d4fc578567' has been enqueued.
+2025-10-06 08:54:30 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759712070.02, PerfScore: 1.61)
+2025-10-06 08:54:30 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 08:54:30 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_203eb6c2
+2025-10-06 08:54:30 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID aa62a47c
+2025-10-06 08:54:30 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:54:30 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 08:54:30 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 08:54:30 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:54:30] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 08:54:31 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 08:54:31 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG aa62a47c-9acd-4407-bd1e-b1d4fc578567...
+2025-10-06 08:54:31 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_38ddee38 (run_id, aa62a47c-9acd-4407-bd1e-b1d4fc578567) is ready.
+2025-10-06 08:54:31 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:54:37 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:54:37] "GET /files/hashes/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:54:54 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:54:54] "POST /files/download/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:55:10 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_203eb6c2 ('load_source_pdf') completed.
+2025-10-06 08:55:10 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 08:55:10 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759712070.02, PerfScore: 1.70)
+2025-10-06 08:55:10 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 08:55:10 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_bc0bd165
+2025-10-06 08:55:10 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID aa62a47c
+2025-10-06 08:55:10 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:55:10 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:55:10] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:55:10 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567) Priority: (1759712070.015468, -1.7000000000000002, 1)
+2025-10-06 08:55:10 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:55:15 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:55:15] "GET /files/hashes/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:56:00 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_bc0bd165 ('extract_toc_text_with_ocr') completed.
+2025-10-06 08:56:00 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'extract_toc_text_with_ocr' via in-memory queue.
+2025-10-06 08:56:00 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'parse_toc_to_json'. (Arrival: 1759712070.02, PerfScore: 1.90)
+2025-10-06 08:56:00 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'parse_toc_to_json' for submission.
+2025-10-06 08:56:00 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_207aead4
+2025-10-06 08:56:00 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'parse_toc_to_json' from Run ID aa62a47c
+2025-10-06 08:56:00 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 08:56:00 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [08:56:00] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 08:56:00 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'parse_toc_to_json' (run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567) Priority: (1759712070.015468, -1.9000000000000001, 2)
+2025-10-06 08:56:00 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'parse_toc_to_json' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 08:56:05 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:05] "GET /files/hashes/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:56:19 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_207aead4 ('parse_toc_to_json') completed.
+2025-10-06 08:56:19 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'parse_toc_to_json' via in-memory queue.
+2025-10-06 08:56:19 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'calculate_page_offset'. (Arrival: 1759712070.02, PerfScore: 2.02)
+2025-10-06 08:56:19 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'calculate_page_offset' for submission.
+2025-10-06 08:56:19 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_763ad03f
+2025-10-06 08:56:19 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'calculate_page_offset' from Run ID aa62a47c
+2025-10-06 08:56:19 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 08:56:19 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'calculate_page_offset' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:56:20 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567
+2025-10-06 08:56:20 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:20] "GET /runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567/summary HTTP/1.1" 200 -
+2025-10-06 08:56:25 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567
+2025-10-06 08:56:25 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:25] "GET /runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567/summary HTTP/1.1" 200 -
+2025-10-06 08:56:26 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567
+2025-10-06 08:56:26 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:26] "GET /runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567/summary HTTP/1.1" 200 -
+2025-10-06 08:56:27 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:27] "GET /files/hashes/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:56:34 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_763ad03f ('calculate_page_offset') completed.
+2025-10-06 08:56:34 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'calculate_page_offset' via in-memory queue.
+2025-10-06 08:56:34 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'split_pdf_into_chunks'. (Arrival: 1759712070.02, PerfScore: 2.02)
+2025-10-06 08:56:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'split_pdf_into_chunks' for submission.
+2025-10-06 08:56:34 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_362d18da
+2025-10-06 08:56:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'split_pdf_into_chunks' from Run ID aa62a47c
+2025-10-06 08:56:34 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 08:56:34 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'split_pdf_into_chunks' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 08:56:41 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:56:41] "GET /files/hashes/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:57:05 - INFO - [__main__:upload_files:318] - ✅ [Push] Received and saved 11 file(s) for run_id 'aa62a47c-9acd-4407-bd1e-b1d4fc578567'.
+2025-10-06 08:57:05 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:57:05] "POST /files/upload/aa62a47c-9acd-4407-bd1e-b1d4fc578567 HTTP/1.1" 200 -
+2025-10-06 08:57:05 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_362d18da ('split_pdf_into_chunks') completed.
+2025-10-06 08:57:05 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'split_pdf_into_chunks' via in-memory queue.
+2025-10-06 08:58:26 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567
+2025-10-06 08:58:26 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:58:26] "GET /runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567/summary HTTP/1.1" 200 -
+2025-10-06 08:58:29 - DEBUG - [__main__:get:216] - Querying status for task 'task_bc0bd165' in run 'aa62a47c-9acd-4407-bd1e-b1d4fc578567': finished
+2025-10-06 08:58:29 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:58:29] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:58:54 - DEBUG - [__main__:get:216] - Querying status for task 'task_362d18da' in run 'aa62a47c-9acd-4407-bd1e-b1d4fc578567': finished
+2025-10-06 08:58:55 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:58:55] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:59:06 - DEBUG - [__main__:get:216] - Querying status for task 'task_362d18da' in run 'aa62a47c-9acd-4407-bd1e-b1d4fc578567': finished
+2025-10-06 08:59:06 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:59:06] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:59:54 - DEBUG - [__main__:get:216] - Querying status for task 'task_362d18da' in run 'aa62a47c-9acd-4407-bd1e-b1d4fc578567': finished
+2025-10-06 08:59:54 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:59:54] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 08:59:54 - INFO - [__main__:download_run_results:332] - Received request to download results for run_id: aa62a47c-9acd-4407-bd1e-b1d4fc578567
+2025-10-06 08:59:54 - ERROR - [__main__:download_run_results:335] - Download request failed: Run directory not found for run_id 'aa62a47c-9acd-4407-bd1e-b1d4fc578567'.
+2025-10-06 08:59:54 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 08:59:54] "[33mGET /runs/aa62a47c-9acd-4407-bd1e-b1d4fc578567/download HTTP/1.1[0m" 404 -
+2025-10-06 09:04:53 - DEBUG - [__main__:get:216] - Querying status for task 'task_362d18da' in run 'aa62a47c-9acd-4407-bd1e-b1d4fc578567': finished
+2025-10-06 09:04:53 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:04:53] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 09:16:51 - INFO - [__main__:main:446] - 👋 Shutting down Ray...
+2025-10-06 09:16:52 - INFO - [__main__:main:448] - Exiting.
+2025-10-06 09:20:18 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 09:20:26 - INFO - [__main__:main:470] - ✅ Ray connected successfully.
+2025-10-06 09:20:26 - INFO - [__main__:main:472] - 🚀 Initializing core services...
+2025-10-06 09:20:31 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 09:20:36 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 09:20:36 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 09:20:36 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759713631.5413084}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759713636.7050805}], 'io_task': 20}}
+2025-10-06 09:20:36 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 09:20:36 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 09:20:36 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 09:20:36 - INFO - [__main__:main:491] - ✅ All services initialized.
+2025-10-06 09:20:36 - INFO - [__main__:main:500] - 🚀 Starting background scheduler thread...
+2025-10-06 09:20:36 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 09:20:36 - INFO - [__main__:main:521] - ✅ Background scheduler is running.
+2025-10-06 09:20:36 - INFO - [__main__:main:525] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 09:20:36 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 09:20:36 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 09:20:36 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 09:20:36 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 09:21:13 - INFO - [__main__:submit_agent:160] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 09:21:14 - INFO - [__main__:submit_agent:173] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 09:21:21 - INFO - [__main__:submit_agent:184] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/610d6d4f-86d8-4a47-8652-0210091749ab'
+2025-10-06 09:21:21 - INFO - [__main__:submit_agent:194] -   - Submission package for run_id '610d6d4f-86d8-4a47-8652-0210091749ab' has been enqueued.
+2025-10-06 09:21:21 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759713681.26, PerfScore: 1.61)
+2025-10-06 09:21:21 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 09:21:21 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_55d55945
+2025-10-06 09:21:21 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID 610d6d4f
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 09:21:21 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:21:21] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 09:21:21 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:21:21 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:21:21] "GET /runs/610d6d4f-86d8-4a47-8652-0210091749ab/summary HTTP/1.1" 200 -
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG 610d6d4f-86d8-4a47-8652-0210091749ab...
+2025-10-06 09:21:21 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_04fd7202 (run_id, 610d6d4f-86d8-4a47-8652-0210091749ab) is ready.
+2025-10-06 09:21:21 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 09:21:29 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:21:29] "GET /files/hashes/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:21:38 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:21:38 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:21:38] "GET /runs/610d6d4f-86d8-4a47-8652-0210091749ab/summary HTTP/1.1" 200 -
+2025-10-06 09:21:44 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:21:44] "POST /files/download/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:22:10 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_55d55945 ('load_source_pdf') completed.
+2025-10-06 09:22:10 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 09:22:10 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759713681.26, PerfScore: 1.70)
+2025-10-06 09:22:10 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 09:22:10 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_779fe83a
+2025-10-06 09:22:10 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID 610d6d4f
+2025-10-06 09:22:10 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 09:22:10 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [09:22:10] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 09:22:10 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: 610d6d4f-86d8-4a47-8652-0210091749ab) Priority: (1759713681.262229, -1.7000000000000002, 1)
+2025-10-06 09:22:10 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 09:22:16 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:22:16] "GET /files/hashes/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:22:33 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:22:33 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:22:33] "GET /runs/610d6d4f-86d8-4a47-8652-0210091749ab/summary HTTP/1.1" 200 -
+2025-10-06 09:23:07 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_779fe83a ('extract_toc_text_with_ocr') completed.
+2025-10-06 09:23:07 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'extract_toc_text_with_ocr' via in-memory queue.
+2025-10-06 09:23:07 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'parse_toc_to_json'. (Arrival: 1759713681.26, PerfScore: 1.90)
+2025-10-06 09:23:07 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'parse_toc_to_json' for submission.
+2025-10-06 09:23:07 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_798ff960
+2025-10-06 09:23:07 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'parse_toc_to_json' from Run ID 610d6d4f
+2025-10-06 09:23:07 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 09:23:07 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [09:23:07] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 09:23:07 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'parse_toc_to_json' (run_id: 610d6d4f-86d8-4a47-8652-0210091749ab) Priority: (1759713681.262229, -1.9000000000000001, 2)
+2025-10-06 09:23:07 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'parse_toc_to_json' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 09:23:14 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:23:14] "GET /files/hashes/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:23:31 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_798ff960 ('parse_toc_to_json') completed.
+2025-10-06 09:23:31 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'parse_toc_to_json' via in-memory queue.
+2025-10-06 09:23:31 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'calculate_page_offset'. (Arrival: 1759713681.26, PerfScore: 2.02)
+2025-10-06 09:23:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'calculate_page_offset' for submission.
+2025-10-06 09:23:31 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_546edfa1
+2025-10-06 09:23:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'calculate_page_offset' from Run ID 610d6d4f
+2025-10-06 09:23:31 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 09:23:31 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'calculate_page_offset' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 09:23:38 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:23:38] "GET /files/hashes/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:23:45 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_546edfa1 ('calculate_page_offset') completed.
+2025-10-06 09:23:45 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'calculate_page_offset' via in-memory queue.
+2025-10-06 09:23:45 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'split_pdf_into_chunks'. (Arrival: 1759713681.26, PerfScore: 2.02)
+2025-10-06 09:23:45 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'split_pdf_into_chunks' for submission.
+2025-10-06 09:23:45 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_fae823d3
+2025-10-06 09:23:45 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'split_pdf_into_chunks' from Run ID 610d6d4f
+2025-10-06 09:23:45 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 09:23:45 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'split_pdf_into_chunks' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 09:23:59 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:23:59] "GET /files/hashes/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:24:25 - INFO - [__main__:upload_files:318] - ✅ [Push] Received and saved 11 file(s) for run_id '610d6d4f-86d8-4a47-8652-0210091749ab'.
+2025-10-06 09:24:25 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:24:25] "POST /files/upload/610d6d4f-86d8-4a47-8652-0210091749ab HTTP/1.1" 200 -
+2025-10-06 09:24:25 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_fae823d3 ('split_pdf_into_chunks') completed.
+2025-10-06 09:24:25 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'split_pdf_into_chunks' via in-memory queue.
+2025-10-06 09:24:55 - DEBUG - [__main__:get_run_summary:54] - Received request for summary of run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:24:55 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:24:55] "GET /runs/610d6d4f-86d8-4a47-8652-0210091749ab/summary HTTP/1.1" 200 -
+2025-10-06 09:24:57 - DEBUG - [__main__:get:216] - Querying status for task 'task_fae823d3' in run '610d6d4f-86d8-4a47-8652-0210091749ab': finished
+2025-10-06 09:24:57 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:24:57] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 09:25:00 - DEBUG - [__main__:get:216] - Querying status for task 'task_fae823d3' in run '610d6d4f-86d8-4a47-8652-0210091749ab': finished
+2025-10-06 09:25:00 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:25:00] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 09:25:00 - INFO - [__main__:download_run_results:332] - Received request to download results for run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:25:29 - INFO - [__main__:download_run_results:353] - Successfully created zip archive in memory for run '610d6d4f-86d8-4a47-8652-0210091749ab'. Sending file...
+2025-10-06 09:25:29 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:25:29] "GET /runs/610d6d4f-86d8-4a47-8652-0210091749ab/download HTTP/1.1" 200 -
+2025-10-06 09:25:54 - INFO - [__main__:destroy_run:100] - 🔥 Received request to destroy and clean up run_id: 610d6d4f-86d8-4a47-8652-0210091749ab
+2025-10-06 09:25:54 - INFO - [__main__:destroy_run:127] - Workflow for run '610d6d4f-86d8-4a47-8652-0210091749ab' is not active. Proceeding with cleanup.
+2025-10-06 09:25:54 - DEBUG - [maze.core.path.dag_context:release_context:114] -   -> Context released from node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {}
+2025-10-06 09:25:54 - INFO - [__main__:destroy_run:133] -   -> Step 1/3: DAGContext for run '610d6d4f-86d8-4a47-8652-0210091749ab' released successfully.
+2025-10-06 09:25:54 - INFO - [__main__:destroy_run:139] -   -> Step 2/3: Task status records for run '610d6d4f-86d8-4a47-8652-0210091749ab' cleaned up.
+2025-10-06 09:25:54 - INFO - [__main__:destroy_run:147] -   -> Step 3/3: Run directory '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/610d6d4f-86d8-4a47-8652-0210091749ab' deleted successfully.
+2025-10-06 09:25:54 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 09:25:54] "POST /runs/destroy HTTP/1.1" 200 -
+2025-10-06 09:39:07 - INFO - [__main__:main:532] - 👋 Shutting down Ray...
+2025-10-06 09:39:07 - INFO - [__main__:main:534] - Exiting.
+2025-10-06 09:48:41 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 09:48:41 - INFO - [maze.core.register.tool_registry:discover_tools:38] - Starting auto-discovery of tools in 'maze/library/tools'...
+2025-10-06 09:48:54 - INFO - [__main__:main:508] - ✅ Ray connected successfully.
+2025-10-06 09:48:54 - INFO - [__main__:main:510] - 🚀 Initializing core services...
+2025-10-06 09:48:59 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 09:49:05 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 09:49:05 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 09:49:05 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759715339.3200812}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759715345.1343925}], 'io_task': 20}}
+2025-10-06 09:49:05 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 09:49:05 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 09:49:05 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 09:49:05 - INFO - [__main__:main:529] - ✅ All services initialized.
+2025-10-06 09:49:05 - INFO - [__main__:main:538] - 🚀 Starting background scheduler thread...
+2025-10-06 09:49:05 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 09:49:05 - INFO - [__main__:main:559] - ✅ Background scheduler is running.
+2025-10-06 09:49:05 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 09:49:05 - INFO - [__main__:main:563] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 09:49:05 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 09:49:05 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 09:49:05 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 09:55:54 - INFO - [__main__:main:570] - 👋 Shutting down Ray...
+2025-10-06 09:55:54 - INFO - [__main__:main:572] - Exiting.
+2025-10-06 10:03:48 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 10:06:09 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 10:07:00 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 10:07:00 - INFO - [maze.core.register.task_registry:discover_tasks:38] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 10:07:16 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 10:07:16 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 10:07:27 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:07:43 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:07:43 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 10:07:43 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759716447.754158}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759716463.1443965}], 'io_task': 20}}
+2025-10-06 10:07:43 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 10:07:43 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 10:07:43 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 10:07:43 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 10:07:43 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 10:07:43 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 10:07:43 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 10:07:43 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 10:07:43 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 10:07:43 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 10:07:43 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 10:07:43 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 10:14:27 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 10:14:27 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 10:14:35 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 10:14:35 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 10:14:49 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 10:14:49 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 10:14:58 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:15:05 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:15:05 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 10:15:05 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759716898.9897819}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759716905.1974525}], 'io_task': 20}}
+2025-10-06 10:15:05 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 10:15:05 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 10:15:05 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 10:15:05 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 10:15:05 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 10:15:05 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 10:15:05 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 10:15:05 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 10:15:05 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 10:15:05 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 10:15:05 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 10:15:05 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 10:18:30 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 10:18:31 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 10:18:45 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 10:18:45 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 10:19:20 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 10:19:20 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 10:19:25 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:19:31 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 10:19:31 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 10:19:31 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759717165.6928372}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759717171.9765215}], 'io_task': 20}}
+2025-10-06 10:19:31 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 10:19:31 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 10:19:31 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 10:19:32 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 10:19:32 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 10:19:32 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 10:19:32 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 10:19:32 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 10:19:32 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 10:19:32 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 10:19:32 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 10:19:32 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 10:24:31 - INFO - [__main__:submit_agent:159] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 10:24:31 - INFO - [__main__:submit_agent:172] -   - Workflow payload for 'Custom Task Workflow' parsed successfully.
+2025-10-06 10:24:31 - INFO - [__main__:submit_agent:183] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/4c425cf8-ff5b-4368-8ca3-702a7b4e872e'
+2025-10-06 10:24:31 - INFO - [__main__:submit_agent:193] -   - Submission package for run_id '4c425cf8-ff5b-4368-8ca3-702a7b4e872e' has been enqueued.
+2025-10-06 10:24:31 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'create_initial_report'. (Arrival: 1759717471.19, PerfScore: 2.02)
+2025-10-06 10:24:31 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:31] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 10:24:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'create_initial_report' for submission.
+2025-10-06 10:24:31 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_92853843
+2025-10-06 10:24:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'create_initial_report' from Run ID 4c425cf8
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.task_dispatcher:loop:418] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG 4c425cf8-ff5b-4368-8ca3-702a7b4e872e...
+2025-10-06 10:24:31 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_db21339d (run_id, 4c425cf8-ff5b-4368-8ca3-702a7b4e872e) is ready.
+2025-10-06 10:24:31 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'create_initial_report' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 10:24:34 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:34] "GET /files/hashes/4c425cf8-ff5b-4368-8ca3-702a7b4e872e HTTP/1.1" 200 -
+2025-10-06 10:24:34 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:34] "POST /files/download/4c425cf8-ff5b-4368-8ca3-702a7b4e872e HTTP/1.1" 200 -
+2025-10-06 10:24:34 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_92853843 ('create_initial_report') completed.
+2025-10-06 10:24:34 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'create_initial_report' via in-memory queue.
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'add_analysis_section'. (Arrival: 1759717471.19, PerfScore: 2.02)
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'add_analysis_section' for submission.
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'add_summary_section'. (Arrival: 1759717471.19, PerfScore: 2.02)
+2025-10-06 10:24:34 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_479e948b
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'add_analysis_section' from Run ID 4c425cf8
+2025-10-06 10:24:34 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 10:24:34 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'add_analysis_section' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'add_summary_section' for submission.
+2025-10-06 10:24:34 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_35e4f792
+2025-10-06 10:24:34 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'add_summary_section' from Run ID 4c425cf8
+2025-10-06 10:24:34 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 10:24:34 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'add_summary_section' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 10:24:34 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:34 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:34] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:35 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:35 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:35] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:36 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:36 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:36] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:37 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:37 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:37] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:38 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:38 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:38] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:39 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:39] "GET /files/hashes/4c425cf8-ff5b-4368-8ca3-702a7b4e872e HTTP/1.1" 200 -
+2025-10-06 10:24:39 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:39 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:39] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:40 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:40] "GET /files/hashes/4c425cf8-ff5b-4368-8ca3-702a7b4e872e HTTP/1.1" 200 -
+2025-10-06 10:24:40 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:40 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:40] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:41 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_479e948b ('add_analysis_section') completed.
+2025-10-06 10:24:41 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'add_analysis_section' via in-memory queue.
+2025-10-06 10:24:41 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:41 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:41] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:42 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': received
+2025-10-06 10:24:42 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:42] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:43 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_35e4f792 ('add_summary_section') completed.
+2025-10-06 10:24:43 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'add_summary_section' via in-memory queue.
+2025-10-06 10:24:43 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'finalize_report'. (Arrival: 1759717471.19, PerfScore: 2.02)
+2025-10-06 10:24:43 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'finalize_report' for submission.
+2025-10-06 10:24:43 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_72dca8d9
+2025-10-06 10:24:43 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'finalize_report' from Run ID 4c425cf8
+2025-10-06 10:24:43 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 10:24:43 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'finalize_report' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 10:24:43 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:43 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:43] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:44 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:44 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:44] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:45 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:45 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:45] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:46 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:46 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:46] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:47 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:47 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:47] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:48 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': running
+2025-10-06 10:24:48 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:48] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:49 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:49] "GET /files/hashes/4c425cf8-ff5b-4368-8ca3-702a7b4e872e HTTP/1.1" 200 -
+2025-10-06 10:24:49 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_72dca8d9 ('finalize_report') completed.
+2025-10-06 10:24:49 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'finalize_report' via in-memory queue.
+2025-10-06 10:24:50 - DEBUG - [__main__:get:215] - Querying status for task 'task_72dca8d9' in run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e': finished
+2025-10-06 10:24:50 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:50] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 10:24:52 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: 4c425cf8-ff5b-4368-8ca3-702a7b4e872e
+2025-10-06 10:24:52 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:52] "GET /runs/4c425cf8-ff5b-4368-8ca3-702a7b4e872e/summary HTTP/1.1" 200 -
+2025-10-06 10:24:55 - INFO - [__main__:destroy_run:99] - 🔥 Received request to destroy and clean up run_id: 4c425cf8-ff5b-4368-8ca3-702a7b4e872e
+2025-10-06 10:24:55 - INFO - [__main__:destroy_run:126] - Workflow for run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e' is not active. Proceeding with cleanup.
+2025-10-06 10:24:55 - DEBUG - [maze.core.path.dag_context:release_context:114] -   -> Context released from node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {}
+2025-10-06 10:24:55 - INFO - [__main__:destroy_run:132] -   -> Step 1/3: DAGContext for run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e' released successfully.
+2025-10-06 10:24:55 - INFO - [__main__:destroy_run:138] -   -> Step 2/3: Task status records for run '4c425cf8-ff5b-4368-8ca3-702a7b4e872e' cleaned up.
+2025-10-06 10:24:56 - INFO - [__main__:destroy_run:146] -   -> Step 3/3: Run directory '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/4c425cf8-ff5b-4368-8ca3-702a7b4e872e' deleted successfully.
+2025-10-06 10:24:56 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 10:24:56] "POST /runs/destroy HTTP/1.1" 200 -
+2025-10-06 10:28:24 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 10:28:24 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 11:20:40 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 11:20:40 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 11:20:49 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 11:20:49 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 11:20:53 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 11:20:57 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 11:20:57 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 11:20:57 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': {'cpu_num': 6.0, 'mem': 6277.25820350647, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759720853.062895}], 'io_task': 20}, 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf': {'cpu_num': 6.0, 'mem': 6789.012890815735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759720857.2224016}], 'io_task': 20}}
+2025-10-06 11:20:57 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 11:20:57 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 11:20:57 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 11:20:57 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 11:20:57 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 11:20:57 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 11:20:57 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 11:20:57 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 11:20:57 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 11:20:57 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 11:20:57 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.20:6380
+2025-10-06 11:20:57 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 11:24:21 - INFO - [__main__:submit_agent:159] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 11:24:22 - INFO - [__main__:submit_agent:172] -   - Workflow payload for 'PDF Chapter Splitting Workflow' parsed successfully.
+2025-10-06 11:24:26 - INFO - [__main__:submit_agent:183] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/b4e09b39-7623-4927-832d-9c586e23cd50'
+2025-10-06 11:24:26 - INFO - [__main__:submit_agent:193] -   - Submission package for run_id 'b4e09b39-7623-4927-832d-9c586e23cd50' has been enqueued.
+2025-10-06 11:24:26 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'load_source_pdf'. (Arrival: 1759721066.27, PerfScore: 1.61)
+2025-10-06 11:24:26 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'load_source_pdf' for submission.
+2025-10-06 11:24:26 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_1c2c1f0b
+2025-10-06 11:24:26 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'load_source_pdf' from Run ID b4e09b39
+2025-10-06 11:24:26 - DEBUG - [maze.core.path.task_dispatcher:loop:487] -   -> Candidate nodes: ['b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f', 'be942f78dfa18f07771ea8ee6ce4873b003c3e586057ddc69f76b6cf']. Choosing least loaded: 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 11:24:26 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f': 1}
+2025-10-06 11:24:26 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 11:24:26 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:24:26] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 11:24:28 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 11:24:28 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG b4e09b39-7623-4927-832d-9c586e23cd50...
+2025-10-06 11:24:28 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_7340b6c6 (run_id, b4e09b39-7623-4927-832d-9c586e23cd50) is ready.
+2025-10-06 11:24:28 - INFO - [maze.core.path.task_dispatcher:loop:498] - 🚀 Dispatching IO task 'load_source_pdf' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 11:24:36 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:24:36] "GET /files/hashes/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:24:52 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:24:52] "POST /files/download/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:25:15 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_1c2c1f0b ('load_source_pdf') completed.
+2025-10-06 11:25:15 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'load_source_pdf' via in-memory queue.
+2025-10-06 11:25:15 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'extract_toc_text_with_ocr'. (Arrival: 1759721066.27, PerfScore: 1.70)
+2025-10-06 11:25:15 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'extract_toc_text_with_ocr' for submission.
+2025-10-06 11:25:15 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_469503e7
+2025-10-06 11:25:15 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'extract_toc_text_with_ocr' from Run ID b4e09b39
+2025-10-06 11:25:15 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 11:25:15 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [11:25:15] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 11:25:15 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'extract_toc_text_with_ocr' (run_id: b4e09b39-7623-4927-832d-9c586e23cd50) Priority: (1759721066.2653146, -1.7000000000000002, 1)
+2025-10-06 11:25:15 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'extract_toc_text_with_ocr' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 11:25:20 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:25:20] "GET /files/hashes/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:26:15 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_469503e7 ('extract_toc_text_with_ocr') completed.
+2025-10-06 11:26:15 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'extract_toc_text_with_ocr' via in-memory queue.
+2025-10-06 11:26:15 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'parse_toc_to_json'. (Arrival: 1759721066.27, PerfScore: 1.90)
+2025-10-06 11:26:15 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'parse_toc_to_json' for submission.
+2025-10-06 11:26:15 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_5b8f5ed6
+2025-10-06 11:26:15 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'parse_toc_to_json' from Run ID b4e09b39
+2025-10-06 11:26:15 - DEBUG - [maze.core.path.task_dispatcher:loop:295] -   -> ✅ Affinity node has resources. Placing on GPUs [0].
+2025-10-06 11:26:15 - DEBUG - [maze.core.path.task_dispatcher:loop:325] - [11:26:15] 🧠 GPU Scheduler Loop: Dequeued Task
+2025-10-06 11:26:15 - DEBUG - [maze.core.path.task_dispatcher:loop:326] -   -> Task to Schedule: 'parse_toc_to_json' (run_id: b4e09b39-7623-4927-832d-9c586e23cd50) Priority: (1759721066.2653146, -1.9000000000000001, 2)
+2025-10-06 11:26:15 - INFO - [maze.core.path.task_dispatcher:loop:329] - 🚀 Dispatching GPU task 'parse_toc_to_json' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f' on GPUs [0].
+2025-10-06 11:26:46 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:26:46] "GET /files/hashes/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:26:57 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:26:57 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:26:57] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:04 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_5b8f5ed6 ('parse_toc_to_json') completed.
+2025-10-06 11:27:04 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'parse_toc_to_json' via in-memory queue.
+2025-10-06 11:27:04 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'calculate_page_offset'. (Arrival: 1759721066.27, PerfScore: 2.02)
+2025-10-06 11:27:04 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'calculate_page_offset' for submission.
+2025-10-06 11:27:04 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_3fb291aa
+2025-10-06 11:27:04 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'calculate_page_offset' from Run ID b4e09b39
+2025-10-06 11:27:04 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 11:27:04 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'calculate_page_offset' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 11:27:10 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:10] "GET /files/hashes/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:27:17 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_3fb291aa ('calculate_page_offset') completed.
+2025-10-06 11:27:17 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'calculate_page_offset' via in-memory queue.
+2025-10-06 11:27:17 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'split_pdf_into_chunks'. (Arrival: 1759721066.27, PerfScore: 2.02)
+2025-10-06 11:27:17 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'split_pdf_into_chunks' for submission.
+2025-10-06 11:27:17 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_3aa97f7f
+2025-10-06 11:27:17 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'split_pdf_into_chunks' from Run ID b4e09b39
+2025-10-06 11:27:17 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 11:27:17 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'split_pdf_into_chunks' to node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'.
+2025-10-06 11:27:23 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:23 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:23] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:26 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:26] "GET /files/hashes/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:27:26 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:26 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:26] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:34 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:34 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:34] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:38 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:38 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:38] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:40 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:40 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:40] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:42 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:42 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:42] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:43 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:43 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:43] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:45 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:45 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:45] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:57 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:27:57 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:57] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:27:58 - INFO - [__main__:upload_files:317] - ✅ [Push] Received and saved 11 file(s) for run_id 'b4e09b39-7623-4927-832d-9c586e23cd50'.
+2025-10-06 11:27:58 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:27:58] "POST /files/upload/b4e09b39-7623-4927-832d-9c586e23cd50 HTTP/1.1" 200 -
+2025-10-06 11:27:59 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_3aa97f7f ('split_pdf_into_chunks') completed.
+2025-10-06 11:27:59 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'split_pdf_into_chunks' via in-memory queue.
+2025-10-06 11:28:07 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:28:07 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:28:07] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:28:09 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:28:09 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:28:09] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/summary HTTP/1.1" 200 -
+2025-10-06 11:28:13 - DEBUG - [__main__:get:215] - Querying status for task 'task_3aa97f7f' in run 'b4e09b39-7623-4927-832d-9c586e23cd50': finished
+2025-10-06 11:28:13 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:28:13] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 11:29:23 - DEBUG - [__main__:get:215] - Querying status for task 'task_3aa97f7f' in run 'b4e09b39-7623-4927-832d-9c586e23cd50': finished
+2025-10-06 11:29:23 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:29:23] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 11:29:23 - INFO - [__main__:download_run_results:331] - Received request to download results for run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:29:52 - INFO - [__main__:download_run_results:352] - Successfully created zip archive in memory for run 'b4e09b39-7623-4927-832d-9c586e23cd50'. Sending file...
+2025-10-06 11:29:52 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:29:52] "GET /runs/b4e09b39-7623-4927-832d-9c586e23cd50/download HTTP/1.1" 200 -
+2025-10-06 11:30:01 - INFO - [__main__:destroy_run:99] - 🔥 Received request to destroy and clean up run_id: b4e09b39-7623-4927-832d-9c586e23cd50
+2025-10-06 11:30:01 - INFO - [__main__:destroy_run:126] - Workflow for run 'b4e09b39-7623-4927-832d-9c586e23cd50' is not active. Proceeding with cleanup.
+2025-10-06 11:30:01 - DEBUG - [maze.core.path.dag_context:release_context:114] -   -> Context released from node 'b75ad647bbda1de003d0b8614eca4de58fe8032631eeb1471c93a83f'. Current node loads: {}
+2025-10-06 11:30:01 - INFO - [__main__:destroy_run:132] -   -> Step 1/3: DAGContext for run 'b4e09b39-7623-4927-832d-9c586e23cd50' released successfully.
+2025-10-06 11:30:01 - INFO - [__main__:destroy_run:138] -   -> Step 2/3: Task status records for run 'b4e09b39-7623-4927-832d-9c586e23cd50' cleaned up.
+2025-10-06 11:30:02 - INFO - [__main__:destroy_run:146] -   -> Step 3/3: Run directory '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/b4e09b39-7623-4927-832d-9c586e23cd50' deleted successfully.
+2025-10-06 11:30:02 - INFO - [werkzeug:_log:97] - 10.18.108.31 - - [06/Oct/2025 11:30:02] "POST /runs/destroy HTTP/1.1" 200 -
+2025-10-06 11:33:33 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 11:33:33 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 15:53:14 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 15:53:14 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 15:53:14 - ERROR - [__main__:main:565] - ❌ An error occurred during server startup: Version mismatch: The cluster was started with:
+    Ray: 2.48.0
+    Python: 3.10.18
+This process on node 10.18.108.1 was started with:
+    Ray: 2.49.2
+    Python: 3.11.9
+
+Traceback (most recent call last):
+  File "/root/workspace/d23oa7cp420c73acue30/maze/main.py", line 501, in main
+    ray.init(address='auto',
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/worker.py", line 1953, in init
+    connect(
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/worker.py", line 1096, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/worker.py", line 2475, in connect
+    raise e
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/worker.py", line 2472, in connect
+    node.check_version_info()
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/node.py", line 437, in check_version_info
+    ray._private.utils.check_version_info(
+  File "/root/miniconda3/envs/maze/lib/python3.11/site-packages/ray/_private/utils.py", line 1286, in check_version_info
+    raise RuntimeError(error_message)
+RuntimeError: Version mismatch: The cluster was started with:
+    Ray: 2.48.0
+    Python: 3.10.18
+This process on node 10.18.108.1 was started with:
+    Ray: 2.49.2
+    Python: 3.11.9
+
+
+2025-10-06 15:53:14 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 16:11:48 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 16:11:48 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 16:12:03 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 16:12:03 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 16:12:20 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 16:12:20 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 16:12:20 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535': {'cpu_num': 6.0, 'mem': 6441.626953125, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759738340.0568}], 'io_task': 20}}
+2025-10-06 16:12:20 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 16:12:20 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 16:12:20 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 16:12:20 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 16:12:20 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 16:12:20 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 16:12:20 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 16:12:20 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 16:12:20 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.20:6380
+2025-10-06 16:12:20 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 16:12:20 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 16:12:20 - INFO - [__main__:main:570] - Exiting.
+2025-10-06 16:13:38 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 16:13:38 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 16:14:22 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 16:14:22 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 16:15:03 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 16:15:03 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 16:15:03 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535': {'cpu_num': 6.0, 'mem': 6441.626953125, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759738503.9797256}], 'io_task': 20}}
+2025-10-06 16:15:03 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 16:15:03 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 16:15:03 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 16:15:03 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 16:15:03 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 16:15:03 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 16:15:03 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 16:15:03 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.1:6380
+2025-10-06 16:15:03 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 16:15:03 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 16:15:04 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.1:6380
+2025-10-06 16:15:04 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 16:18:26 - INFO - [__main__:submit_agent:159] - 🚀 Received a new submission via /submit_agent/ endpoint.
+2025-10-06 16:18:27 - INFO - [__main__:submit_agent:172] -   - Workflow payload for 'Custom Task Workflow' parsed successfully.
+2025-10-06 16:18:31 - INFO - [__main__:submit_agent:183] -   - Project archive extracted to server path: '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/2dc06e17-bb16-4766-91bc-5ceb0d6b1005'
+2025-10-06 16:18:31 - INFO - [__main__:submit_agent:193] -   - Submission package for run_id '2dc06e17-bb16-4766-91bc-5ceb0d6b1005' has been enqueued.
+2025-10-06 16:18:31 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'create_initial_report'. (Arrival: 1759738711.32, PerfScore: 2.02)
+2025-10-06 16:18:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'create_initial_report' for submission.
+2025-10-06 16:18:31 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_a1c1e03f
+2025-10-06 16:18:31 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'create_initial_report' from Run ID 2dc06e17
+2025-10-06 16:18:31 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:31] "POST /submit_agent/ HTTP/1.1" 200 -
+2025-10-06 16:18:31 - DEBUG - [maze.core.path.task_dispatcher:loop:418] -   -> Candidate nodes: ['4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535']. Choosing least loaded: '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'.
+2025-10-06 16:18:31 - DEBUG - [maze.core.path.dag_context:create_context:81] -   -> Context created on node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'. Current node loads: {'4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535': 1}
+2025-10-06 16:18:31 - DEBUG - [maze.core.path.dag_context:create_context:82] -   -> Injecting configurations into DAGContext...
+2025-10-06 16:18:39 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:39 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:39] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:40 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:40 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:40] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:42 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:42 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:42] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:43 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:43 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:43] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:44 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:44 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:44] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:45 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:45 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:45] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:46 - DEBUG - [maze.core.path.dag_context:create_context:102] -   -> ✅ Configurations successfully injected.
+2025-10-06 16:18:46 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:132] - 💾 Preparing context for DAG 2dc06e17-bb16-4766-91bc-5ceb0d6b1005...
+2025-10-06 16:18:46 - DEBUG - [maze.core.path.task_dispatcher:_prepare_dag_context:144] - ✅ Context for DAG dag_65c888ee (run_id, 2dc06e17-bb16-4766-91bc-5ceb0d6b1005) is ready.
+2025-10-06 16:18:46 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'create_initial_report' to node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'.
+2025-10-06 16:18:46 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:46 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:46] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:47 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:47 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:47] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:48 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:48 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:48] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:49 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:49 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:49] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:50 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:50 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:50] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:51 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:51 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:51] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:52 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:52 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:52] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:53 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:53 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:53] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:54 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:54 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:54] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:55 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:55 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:55] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:56 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:56 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:56] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:57 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:57 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:57] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:58 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:58 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:58] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:18:59 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:18:59 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:18:59] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:00 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:00 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:00] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:01 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:01 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:01] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:02 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:02 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:02] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:03 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:03 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:03] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:03 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:03] "GET /files/hashes/2dc06e17-bb16-4766-91bc-5ceb0d6b1005 HTTP/1.1" 200 -
+2025-10-06 16:19:04 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:04 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:04] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:05 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:05 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:05] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:06 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:06 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:06] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:07 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:07 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:07] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:08 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:08 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:08] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:09 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:09 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:09] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:10 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:10 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:10] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:11 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:11 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:11] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:12 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:12 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:12] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:13 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:13 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:13] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:14 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:15 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:14] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:16 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:16 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:16] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:17 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:17 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:17] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:18 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:18 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:18] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:19 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:19 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:19] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:20 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:20 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:20] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:21 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:21 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:21] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:22 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:22 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:22] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:23 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:23] "POST /files/download/2dc06e17-bb16-4766-91bc-5ceb0d6b1005 HTTP/1.1" 200 -
+2025-10-06 16:19:23 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:23 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:23] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:24 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:24 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:24] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:25 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:25 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:25] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:26 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:26 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:26] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:27 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:27 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:27] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:28 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:28 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:28] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:29 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:29 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:29] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:30 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:30 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:30] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:31 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:31 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:31] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:32 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:32 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:32] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:33 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:33 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:33] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:34 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:34 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:34] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:35 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:35 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:35] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:36 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:36 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:36] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:37 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:37 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:37] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:38 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_a1c1e03f ('create_initial_report') completed.
+2025-10-06 16:19:38 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'create_initial_report' via in-memory queue.
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'add_analysis_section'. (Arrival: 1759738711.32, PerfScore: 2.02)
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'add_analysis_section' for submission.
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'add_summary_section'. (Arrival: 1759738711.32, PerfScore: 2.02)
+2025-10-06 16:19:38 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_84b16837
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'add_analysis_section' from Run ID 2dc06e17
+2025-10-06 16:19:38 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 16:19:38 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'add_analysis_section' to node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'.
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'add_summary_section' for submission.
+2025-10-06 16:19:38 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_7757f448
+2025-10-06 16:19:38 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'add_summary_section' from Run ID 2dc06e17
+2025-10-06 16:19:38 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 16:19:38 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'add_summary_section' to node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'.
+2025-10-06 16:19:38 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:38 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:38] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:39 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:39 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:39] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:40 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:40 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:40] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:41 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:41 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:41] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:42 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:42 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:42] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:44 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:44 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:44] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:45 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:45 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:45] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:46 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:46 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:46] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:47 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:47 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:47] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:48 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:48 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:48] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:49 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:49 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:49] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:50 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:50 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:50] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:51 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:51 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:51] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:52 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:52 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:52] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:53 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:53 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:53] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:54 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:54 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:54] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:55 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:55 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:55] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:56 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:56] "GET /files/hashes/2dc06e17-bb16-4766-91bc-5ceb0d6b1005 HTTP/1.1" 200 -
+2025-10-06 16:19:56 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:56] "GET /files/hashes/2dc06e17-bb16-4766-91bc-5ceb0d6b1005 HTTP/1.1" 200 -
+2025-10-06 16:19:56 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:56 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:56] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:57 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:57 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:57] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:58 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:58 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:58] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:19:59 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:19:59 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:19:59] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:00 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:20:00 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:00] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:01 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:20:01 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:01] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:02 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:20:02 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:02] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:03 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:20:03 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:03] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:04 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_84b16837 ('add_analysis_section') completed.
+2025-10-06 16:20:04 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'add_analysis_section' via in-memory queue.
+2025-10-06 16:20:04 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': received
+2025-10-06 16:20:04 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:04] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:05 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_7757f448 ('add_summary_section') completed.
+2025-10-06 16:20:05 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'add_summary_section' via in-memory queue.
+2025-10-06 16:20:05 - INFO - [maze.core.path.daps:enqueue_task:66] -   -> Enqueued 'finalize_report'. (Arrival: 1759738711.32, PerfScore: 2.02)
+2025-10-06 16:20:05 - INFO - [maze.core.path.daps:scheduler_and_submitter:164] - 🏆 Picked 'finalize_report' for submission.
+2025-10-06 16:20:05 - INFO - [maze.core.path.task_dispatcher:submit:568] - 💮 TaskScheduler received task: task_b5b08453
+2025-10-06 16:20:05 - INFO - [maze.core.path.daps:scheduler_and_submitter:189] - 🎁 Submitted: 'finalize_report' from Run ID 2dc06e17
+2025-10-06 16:20:05 - DEBUG - [maze.core.path.task_dispatcher:loop:401] -   -> ✅ Affinity node has resources.
+2025-10-06 16:20:05 - INFO - [maze.core.path.task_dispatcher:loop:431] - 🚀 Dispatching CPU task 'finalize_report' to node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'.
+2025-10-06 16:20:05 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:05 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:05] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:06 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:06 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:06] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:07 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:07 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:07] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:08 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:08 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:08] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:09 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:09 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:09] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:10 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:10 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:10] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:11 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:11 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:11] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:12 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:12 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:12] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:13 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:13 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:13] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:14 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:14 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:14] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:15 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:15 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:15] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:16 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:16 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:16] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:18 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:18 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:18] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:18 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:18] "GET /files/hashes/2dc06e17-bb16-4766-91bc-5ceb0d6b1005 HTTP/1.1" 200 -
+2025-10-06 16:20:19 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:19 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:19] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:20 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:20 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:20] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:21 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:21 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:21] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:22 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': running
+2025-10-06 16:20:22 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:22] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:22 - INFO - [maze.core.path.task_dispatcher:monitor:534] - ✅ [SUCCESS] Task task_b5b08453 ('finalize_report') completed.
+2025-10-06 16:20:22 - DEBUG - [maze.core.path.task_dispatcher:monitor:550] -   -> 📬 Notified completion of 'finalize_report' via in-memory queue.
+2025-10-06 16:20:23 - DEBUG - [__main__:get:215] - Querying status for task 'task_b5b08453' in run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005': finished
+2025-10-06 16:20:23 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:23] "POST /get/ HTTP/1.1" 200 -
+2025-10-06 16:20:26 - DEBUG - [__main__:get_run_summary:53] - Received request for summary of run_id: 2dc06e17-bb16-4766-91bc-5ceb0d6b1005
+2025-10-06 16:20:26 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:26] "GET /runs/2dc06e17-bb16-4766-91bc-5ceb0d6b1005/summary HTTP/1.1" 200 -
+2025-10-06 16:20:27 - INFO - [__main__:destroy_run:99] - 🔥 Received request to destroy and clean up run_id: 2dc06e17-bb16-4766-91bc-5ceb0d6b1005
+2025-10-06 16:20:27 - INFO - [__main__:destroy_run:126] - Workflow for run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005' is not active. Proceeding with cleanup.
+2025-10-06 16:20:27 - DEBUG - [maze.core.path.dag_context:release_context:114] -   -> Context released from node '4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535'. Current node loads: {}
+2025-10-06 16:20:27 - INFO - [__main__:destroy_run:132] -   -> Step 1/3: DAGContext for run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005' released successfully.
+2025-10-06 16:20:27 - INFO - [__main__:destroy_run:138] -   -> Step 2/3: Task status records for run '2dc06e17-bb16-4766-91bc-5ceb0d6b1005' cleaned up.
+2025-10-06 16:20:28 - INFO - [__main__:destroy_run:146] -   -> Step 3/3: Run directory '/root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/runs/2dc06e17-bb16-4766-91bc-5ceb0d6b1005' deleted successfully.
+2025-10-06 16:20:28 - INFO - [werkzeug:_log:97] - 10.18.108.1 - - [06/Oct/2025 16:20:28] "POST /runs/destroy HTTP/1.1" 200 -
+2025-10-06 16:35:13 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 16:35:13 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 16:35:15 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 16:35:15 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 16:35:17 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 16:35:17 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 16:35:17 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'4478f18dd8dbc279567814140baea4cbdd37e038723528b1d05d1535': {'cpu_num': 6.0, 'mem': 6441.626953125, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759739717.9293907}], 'io_task': 20}}
+2025-10-06 16:35:17 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 16:35:17 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 16:35:17 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 16:35:17 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 16:35:17 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 16:35:17 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 16:35:17 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 16:35:17 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 16:35:17 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.1:6380
+2025-10-06 16:35:17 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 16:35:17 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.1:6380
+2025-10-06 16:35:17 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 16:37:17 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 16:45:36 - INFO - [root:setup_logging:64] - Logging system configured in 'server' mode. Log file at: /root/workspace/d23oa7cp420c73acue30/maze/runtime_artifacts/logs/maze.log
+2025-10-06 16:45:36 - INFO - [maze.core.register.task_registry:discover_tasks:36] - Starting auto-discovery of tasks in 'maze/library/tasks'...
+2025-10-06 16:45:37 - INFO - [__main__:main:506] - ✅ Ray connected successfully.
+2025-10-06 16:45:37 - INFO - [__main__:main:508] - 🚀 Initializing core services...
+2025-10-06 16:45:38 - INFO - [maze.core.worker.resource_manager:collect_gpus_info:104] - [{'index': 0, 'name': 'Tesla P40', 'utilization': 0, 'memory_total': 23040, 'memory_used': 0, 'memory_free': 22906}]
+2025-10-06 16:45:38 - INFO - [maze.core.worker.resource_manager:__init__:93] - ======集群各node资源======
+2025-10-06 16:45:38 - INFO - [maze.core.worker.resource_manager:__init__:94] - {'34ba450d75b0e654c969c23d2138583fbe593718a919db24bc6c4aca': {'cpu_num': 6.0, 'mem': 5122.534375190735, 'gpu_info': [{'index': 0, 'name': 'Tesla P40', 'gpu_mem': 22906, 'gpu_mem_total': 23040, 'status': 'FREE', 'request_api_url': None, 'backend': None, 'last_used_time': 1759740338.6664934}], 'io_task': 20}}
+2025-10-06 16:45:38 - WARNING - [maze.core.path.task_dispatcher:__init__:42] - ⚠️ TaskScheduler: models_config_path '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json' not found. No model configs loaded.
+2025-10-06 16:45:38 - ERROR - [maze.utils.execution_backend:__init__:173] - 😭 Failed to load model configuration from '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json': [Errno 2] No such file or directory: '/root/workspace/d23oa7cp420c73acue30/maze/config/models.json'
+2025-10-06 16:45:38 - INFO - [maze.core.path.task_dispatcher:__init__:68] - ✅ Dynamically calculated single GPU memory threshold: 23040 MiB
+2025-10-06 16:45:38 - INFO - [__main__:main:527] - ✅ All services initialized.
+2025-10-06 16:45:38 - INFO - [__main__:main:536] - 🚀 Starting background scheduler thread...
+2025-10-06 16:45:38 - INFO - [maze.core.path.daps:dag_manager_daps:21] - 🌟 FTC Scheduler (V3 - In-Memory Version) starting...
+2025-10-06 16:45:38 - INFO - [__main__:main:557] - ✅ Background scheduler is running.
+2025-10-06 16:45:38 - INFO - [__main__:main:561] - 🚀 Starting Maze Unified Server on http://10.18.108.1:6380
+2025-10-06 16:45:38 - INFO - [maze.core.path.daps:scheduler_and_submitter:152] - 🚀 FTC Submitter (In-Memory Version) is running.
+2025-10-06 16:45:38 - INFO - [maze.core.path.daps:dag_manager_daps:273] - 🌟 DAPS Scheduler threads started.
+2025-10-06 16:45:38 - INFO - [werkzeug:_log:97] - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://10.18.108.1:6380
+2025-10-06 16:45:38 - INFO - [werkzeug:_log:97] - [33mPress CTRL+C to quit[0m
+2025-10-06 16:46:02 - INFO - [__main__:main:568] - 👋 Shutting down Ray...
+2025-10-06 16:46:02 - INFO - [__main__:main:570] - Exiting.
