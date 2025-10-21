@@ -19,8 +19,7 @@ import signal
 app = FastAPI()
 
 mapath = MaPath(strategy="FCFS")
-mapath.start()
-
+  
 #异常退出时需要做相关清理
 def signal_handler(signum, frame):
     mapath.cleanup()
@@ -119,6 +118,13 @@ async def run_workflow(req:Request):
     mapath.run_workflow(workflow_id)
     return {"status":"success"}
 
+
+'''
+描述：前端接收到/run_workflow请求后，立即发送该请求，实时获取工作流运行结果
+
+请求参数：工作流ID
+响应参数：通过SSE机制实时返回各个任务的运行结果
+'''
 @app.websocket("/get_workflow_res/{workflow_id}")
 async def get_workflow_res(websocket: WebSocket, workflow_id: str):
     await websocket.accept()
@@ -126,5 +132,6 @@ async def get_workflow_res(websocket: WebSocket, workflow_id: str):
     await websocket.close()
    
 if __name__ == "__main__":
+    mapath.start()
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
     

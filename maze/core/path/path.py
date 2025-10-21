@@ -9,6 +9,7 @@ from fastapi import WebSocket
 import asyncio
 from maze.core.path.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
+import os
 
 class MaPath:
     def __init__(self,strategy:str):
@@ -18,19 +19,16 @@ class MaPath:
         self.workflows: Dict[str, Workflow] = {}
         self.finished_queues: Dict[Any, asyncio.Queue] = {} #workflow_id:queue     
          
-    # def cleanup(self):
-    #     message = {
-    #         "type":"shutdown"
-    #     }
-    #     self.socket.send(json.dumps(message))
+    def cleanup(self):
+        #通知调度进程关闭，（调度进程释放
+        message = {"type":"shutdown"}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler_receive.send(serialized)
 
-    #     print("主进程等待子进程结束")
-    #     self.scheduler_process.join()
-    #     print("主进程等待完毕")
-    #     self.socket.close()
-    #     self.context.term()
-    #     sys.exit(0)
-    
+        self.scheduler_process.join()
+        os._exit(1)
+        
+     
     def create_workflow(self,workflow_id:str):
         self.workflows[workflow_id] = Workflow(workflow_id)
 
@@ -59,29 +57,6 @@ class MaPath:
             serialized: bytes = json.dumps(message).encode('utf-8')
             self.socket_to_scheduler_receive.send(serialized)
             
-    
-    async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
-        """
-        持续获取工作流每个任务的运行结果
-        """
-        workflow = self.workflows[workflow_id]
-        total_task_num = workflow.get_total_task_num()
-
-        finished_queue = self.finished_queues.get(workflow_id)
-
-        assert finished_queue != None
-
-        count = 0
-        while True:
-            data = await finished_queue.get()
-            await websocket.send_json(data)
-            count += 1
-            if(count == total_task_num):
-                message = {"type":"clear_workflow"}
-                serialized: bytes = json.dumps(message).encode('utf-8')
-                self.socket_to_scheduler_receive.send(serialized)
-                break
-  
     def _monitor_thread(self,port1,port2):
         assert self.context != None
 
@@ -128,7 +103,27 @@ class MaPath:
                         serialized: bytes = json.dumps(message).encode('utf-8')
                         socket_to_scheduler_receive.send(serialized)
 
-                
+    async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
+        """
+        持续获取工作流每个任务的运行结果
+        """
+        workflow = self.workflows[workflow_id]
+        total_task_num = workflow.get_total_task_num()
+
+        finished_queue = self.finished_queues.get(workflow_id)
+
+        assert finished_queue != None
+
+        count = 0
+        while True:
+            data = await finished_queue.get()
+            await websocket.send_json(data)
+            count += 1
+            if(count == total_task_num):
+                message = {"type":"clear_workflow"}
+                serialized: bytes = json.dumps(message).encode('utf-8')
+                self.socket_to_scheduler_receive.send(serialized)
+                break
        
     def start(self):
         self.context = zmq.Context() #zmq context
@@ -145,6 +140,7 @@ class MaPath:
         self.monitor_thread = threading.Thread(target=self._monitor_thread, args=(port1,port2,))
         self.monitor_thread.start()
 
+        #创建scheduler进程
         self.scheduler_process = mp.Process(target=scheduler_process, args=(port1,port2,self.strategy,))
         self.scheduler_process.start()
         

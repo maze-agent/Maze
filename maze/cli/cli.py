@@ -4,7 +4,8 @@ import uvicorn
 
 
 def start_head(port: int):
-    from maze.core.server import app
+    from maze.core.server import app,mapath
+    mapath.start()
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 

@@ -31,13 +31,19 @@ def scheduler_process(port1:int,port2:int,strategy:str):
 class Scheduler():
     def _launch_ray_head(self):
         try:
+            command = [
+                "ray", "start", "--head"
+            ]
             result = subprocess.run(
-                ["ray", "start", "--head"],
-                capture_output=True,
-                text=True
+                command,
+                check=True,                    # 如果命令失败（返回码非0），抛出异常
+                text=True,                     # 以字符串形式处理输出
+                capture_output=True,           # 捕获 stdout 和 stderr
             )
-        
-
+            # print("Ray 头节点启动成功！")
+            # print("标准输出:\n", result.stdout)
+            # print("标准错误:\n", result.stderr)
+            
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to start Ray: {result.stderr}")
 
@@ -59,10 +65,18 @@ class FCFSScheduler(Scheduler):
         self.tasks_view = TasksView() #任务视图（维护任务所有相关信息）
         
     def _cleanup(self):
-        print("====_cleanup======")
-        subprocess.run(["ray", "stop"]) 
-        self.socket.close()
-        self.context.term()
+        command = [
+            "ray", "stop", 
+        ]
+        result = subprocess.run(
+            command,
+            check=True,                    # 如果命令失败（返回码非0），抛出异常
+            text=True,                     # 以字符串形式处理输出
+            capture_output=True,           # 捕获 stdout 和 stderr
+        )
+        # print("Ray 关闭成功！")
+        # print("标准输出:\n", result.stdout)
+        # print("标准错误:\n", result.stderr)
         os._exit(1)
     
     def _run_task(self,choosed_node_info,task):
@@ -132,7 +146,6 @@ class FCFSScheduler(Scheduler):
                 elif(message["type"]=="stop_worker"):
                     pass
                 elif(message["type"]=="shutdown"):
-                    print("子进程接收到终止信号")
                     self._cleanup()
 
         except Exception as e:
