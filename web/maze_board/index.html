@@ -1,0 +1,595 @@
+import React, { useState, useEffect } from 'react';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+
+// Mock API - Replace these with real API calls later
+const mockAPI = {
+  getWorkers: () => [
+    { worker_id: 'worker-1', hostname: 'node-01.cluster', cpu_total: 16, cpu_used: 8, memory_total_gb: 64, memory_used_gb: 32, gpu_total: 2, gpu_used: 1, status: 'active', last_heartbeat: '2025-10-20T10:30:00' },
+    { worker_id: 'worker-2', hostname: 'node-02.cluster', cpu_total: 16, cpu_used: 14, memory_total_gb: 64, memory_used_gb: 48, gpu_total: 2, gpu_used: 2, status: 'active', last_heartbeat: '2025-10-20T10:29:55' },
+    { worker_id: 'worker-3', hostname: 'node-03.cluster', cpu_total: 8, cpu_used: 2, memory_total_gb: 32, memory_used_gb: 8, gpu_total: 1, gpu_used: 0, status: 'idle', last_heartbeat: '2025-10-20T10:29:50' },
+    { worker_id: 'worker-4', hostname: 'node-04.cluster', cpu_total: 16, cpu_used: 0, memory_total_gb: 64, memory_used_gb: 4, gpu_total: 2, gpu_used: 0, status: 'offline', last_heartbeat: '2025-10-20T09:15:00' },
+  ],
+  
+  getWorkflows: () => [
+    { workflow_id: 'wf-001', workflow_name: 'ML Training Pipeline', created_at: '2025-10-15T08:00:00', total_runs: 12, last_run_at: '2025-10-20T09:00:00' },
+    { workflow_id: 'wf-002', workflow_name: 'Data Processing Job', created_at: '2025-10-18T10:00:00', total_runs: 5, last_run_at: '2025-10-20T10:15:00' },
+    { workflow_id: 'wf-003', workflow_name: 'Model Evaluation', created_at: '2025-10-19T14:00:00', total_runs: 3, last_run_at: '2025-10-20T08:30:00' },
+  ],
+  
+  getWorkflowStructure: (id) => ({
+    workflow_id: id,
+    workflow_name: id === 'wf-001' ? 'ML Training Pipeline' : 'Data Processing Job',
+    tasks: [
+      { task_id: 'task-1', task_name: 'Load Dataset', task_type: 'io', dependencies: [], estimated_duration_sec: 300 },
+      { task_id: 'task-2', task_name: 'Preprocess Data', task_type: 'compute', dependencies: ['task-1'], estimated_duration_sec: 600 },
+      { task_id: 'task-3', task_name: 'Feature Engineering', task_type: 'compute', dependencies: ['task-2'], estimated_duration_sec: 900 },
+      { task_id: 'task-4', task_name: 'Train Model', task_type: 'gpu', dependencies: ['task-3'], estimated_duration_sec: 3600 },
+      { task_id: 'task-5', task_name: 'Evaluate Model', task_type: 'compute', dependencies: ['task-4'], estimated_duration_sec: 300 },
+      { task_id: 'task-6', task_name: 'Save Results', task_type: 'io', dependencies: ['task-5'], estimated_duration_sec: 180 },
+    ]
+  }),
+  
+  getWorkflowRuns: (id) => [
+    { run_id: 'run-001', workflow_id: id, started_at: '2025-10-20T09:00:00', finished_at: null, status: 'running', total_tasks: 6, completed_tasks: 3, failed_tasks: 0 },
+    { run_id: 'run-002', workflow_id: id, started_at: '2025-10-19T15:00:00', finished_at: '2025-10-19T16:45:00', status: 'completed', total_tasks: 6, completed_tasks: 6, failed_tasks: 0 },
+    { run_id: 'run-003', workflow_id: id, started_at: '2025-10-19T10:00:00', finished_at: '2025-10-19T10:30:00', status: 'failed', total_tasks: 6, completed_tasks: 2, failed_tasks: 1 },
+  ],
+  
+  getRunDetails: (id) => ({
+    run_id: id,
+    workflow_id: 'wf-001',
+    started_at: '2025-10-20T09:00:00',
+    status: 'running',
+    tasks: [
+      { task_id: 'task-1', task_name: 'Load Dataset', status: 'completed', worker_id: 'worker-1', started_at: '2025-10-20T09:00:00', finished_at: '2025-10-20T09:05:00', duration_sec: 300, result: 'success' },
+      { task_id: 'task-2', task_name: 'Preprocess Data', status: 'completed', worker_id: 'worker-2', started_at: '2025-10-20T09:05:00', finished_at: '2025-10-20T09:15:00', duration_sec: 600, result: 'success' },
+      { task_id: 'task-3', task_name: 'Feature Engineering', status: 'completed', worker_id: 'worker-1', started_at: '2025-10-20T09:15:00', finished_at: '2025-10-20T09:30:00', duration_sec: 900, result: 'success' },
+      { task_id: 'task-4', task_name: 'Train Model', status: 'running', worker_id: 'worker-2', started_at: '2025-10-20T09:30:00', finished_at: null, duration_sec: null, result: null },
+      { task_id: 'task-5', task_name: 'Evaluate Model', status: 'pending', worker_id: null, started_at: null, finished_at: null, duration_sec: null, result: null },
+      { task_id: 'task-6', task_name: 'Save Results', status: 'pending', worker_id: null, started_at: null, finished_at: null, duration_sec: null, result: null },
+    ]
+  }),
+};
+
+// Utility function to format dates
+const formatDate = (dateStr) => {
+  if (!dateStr) return 'N/A';
+  return new Date(dateStr).toLocaleString();
+};
+
+// Utility function to format duration
+const formatDuration = (seconds) => {
+  if (!seconds) return 'N/A';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+};
+
+// Dashboard Overview Component
+const Dashboard = () => {
+  const workers = mockAPI.getWorkers();
+  const workflows = mockAPI.getWorkflows();
+  
+  const activeWorkers = workers.filter(w => w.status === 'active').length;
+  const totalCPU = workers.reduce((sum, w) => sum + w.cpu_total, 0);
+  const usedCPU = workers.reduce((sum, w) => sum + w.cpu_used, 0);
+  const totalMemory = workers.reduce((sum, w) => sum + w.memory_total_gb, 0);
+  const usedMemory = workers.reduce((sum, w) => sum + w.memory_used_gb, 0);
+  
+  const statusData = [
+    { name: 'Active', value: workers.filter(w => w.status === 'active').length, color: '#10b981' },
+    { name: 'Idle', value: workers.filter(w => w.status === 'idle').length, color: '#f59e0b' },
+    { name: 'Offline', value: workers.filter(w => w.status === 'offline').length, color: '#ef4444' },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-3xl font-bold text-gray-800">Dashboard Overview</h1>
+      
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="text-gray-500 text-sm font-medium">Active Workers</div>
+          <div className="text-3xl font-bold text-gray-800 mt-2">{activeWorkers} / {workers.length}</div>
+        </div>
+        
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="text-gray-500 text-sm font-medium">Total Workflows</div>
+          <div className="text-3xl font-bold text-gray-800 mt-2">{workflows.length}</div>
+        </div>
+        
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="text-gray-500 text-sm font-medium">CPU Usage</div>
+          <div className="text-3xl font-bold text-gray-800 mt-2">{usedCPU} / {totalCPU}</div>
+          <div className="text-sm text-gray-500 mt-1">{((usedCPU / totalCPU) * 100).toFixed(1)}% utilized</div>
+        </div>
+        
+        <div className="bg-white p-6 rounded-lg shadow">
+          <div className="text-gray-500 text-sm font-medium">Memory Usage</div>
+          <div className="text-3xl font-bold text-gray-800 mt-2">{usedMemory.toFixed(0)} / {totalMemory} GB</div>
+          <div className="text-sm text-gray-500 mt-1">{((usedMemory / totalMemory) * 100).toFixed(1)}% utilized</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-lg shadow">
+          <h2 className="text-xl font-semibold mb-4 text-gray-800">Worker Status Distribution</h2>
+          <ResponsiveContainer width="100%" height={250}>
+            <PieChart>
+              <Pie data={statusData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+                {statusData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Pie>
+              <Tooltip />
+              <Legend />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="bg-white p-6 rounded-lg shadow">
+          <h2 className="text-xl font-semibold mb-4 text-gray-800">Resource Usage by Worker</h2>
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={workers}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="worker_id" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="cpu_used" fill="#3b82f6" name="CPU Used" />
+              <Bar dataKey="memory_used_gb" fill="#10b981" name="Memory (GB)" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Workers List Component
+const WorkersList = () => {
+  const workers = mockAPI.getWorkers();
+  
+  const getStatusColor = (status) => {
+    switch(status) {
+      case 'active': return 'bg-green-100 text-green-800';
+      case 'idle': return 'bg-yellow-100 text-yellow-800';
+      case 'offline': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-3xl font-bold text-gray-800">Workers</h1>
+      
+      <div className="grid grid-cols-1 gap-4">
+        {workers.map(worker => (
+          <div key={worker.worker_id} className="bg-white p-6 rounded-lg shadow">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 className="text-xl font-semibold text-gray-800">{worker.worker_id}</h3>
+                <p className="text-sm text-gray-500">{worker.hostname}</p>
+              </div>
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(worker.status)}`}>
+                {worker.status}
+              </span>
+            </div>
+            
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              <div>
+                <div className="text-sm text-gray-500">CPU</div>
+                <div className="text-lg font-semibold text-gray-800">{worker.cpu_used} / {worker.cpu_total}</div>
+                <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
+                  <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${(worker.cpu_used / worker.cpu_total) * 100}%` }}></div>
+                </div>
+              </div>
+              
+              <div>
+                <div className="text-sm text-gray-500">Memory</div>
+                <div className="text-lg font-semibold text-gray-800">{worker.memory_used_gb} / {worker.memory_total_gb} GB</div>
+                <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
+                  <div className="bg-green-500 h-2 rounded-full" style={{ width: `${(worker.memory_used_gb / worker.memory_total_gb) * 100}%` }}></div>
+                </div>
+              </div>
+              
+              <div>
+                <div className="text-sm text-gray-500">GPU</div>
+                <div className="text-lg font-semibold text-gray-800">{worker.gpu_used} / {worker.gpu_total}</div>
+                <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
+                  <div className="bg-purple-500 h-2 rounded-full" style={{ width: worker.gpu_total > 0 ? `${(worker.gpu_used / worker.gpu_total) * 100}%` : '0%' }}></div>
+                </div>
+              </div>
+              
+              <div>
+                <div className="text-sm text-gray-500">Last Heartbeat</div>
+                <div className="text-sm font-medium text-gray-800">{new Date(worker.last_heartbeat).toLocaleTimeString()}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// Workflows List Component
+const WorkflowsList = ({ onSelectWorkflow }) => {
+  const workflows = mockAPI.getWorkflows();
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-3xl font-bold text-gray-800">Workflows</h1>
+      
+      <div className="bg-white rounded-lg shadow overflow-hidden">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Workflow Name</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Runs</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Run</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {workflows.map(workflow => (
+              <tr key={workflow.workflow_id} className="hover:bg-gray-50">
+                <td className="px-6 py-4 whitespace-nowrap">
+                  <div className="text-sm font-medium text-gray-900">{workflow.workflow_name}</div>
+                  <div className="text-sm text-gray-500">{workflow.workflow_id}</div>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  {formatDate(workflow.created_at)}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                  {workflow.total_runs}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  {formatDate(workflow.last_run_at)}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                  <button 
+                    onClick={() => onSelectWorkflow(workflow.workflow_id)}
+                    className="text-blue-600 hover:text-blue-900 font-medium"
+                  >
+                    View Details →
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// Workflow Detail Component with DAG
+const WorkflowDetail = ({ workflowId, onSelectRun, onBack }) => {
+  const structure = mockAPI.getWorkflowStructure(workflowId);
+  const runs = mockAPI.getWorkflowRuns(workflowId);
+  
+  const getStatusColor = (status) => {
+    switch(status) {
+      case 'running': return 'bg-blue-100 text-blue-800';
+      case 'completed': return 'bg-green-100 text-green-800';
+      case 'failed': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const renderDAG = () => {
+    const levels = [];
+    const processed = new Set();
+    
+    const getTasks = (deps) => structure.tasks.filter(t => 
+      deps.length === 0 ? t.dependencies.length === 0 : 
+      t.dependencies.length > 0 && t.dependencies.every(d => processed.has(d))
+    );
+    
+    let currentLevel = getTasks([]);
+    while (currentLevel.length > 0) {
+      levels.push(currentLevel);
+      currentLevel.forEach(t => processed.add(t.task_id));
+      currentLevel = getTasks(Array.from(processed));
+    }
+
+    return (
+      <div className="flex flex-col space-y-8 p-6">
+        {levels.map((level, levelIdx) => (
+          <div key={levelIdx} className="flex justify-center space-x-4">
+            {level.map(task => (
+              <div key={task.task_id} className="flex flex-col items-center">
+                <div className="bg-blue-500 text-white px-4 py-3 rounded-lg shadow-md text-center min-w-[140px]">
+                  <div className="font-semibold text-sm">{task.task_name}</div>
+                  <div className="text-xs mt-1 opacity-80">{task.task_type}</div>
+                </div>
+                {levelIdx < levels.length - 1 && (
+                  <div className="w-0.5 h-8 bg-gray-300 mt-2"></div>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center space-x-4">
+        <button onClick={onBack} className="text-blue-600 hover:text-blue-800 font-medium">
+          ← Back to Workflows
+        </button>
+      </div>
+      
+      <h1 className="text-3xl font-bold text-gray-800">{structure.workflow_name}</h1>
+      
+      <div className="bg-white p-6 rounded-lg shadow">
+        <h2 className="text-xl font-semibold mb-4 text-gray-800">Workflow Structure</h2>
+        <div className="border rounded-lg bg-gray-50">
+          {renderDAG()}
+        </div>
+        <div className="mt-4 text-sm text-gray-600">
+          <span className="font-medium">Total Tasks:</span> {structure.tasks.length}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-6 py-4 border-b">
+          <h2 className="text-xl font-semibold text-gray-800">Run History</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Run ID</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {runs.map(run => (
+                <tr key={run.run_id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                    {run.run_id}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {formatDate(run.started_at)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(run.status)}`}>
+                      {run.status}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {run.completed_tasks} / {run.total_tasks} tasks
+                    {run.failed_tasks > 0 && <span className="text-red-600 ml-2">({run.failed_tasks} failed)</span>}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    <button 
+                      onClick={() => onSelectRun(run.run_id)}
+                      className="text-blue-600 hover:text-blue-900 font-medium"
+                    >
+                      View Details →
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Run Detail Component
+const RunDetail = ({ runId, onBack }) => {
+  const details = mockAPI.getRunDetails(runId);
+  
+  const getStatusColor = (status) => {
+    switch(status) {
+      case 'pending': return 'bg-gray-100 text-gray-800';
+      case 'running': return 'bg-blue-100 text-blue-800';
+      case 'completed': return 'bg-green-100 text-green-800';
+      case 'failed': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center space-x-4">
+        <button onClick={onBack} className="text-blue-600 hover:text-blue-800 font-medium">
+          ← Back
+        </button>
+      </div>
+      
+      <div className="flex justify-between items-start">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-800">Run Details</h1>
+          <p className="text-gray-500 mt-1">{details.run_id}</p>
+        </div>
+        <span className={`px-4 py-2 rounded-full text-sm font-medium ${getStatusColor(details.status)}`}>
+          {details.status}
+        </span>
+      </div>
+
+      <div className="bg-white p-6 rounded-lg shadow">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div>
+            <div className="text-sm text-gray-500">Workflow ID</div>
+            <div className="text-lg font-semibold text-gray-800">{details.workflow_id}</div>
+          </div>
+          <div>
+            <div className="text-sm text-gray-500">Started At</div>
+            <div className="text-lg font-semibold text-gray-800">{formatDate(details.started_at)}</div>
+          </div>
+          <div>
+            <div className="text-sm text-gray-500">Completed Tasks</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {details.tasks.filter(t => t.status === 'completed').length} / {details.tasks.length}
+            </div>
+          </div>
+          <div>
+            <div className="text-sm text-gray-500">Failed Tasks</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {details.tasks.filter(t => t.status === 'failed').length}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-6 py-4 border-b">
+          <h2 className="text-xl font-semibold text-gray-800">Task Execution Timeline</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Task</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Worker</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Duration</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Result</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {details.tasks.map(task => (
+                <tr key={task.task_id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="text-sm font-medium text-gray-900">{task.task_name}</div>
+                    <div className="text-sm text-gray-500">{task.task_id}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(task.status)}`}>
+                      {task.status}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {task.worker_id || '-'}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {formatDate(task.started_at)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {formatDuration(task.duration_sec)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {task.result || '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main App Component with Navigation
+const App = () => {
+  const [currentPage, setCurrentPage] = useState('dashboard');
+  const [selectedWorkflow, setSelectedWorkflow] = useState(null);
+  const [selectedRun, setSelectedRun] = useState(null);
+
+  const renderPage = () => {
+    if (selectedRun) {
+      return <RunDetail runId={selectedRun} onBack={() => setSelectedRun(null)} />;
+    }
+    
+    if (selectedWorkflow) {
+      return (
+        <WorkflowDetail 
+          workflowId={selectedWorkflow} 
+          onSelectRun={setSelectedRun}
+          onBack={() => setSelectedWorkflow(null)} 
+        />
+      );
+    }
+
+    switch(currentPage) {
+      case 'dashboard':
+        return <Dashboard />;
+      case 'workers':
+        return <WorkersList />;
+      case 'workflows':
+        return <WorkflowsList onSelectWorkflow={setSelectedWorkflow} />;
+      default:
+        return <Dashboard />;
+    }
+  };
+
+  const navItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+    { id: 'workers', label: 'Workers', icon: '🖥️' },
+    { id: 'workflows', label: 'Workflows', icon: '⚙️' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <nav className="bg-white shadow-lg">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="flex justify-between items-center h-16">
+            <div className="flex items-center space-x-2">
+              <span className="text-2xl">🚀</span>
+              <h1 className="text-xl font-bold text-gray-800">Distributed Workflow Manager</h1>
+            </div>
+            <div className="flex space-x-1">
+              {navItems.map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    setCurrentPage(item.id);
+                    setSelectedWorkflow(null);
+                    setSelectedRun(null);
+                  }}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    currentPage === item.id && !selectedWorkflow && !selectedRun
+                      ? 'bg-blue-500 text-white'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  <span className="mr-2">{item.icon}</span>
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        {renderPage()}
+      </main>
+
+      <footer className="bg-white border-t mt-12">
+        <div className="max-w-7xl mx-auto px-4 py-6">
+          <div className="text-sm text-gray-500">
+            <p className="font-semibold text-gray-700 mb-2">🔌 API Endpoints Needed:</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/workers</code>
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/workflows</code>
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/workflows/:id</code>
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/workflows/:id/runs</code>
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/runs/:id</code>
+              <code className="bg-gray-100 px-2 py-1 rounded">GET /api/workers/:id/tasks</code>
+            </div>
+            <p className="mt-3 text-xs">Using mock data - Replace mockAPI with real fetch() calls to your FastAPI backend</p>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default App;

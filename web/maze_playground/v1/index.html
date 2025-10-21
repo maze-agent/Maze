@@ -1,0 +1,2508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Maze Workflow Playground</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <style>
+    /* ... 之前的CSS样式保持不变 ... */
+    :root {
+      --primary-600: #3b82f6;
+      --primary-500: #60a5fa;
+      --primary-100: #dbeafe;
+      --gray-900: #111827;
+      --gray-700: #374151;
+      --gray-500: #6b7280;
+      --gray-400: #9ca3af;
+      --gray-300: #d1d5db;
+      --gray-200: #e5e7eb;
+      --gray-100: #f3f4f6;
+      --gray-50: #f9fafb;
+      --success-500: #10b981;
+      --warning-500: #f59e0b;
+      --danger-500: #ef4444;
+      --surface-1: #ffffff;
+      --surface-2: #f9fafb;
+      --surface-3: #f3f4f6;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --transition-all: all 0.2s ease;
+      --toolbar-height: 60px;
+      --sidebar-width: 280px;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      background-color: var(--gray-50);
+      color: var(--gray-900);
+      line-height: 1.5;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* 所有之前的CSS样式保持不变 */
+    /* 顶部工具栏 */
+    .toolbar {
+      height: var(--toolbar-height);
+      background: var(--surface-1);
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      box-shadow: var(--shadow-sm);
+      z-index: 100;
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 600;
+      font-size: 18px;
+      color: var(--primary-600);
+    }
+
+    .session-info {
+      font-size: 14px;
+      color: var(--gray-500);
+      background: var(--gray-100);
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+    }
+
+    /* 主要布局 */
+    .main-layout {
+      display: flex;
+      height: calc(100vh - var(--toolbar-height));
+    }
+
+    /* 左侧边栏 */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--surface-1);
+      border-right: 1px solid var(--gray-200);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      padding: 20px 16px;
+      border-bottom: 1px solid var(--gray-200);
+    }
+
+    .sidebar-section:last-child {
+      border-bottom: none;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .sidebar h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--gray-700);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .search-box {
+      position: relative;
+      margin-bottom: 16px;
+    }
+
+    .search-box input {
+      width: 100%;
+      padding: 8px 12px 8px 36px;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      background: var(--gray-50);
+    }
+
+    .search-box i {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--gray-400);
+      font-size: 14px;
+    }
+
+    .task-item {
+      background: var(--surface-1);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      margin-bottom: 12px;
+      cursor: grab;
+      transition: var(--transition-all);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .task-item:hover {
+      border-color: var(--primary-500);
+      background: var(--primary-100);
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+    }
+
+    .task-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .task-icon {
+      width: 32px;
+      height: 32px;
+      background: #eff6ff;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--primary-600);
+      font-size: 16px;
+    }
+
+    .task-name {
+      font-weight: 500;
+      font-size: 14px;
+      color: var(--gray-900);
+    }
+
+    .task-description {
+      font-size: 12px;
+      color: var(--gray-500);
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+
+    .task-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--gray-400);
+    }
+
+    /* 中间工作区 */
+    .workspace {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--gray-50);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .workspace-header {
+      padding: 16px 24px;
+      background: var(--surface-1);
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .workflow-info {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .workflow-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--gray-900);
+    }
+
+    .workflow-stats {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--gray-500);
+    }
+
+    .stat-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .canvas-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background:
+              linear-gradient(90deg, #f0f0f0 1px, transparent 1px),
+              linear-gradient(#f0f0f0 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+
+    .canvas {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    /* 右侧面板 - 属性面板 */
+    .property-panel {
+      width: 320px;
+      background: var(--surface-1);
+      border-left: 1px solid var(--gray-200);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .property-header {
+      padding: 20px 16px;
+      border-bottom: 1px solid var(--gray-200);
+    }
+
+    .property-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .property-subtitle {
+      font-size: 13px;
+      color: var(--gray-500);
+    }
+
+    .property-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    /* 按钮样式 */
+    .btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: var(--transition-all);
+      font-size: 14px;
+      height: 36px;
+    }
+
+    .btn-primary {
+      background: var(--primary-600);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #2563eb;
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .btn-success {
+      background: var(--success-500);
+      color: white;
+    }
+
+    .btn-success:hover:not(:disabled) {
+      background: #059669;
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .btn-warning {
+      background: var(--warning-500);
+      color: white;
+    }
+
+    .btn-warning:hover:not(:disabled) {
+      background: #d97706;
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .btn-danger {
+      background: var(--danger-500);
+      color: white;
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background: #dc2626;
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .btn-secondary {
+      background: var(--gray-100);
+      color: var(--gray-700);
+      border: 1px solid var(--gray-300);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--gray-200);
+      transform: translateY(-1px);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-sm {
+      padding: 6px 12px;
+      height: 32px;
+      font-size: 13px;
+    }
+
+    /* 工作流节点样式 */
+    .workflow-node {
+      position: absolute;
+      width: 240px;
+      min-height: 140px;
+      background: var(--surface-1);
+      border: 2px solid var(--gray-300);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      cursor: move;
+      box-shadow: var(--shadow-md);
+      z-index: 10;
+      transition: var(--transition-all);
+    }
+
+    .workflow-node:hover {
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+      border-color: var(--primary-500);
+    }
+
+    .workflow-node.selected {
+      border-color: var(--warning-500);
+      box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.3);
+    }
+
+    .workflow-node.ready {
+      border-color: var(--success-500);
+    }
+
+    .node-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+
+    .node-title {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--gray-900);
+      max-width: 70%;
+      word-break: break-word;
+    }
+
+    .node-type {
+      font-size: 11px;
+      background: var(--primary-600);
+      color: white;
+      padding: 3px 8px;
+      border-radius: 20px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .node-function {
+      font-size: 12px;
+      color: var(--gray-500);
+      margin-bottom: 12px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      background: var(--gray-50);
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+    }
+
+    .node-delete {
+      position: absolute;
+      top: -10px;
+      right: -10px;
+      width: 24px;
+      height: 24px;
+      background: var(--danger-500);
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 14px;
+      box-shadow: var(--shadow-md);
+      opacity: 0;
+      transition: var(--transition-all);
+    }
+
+    .workflow-node:hover .node-delete {
+      opacity: 1;
+    }
+
+    /* 连接点 */
+    .node-connector {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      cursor: crosshair;
+      border: 2px solid white;
+      box-shadow: 0 0 0 1px var(--gray-400);
+      z-index: 20;
+    }
+
+    .connector-source {
+      background: var(--success-500);
+      top: 50%;
+      right: -8px;
+      transform: translateY(-50%);
+    }
+
+    .connector-target {
+      background: var(--primary-600);
+      left: -8px;
+      transform: translateY(-50%);
+    }
+
+    .connector-target.top {
+      top: 25%;
+    }
+
+    .connector-target.middle {
+      top: 50%;
+    }
+
+    .connector-target.bottom {
+      top: 75%;
+    }
+
+    .connector-label {
+      position: absolute;
+      font-size: 11px;
+      color: var(--gray-500);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .connector-label.target {
+      left: -90px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .connector-label.source {
+      right: -90px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    /* 连接线 */
+    .connection-line {
+      position: absolute;
+      background: var(--primary-600);
+      height: 3px;
+      transform-origin: 0 0;
+      z-index: 5;
+      border-radius: 2px;
+    }
+
+    .connection-arrow {
+      position: absolute;
+      width: 0;
+      height: 0;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 8px solid var(--primary-600);
+      transform-origin: 0 50%;
+      z-index: 5;
+    }
+
+    /* 列表项样式 */
+    .workflow-item, .run-item {
+      background: var(--gray-50);
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: var(--transition-all);
+      font-size: 14px;
+    }
+
+    .workflow-item:hover, .run-item:hover {
+      border-color: var(--primary-500);
+      background: var(--primary-100);
+      transform: translateX(4px);
+    }
+
+    .workflow-item.active, .run-item.active {
+      background: #dbeafe;
+      border-color: var(--primary-600);
+    }
+
+    .workflow-item h4, .run-item h4 {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--gray-900);
+      margin-bottom: 4px;
+    }
+
+    .workflow-item small, .run-item small {
+      font-size: 12px;
+      color: var(--gray-500);
+    }
+
+    .run-item.completed {
+      border-color: var(--success-500);
+      background: #f0fdf4;
+    }
+
+    .run-item.failed {
+      border-color: var(--danger-500);
+      background: #fef2f2;
+    }
+
+    .run-item.running {
+      border-color: var(--warning-500);
+      background: #fffbeb;
+    }
+
+    /* 参数输入区域 */
+    .node-parameters {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--gray-200);
+    }
+
+    .param-input {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      margin-bottom: 6px;
+      transition: var(--transition-all);
+    }
+
+    .param-input:focus {
+      outline: none;
+      border-color: var(--primary-500);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+    }
+
+    .param-label {
+      font-size: 12px;
+      color: var(--gray-600);
+      margin-bottom: 4px;
+      display: block;
+      font-weight: 500;
+    }
+
+    /* 输出参数显示 */
+    .output-params {
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px dashed var(--gray-200);
+      font-size: 12px;
+      color: var(--gray-600);
+    }
+
+    .output-param {
+      display: inline-block;
+      background: #ecfdf5;
+      color: var(--success-500);
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-right: 6px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* 结果显示区域 */
+    .results-container {
+      flex: 1;
+      background: var(--gray-50);
+      padding: 20px;
+      overflow-y: auto;
+    }
+
+    .result-item {
+      margin-bottom: 16px;
+      padding: 16px;
+      background: var(--surface-1);
+      border-radius: var(--radius-md);
+      border-left: 4px solid var(--primary-600);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .result-item.completed {
+      border-left-color: var(--success-500);
+    }
+
+    .result-item.failed {
+      border-left-color: var(--danger-500);
+    }
+
+    .result-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .result-title {
+      font-weight: 600;
+      color: var(--gray-900);
+      font-size: 14px;
+    }
+
+    .result-status {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--gray-500);
+      color: white;
+      font-weight: 500;
+    }
+
+    .result-status.completed {
+      background: var(--success-500);
+    }
+
+    .result-status.failed {
+      background: var(--danger-500);
+    }
+
+    .result-status.running {
+      background: var(--warning-500);
+      color: var(--gray-900);
+    }
+
+    .result-content {
+      font-size: 13px;
+      color: var(--gray-700);
+      white-space: pre-wrap;
+      background: var(--gray-50);
+      padding: 12px;
+      border-radius: var(--radius-sm);
+      margin-top: 8px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* 模态框 */
+    .modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .modal.show {
+      display: flex;
+    }
+
+    .modal-content {
+      background: var(--surface-1);
+      border-radius: var(--radius-lg);
+      width: 500px;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .modal-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--gray-900);
+    }
+
+    .modal-body {
+      padding: 24px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+      font-size: 14px;
+      color: var(--gray-700);
+    }
+
+    .form-input, .form-textarea, .form-select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      transition: var(--transition-all);
+    }
+
+    .form-input:focus, .form-textarea:focus, .form-select:focus {
+      outline: none;
+      border-color: var(--primary-500);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .form-textarea {
+      min-height: 200px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 13px;
+      resize: vertical;
+    }
+
+    .modal-footer {
+      padding: 20px 24px;
+      border-top: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+    }
+
+    /* 加载状态 */
+    .loading {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid var(--primary-600);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* 选项卡 */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--gray-200);
+      background: var(--gray-50);
+    }
+
+    .tab {
+      padding: 12px 20px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 14px;
+      color: var(--gray-500);
+      transition: var(--transition-all);
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab:hover {
+      color: var(--gray-700);
+    }
+
+    .tab.active {
+      color: var(--primary-600);
+      border-bottom: 2px solid var(--primary-600);
+      background: var(--surface-1);
+    }
+
+    .tab-content {
+      display: none;
+      flex: 1;
+      overflow: hidden;
+      padding: 20px;
+    }
+
+    .tab-content.active {
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 拖拽提示 */
+    .drag-hint {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: var(--gray-400);
+    }
+
+    .drag-hint i {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.3;
+    }
+
+    .drag-hint p {
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+
+    .drag-hint small {
+      font-size: 13px;
+      color: var(--gray-400);
+    }
+/* 自定义提示弹窗样式 */
+#alert-modal .modal-content {
+  width: 400px;
+}
+
+#alert-modal .modal-body {
+  padding: 24px;
+  text-align: center;
+}
+
+#alert-modal .modal-body p {
+  margin: 0;
+  line-height: 1.6;
+  font-size: 16px;
+  color: var(--gray-700);
+}
+
+    /* 响应式设计 */
+    @media (max-width: 1200px) {
+      .property-panel {
+        width: 280px;
+      }
+
+      .sidebar {
+        width: 240px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .property-panel {
+        display: none;
+      }
+
+      .sidebar {
+        width: 200px;
+      }
+    }
+
+  </style>
+</head>
+<body>
+<!-- 顶部工具栏 -->
+<div class="toolbar">
+  <div class="toolbar-left">
+    <div class="logo">
+      <i class="fas fa-project-diagram"></i>
+      <span>Maze Workflow Playground</span>
+    </div>
+    <div class="session-info" id="session-info">未连接</div>
+  </div>
+  <div class="toolbar-right">
+    <button class="btn btn-secondary" id="create-session-btn">
+      <i class="fas fa-plug"></i> 连接会话
+    </button>
+    <button class="btn btn-primary" id="create-workflow-btn" disabled>
+      <i class="fas fa-plus"></i> 新建工作流
+    </button>
+    <button class="btn btn-success" id="submit-workflow-btn" disabled>
+      <i class="fas fa-play"></i> 运行
+    </button>
+    <button class="btn btn-secondary" id="save-workflow-btn" disabled>
+      <i class="fas fa-save"></i> 保存
+    </button>
+    <button class="btn btn-primary" id="write-task-btn">
+      <i class="fas fa-code"></i> 编写任务
+    </button>
+    <button class="btn btn-primary" id="upload-task-btn">
+      <i class="fas fa-upload"></i> 上传任务
+    </button>
+    <button class="btn btn-secondary" id="set-input-params-btn" disabled>
+      <i class="fas fa-edit"></i> 设置参数
+    </button>
+  </div>
+</div>
+
+<!-- 主要布局 -->
+<div class="main-layout">
+  <!-- 左侧边栏 -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <h3><i class="fas fa-toolbox"></i> 可用任务</h3>
+      <div class="search-box">
+        <i class="fas fa-search"></i>
+        <input type="text" placeholder="搜索任务..." id="task-search">
+      </div>
+      <div id="task-list"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3><i class="fas fa-project-diagram"></i> 工作流列表</h3>
+      <div id="workflow-list"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3><i class="fas fa-running"></i> 运行实例</h3>
+      <div id="run-list"></div>
+    </div>
+  </div>
+
+  <!-- 中间工作区 -->
+  <div class="workspace">
+    <div class="workspace-header">
+      <div class="workflow-info">
+        <div class="workflow-title" id="current-workflow-name">未选择工作流</div>
+        <div class="workflow-stats">
+          <div class="stat-item">
+            <i class="fas fa-cube"></i>
+            <span id="node-count">0</span> 节点
+          </div>
+          <div class="stat-item">
+            <i class="fas fa-link"></i>
+            <span id="connection-count">0</span> 连接
+          </div>
+        </div>
+      </div>
+      <div class="workflow-actions">
+        <button class="btn btn-secondary btn-sm" id="zoom-in">
+          <i class="fas fa-search-plus"></i>
+        </button>
+        <button class="btn btn-secondary btn-sm" id="zoom-out">
+          <i class="fas fa-search-minus"></i>
+        </button>
+        <button class="btn btn-secondary btn-sm" id="fit-view">
+          <i class="fas fa-expand"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="designer">工作流设计器</div>
+      <div class="tab" data-tab="results">执行结果</div>
+    </div>
+
+    <div class="tab-content active" id="designer-tab">
+      <div class="canvas-container">
+        <div class="canvas" id="workflow-canvas">
+          <div class="drag-hint" id="drag-hint">
+            <i class="fas fa-project-diagram"></i>
+            <p>拖拽任务到此处创建工作流</p>
+            <small>从左侧工具箱中选择任务并拖拽到此处</small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-content" id="results-tab">
+      <div class="results-container" id="results-container">
+        <p>请选择一个运行实例查看结果</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧面板 - 属性面板 -->
+  <div class="property-panel">
+    <div class="property-header">
+      <div class="property-title" id="property-title">属性面板</div>
+      <div class="property-subtitle" id="property-subtitle">选择节点查看属性</div>
+    </div>
+    <div class="property-content" id="property-content">
+      <p>请选择一个节点查看和编辑属性</p>
+    </div>
+  </div>
+</div>
+<!-- 自定义提示弹窗 -->
+<div class="modal" id="alert-modal">
+  <div class="modal-content" style="width: 400px;">
+    <div class="modal-header">
+      <h3 id="alert-title">提示</h3>
+      <button id="close-alert" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p id="alert-message" style="margin: 0; line-height: 1.6;"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" id="confirm-alert">确定</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- 模态框 -->
+<div class="modal" id="create-session-modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>创建新会话</h3>
+      <button id="close-create-session" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">服务器地址</label>
+        <input type="text" class="form-input" id="server-address" value="127.0.0.1:6380" placeholder="例如: 127.0.0.1:6380">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-create-session">取消</button>
+      <button class="btn btn-primary" id="confirm-create-session">
+        <span id="create-session-text">连接</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="write-task-modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>编写任务函数</h3>
+      <button id="close-write-task" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">函数名称</label>
+        <input type="text" class="form-input" id="function-name" placeholder="例如: my_custom_task">
+      </div>
+      <div class="form-group">
+        <label class="form-label">任务代码</label>
+        <textarea class="form-textarea" id="task-code" placeholder="在此编写任务代码...">from maze.library.tasks.definitions import task
+@task(
+    name="my_task",
+    description="我的自定义任务",
+    task_type='cpu',
+    input_parameters={"properties": {"param1": {"type": "string"}}},
+    output_parameters={"properties": {"result": {"type": "string"}}}
+)
+def my_task(param1: str) -> str:
+    return f"处理结果: {param1}"</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-write-task">取消</button>
+      <button class="btn btn-primary" id="confirm-write-task">
+        <span id="write-task-text">注册任务</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="upload-task-modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>上传任务包</h3>
+      <button id="close-upload-task" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">任务描述</label>
+        <input type="text" class="form-input" id="task-description" placeholder="任务描述">
+      </div>
+      <div class="form-group">
+        <label class="form-label">任务类型</label>
+        <select class="form-select" id="task-type">
+          <option value="cpu">CPU任务</option>
+          <option value="gpu">GPU任务</option>
+          <option value="io">IO任务</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">选择文件</label>
+        <input type="file" class="form-input" id="task-file" accept=".zip">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-upload-task">取消</button>
+      <button class="btn btn-primary" id="confirm-upload-task">
+        <span id="upload-task-text">上传任务</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="input-params-modal">
+  <div class="modal-content" style="width: 600px;">
+    <div class="modal-header">
+      <h3>设置头结点输入参数</h3>
+      <button id="close-input-params" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body" id="input-params-body">
+      <!-- 参数输入区域将在这里动态生成 -->
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-input-params">取消</button>
+      <button class="btn btn-primary" id="confirm-input-params">保存参数</button>
+    </div>
+  </div>
+</div>
+<!-- 创建工作流模态框 -->
+<div class="modal" id="create-workflow-modal">
+  <div class="modal-content" style="width: 500px;">
+    <div class="modal-header">
+      <h3>创建工作流</h3>
+      <button id="close-create-workflow" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">工作流名称</label>
+        <input type="text" class="form-input" id="workflow-name" placeholder="请输入工作流名称" value="新工作流">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-create-workflow">取消</button>
+      <button class="btn btn-primary" id="confirm-create-workflow">创建</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    // 工作流状态管理
+    let workflowStates = {};
+    let currentState = {
+      sessionId: null,
+      currentWorkflowId: null,
+      availableTasks: [],
+      workflows: [],
+      runs: [],
+      workflowNodes: [],
+      workflowConnections: [],
+      selectedNode: null,
+      connectingNode: null,
+      isConnecting: false,
+      nodeParameters: {},
+      nodeTaskIds: {},
+      addedNodes: new Set(),
+      currentRunId: null,
+      runResults: {},
+      isSubmitting: false,
+      zoomLevel: 1,
+      canvasOffset: { x: 0, y: 0 }
+    };
+    // 自定义弹窗元素
+const alertElements = {
+  modal: document.getElementById('alert-modal'),
+  title: document.getElementById('alert-title'),
+  message: document.getElementById('alert-message'),
+  closeBtn: document.getElementById('close-alert'),
+  confirmBtn: document.getElementById('confirm-alert')
+};
+
+// 自定义提示弹窗函数
+function showAlert(message, title = '提示') {
+  alertElements.title.textContent = title;
+  alertElements.message.textContent = message;
+  showModal('alert-modal');
+}
+
+// 确认弹窗函数
+function showConfirm(message, callback, title = '确认') {
+  alertElements.title.textContent = title;
+  alertElements.message.textContent = message;
+
+  // 临时存储回调函数
+  alertElements.confirmBtn.onclick = function() {
+    hideModal('alert-modal');
+    if (callback) callback();
+  };
+
+  showModal('alert-modal');
+}
+
+    // 轮询定时器
+    let runStatusPollingInterval = null;
+    let currentPollingRunId = null;
+
+    const API_BASE_URL = 'http://localhost:8000/api';
+    const elements = {
+      sessionInfo: document.getElementById('session-info'),
+      createWorkflowBtn: document.getElementById('create-workflow-btn'),
+      submitWorkflowBtn: document.getElementById('submit-workflow-btn'),
+      saveWorkflowBtn: document.getElementById('save-workflow-btn'),
+      setInputParamsBtn: document.getElementById('set-input-params-btn'),
+      currentWorkflowName: document.getElementById('current-workflow-name'),
+      nodeCount: document.getElementById('node-count'),
+      connectionCount: document.getElementById('connection-count'),
+      taskList: document.getElementById('task-list'),
+      workflowList: document.getElementById('workflow-list'),
+      runList: document.getElementById('run-list'),
+      workflowCanvas: document.getElementById('workflow-canvas'),
+      dragHint: document.getElementById('drag-hint'),
+      resultsContainer: document.getElementById('results-container'),
+      createSessionModal: document.getElementById('create-session-modal'),
+      writeTaskModal: document.getElementById('write-task-modal'),
+      uploadTaskModal: document.getElementById('upload-task-modal'),
+      inputParamsModal: document.getElementById('input-params-modal'),
+      inputParamsBody: document.getElementById('input-params-body'),
+      serverAddress: document.getElementById('server-address'),
+      functionName: document.getElementById('function-name'),
+      taskCode: document.getElementById('task-code'),
+      taskDescription: document.getElementById('task-description'),
+      taskType: document.getElementById('task-type'),
+      taskFile: document.getElementById('task-file'),
+      propertyTitle: document.getElementById('property-title'),
+      propertySubtitle: document.getElementById('property-subtitle'),
+      propertyContent: document.getElementById('property-content'),
+        createWorkflowModal: document.getElementById('create-workflow-modal'),
+        workflowName: document.getElementById('workflow-name'),
+        closeCreateWorkflow: document.getElementById('close-create-workflow'),
+        cancelCreateWorkflow: document.getElementById('cancel-create-workflow'),
+        confirmCreateWorkflow: document.getElementById('confirm-create-workflow')
+    };
+
+    // 选项卡切换功能
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+        tab.classList.add('active');
+        const tabName = tab.getAttribute('data-tab');
+        document.getElementById(`${tabName}-tab`).classList.add('active');
+      });
+    });
+
+    function showModal(modalId) {
+      document.getElementById(modalId).classList.add('show');
+    }
+
+    function hideModal(modalId) {
+      document.getElementById(modalId).classList.remove('show');
+    }
+
+    // 保存当前工作流状态
+    function saveCurrentWorkflowState() {
+      if (currentState.currentWorkflowId) {
+        workflowStates[currentState.currentWorkflowId] = {
+          nodes: [...currentState.workflowNodes],
+          connections: [...currentState.workflowConnections],
+          nodeParameters: {...currentState.nodeParameters},
+          nodeTaskIds: {...currentState.nodeTaskIds},
+          addedNodes: new Set(currentState.addedNodes)
+        };
+      }
+    }
+
+    // 恢复工作流状态
+    function restoreWorkflowState(workflowId) {
+      if (workflowStates[workflowId]) {
+        const state = workflowStates[workflowId];
+        currentState.workflowNodes = [...state.nodes];
+        currentState.workflowConnections = [...state.connections];
+        currentState.nodeParameters = {...state.nodeParameters};
+        currentState.nodeTaskIds = {...state.nodeTaskIds};
+        currentState.addedNodes = new Set(state.addedNodes);
+      } else {
+        currentState.workflowNodes = [];
+        currentState.workflowConnections = [];
+        currentState.nodeParameters = {};
+        currentState.nodeTaskIds = {};
+        currentState.addedNodes = new Set();
+      }
+      currentState.selectedNode = null;
+    }
+
+    function updateUI() {
+      // 更新会话信息
+      if (currentState.sessionId) {
+        elements.sessionInfo.textContent = `当前会话: ${currentState.sessionId.substring(0, 8)}...`;
+        elements.createWorkflowBtn.disabled = false;
+      } else {
+        elements.sessionInfo.textContent = '未连接';
+        elements.createWorkflowBtn.disabled = true;
+      }
+
+      // 更新工作流信息
+      if (currentState.currentWorkflowId) {
+        elements.currentWorkflowName.textContent = currentState.currentWorkflowName || '未命名工作流';
+        elements.submitWorkflowBtn.disabled = false;
+        elements.saveWorkflowBtn.disabled = false;
+        elements.setInputParamsBtn.disabled = false;
+
+      } else {
+        elements.currentWorkflowName.textContent = '未选择工作流';
+        elements.submitWorkflowBtn.disabled = true;
+        elements.saveWorkflowBtn.disabled = true;
+        elements.setInputParamsBtn.disabled = true;
+
+      }
+
+      // 更新统计信息
+      elements.nodeCount.textContent = currentState.workflowNodes.length;
+      elements.connectionCount.textContent = currentState.workflowConnections.length;
+
+      renderTaskList();
+      renderWorkflowList();
+      renderRunList();
+      renderWorkflowCanvas();
+      updatePropertyPanel();
+    }
+
+    function renderTaskList() {
+      elements.taskList.innerHTML = '';
+      currentState.availableTasks.forEach(task => {
+        const taskItem = document.createElement('div');
+        taskItem.className = 'task-item';
+        taskItem.draggable = true;
+        taskItem.innerHTML = `
+        <div class="task-header">
+          <div class="task-icon">
+            <i class="fas fa-cog"></i>
+          </div>
+          <div class="task-name">${task.name}</div>
+        </div>
+        <div class="task-description">${task.description || '无描述'}</div>
+        <div class="task-meta">
+          <span>类型: ${task.task_type}</span>
+          <span>ID: ${task.name.substring(0, 8)}</span>
+        </div>
+      `;
+        taskItem.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('task', JSON.stringify(task));
+        });
+        elements.taskList.appendChild(taskItem);
+      });
+    }
+
+    function renderWorkflowList() {
+      elements.workflowList.innerHTML = '';
+      currentState.workflows.forEach(workflow => {
+        const workflowItem = document.createElement('div');
+        workflowItem.className = 'workflow-item';
+        if (workflow.workflow_id === currentState.currentWorkflowId) {
+          workflowItem.classList.add('active');
+        }
+        workflowItem.innerHTML = `
+        <h4>${workflow.name}</h4>
+        <small>ID: ${workflow.workflow_id.substring(0, 12)}...</small>
+      `;
+        workflowItem.addEventListener('click', () => {
+          loadWorkflow(workflow.workflow_id);
+        });
+        elements.workflowList.appendChild(workflowItem);
+      });
+    }
+
+    function renderRunList() {
+      elements.runList.innerHTML = '';
+      currentState.runs.forEach(run => {
+        const runItem = document.createElement('div');
+        runItem.className = 'run-item';
+        runItem.classList.add(run.status || 'running');
+        if (run.run_id === currentState.currentRunId) {
+          runItem.classList.add('active');
+        }
+        runItem.innerHTML = `
+        <h4>运行实例</h4>
+        <small>ID: ${run.run_id.substring(0, 12)}...</small>
+        <div style="margin-top: 8px;">
+          <span class="result-status ${run.status || 'running'}">${run.status || 'running'}</span>
+        </div>
+      `;
+        runItem.addEventListener('click', () => {
+          selectRun(run.run_id);
+        });
+        elements.runList.appendChild(runItem);
+      });
+    }
+
+    function renderWorkflowCanvas() {
+      const canvas = elements.workflowCanvas;
+      const oldNodes = canvas.querySelectorAll('.workflow-node, .connection-line, .connection-arrow');
+      oldNodes.forEach(node => node.remove());
+        elements.dragHint.style.display = elements.dragHint.style.display = currentState.workflowNodes.length > 0 ? 'none' : 'block';
+
+        currentState.workflowNodes.forEach(node => {
+        const nodeElement = document.createElement('div');
+        nodeElement.className = 'workflow-node';
+        nodeElement.id = `node-${node.id}`;
+        nodeElement.style.left = `${node.x}px`;
+        nodeElement.style.top = `${node.y}px`;
+
+        if (node.id === currentState.selectedNode) {
+          nodeElement.classList.add('selected');
+        }
+
+        if (isNodeReady(node.id)) {
+          nodeElement.classList.add('ready');
+        }
+
+        const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+        const inputParams = taskInfo?.input_parameters?.properties || {};
+        const outputParams = taskInfo?.output_parameters?.properties || {};
+
+        let nodeHtml = `
+        <div class="node-header">
+          <div class="node-title">${node.name}</div>
+          <div class="node-type">${node.task_type || 'task'}</div>
+        </div>
+        <div class="node-function">${node.function_name}</div>
+        <div class="node-delete" onclick="deleteNode('${node.id}')">×</div>
+      `;
+
+        const inputParamNames = Object.keys(inputParams);
+        inputParamNames.forEach((paramName, index) => {
+          const positionClass = inputParamNames.length === 1 ? 'middle' :
+                  inputParamNames.length === 2 ? (index === 0 ? 'top' : 'bottom') :
+                          index === 0 ? 'top' : index === inputParamNames.length - 1 ? 'bottom' : 'middle';
+
+          nodeHtml += `
+          <div class="node-connector connector-target ${positionClass}" data-node-id="${node.id}" data-param-name="${paramName}"></div>
+          <div class="connector-label target ${positionClass}" style="top: ${positionClass === 'top' ? '25%' : positionClass === 'middle' ? '50%' : '75%'}">
+            ${paramName}
+          </div>
+        `;
+        });
+
+        const outputParamNames = Object.keys(outputParams);
+        outputParamNames.forEach((paramName, index) => {
+          const positionClass = outputParamNames.length === 1 ? 'middle' :
+                  outputParamNames.length === 2 ? (index === 0 ? 'top' : 'bottom') :
+                          index === 0 ? 'top' : index === outputParamNames.length - 1 ? 'bottom' : 'middle';
+
+          nodeHtml += `
+          <div class="node-connector connector-source ${positionClass}" data-node-id="${node.id}" data-output-param="${paramName}"></div>
+          <div class="connector-label source ${positionClass}" style="top: ${positionClass === 'top' ? '25%' : positionClass === 'middle' ? '50%' : '75%'}">
+            ${paramName}
+          </div>
+        `;
+        });
+
+        if (outputParamNames.length > 0) {
+          nodeHtml += `<div class="output-params">输出: `;
+          outputParamNames.forEach(paramName => {
+            nodeHtml += `<span class="output-param">${paramName}</span>`;
+          });
+          nodeHtml += `</div>`;
+        }
+
+        nodeElement.innerHTML = nodeHtml;
+        makeNodeDraggable(nodeElement, node);
+        nodeElement.addEventListener('click', (e) => {
+          if (!e.target.classList.contains('node-delete') &&
+                  !e.target.classList.contains('node-connector') &&
+                  !e.target.classList.contains('param-input')) {
+            selectNode(node.id);
+          }
+        });
+        canvas.appendChild(nodeElement);
+      });
+
+      currentState.workflowConnections.forEach(conn => {
+        drawConnection(conn.source, conn.target, conn.outputParam, conn.inputParam);
+      });
+    }
+
+    function isNodeReady(nodeId) {
+      const node = currentState.workflowNodes.find(n => n.id === nodeId);
+      if (!node) return false;
+
+      const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+      const inputParams = taskInfo?.input_parameters?.properties || {};
+      const inputParamNames = Object.keys(inputParams);
+
+      const hasIncomingConnections = currentState.workflowConnections.some(conn => conn.target === nodeId);
+
+      if (!hasIncomingConnections) {
+        for (const paramName of inputParamNames) {
+          if (!currentState.nodeParameters[nodeId]?.[paramName]) {
+            return false;
+          }
+        }
+        return inputParamNames.length > 0;
+      } else {
+        const connectedParams = currentState.workflowConnections
+                .filter(conn => conn.target === nodeId)
+                .map(conn => conn.inputParam);
+
+        for (const paramName of inputParamNames) {
+          if (!connectedParams.includes(paramName)) {
+            return false;
+          }
+        }
+        return inputParamNames.length > 0 && connectedParams.length === inputParamNames.length;
+      }
+    }
+
+    function makeNodeDraggable(nodeElement, node) {
+      let isDragging = false;
+      let offsetX, offsetY;
+
+      nodeElement.addEventListener('mousedown', (e) => {
+        if (e.target.classList.contains('node-connector')) return;
+        if (e.target.classList.contains('node-delete')) return;
+
+        isDragging = true;
+        const rect = nodeElement.getBoundingClientRect();
+        offsetX = e.clientX - rect.left;
+        offsetY = e.clientY - rect.top;
+        nodeElement.style.zIndex = '100';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+
+        const canvasRect = elements.workflowCanvas.getBoundingClientRect();
+        let x = e.clientX - canvasRect.left - offsetX;
+        let y = e.clientY - canvasRect.top - offsetY;
+
+        x = Math.max(0, Math.min(x, canvasRect.width - 240));
+        y = Math.max(0, Math.min(y, canvasRect.height - 140));
+
+        nodeElement.style.left = `${x}px`;
+        nodeElement.style.top = `${y}px`;
+        node.x = x;
+        node.y = y;
+
+        renderWorkflowCanvas();
+      });
+
+      document.addEventListener('mouseup', () => {
+        isDragging = false;
+        nodeElement.style.zIndex = '10';
+      });
+    }
+
+    function selectNode(nodeId) {
+      currentState.selectedNode = nodeId;
+      updateUI();
+    }
+
+    function selectRun(runId) {
+      currentState.currentRunId = runId;
+      renderRunList();
+      loadRunResults(runId);
+    }
+
+    function deleteNode(nodeId) {
+      currentState.workflowNodes = currentState.workflowNodes.filter(node => node.id !== nodeId);
+      currentState.workflowConnections = currentState.workflowConnections.filter(
+              conn => conn.source === nodeId || conn.target === nodeId
+      );
+
+      if (currentState.nodeParameters[nodeId]) {
+        delete currentState.nodeParameters[nodeId];
+      }
+
+      if (currentState.nodeTaskIds[nodeId]) {
+        delete currentState.nodeTaskIds[nodeId];
+      }
+
+      currentState.addedNodes.delete(nodeId);
+
+      if (currentState.selectedNode === nodeId) {
+        currentState.selectedNode = null;
+      }
+
+      updateUI();
+    }
+
+    function drawConnection(sourceNodeId, targetNodeId, outputParam, inputParam) {
+      const sourceNode = currentState.workflowNodes.find(n => n.id === sourceNodeId);
+      const targetNode = currentState.workflowNodes.find(n => n.id === targetNodeId);
+
+      if (!sourceNode || !targetNode) return;
+
+      const canvas = elements.workflowCanvas;
+      const sourceElement = document.getElementById(`node-${sourceNodeId}`);
+      const targetElement = document.getElementById(`node-${targetNodeId}`);
+
+      if (!sourceElement || !targetElement) return;
+
+      const sourceRect = sourceElement.getBoundingClientRect();
+      const targetRect = targetElement.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+
+      const sourceX = sourceRect.left + sourceRect.width - canvasRect.left;
+      const sourceY = sourceRect.top + sourceRect.height/2 - canvasRect.top;
+
+      let targetY;
+      const taskInfo = currentState.availableTasks.find(t => t.name === targetNode.function_name);
+      const inputParams = taskInfo?.input_parameters?.properties || {};
+      const inputParamNames = Object.keys(inputParams);
+      const inputParamIndex = inputParamNames.indexOf(inputParam);
+
+      if (inputParamNames.length === 1) {
+        targetY = targetRect.top + targetRect.height/2 - canvasRect.top;
+      } else if (inputParamNames.length === 2) {
+        targetY = targetRect.top + (inputParamIndex === 0 ? targetRect.height * 0.25 : targetRect.height * 0.75) - canvasRect.top;
+      } else {
+        const step = targetRect.height / (inputParamNames.length + 1);
+        targetY = targetRect.top + step * (inputParamIndex + 1) - canvasRect.top;
+      }
+
+      const targetX = targetRect.left - canvasRect.left;
+
+      const length = Math.sqrt(Math.pow(targetX - sourceX, 2) + Math.pow(targetY - sourceY, 2));
+      const angle = Math.atan2(targetY - sourceY, targetX - sourceX) * 180 / Math.PI;
+
+      const line = document.createElement('div');
+      line.className = 'connection-line';
+      line.style.width = `${length}px`;
+      line.style.left = `${sourceX}px`;
+      line.style.top = `${sourceY}px`;
+      line.style.transform = `rotate(${angle}deg)`;
+
+      const arrow = document.createElement('div');
+      arrow.className = 'connection-arrow';
+      arrow.style.left = `${targetX}px`;
+      arrow.style.top = `${targetY}px`;
+      arrow.style.transform = `rotate(${angle}deg)`;
+
+      canvas.appendChild(line);
+      canvas.appendChild(arrow);
+    }
+
+    function updatePropertyPanel() {
+      if (currentState.selectedNode) {
+        const node = currentState.workflowNodes.find(n => n.id === currentState.selectedNode);
+        if (node) {
+          elements.propertyTitle.textContent = '节点属性';
+          elements.propertySubtitle.textContent = node.name;
+
+          const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+          const inputParams = taskInfo?.input_parameters?.properties || {};
+
+          let paramsHtml = '<div class="node-parameters">';
+          Object.keys(inputParams).forEach(paramName => {
+            const paramValue = currentState.nodeParameters[currentState.selectedNode]?.[paramName] || '';
+            const paramType = inputParams[paramName].type || 'string';
+            paramsHtml += `
+            <div class="param-item">
+              <label class="param-label">${paramName} (${paramType})</label>
+              <input type="text" class="param-input"
+                     value="${paramValue}"
+                     data-param="${paramName}"
+                     placeholder="输入${paramName}">
+            </div>
+          `;
+          });
+          paramsHtml += '</div>';
+
+          elements.propertyContent.innerHTML = paramsHtml;
+
+          elements.propertyContent.querySelectorAll('.param-input').forEach(input => {
+            input.addEventListener('change', function() {
+              const paramName = this.getAttribute('data-param');
+              const paramValue = this.value;
+
+              if (!currentState.nodeParameters[currentState.selectedNode]) {
+                currentState.nodeParameters[currentState.selectedNode] = {};
+              }
+              currentState.nodeParameters[currentState.selectedNode][paramName] = paramValue;
+
+              if (isNodeReady(currentState.selectedNode)) {
+                checkAndAddNodeIfNeeded(currentState.selectedNode);
+              }
+
+              renderWorkflowCanvas();
+            });
+          });
+        }
+      } else {
+        elements.propertyTitle.textContent = '属性面板';
+        elements.propertySubtitle.textContent = '选择节点查看属性';
+        elements.propertyContent.innerHTML = '<p>请选择一个节点查看和编辑属性</p>';
+      }
+    }
+
+    function showInputParamsModal() {
+      if (!currentState.currentWorkflowId) {
+          showAlert('请先创建工作流');
+        return;
+      }
+
+      const headNodes = currentState.workflowNodes.filter(node => {
+        return !currentState.workflowConnections.some(conn => conn.target === node.id);
+      });
+
+      if (headNodes.length === 0) {
+          showAlert('没有找到头结点');
+        return;
+      }
+
+      let paramsHtml = '';
+      headNodes.forEach(node => {
+        const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+        const inputParams = taskInfo?.input_parameters?.properties || {};
+
+        if (Object.keys(inputParams).length > 0) {
+          paramsHtml += `<h4>${node.name} (${node.function_name})</h4>`;
+          Object.keys(inputParams).forEach(paramName => {
+            const paramValue = currentState.nodeParameters[node.id]?.[paramName] || '';
+            const paramType = inputParams[paramName].type || 'string';
+            paramsHtml += `
+            <div class="param-row">
+              <div class="param-name">${paramName} (${paramType}):</div>
+              <div class="param-value">
+                <input type="text" class="form-input" id="param-${node.id}-${paramName}" value="${paramValue}" placeholder="输入${paramName}">
+              </div>
+            </div>
+          `;
+          });
+          paramsHtml += '<hr style="margin: 15px 0;">';
+        }
+      });
+
+      if (paramsHtml) {
+        elements.inputParamsBody.innerHTML = paramsHtml;
+        showModal('input-params-modal');
+      } else {
+          showAlert('选中的头结点没有需要输入的参数');
+      }
+    }
+
+    function saveInputParams() {
+      const headNodes = currentState.workflowNodes.filter(node => {
+        return !currentState.workflowConnections.some(conn => conn.target === node.id);
+      });
+
+      headNodes.forEach(node => {
+        const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+        const inputParams = taskInfo?.input_parameters?.properties || {};
+
+        Object.keys(inputParams).forEach(paramName => {
+          const inputElement = document.getElementById(`param-${node.id}-${paramName}`);
+          if (inputElement) {
+            const paramValue = inputElement.value;
+            if (!currentState.nodeParameters[node.id]) {
+              currentState.nodeParameters[node.id] = {};
+            }
+            currentState.nodeParameters[node.id][paramName] = paramValue;
+          }
+        });
+      });
+
+      hideModal('input-params-modal');
+      renderWorkflowCanvas();
+
+      headNodes.forEach(node => {
+        if (isNodeReady(node.id)) {
+          checkAndAddNodeIfNeeded(node.id);
+        }
+      });
+
+        showAlert('参数保存成功！');
+    }
+
+    async function checkAndAddNodeIfNeeded(nodeId) {
+      if (currentState.addedNodes.has(nodeId)) {
+        return;
+      }
+
+      const node = currentState.workflowNodes.find(n => n.id === nodeId);
+      if (!node) return;
+
+      if (!isNodeReady(nodeId)) {
+        return;
+      }
+
+      try {
+        let inputs = {};
+        const taskInfo = currentState.availableTasks.find(t => t.name === node.function_name);
+        const inputParams = taskInfo?.input_parameters?.properties || {};
+
+        const hasIncomingConnections = currentState.workflowConnections.some(conn => conn.target === nodeId);
+
+        if (!hasIncomingConnections) {
+          inputs = currentState.nodeParameters[nodeId] || {};
+        } else {
+          const incomingConnections = currentState.workflowConnections.filter(conn => conn.target === nodeId);
+          incomingConnections.forEach(conn => {
+            const sourceTaskId = currentState.nodeTaskIds[conn.source];
+            if (sourceTaskId) {
+              inputs[conn.inputParam] = `${sourceTaskId}.output.${conn.outputParam}`;
+            }
+          });
+        }
+
+        const taskData = {
+          function_name: node.function_name,
+          task_name: node.name,
+          inputs: inputs
+        };
+
+        const backendTaskId = await addTaskToWorkflow(currentState.currentWorkflowId, taskData);
+        if (backendTaskId) {
+          currentState.nodeTaskIds[nodeId] = backendTaskId;
+          currentState.addedNodes.add(nodeId);
+          console.log(`节点 ${nodeId} 已添加到后端，后端ID: ${backendTaskId}`);
+          renderWorkflowCanvas();
+        }
+      } catch (error) {
+        console.error('添加任务到后端失败:', error);
+      }
+    }
+
+    async function createSession(serverAddress) {
+      try {
+        const response = await axios.post(`${API_BASE_URL}/client/create`, {
+          server_address: serverAddress
+        });
+        return response.data.session_id;
+      } catch (error) {
+        throw new Error('创建会话失败: ' + (error.response?.data?.detail || error.message));
+      }
+    }
+
+    async function loadAvailableTasks() {
+      if (!currentState.sessionId) return;
+
+      try {
+        const response = await axios.get(`${API_BASE_URL}/${currentState.sessionId}/tasks/available`);
+        currentState.availableTasks = response.data.available_tasks || [];
+      } catch (error) {
+        console.error('加载任务失败:', error);
+      }
+    }
+
+    async function registerTask(functionName, code) {
+      if (!currentState.sessionId) return;
+
+      try {
+        const formData = new FormData();
+        formData.append('task_code', code);
+        formData.append('function_name', functionName);
+
+        await axios.post(`${API_BASE_URL}/${currentState.sessionId}/tasks/register`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+      } catch (error) {
+        throw new Error('注册任务失败: ' + (error.response?.data?.detail || error.message));
+      }
+    }
+
+    async function uploadTaskPackage(description, taskType, file) {
+      if (!currentState.sessionId || !file) return;
+
+      try {
+        const formData = new FormData();
+        formData.append('task_archive', file);
+        formData.append('description', description);
+        formData.append('task_type', taskType);
+        formData.append('version', '1.0.0');
+        formData.append('author', 'unknown');
+
+        await axios.post(`${API_BASE_URL}/${currentState.sessionId}/tasks/upload`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+      } catch (error) {
+        throw new Error('上传任务包失败: ' + (error.response?.data?.detail || error.message));
+      }
+    }
+
+    async function createWorkflow(name) {
+      if (!currentState.sessionId) return;
+
+      try {
+        const response = await axios.post(`${API_BASE_URL}/${currentState.sessionId}/workflows/create`, {
+          name: name
+        });
+        const workflowId = response.data.workflow_id;
+        currentState.workflows.push({ workflow_id: workflowId, name: name });
+
+        workflowStates[workflowId] = {
+          nodes: [],
+          connections: [],
+          nodeParameters: {},
+          nodeTaskIds: {},
+          addedNodes: new Set()
+        };
+
+        return workflowId;
+      } catch (error) {
+        throw new Error('创建工作流失败: ' + (error.response?.data?.detail || error.message));
+      }
+    }
+
+    async function addTaskToWorkflow(workflowId, taskData) {
+      if (!currentState.sessionId || !workflowId) return null;
+
+      try {
+        const response = await axios.post(
+                `${API_BASE_URL}/${currentState.sessionId}/workflows/${workflowId}/tasks/add`,
+                taskData
+        );
+        return response.data.task_id;
+      } catch (error) {
+        console.error('添加任务失败:', error);
+        throw new Error('添加任务失败: ' + (error.response?.data?.detail || error.message));
+      }
+    }
+
+    async function loadWorkflow(workflowId) {
+      if (currentState.currentWorkflowId) {
+        saveCurrentWorkflowState();
+      }
+
+      currentState.currentWorkflowId = workflowId;
+      currentState.currentWorkflowName = currentState.workflows.find(w => w.workflow_id === workflowId)?.name || '未命名工作流';
+      restoreWorkflowState(workflowId);
+      updateUI();
+    }
+
+    async function saveWorkflow() {
+      if (!currentState.currentWorkflowId || currentState.workflowNodes.length === 0) {
+          showAlert('没有需要保存的任务节点');
+        return;
+      }
+
+      try {
+        for (const node of currentState.workflowNodes) {
+          if (!currentState.addedNodes.has(node.id)) {
+            await checkAndAddNodeIfNeeded(node.id);
+          }
+        }
+          showAlert('工作流保存成功！');
+      } catch (error) {
+          showAlert('保存工作流失败: ' + error.message);
+      }
+    }
+
+    // 启动运行状态轮询
+    function startRunStatusPolling(runId) {
+      // 停止之前的轮询
+      stopRunStatusPolling();
+      currentPollingRunId = runId;
+
+      // 立即获取一次状态
+      updateRunStatus(runId);
+
+      // 每2秒轮询一次状态
+      runStatusPollingInterval = setInterval(() => {
+        updateRunStatus(runId);
+      }, 2000);
+    }
+
+    // 停止轮询运行状态
+    function stopRunStatusPolling() {
+      if (runStatusPollingInterval) {
+        clearInterval(runStatusPollingInterval);
+        runStatusPollingInterval = null;
+      }
+      currentPollingRunId = null;
+    }
+
+    // 更新运行状态
+    async function updateRunStatus(runId) {
+      if (!currentState.sessionId || !runId) return;
+
+      try {
+        const response = await axios.get(`${API_BASE_URL}/${currentState.sessionId}/runs/${runId}/summary`);
+        const summary = response.data;
+        const runStatus = summary.run_summary?.status || 'running';
+
+        // 更新运行实例状态
+        const runIndex = currentState.runs.findIndex(r => r.run_id === runId);
+        if (runIndex !== -1) {
+          currentState.runs[runIndex].status = runStatus;
+        }
+
+        // 如果是当前选中的运行实例，更新显示
+        if (currentState.currentRunId === runId) {
+          renderRunList();
+          // 如果结果显示在页面上，刷新结果
+          if (document.querySelector('.tab[data-tab="results"]').classList.contains('active')) {
+            loadRunResults(runId);
+          }
+        }
+
+        // 如果运行已完成（completed或failed），停止轮询
+        if (runStatus === 'completed' || runStatus === 'failed') {
+          stopRunStatusPolling();
+        }
+      } catch (error) {
+        console.error('获取运行状态失败:', error);
+        // 如果获取状态失败，也停止轮询
+        stopRunStatusPolling();
+      }
+    }
+
+    async function submitWorkflow() {
+      if (!currentState.sessionId || !currentState.currentWorkflowId) return;
+
+      if (currentState.isSubmitting) {
+          showAlert('工作流正在提交中，请稍候...');
+        return;
+      }
+
+      let submitBtn = null;
+      let originalText = '';
+
+      try {
+        currentState.isSubmitting = true;
+        submitBtn = document.getElementById('submit-workflow-btn');
+        if (submitBtn) {
+          originalText = submitBtn.innerHTML;
+          submitBtn.innerHTML = '<span class="loading"><span class="spinner"></span> 运行中...</span>';
+          submitBtn.disabled = true;
+        }
+
+        await saveWorkflow();
+
+        const response = await axios.post(`${API_BASE_URL}/${currentState.sessionId}/workflows/${currentState.currentWorkflowId}/submit`, {
+          mode: 'local'
+        });
+
+        const runId = response.data.run_id;
+        // 添加新的运行实例
+        currentState.runs.push({ run_id: runId, status: 'running' });
+        currentState.currentRunId = runId;
+        updateUI();
+
+        if (submitBtn) {
+            showAlert(`工作流提交成功! 运行ID: ${runId.substring(0, 8)}...`);
+        }
+
+        // 开始轮询运行状态
+        startRunStatusPolling(runId);
+
+        // 自动切换到结果选项卡并加载结果
+        document.querySelector('.tab[data-tab="results"]').click();
+        loadRunResults(runId);
+
+        return runId;
+      } catch (error) {
+        console.error('提交工作流失败:', error);
+        if (submitBtn) {
+            showAlert('提交工作流失败: ' + (error.response?.data?.detail || error.message || '未知错误'));
+        }
+        throw error;
+      } finally {
+        currentState.isSubmitting = false;
+        if (submitBtn) {
+          submitBtn.innerHTML = originalText || '<i class="fas fa-play"></i> 运行';
+          submitBtn.disabled = false;
+        }
+      }
+    }
+
+    async function loadRunResults(runId) {
+      if (!currentState.sessionId || !runId) return;
+
+      try {
+        elements.resultsContainer.innerHTML = '<p>正在加载结果...</p>';
+
+        // 获取运行摘要
+        const summaryResponse = await axios.get(`${API_BASE_URL}/${currentState.sessionId}/runs/${runId}/summary`);
+        const summary = summaryResponse.data;
+
+        let resultsHtml = '<h4>运行摘要</h4>';
+        resultsHtml += `<div style="margin-bottom: 20px; padding: 10px; background: white; border-radius: 6px;">
+        <div><strong>状态:</strong> <span style="color: ${getStatusColor(summary.run_summary?.status)}">${summary.run_summary?.status || 'unknown'}</span></div>
+        <div><strong>总耗时:</strong> ${summary.run_summary?.total_duration || 'N/A'} 秒</div>
+      </div>`;
+
+        // 获取每个任务的详细结果
+        if (summary.task_summaries) {
+          resultsHtml += '<h4>任务执行详情</h4>';
+          for (const task of summary.task_summaries) {
+            try {
+              // 获取具体任务结果
+              const taskResultResponse = await axios.post(`${API_BASE_URL}/${currentState.sessionId}/tasks/result`, {
+                run_id: runId,
+                task_id: task.task_id,
+                wait: false
+              });
+              const taskResult = taskResultResponse.data;
+
+              resultsHtml += `
+              <div class="result-item ${taskResult.task_status || ''}">
+                <div class="result-header">
+                  <div class="result-title">${task.name} (${task.task_id.substring(0, 8)}...)</div>
+                  <div class="result-status ${taskResult.task_status || ''}">${taskResult.task_status || 'unknown'}</div>
+                </div>
+                <div><strong>耗时:</strong> ${task.duration || 'N/A'} 秒</div>
+            `;
+
+              if (taskResult.task_status === 'finished' && taskResult.data) {
+                resultsHtml += `<div class="result-content">${JSON.stringify(taskResult.data, null, 2)}</div>`;
+              } else if (taskResult.task_status === 'failed' && taskResult.error) {
+                resultsHtml += `<div class="result-content" style="color: #ef4444;">${taskResult.error}</div>`;
+              } else if (taskResult.task_status === 'running') {
+                resultsHtml += `<div class="result-content">任务正在执行中...</div>`;
+              }
+
+              resultsHtml += '</div>';
+            } catch (error) {
+              console.error('获取任务结果失败:', error);
+              resultsHtml += `
+              <div class="result-item failed">
+                <div class="result-header">
+                  <div class="result-title">${task.name} (${task.task_id.substring(0, 8)}...)</div>
+                  <div class="result-status failed">error</div>
+                </div>
+                <div class="result-content" style="color: #ef4444;">获取结果失败: ${error.message}</div>
+              </div>
+            `;
+            }
+          }
+        }
+
+        elements.resultsContainer.innerHTML = resultsHtml;
+      } catch (error) {
+        console.error('加载运行结果失败:', error);
+        elements.resultsContainer.innerHTML = `<p style="color: #ef4444;">加载结果失败: ${error.message}</p>`;
+      }
+    }
+
+    function getStatusColor(status) {
+      switch (status) {
+        case 'completed': return '#10b981';
+        case 'failed': return '#ef4444';
+        case 'running': return '#f59e0b';
+        default: return '#6b7280';
+      }
+    }
+
+    async function handleCreateSession() {
+      const serverAddress = elements.serverAddress.value.trim();
+      if (!serverAddress) {
+          showAlert('请输入服务器地址');
+        return;
+      }
+
+      try {
+        const confirmBtn = document.getElementById('confirm-create-session');
+        const originalText = confirmBtn.innerHTML;
+        confirmBtn.innerHTML = '<span class="loading"><span class="spinner"></span> 连接中...</span>';
+        confirmBtn.disabled = true;
+
+        currentState.sessionId = await createSession(serverAddress);
+        await loadAvailableTasks();
+
+        hideModal('create-session-modal');
+        updateUI();
+
+        confirmBtn.innerHTML = originalText;
+        confirmBtn.disabled = false;
+      } catch (error) {
+          showAlert(error.message);
+        const confirmBtn = document.getElementById('confirm-create-session');
+        confirmBtn.innerHTML = '连接';
+        confirmBtn.disabled = false;
+      }
+    }
+
+    async function handleRegisterTask() {
+      const functionName = elements.functionName.value.trim();
+      const code = elements.taskCode.value.trim();
+      if (!functionName || !code) {
+          showAlert('请填写完整的任务信息');
+        return;
+      }
+
+      try {
+        const confirmBtn = document.getElementById('confirm-write-task');
+        const originalText = confirmBtn.innerHTML;
+        confirmBtn.innerHTML = '<span class="loading"><span class="spinner"></span> 注册中...</span>';
+        confirmBtn.disabled = true;
+
+        await registerTask(functionName, code);
+        hideModal('write-task-modal');
+        elements.functionName.value = '';
+        await loadAvailableTasks();
+        updateUI();
+          showAlert('任务注册成功!');
+
+        confirmBtn.innerHTML = originalText;
+        confirmBtn.disabled = false;
+      } catch (error) {
+          showAlert(error.message);
+        const confirmBtn = document.getElementById('confirm-write-task');
+        confirmBtn.innerHTML = '注册任务';
+        confirmBtn.disabled = false;
+      }
+    }
+
+    async function handleUploadTask() {
+      const description = elements.taskDescription.value.trim();
+      const taskType = elements.taskType.value;
+      const file = elements.taskFile.files[0];
+      if (!file) {
+          showAlert('请选择要上传的文件');
+        return;
+      }
+
+      try {
+        const confirmBtn = document.getElementById('confirm-upload-task');
+        const originalText = confirmBtn.innerHTML;
+        confirmBtn.innerHTML = '<span class="loading"><span class="spinner"></span> 上传中...</span>';
+        confirmBtn.disabled = true;
+
+        await uploadTaskPackage(description, taskType, file);
+        hideModal('upload-task-modal');
+        elements.taskDescription.value = '';
+        elements.taskFile.value = '';
+        await loadAvailableTasks();
+        updateUI();
+          showAlert('任务包上传成功!');
+
+        confirmBtn.innerHTML = originalText;
+        confirmBtn.disabled = false;
+      } catch (error) {
+          showAlert(error.message);
+        const confirmBtn = document.getElementById('confirm-upload-task');
+        confirmBtn.innerHTML = '上传任务';
+        confirmBtn.disabled = false;
+      }
+    }
+
+      async function handleCreateWorkflow() {
+          // 显示自定义模态框
+          elements.workflowName.value = '新工作流';
+          showModal('create-workflow-modal');
+      }
+
+// 创建工作流的实际逻辑
+      async function createWorkflowWithName(workflowName) {
+          if (!workflowName) {
+              showAlert('工作流名称不能为空');
+              return;
+          }
+
+          try {
+              if (currentState.currentWorkflowId) {
+                  saveCurrentWorkflowState();
+              }
+
+              const newWorkflowId = await createWorkflow(workflowName);
+              currentState.currentWorkflowId = newWorkflowId;
+              currentState.currentWorkflowName = workflowName;
+              currentState.workflowNodes = [];
+              currentState.workflowConnections = [];
+              currentState.nodeParameters = {};
+              currentState.nodeTaskIds = {};
+              currentState.addedNodes.clear();
+              currentState.selectedNode = null;
+
+              updateUI();
+              showAlert('工作流创建成功!');
+          } catch (error) {
+              showAlert(error.message);
+          }
+      }
+
+    function initEventListeners() {
+        document.getElementById('close-create-workflow').addEventListener('click', () => hideModal('create-workflow-modal'));
+        document.getElementById('cancel-create-workflow').addEventListener('click', () => hideModal('create-workflow-modal'));
+        document.getElementById('confirm-create-workflow').addEventListener('click', () => {
+            const workflowName = elements.workflowName.value.trim();
+            hideModal('create-workflow-modal');
+            createWorkflowWithName(workflowName);
+        });
+
+        // 支持回车键确认
+        elements.workflowName.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const workflowName = elements.workflowName.value.trim();
+                hideModal('create-workflow-modal');
+                createWorkflowWithName(workflowName);
+            }
+        });
+        alertElements.closeBtn.addEventListener('click', () => hideModal('alert-modal'));
+        alertElements.confirmBtn.addEventListener('click', () => hideModal('alert-modal'));
+
+// 点击弹窗外部关闭
+        alertElements.modal.addEventListener('click', (e) => {
+            if (e.target === alertElements.modal) {
+                hideModal('alert-modal');
+            }
+        });
+      document.getElementById('create-session-btn').addEventListener('click', () => showModal('create-session-modal'));
+      document.getElementById('close-create-session').addEventListener('click', () => hideModal('create-session-modal'));
+      document.getElementById('cancel-create-session').addEventListener('click', () => hideModal('create-session-modal'));
+      document.getElementById('confirm-create-session').addEventListener('click', handleCreateSession);
+
+      document.getElementById('write-task-btn').addEventListener('click', () => showModal('write-task-modal'));
+      document.getElementById('close-write-task').addEventListener('click', () => hideModal('write-task-modal'));
+      document.getElementById('cancel-write-task').addEventListener('click', () => hideModal('write-task-modal'));
+      document.getElementById('confirm-write-task').addEventListener('click', handleRegisterTask);
+
+      document.getElementById('upload-task-btn').addEventListener('click', () => showModal('upload-task-modal'));
+      document.getElementById('close-upload-task').addEventListener('click', () => hideModal('upload-task-modal'));
+      document.getElementById('cancel-upload-task').addEventListener('click', () => hideModal('upload-task-modal'));
+      document.getElementById('confirm-upload-task').addEventListener('click', handleUploadTask);
+
+      document.getElementById('set-input-params-btn').addEventListener('click', showInputParamsModal);
+      document.getElementById('close-input-params').addEventListener('click', () => hideModal('input-params-modal'));
+      document.getElementById('cancel-input-params').addEventListener('click', () => hideModal('input-params-modal'));
+      document.getElementById('confirm-input-params').addEventListener('click', saveInputParams);
+
+      document.getElementById('create-workflow-btn').addEventListener('click', handleCreateWorkflow);
+      document.getElementById('submit-workflow-btn').addEventListener('click', submitWorkflow);
+      document.getElementById('save-workflow-btn').addEventListener('click', saveWorkflow);
+
+      document.querySelectorAll('.modal').forEach(modal => {
+        modal.addEventListener('click', (e) => {
+          if (e.target === modal) {
+            modal.classList.remove('show');
+          }
+        });
+      });
+
+      const canvas = document.getElementById('workflow-canvas');
+      canvas.addEventListener('dragover', (e) => {
+        e.preventDefault();
+      });
+
+      canvas.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (!currentState.currentWorkflowId) {
+            showAlert('请先创建工作流');
+          return;
+        }
+
+        const taskData = e.dataTransfer.getData('task');
+        if (taskData) {
+          const task = JSON.parse(taskData);
+          const nodeId = `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const newNode = {
+            id: nodeId,
+            name: task.name,
+            function_name: task.name,
+            task_type: task.task_type,
+            x: e.offsetX - 120,
+            y: e.offsetY - 70
+          };
+          currentState.workflowNodes.push(newNode);
+          renderWorkflowCanvas();
+          console.log(`节点 ${nodeId} 已创建，等待输入参数或连接建立后再添加到后端`);
+          showAlert(`已将任务 "${task.name}" 添加到工作流中`);
+        }
+      });
+
+      canvas.addEventListener('click', (e) => {
+        if (e.target.classList.contains('node-connector')) {
+          const nodeId = e.target.getAttribute('data-node-id');
+          const inputParam = e.target.getAttribute('data-param-name');
+          const outputParam = e.target.getAttribute('data-output-param');
+
+          if (e.target.classList.contains('connector-source')) {
+            if (!currentState.isConnecting) {
+              currentState.connectingNode = nodeId;
+              currentState.isConnecting = true;
+              currentState.connectingOutputParam = outputParam;
+              e.target.style.background = '#f59e0b';
+            } else {
+              const connectingElement = document.querySelector(`[data-node-id="${currentState.connectingNode}"].connector-source`);
+              if (connectingElement) {
+                connectingElement.style.background = '#10b981';
+              }
+              currentState.connectingNode = null;
+              currentState.isConnecting = false;
+              currentState.connectingOutputParam = null;
+            }
+          } else if (e.target.classList.contains('connector-target')) {
+            if (currentState.isConnecting && currentState.connectingNode && currentState.connectingNode !== nodeId) {
+              const newConnection = {
+                source: currentState.connectingNode,
+                target: nodeId,
+                inputParam: inputParam,
+                outputParam: currentState.connectingOutputParam
+              };
+              currentState.workflowConnections.push(newConnection);
+
+              const connectingElement = document.querySelector(`[data-node-id="${currentState.connectingNode}"].connector-source`);
+              if (connectingElement) {
+                connectingElement.style.background = '#10b981';
+              }
+              currentState.connectingNode = null;
+              currentState.isConnecting = false;
+              currentState.connectingOutputParam = null;
+
+              renderWorkflowCanvas();
+
+              if (isNodeReady(nodeId)) {
+                checkAndAddNodeIfNeeded(nodeId);
+              }
+            } else {
+              currentState.connectingNode = null;
+              currentState.isConnecting = false;
+              currentState.connectingOutputParam = null;
+            }
+          }
+        }
+      });
+
+      // 缩放功能
+      document.getElementById('zoom-in').addEventListener('click', () => {
+        currentState.zoomLevel = Math.min(currentState.zoomLevel + 0.1, 2);
+        elements.workflowCanvas.style.transform = `scale(${currentState.zoomLevel})`;
+      });
+
+      document.getElementById('zoom-out').addEventListener('click', () => {
+        currentState.zoomLevel = Math.max(currentState.zoomLevel - 0.1, 0.5);
+        elements.workflowCanvas.style.transform = `scale(${currentState.zoomLevel})`;
+      });
+
+      document.getElementById('fit-view').addEventListener('click', () => {
+        currentState.zoomLevel = 1;
+        elements.workflowCanvas.style.transform = `scale(${currentState.zoomLevel})`;
+      });
+    }
+
+    // 页面卸载时清理轮询
+    window.addEventListener('beforeunload', () => {
+      stopRunStatusPolling();
+    });
+
+    initEventListeners();
+    updateUI();
+  });
+</script>
+</body>
+</html>
