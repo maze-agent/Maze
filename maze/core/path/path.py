@@ -42,7 +42,6 @@ class MaPath:
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler_receive.send(serialized)
         
-
     def add_task(self,workflow_id:str,task_id:str,task_type:str):
         self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id))
 
@@ -128,8 +127,6 @@ class MaPath:
                 self.websocket_que[message["workflow_id"]].put_nowait(
                     item = message
                 )
-                
-                pass
     
     async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
         """
