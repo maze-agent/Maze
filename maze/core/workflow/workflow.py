@@ -111,17 +111,15 @@ class Workflow:
             raise ValueError(f"Task {task_id} not found in workflow.")
         
         task = self.tasks[task_id]
-        task.status = "finished"
+        task.completed = True
 
         ready_tasks = []
         for successor in self.graph.successors(task_id):
             pred_tasks = [self.tasks[p] for p in self.graph.predecessors(successor)]
+            
             # 如果所有前驱任务都已完成，则该后继任务就绪
-            if all(pred.status == "finished" for pred in pred_tasks):
-                succ_task = self.tasks[successor]
-                if succ_task.status == "pending":  # 避免重复加入
-                    succ_task.status = "ready"
-                    ready_tasks.append(succ_task)
+            if all(pred.completed  for pred in pred_tasks): 
+                ready_tasks.append(self.tasks[successor])
         
         return ready_tasks
 

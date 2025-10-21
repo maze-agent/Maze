@@ -1,21 +1,16 @@
-from unittest import runner
 import ray
 import ast
 
 @ray.remote
-def remote_task_runner(code_str:str,task_input:dict):
-    # print('====remote task runner===')
-    # print(code_str)
-    # print(task_input)
-    runner = Runner(code_str,task_input)
+def remote_task_runner(code_str:str,task_input_data:dict):
+    runner = Runner(code_str,task_input_data)
     output = runner.run()
     return output
 
-
 class Runner():
-    def __init__(self,code_str,task_input):
+    def __init__(self,code_str,task_input_data):
         self.code_str = code_str
-        self.task_input = task_input
+        self.task_input_data = task_input_data
     
     def _extract_imports(self):
         tree = ast.parse(self.code_str)
@@ -59,7 +54,7 @@ class Runner():
         # 获取函数名并调用
         func_name = func_node.name
         if func_name in namespace:
-            return namespace[func_name](self.task_input)
+            return namespace[func_name](self.task_input_data)
         else:
             raise NameError(f"Function {func_name} not found in namespace")
 

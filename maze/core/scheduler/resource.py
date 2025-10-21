@@ -1,6 +1,8 @@
+from platform import node
 from typing import Any,List
 
 
+from maze.core.scheduler.runtime import TaskRuntime
 import ray
 import subprocess
 import threading
@@ -9,15 +11,16 @@ import threading
 class ResourceManager():
     def __init__(self):
         self.lock = threading.Lock() #ResourceManager对象由submit线程、monitor线程、receive线程共同操作，需要线程安全
-
+        
         ray.init(address='auto') 
         self.head_node_id = ray.get_runtime_context().get_node_id()
         self.nodes_detail_by_ray = {} #ray.nodes接口获取的节点信息
         self.nodes_available_resources = {} #各个节点的剩余资源
+        self.nodeid_to_ip = {self.head_node_id:ray.util.get_node_ip_address()}
         
         self._get_nodes_detail_by_ray()
         self._init_head_node_resource()
-        
+
     def choose_node(self,task_need_resources:dict):
         #{'cpu': 1, 'cpu_mem': 123, 'gpu': 1, 'gpu_mem': 1432}
         with self.lock:
@@ -43,34 +46,38 @@ class ResourceManager():
                         self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_mem'] -= gpu_mem_need
                         self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_num'] -= gpu_need
 
-                        choosed_machine = {"node_id":node_id,"gpu_id":gpu_id}
+                        choosed_machine = {"node_id":node_id, "gpu_id":gpu_id}
                 else:
                     #更新资源
                     self.nodes_available_resources[node_id]['cpu'] -= cpu_need
                     self.nodes_available_resources[node_id]['cpu_mem'] -= cpu_mem_need
         
                     choosed_machine = {"node_id":node_id}
-
+            
+            if choosed_machine is not None:
+                choosed_machine["node_ip"] = self.nodeid_to_ip[choosed_machine["node_id"]]
+               
             return choosed_machine
 
-    def release_resource(self,tasks:List):
-        for task in tasks:
-            node_id = task["node_id"]
-            resources = task["detail"]['resources']
+    def release_resource(self,tasks:List[TaskRuntime]):
+        with self.lock:
+            for task in tasks:
+                node_id = task.node_id
+                resources = task.resources
 
-            cpu = resources["cpu"]
-            cpu_mem = resources["cpu_mem"]
-            gpu = resources["gpu"]
-            gpu_mem = resources["gpu_mem"]
+                cpu = resources["cpu"]
+                cpu_mem = resources["cpu_mem"]
+                gpu = resources["gpu"]
+                gpu_mem = resources["gpu_mem"]
 
-            self.nodes_available_resources[node_id]['cpu'] += cpu
-            self.nodes_available_resources[node_id]['cpu_mem'] += cpu_mem
-            
-            if gpu > 0:
-                gpu_id = task["gpu_id"]
+                self.nodes_available_resources[node_id]['cpu'] += cpu
+                self.nodes_available_resources[node_id]['cpu_mem'] += cpu_mem
+                
+                if gpu > 0:
+                    gpu_id = task.gpu_id
 
-                self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_mem'] += gpu_mem
-                self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_num'] += gpu
+                    self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_mem'] += gpu_mem
+                    self.nodes_available_resources[node_id]['gpu_resource'][gpu_id]['gpu_num'] += gpu
 
     def _init_head_node_resource(self):
         self.nodes_available_resources[self.head_node_id] = {
@@ -89,13 +96,13 @@ class ResourceManager():
                     "gpu_mem":gpu_mem,
                     "gpu_num":1
                 }
-         
+            
     def _get_nodes_detail_by_ray(self):
         nodes: Any = ray.nodes()
         for node in nodes:
             if node['Alive']:
                 self.nodes_detail_by_ray[node['NodeID']] = node
-
+    
     def _collect_gpus_info(self):
         try:
             # 执行 nvidia-smi 命令并捕获输出

@@ -146,8 +146,8 @@ async def get_workflow_res(websocket: WebSocket, workflow_id: str):
     except Exception as e:
         print(f"{workflow_id} websocket disconnect : {e}")
     finally:
-        pass
-        #print(f"客户端 {client_id} 断开")
+        mapath.clear_workflow_runtime(workflow_id)
+       
 
 if __name__ == "__main__":
     mapath.start()

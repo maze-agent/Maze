@@ -1,6 +1,7 @@
 from email import message
 from math import pi
 from re import S
+import resource
 from typing import Any,List
 from unittest import result
 
@@ -14,9 +15,9 @@ import subprocess
 
 import os
 import sys
-from maze.core.path.resource_manager import ResourceManager
-from maze.core.path.view import TasksView
-from maze.core.path.runner import remote_task_runner
+from maze.core.scheduler.resource import ResourceManager
+from maze.core.scheduler.runtime import RuntimeManager,TaskRuntime
+from maze.core.scheduler.runner import remote_task_runner
 
 def scheduler_process(port1:int,port2:int,strategy:str):
     if strategy == "FCFS":
@@ -26,8 +27,6 @@ def scheduler_process(port1:int,port2:int,strategy:str):
 
     scheduler.start()
  
-
-   
 class Scheduler():
     def _launch_ray_head(self):
         try:
@@ -50,7 +49,6 @@ class Scheduler():
         except Exception as e:
             print(f"发生异常：{e}")
    
-
 class FCFSScheduler(Scheduler):
     """
     First come first serve scheduler.
@@ -58,11 +56,8 @@ class FCFSScheduler(Scheduler):
     def __init__(self, port1:int, port2:int):
         self.port1 = port1
         self.port2 = port2
-        
         self.task_queue = queue.Queue() #任务队列（receive线程和submit线程之间交互）
-         
-        
-        self.tasks_view = TasksView() #任务视图（维护任务所有相关信息）
+        self.workflow_manager = RuntimeManager() # 工作流管理器
         
     def _cleanup(self):
         command = [
@@ -79,48 +74,6 @@ class FCFSScheduler(Scheduler):
         # print("标准错误:\n", result.stderr)
         os._exit(1)
     
-    def _run_task(self,choosed_node_info,task):
-        if "gpu_id" in choosed_node_info:
-            pass
-        else:
-            """
-            task_input = {
-                "input_params" : {
-                    "1":{
-                        "key": "task1_input", #输入参数的key，在代码中可通过params.get("input_key")获取输入参数的值
-                        "input_schema":"from_user",  #输入模式
-                        "data_type":"str",  #输入参数的类型     
-                        "value" : "这是task1的输入",   #输入参数的value
-                    },
-                }
-            }
-
-            task_input = {
-                "input_params" : {
-                    "1":{
-                    "key": "task2_input", #输入参数的key，在代码中可通过params.get("input_key")获取输入参数的值
-                    "input_schema":"from_task",  #输入模式
-                    "data_type":"str",  #输入参数的类型     
-                    "value" : f"{task_id1}.output.task1_output",   #输入参数的value
-                    },
-                }
-            }
-            """
-            task_input = {}
-            for _,input_info in task['task_input']["input_params"].items():
-                if input_info["input_schema"] == "from_user":
-                    task_input[input_info["key"]] = input_info["value"]
-                elif input_info["input_schema"] == "from_task":
-                    task_input[input_info["key"]] = self.tasks_view.get_result(input_info["value"])
-  
-            result_ref = remote_task_runner.options(
-                num_cpus=task["resources"]["cpu"],
-                memory=task["resources"]["cpu_mem"],
-                scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=choosed_node_info["node_id"], soft=False)
-            ).remote(code_str=task['code_str'],task_input=task_input)
-            
-            return result_ref
-
     def _receive_thread(self,port1:int):
         print("====_receive_thread======")
         
@@ -136,9 +89,17 @@ class FCFSScheduler(Scheduler):
                 message = json.loads(data.decode('utf-8'))
                 
                 if(message["type"]=="run_task"):
-                    self.task_queue.put(message['task'])
+                    task = message['task']
+                    task_runtime = TaskRuntime(workflow_id=task['workflow_id'],
+                                                            task_id=task['task_id'],
+                                                            task_input=task['task_input'],
+                                                            task_output=task['task_output'],
+                                                            resources=task['resources'],
+                                                            code_str=task['code_str']
+                                                            )                
+                    self.task_queue.put(task_runtime)
                 elif(message["type"]=="clear_workflow"):
-                    pass
+                    self.workflow_manager.clear_workflow(workflow_id=message['workflow_id'])
                 elif(message["type"]=="join_worker"):
                     pass
                     #新节点加入
@@ -149,61 +110,83 @@ class FCFSScheduler(Scheduler):
                     self._cleanup()
 
         except Exception as e:
-            print(f"[子进程] 发生错误: {e}")
+            print(f"_receive_thread error: {e}")
             self._cleanup()
 
     def _monitor(self, port2:int):
         print("====_monitor======")
-        socket_to_mapath_monitor = self.context.socket(zmq.DEALER)
-        socket_to_mapath_monitor.connect(f"tcp://127.0.0.1:{port2}")
+        socket_to_main_monitor = self.context.socket(zmq.DEALER)
+        socket_to_main_monitor.connect(f"tcp://127.0.0.1:{port2}")
 
         while True:
-            #获取一批running任务并等待完成（等待上限：1s）
-            running_tasks_ref:List = self.tasks_view.get_running_tasks_ref()
+            #1.清除待删除的工作流
+            self.workflow_manager.clear_del_workflows()
 
-            if len(running_tasks_ref) == 0:
+
+            #2.获取一批running任务并等待完成（等待上限：1s）
+            running_tasks:List = self.workflow_manager.get_running_tasks()
+            if len(running_tasks) == 0:
                 time.sleep(1)
                 continue
 
+            running_tasks_ref = [task.object_ref for task in running_tasks]
             finished_tasks_ref, _ = ray.wait(running_tasks_ref, num_returns=len(running_tasks_ref), timeout=1.0)
+            if len(finished_tasks_ref) == 0:
+                continue
             tasks_res = ray.get(finished_tasks_ref)
           
-            #记录完成任务的结果
-            self.tasks_view.set_task_finished(finished_tasks_ref,tasks_res)
+            #3.记录完成任务的结果
+            self.workflow_manager.set_task_result(finished_tasks_ref,tasks_res)
             
-            #释放资源
-            finished_tasks = self.tasks_view.get_task_by_ref(finished_tasks_ref)
+            #4.释放资源
+            finished_tasks = self.workflow_manager.get_tasks_by_refs(finished_tasks_ref)
+            assert(len(finished_tasks)==len(finished_tasks_ref))
             self.resource_manager.release_resource(finished_tasks)
 
-            #todo:zmq发送任务结果
+            #5.zmq发送任务结果
             for task in finished_tasks:
                 message = {
                     "type":"finish_task",
-                    "workflow_id":task['detail']['workflow_id'],
-                    "task_id":task['detail']['task_id'],
-                    "result":task['result']
+                    "workflow_id":task.workflow_id,
+                    "task_id":task.task_id,
+                    "result":task.result
                 }
                 serialized_message = json.dumps(message).encode('utf-8')
-                socket_to_mapath_monitor.send(serialized_message)
+                socket_to_main_monitor.send(serialized_message)
 
-    def _submit_thread(self):
+    def _submit_thread(self,port2:int):
         print("====_submit_thread======")
+        socket_to_main_monitor = self.context.socket(zmq.DEALER)
+        socket_to_main_monitor.connect(f"tcp://127.0.0.1:{port2}")
 
         #FCFS
-        self.cur_ready_task = None
+        self.cur_ready_task: None|TaskRuntime = None
         while True:
             if self.cur_ready_task is None:
-                self.cur_ready_task = self.task_queue.get()
-                self.tasks_view.add_new_task(self.cur_ready_task)
-                 
-            #1.获取可调度节点
-            choosed_node = self.resource_manager.choose_node(self.cur_ready_task["resources"]) 
-            if choosed_node:  
+                self.cur_ready_task =  self.task_queue.get()
+                self.workflow_manager.add_task(self.cur_ready_task)
+            assert(self.cur_ready_task is not None)   
+
+            #1.获取调度节点
+            choosed_node_info = self.resource_manager.choose_node(task_need_resources=self.cur_ready_task.resources) #choosed_node = {"node_id":"node_id","gpu_id":"gpu_id"}
+            if choosed_node_info:  
                 #print(f"任务执行")
                 #print(self.cur_ready_task)
 
-                ref = self._run_task(choosed_node,self.cur_ready_task)
-                self.tasks_view.set_task_running(self.cur_ready_task["task_id"],ref,choosed_node)
+                #2.运行任务
+                self.workflow_manager.run_task(self.cur_ready_task,choosed_node_info)
+
+                #3.推送更新任务状态
+                message = {
+                    "type":"start_task",
+                    "workflow_id":self.cur_ready_task.workflow_id,
+                    "task_id":self.cur_ready_task.task_id,
+                    "node_ip":choosed_node_info.get("node_ip"),
+                    "node_id":choosed_node_info.get("node_id"),
+                    "gpu_id":choosed_node_info.get("gpu_id"),
+                }
+                serialized_message = json.dumps(message).encode('utf-8')
+                socket_to_main_monitor.send(serialized_message)
 
                 self.cur_ready_task = None
             else: #当前无满足所需资源的机器
@@ -225,7 +208,7 @@ class FCFSScheduler(Scheduler):
         self.monitor_thread.start()
         
         #创建submit线程，用于提交任务
-        self.submit_thread = threading.Thread(target=self._submit_thread) 
+        self.submit_thread = threading.Thread(target=self._submit_thread,args=(self.port2,)) 
         self.submit_thread.start()
 
 

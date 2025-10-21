@@ -7,7 +7,7 @@ from maze.core.workflow.task import CodeTask
 from maze.core.workflow.workflow import Workflow
 from fastapi import WebSocket
 import asyncio
-from maze.core.path.scheduler import scheduler_process
+from maze.core.scheduler.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
 import os
 
@@ -17,7 +17,7 @@ class MaPath:
         self.strategy=strategy
 
         self.workflows: Dict[str, Workflow] = {}
-        self.finished_queues: Dict[Any, asyncio.Queue] = {} #workflow_id:queue     
+        self.websocket_que: Dict[Any, asyncio.Queue] = {} #workflow_id:queue     
          
     def cleanup(self):
         #通知调度进程关闭，（调度进程释放
@@ -28,9 +28,20 @@ class MaPath:
         self.scheduler_process.join()
         os._exit(1)
         
-     
     def create_workflow(self,workflow_id:str):
         self.workflows[workflow_id] = Workflow(workflow_id)
+    
+    def clear_workflow_runtime(self,workflow_id:str):
+        '''
+        Clear workflow runtime
+        '''
+        print("=============")
+        del self.websocket_que[workflow_id]
+
+        message = {"type":"clear_workflow","workflow_id":workflow_id}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler_receive.send(serialized)
+        
 
     def add_task(self,workflow_id:str,task_id:str,task_type:str):
         self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id))
@@ -50,7 +61,7 @@ class MaPath:
         运行工作流，将工作流起始任务加入调度器
         """
         workflow = self.workflows[workflow_id]
-        self.finished_queues[workflow_id] = asyncio.Queue()
+        self.websocket_que[workflow_id] = asyncio.Queue()
         start_task:List = workflow.get_start_task()
         for task in start_task:
             message = {
@@ -86,13 +97,12 @@ class MaPath:
                     }
                 }
                 '''
-                #添加任务结果到异步队列中，main线程通过队列获取任务结果并用SSE机制向客户端推送
-                self.finished_queues[message["workflow_id"]].put_nowait(
-                    item = {
-                        "task_id":message["task_id"],
-                        "workflow_id":message["workflow_id"],
-                        "result":message["result"]
-                    }
+                if message['workflow_id'] not in self.websocket_que:
+                    continue
+
+                #添加任务结果到异步队列中，main线程通过队列获取任务结果并用websocket机制向客户端推送
+                self.websocket_que[message["workflow_id"]].put_nowait(
+                    item = message
                 )
 
                 #标记任务完成，检测是否有新的入度为0的任务
@@ -106,6 +116,21 @@ class MaPath:
                         serialized: bytes = json.dumps(message).encode('utf-8')
                         socket_to_scheduler_receive.send(serialized)
 
+            elif(message["type"]=="start_task"):
+                '''
+                message = {
+                    "type":"start_task",
+                    "workflow_id":"workflow_id",
+                    "task_id":"task_id",
+                }
+                '''
+                #添加任务结果到异步队列中，main线程通过队列获取任务结果并用websocket机制向客户端推送
+                self.websocket_que[message["workflow_id"]].put_nowait(
+                    item = message
+                )
+                
+                pass
+    
     async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
         """
         持续获取工作流每个任务的运行结果
@@ -113,19 +138,19 @@ class MaPath:
         workflow = self.workflows[workflow_id]
         total_task_num = workflow.get_total_task_num()
 
-        finished_queue = self.finished_queues.get(workflow_id)
+        q = self.websocket_que.get(workflow_id)
 
-        assert finished_queue != None
+        assert q != None
 
         count = 0
         while True:
-            data = await finished_queue.get()
+            data = await q.get()
             await websocket.send_json(data)
-            count += 1
+
+            if data["type"]=="finish_task":
+                count += 1
+
             if(count == total_task_num):
-                message = {"type":"clear_workflow"}
-                serialized: bytes = json.dumps(message).encode('utf-8')
-                self.socket_to_scheduler_receive.send(serialized)
                 break
        
     def start(self):
