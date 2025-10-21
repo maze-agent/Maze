@@ -89,6 +89,14 @@ class Workflow:
             raise ValueError("Both tasks must exist in the workflow before adding an edge.")
         self.graph.add_edge(source_task_id, target_task_id)
 
+    def del_edge(self, source_task_id: str, target_task_id: str) -> None:
+        """
+        Delete a edge from workflow
+        """
+        if source_task_id not in self.graph or target_task_id not in self.graph:
+            raise ValueError("Both tasks must exist in the workflow before deleting an edge.")
+        self.graph.remove_edge(source_task_id, target_task_id)
+
     def get_start_task(self) -> List[CodeTask]:
         """
         Get start tasks from workflow (tasks with no incoming edges)

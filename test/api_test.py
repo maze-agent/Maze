@@ -83,6 +83,31 @@ def save_task(workflow_id,task_id,code_str,task_input,task_output,resources):
     except requests.exceptions.RequestException as e:
         print("请求发生错误：", e)
 
+def del_task(workflow_id,task_id):
+    data = {
+        'workflow_id': workflow_id,
+        'task_id': task_id,
+    }
+
+    # 定义请求的 URL
+    url = "http://localhost:8000/del_task" 
+
+    try:
+        # 发送 POST 请求
+        response = requests.post(url,json=data)
+
+        # 检查响应状态码
+        if response.status_code == 200:
+            data = response.json()
+            #print(data)
+            #return data["task_id"]
+        else:
+            print(f"请求失败，状态码：{response.status_code}")
+            print("响应内容：", response.text)
+
+    except requests.exceptions.RequestException as e:
+        print("请求发生错误：", e)
+
 def add_edge(workflow_id,source_task_id,target_task_id):
     data = {
         'workflow_id': workflow_id,
@@ -108,6 +133,33 @@ def add_edge(workflow_id,source_task_id,target_task_id):
 
     except requests.exceptions.RequestException as e:
         print("请求发生错误：", e)
+
+def del_edge(workflow_id,source_task_id,target_task_id):
+    data = {
+        'workflow_id': workflow_id,
+        'source_task_id': source_task_id,
+        'target_task_id': target_task_id,
+    }
+
+    # 定义请求的 URL
+    url = "http://localhost:8000/del_edge" 
+
+    try:
+        # 发送 POST 请求
+        response = requests.post(url,json=data)
+
+        # 检查响应状态码
+        if response.status_code == 200:
+            data = response.json()
+            #print(data)
+            #return data["task_id"]
+        else:
+            print(f"请求失败，状态码：{response.status_code}")
+            print("响应内容：", response.text)
+
+    except requests.exceptions.RequestException as e:
+        print("请求发生错误：", e)
+
 
 def run_workflow(workflow_id):
     data = {
@@ -171,6 +223,8 @@ workflow_id = create_workflow()
 #2.新增2个任务
 task_id1 = add_task(workflow_id)
 task_id2 = add_task(workflow_id)
+# del_task(workflow_id,task_id2)
+# task_id2 = add_task(workflow_id)
 
 #3.保存任务（输入，输出，所需资源，code str）
 code_str = """
@@ -258,7 +312,8 @@ save_task(workflow_id=workflow_id,task_id=task_id2,code_str=code_str,task_input=
 
 #4.添加边
 add_edge(workflow_id=workflow_id,source_task_id=task_id1,target_task_id=task_id2)
-
+# del_edge(workflow_id=workflow_id,source_task_id=task_id1,target_task_id=task_id2)
+# add_edge(workflow_id=workflow_id,source_task_id=task_id1,target_task_id=task_id2)
 
 #5.执行任务
 run_workflow(workflow_id=workflow_id)

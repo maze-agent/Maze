@@ -55,6 +55,9 @@ class MaPath:
     def add_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
         self.workflows[workflow_id].add_edge(source_task_id,target_task_id)
 
+    def del_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
+        self.workflows[workflow_id].del_edge(source_task_id,target_task_id)
+
     def run_workflow(self,workflow_id:str):
         """
         运行工作流，将工作流起始任务加入调度器

@@ -69,7 +69,6 @@ async def del_task(req:Request):
     return {"status":"success","task_id": task_id}
 
 
-
 '''
 描述：在每个任务方框中有一个“保存”按钮，按下后发送该请求，保存任务详细信息（输入参数，输出参数，所需资源，任务code_str）
 
@@ -113,6 +112,24 @@ async def add_edge(req:Request):
     mapath.add_edge(workflow_id, source_task_id, target_task_id)
    
     return {"status":"success"}
+
+'''
+描述：删除边（前端断开任务间连线时发送）
+
+请求参数：工作流ID，源务ID，源任务ID
+响应参数：是否删除成功
+'''
+@app.post("/del_edge")
+async def add_edge(req:Request):
+    data = await req.json()
+   
+    workflow_id = data.get("workflow_id")
+    source_task_id = data.get("source_task_id")
+    target_task_id = data.get("target_task_id")
+    mapath.del_edge(workflow_id, source_task_id, target_task_id)
+   
+    return {"status":"success"}
+
 
 
 '''
