@@ -1,0 +1,64 @@
+/* Features section styles */
+.features-section {
+    background: transparent;
+    padding: 100px 40px;
+    display: flex;
+    justify-content: center;
+    position: relative;
+    z-index: 5;
+}
+
+.features-container {
+    max-width: 1400px;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 30px;
+}
+
+.feature-card {
+    background: var(--glass-bg);
+    border-radius: 25px;
+    padding: 45px 35px;
+    flex: 1;
+    min-width: 350px;
+    max-width: 400px;
+    box-shadow: 0 15px 35px var(--shadow-light);
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    color: var(--text-primary);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
+}
+
+.feature-card:hover {
+    transform: translateY(-10px);
+    box-shadow: 0 20px 40px var(--shadow-medium);
+    border-color: rgba(106, 90, 249, 0.3);
+}
+
+.feature-icon {
+    font-size: 3rem;
+    margin-bottom: 25px;
+    background: var(--primary-color);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.feature-card h2 {
+    font-size: 1.8rem;
+    margin-bottom: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.feature-card p {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    font-family: 'Roboto', sans-serif;
+    font-weight: 300;
+}
+
+

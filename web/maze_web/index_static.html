@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Maze Framework</title>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
+    
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/background.css">
+    <link rel="stylesheet" href="css/navigation.css">
+    <link rel="stylesheet" href="css/hero.css">
+    <link rel="stylesheet" href="css/features.css">
+    <link rel="stylesheet" href="css/architecture.css">
+    <link rel="stylesheet" href="css/modal.css">
+    <link rel="stylesheet" href="css/footer.css">
+</head>
+<body>
+    <!-- Background -->
+    <div class="background-container">
+        <div class="grid-overlay"></div>
+        <div class="particles" id="particles"></div>
+        <div class="maze-container" id="mazeContainer">
+            <div class="maze-walker" id="mazeWalker"></div>
+        </div>
+    </div>
+
+    <!-- Demo Modal -->
+    <div class="demo-modal" id="demoModal">
+        <div class="demo-modal-content">
+            <span class="demo-close" id="closeDemo">&times;</span>
+            <h2 class="demo-modal-title">Maze Framework Demos</h2>
+            <p class="demo-modal-subtitle">Explore how Maze enables distributed agent collaboration</p>
+
+            <div class="demo-videos-container">
+                <div class="demo-video-card">
+                    <h3>🎯 Demo 1: Workflow Designer</h3>
+                    <p>See how to visually design and orchestrate complex multi-agent workflows with our intuitive playground interface.</p>
+                    <div class="video-wrapper">
+                        <video controls>
+                            <source src="https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                </div>
+
+                <div class="demo-video-card">
+                    <h3>🚀 Demo 2: Distributed Execution</h3>
+                    <p>Watch agents collaboratively execute tasks across distributed workers with real-time monitoring and results.</p>
+                    <div class="video-wrapper">
+                        <video controls>
+                            <source src="https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Navigation Bar -->
+    <nav class="top-navbar">
+        <div class="navbar-container">
+            <div class="navbar-left">
+                <img src="assets/maze-logo-icon.svg" alt="Maze Logo" class="logo" />
+                <span class="logo-text"></span>
+            </div>
+            <div class="navbar-center">
+                <a href="https://github.com/QinbinLi/Maze" target="_blank">Source Code ▾</a>
+                <a href="https://arxiv.org/" target="_blank">Paper ▾</a>
+                <a href="https://maze-doc.readthedocs.io/en/latest/index.html" target="_blank">Docs ▾</a>
+                <a onclick="openDemoModal()">Demo ▾</a>
+                <a href="#">About Us ▾</a>
+            </div>
+            <div class="navbar-right">
+                <a class="btn-outline" onclick="openDemoModal()">Get a demo</a>
+                <a class="btn-filled" href="#">Sign up</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero-wrapper">
+        <div class="hero-content">
+            <h1 class="hero-title">The framework for distributed agents.</h1>
+            <p class="hero-subtitle">Maze: multiple agent deploying and task level distribution</p>
+            <div class="hero-buttons">
+                <button class="btn-solid" onclick="openDemoModal()">Watch Demo</button>
+                <a href="#" class="btn-outline-white">See the docs</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features-section">
+        <div class="features-container">
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h2>Accelerate Agent Development</h2>
+                <p>Rapidly build, configure, and compose multiple agents using modular templates and visual IDE.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🛡️</div>
+                <h2>Reliable Agent Deployment</h2>
+                <p>Multi-agent collaborative execution with human feedback, complex task scheduling and control.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📊</div>
+                <h2>Observability & Quality Enhancement</h2>
+                <p>Real-time monitoring of agent execution, problem diagnosis, and continuous model behavior iteration.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture Section -->
+    <section class="architecture-section">
+        <div class="architecture-left">
+            <h2>Maze Architecture</h2>
+            <div class="architecture-card">
+                <div class="architecture-icon">🧠</div>
+                <h3>MaLearn</h3>
+                <p>Component for training and enhancing language models to improve intelligent decision-making and learning capabilities.</p>
+            </div>
+            <div class="architecture-card">
+                <div class="architecture-icon">⚙️</div>
+                <h3>MaWorker</h3>
+                <p>Executes various tasks and coordinates multiple agents to ensure efficient collaboration.</p>
+            </div>
+            <div class="architecture-card">
+                <div class="architecture-icon">📋</div>
+                <h3>MaRegister</h3>
+                <p>Registers and manages agents to ensure all agents in the system operate normally.</p>
+            </div>
+            <div class="architecture-card">
+                <div class="architecture-icon">🧭</div>
+                <h3>MaPath</h3>
+                <p>Defines agent paths and task flows to help agents execute multi-step tasks.</p>
+            </div>
+        </div>
+        <div class="architecture-right">
+            <img src="R.gif" alt="Maze Architecture Visualization" />
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer-section">
+        <div class="footer-brand">Maze</div>
+        <div class="footer-status">
+            <div class="footer-left">
+                <span class="status-dot"></span> All systems operational
+            </div>
+            <div class="footer-right">
+                <a href="#">Privacy Policy</a>
+                <a href="#">Terms of Service</a>
+            </div>
+        </div>
+    </footer>
+
+    <!-- JavaScript Files -->
+    <script src="js/config.js"></script>
+    <script src="js/site-config.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/maze.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

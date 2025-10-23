@@ -1,0 +1,62 @@
+/* Base styles and global variables */
+body, h1, h2, h3, p, a, span {
+    font-family: 'Orbitron', sans-serif;
+    color: white;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-size: 36px;
+    background: #0a0a1a;
+}
+
+/* CSS Variables for consistent theming */
+:root {
+    --primary-color: #b49af3;
+    --primary-hover: #c9b5f9;
+    --primary-light: #cbb8f5;
+    --accent-color: #00ffff;
+    --background-dark: #0a0a1a;
+    --text-primary: #ffffff;
+    --text-secondary: #d0d0d0;
+    --text-muted: #ccc;
+    --border-color: rgba(255, 255, 255, 0.1);
+    --border-hover: rgba(180, 154, 243, 0.5);
+    --shadow-light: rgba(0, 0, 0, 0.2);
+    --shadow-medium: rgba(0, 0, 0, 0.3);
+    --shadow-heavy: rgba(0, 0, 0, 0.5);
+    --glass-bg: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.1);
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes grid-move {
+    0% { transform: translate(0, 0); }
+    100% { transform: translate(-50px, -50px); }
+}
+
+@keyframes float {
+    0% { transform: translateY(0) translateX(0); opacity: 0; }
+    10% { opacity: 0.5; }
+    90% { opacity: 0.5; }
+    100% { transform: translateY(-100vh) translateX(100px); opacity: 0; }
+}
+
+
