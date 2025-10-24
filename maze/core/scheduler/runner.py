@@ -1,7 +1,7 @@
 import ray
 import ast
 
-@ray.remote
+@ray.remote(max_retries=0)
 def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices=None):
     if cuda_visible_devices:
         import os

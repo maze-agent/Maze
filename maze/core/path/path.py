@@ -1,69 +1,84 @@
+import os
 import json
-from typing import Any,Dict,List
+import zmq.asyncio
+import asyncio
 import multiprocessing as mp
-import zmq
-import threading
+from fastapi import WebSocket
+from typing import Any,Dict,List
+from asyncio.queues import Queue
 from maze.core.workflow.task import CodeTask
 from maze.core.workflow.workflow import Workflow
-from fastapi import WebSocket
-import asyncio
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
-import os
 
 class MaPath:
     def __init__(self,strategy:str):
         assert strategy == "FCFS" #暂时只支持FCFS策略
         self.strategy=strategy
 
+        self.lock = lock = asyncio.Lock()
+
         self.workflows: Dict[str, Workflow] = {}
-        self.websocket_que: Dict[Any, asyncio.Queue] = {} #workflow_id:queue     
+        self.async_que: Dict[str, asyncio.Queue] = {} #workflow_id:queue     
          
     def cleanup(self):
-        #通知调度进程关闭，（调度进程释放
+        '''
+        Clean up the main process and scheduler process.
+        '''
         message = {"type":"shutdown"}
         serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_scheduler_receive.send(serialized)
+        self.socket_to_receive.send(serialized)
 
         self.scheduler_process.join()
         os._exit(1)
         
     def create_workflow(self,workflow_id:str):
+        '''
+        Create a workflow.
+        '''
         self.workflows[workflow_id] = Workflow(workflow_id)
     
-    def clear_workflow_runtime(self,workflow_id:str):
-        '''
-        Clear workflow runtime
-        '''
-        print("=============")
-        del self.websocket_que[workflow_id]
-
-        message = {"type":"clear_workflow","workflow_id":workflow_id}
-        serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_scheduler_receive.send(serialized)
-        
     def add_task(self,workflow_id:str,task_id:str,task_type:str):
+        '''
+        Add a task to the workflow.
+
+        '''
         self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id))
 
     def del_task(self,workflow_id:str,task_id:str):
+        '''
+        Delete a task from the workflow.
+        '''
         self.workflows[workflow_id].del_task(task_id)
 
     def save_task(self,workflow_id:str,task_id:str,task_input:str,task_output:str,code_str:str,resources:str):
+        '''
+        Save a task.
+
+        '''
         task = self.workflows[workflow_id].get_task(task_id)
         task.save_task(task_input=task_input, task_output=task_output, code_str = code_str, resources=resources)
 
+       
     def add_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
+        '''
+        Add an edge to the workflow.
+        '''
         self.workflows[workflow_id].add_edge(source_task_id,target_task_id)
 
     def del_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
+        '''
+        Delete an edge from the workflow.
+
+        '''
         self.workflows[workflow_id].del_edge(source_task_id,target_task_id)
 
     def run_workflow(self,workflow_id:str):
         """
-        运行工作流，将工作流起始任务加入调度器
+        Start a workflow.
         """
         workflow = self.workflows[workflow_id]
-        self.websocket_que[workflow_id] = asyncio.Queue()
+        self.async_que[workflow_id] = asyncio.Queue()
         start_task:List = workflow.get_start_task()
         for task in start_task:
             message = {
@@ -71,117 +86,113 @@ class MaPath:
                 "task":task.to_json()
             }
             serialized: bytes = json.dumps(message).encode('utf-8')
-            self.socket_to_scheduler_receive.send(serialized)
-            
-    def _monitor_thread(self,port1,port2):
-        assert self.context != None
+            self.socket_to_receive.send(serialized)
+  
+    def get_ray_head_port(self):
+        '''
+        Get the ray head port.
 
-        socket_to_scheduler_receive = self.context.socket(zmq.DEALER)
-        socket_to_scheduler_receive.connect(f"tcp://127.0.0.1:{port1}")
-
-        socket_from_scheduler_monitor = self.context.socket(zmq.ROUTER)
-        socket_from_scheduler_monitor.bind(f"tcp://127.0.0.1:{port2}")
-
-        while True:
-            frames = socket_from_scheduler_monitor.recv_multipart()
-            assert(len(frames)==2)
-            identity, data = frames
-            message = json.loads(data.decode('utf-8'))
-          
-            if(message["type"]=="finish_task"):
-                '''
-                message = {
-                    "type":"finish_task",
-                    "workflow_id":"workflow_id",
-                    "task_id":"task_id",
-                    "result":{
-                        "key" : "value"
-                    }
-                }
-                '''
-                if message['workflow_id'] not in self.websocket_que:
-                    continue
-
-                #添加任务结果到异步队列中，main线程通过队列获取任务结果并用websocket机制向客户端推送
-                self.websocket_que[message["workflow_id"]].put_nowait(
-                    item = message
-                )
-
-                #标记任务完成，检测是否有新的入度为0的任务
-                new_ready_tasks  = self.workflows[message["workflow_id"]].finish_task(task_id=message["task_id"])
-                if len(new_ready_tasks) > 0:
-                    for task in new_ready_tasks:
-                        message = {
-                            "type":"run_task",
-                            "task":task.to_json()
-                        }                 
-                        serialized: bytes = json.dumps(message).encode('utf-8')
-                        socket_to_scheduler_receive.send(serialized)
-
-            elif(message["type"]=="start_task"):
-                '''
-                message = {
-                    "type":"start_task",
-                    "workflow_id":"workflow_id",
-                    "task_id":"task_id",
-                }
-                '''
-                #添加任务结果到异步队列中，main线程通过队列获取任务结果并用websocket机制向客户端推送
-                self.websocket_que[message["workflow_id"]].put_nowait(
-                    item = message
-                )
+        '''
+        return self.ray_head_port
     
-    #def _wait_ray_head_ready(self):
-        
-
-    async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
-        """
-        持续获取工作流每个任务的运行结果
-        """
-        workflow = self.workflows[workflow_id]
-        total_task_num = workflow.get_total_task_num()
-
-        q = self.websocket_que.get(workflow_id)
-
-        assert q != None
-
-        count = 0
-        while True:
-            data = await q.get()
-            await websocket.send_json(data)
-
-            if data["type"]=="finish_task":
-                count += 1
-
-            if(count == total_task_num):
-                break
-       
-    def start(self):
-        self.context = zmq.Context() #zmq context
+    def init(self,ray_head_port):
+        '''
+        Initialize.
+        '''
+        self.ray_head_port = ray_head_port
+        self.context = zmq.asyncio.Context()
         available_ports = get_available_ports(2)
       
         port1 = available_ports[0]
         port2 = available_ports[1]
 
-        #创建与scheduler_process中的receive线程通信的socket
-        self.socket_to_scheduler_receive = self.context.socket(zmq.DEALER)
-        self.socket_to_scheduler_receive.connect(f"tcp://127.0.0.1:{port1}")
+         
+        self.socket_to_receive = self.context.socket(zmq.DEALER)
+        self.socket_to_receive.connect(f"tcp://127.0.0.1:{port1}")
         
-        #创建monitor线程
-        self.monitor_thread = threading.Thread(target=self._monitor_thread, args=(port1,port2,))
-        self.monitor_thread.start()
+        self.socket_from_submit_supervisor = self.context.socket(zmq.ROUTER)
+        self.socket_from_submit_supervisor.bind(f"tcp://127.0.0.1:{port2}")
 
-        #创建scheduler进程
+        
+        #Create the scheduler process and wait for it to be ready
         self.ready_queue = mp.Queue()
-        self.scheduler_process = mp.Process(target=scheduler_process, args=(port1,port2,self.strategy,self.ready_queue))
+        self.scheduler_process = mp.Process(target=scheduler_process, args=(port1,port2,self.strategy,self.ray_head_port,self.ready_queue))
         self.scheduler_process.start()
         message = self.ready_queue.get()
         if message == 'ready':
             pass
         else:
             raise Exception('scheduler process error')
-            
-        
-        
+ 
+    async def monitor_coroutine(self):
+        '''
+        Monitor the task from the scheduler process.
+        '''
+        while True:
+            try:
+                frames = await self.socket_from_submit_supervisor.recv_multipart()
+                assert(len(frames)==2)
+                identity, data = frames
+                message = json.loads(data.decode('utf-8'))
+               
+                async with self.lock:
+                    if message['workflow_id'] not in self.async_que:
+                        continue
 
+                    que: Queue[Any] = self.async_que[message['workflow_id']]
+                    await que.put(message)
+
+                    if(message["type"]=="finish_task"):
+                        new_ready_tasks  = self.workflows[message["workflow_id"]].finish_task(task_id=message["task_id"])
+                        if len(new_ready_tasks) > 0:
+                            for task in new_ready_tasks:
+                                message = {
+                                    "type":"run_task",
+                                    "task":task.to_json()
+                                }                 
+                                serialized: bytes = json.dumps(message).encode('utf-8')
+                                self.socket_to_receive.send(serialized)
+            except Exception as e:
+                print(f"Error in monitor: {e}")
+                await asyncio.sleep(1)
+
+    async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
+        """
+        Get the workflow result and send to websocket.
+        """
+        workflow = self.workflows[workflow_id]
+        total_task_num = workflow.get_total_task_num()
+
+        que = self.async_que[workflow_id]
+        assert que != None
+
+        count = 0
+        while True:
+            data = await que.get()
+            await websocket.send_json(data)
+
+            if data["type"]=="finish_task":
+                count += 1
+                if(count == total_task_num):
+                    message = {"type":"finish_workflow","workflow_id":workflow_id}
+                    serialized: bytes = json.dumps(message).encode('utf-8')
+                    self.socket_to_receive.send(serialized)
+                     
+                    break
+            elif data["type"]=="task_exception":
+                raise Exception(data["message"])
+          
+    async def stop_workflow(self,workflow_id:str):
+        '''
+        Stop workflow
+        '''
+        async with self.lock:
+            del self.async_que[workflow_id]
+
+        message = {"type":"stop_workflow","workflow_id":workflow_id}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_receive.send(serialized)
     
+    
+
+   

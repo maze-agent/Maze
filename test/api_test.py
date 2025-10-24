@@ -271,10 +271,12 @@ save_task(workflow_id=workflow_id,task_id=task_id1,code_str=code_str,task_input=
 
 code_str = """
 from datetime import datetime
+import time 
 
 def task2(params):
     task_input = params.get("task2_input")
-
+    time.sleep(3)
+    a=1/0
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str + "===="
@@ -303,7 +305,7 @@ task_output = {
     }
 }
 resources = {
-    "cpu":1,
+    "cpu":10,
     "cpu_mem": 123,
     "gpu":0.8,
     "gpu_mem" : 324

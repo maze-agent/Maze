@@ -1,15 +1,12 @@
-from _thread import LockType
-from typing import Any, List,Dict
-import threading
-from maze.core.scheduler.runner import remote_task_runner
 import ray
-
+from typing import Any, List,Dict
+from maze.core.scheduler.runner import remote_task_runner
 
 class SelectedNode():
-    def __init__(self):
-        self.node_id = None
-        self.node_ip = None
-        self.gpu_id = None
+    def __init__(self,node_id:str,node_ip:str,gpu_id:int=None):
+        self.node_id = node_id
+        self.node_ip = node_ip
+        self.gpu_id = gpu_id
 
 class TaskRuntime():
     def __init__(self,workflow_id:str,task_id:str,task_input:Dict,task_output:Dict,resources:Dict,code_str:str):
@@ -28,15 +25,15 @@ class TaskRuntime():
 class WorkflowRuntime():
     def __init__(self,workflow_id):
         self.workflow_id: str = workflow_id
-        self.to_delete = False
         self.tasks: Dict[str, TaskRuntime] = {}
         self.ref_to_taskid = {}
-    
+ 
     def add_task(self, task:TaskRuntime):
         '''
         Add task to workflow.
         '''
         self.tasks[task.task_id] = task
+     
          
     def get_task_result(self,key):
         '''
@@ -55,106 +52,137 @@ class WorkflowRuntime():
         self.tasks[task_id].selected_node = selected_node
           
         self.ref_to_taskid[object_ref] = task_id
-          
+
+    def get_running_task_refs(self):
+        running_task_refs = []
+        for task_id,task in self.tasks.items():
+            if task.status == "running":
+                running_task_refs.append(task.object_ref)
+        return running_task_refs
+
+    def set_task_result(self, task:TaskRuntime,result:Dict):
+        self.tasks[task.task_id].result = result
+        self.tasks[task.task_id].status = "finished"
+
+    def get_task_by_ref(self, ref) -> TaskRuntime:
+        task_id = self.ref_to_taskid[ref]
+        return self.tasks[task_id]
+
     def get_running_tasks(self):
         running_tasks = []
         for task_id,task in self.tasks.items():
             if task.status == "running":
                 running_tasks.append(task)
         return running_tasks
-
-    def set_task_result(self, object_ref,result):
-        task_id = self.ref_to_taskid[object_ref]
-        self.tasks[task_id].result = result
-        self.tasks[task_id].status = "finished"
-
-    def get_task_by_ref(self, ref):
-        task_id = self.ref_to_taskid[ref]
-        return self.tasks[task_id]
-
-class RuntimeManager():
+        
+class WorkflowRuntimeManager():
     def __init__(self):
-        self.lock: LockType = threading.Lock() #RuntimeManager对象由submit线程、monitor线程、receive线程 共同操作，需要线程安全
         self.workflows = {}
         self.ref_to_workflow_id = {}
+    
+    def _get_workflow_by_ref(self, ref):
+        if ref not in self.ref_to_workflow_id:
+            return None
+
+        return self.workflows[self.ref_to_workflow_id[ref]]
+
+    def clear_workflow(self, workflow_id:str):
+        '''
+        Clear workflow.
+        '''
+        if workflow_id not in self.workflows:
+            return
+
+        refs_to_del = []
+        for ref,workflow_id in self.ref_to_workflow_id.items():
+            if workflow_id == workflow_id:
+                refs_to_del.append(ref)
+        for ref in refs_to_del:
+            del self.ref_to_workflow_id[ref]
+
+        del self.workflows[workflow_id]
+
+    def cancel_workflow(self, workflow_id:str):
+        '''
+        Cancel running tasks of workflow and return running tasks.
+        '''
+        if workflow_id not in self.workflows:
+            return []
    
-    def add_task(self, task:TaskRuntime):
-        with self.lock:
-            if task.workflow_id not in self.workflows:
-                self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
-            
-            self.workflows[task.workflow_id].add_task(task)
-    
-    def run_task(self,task:TaskRuntime,selected_node:SelectedNode):
-        with self.lock:
-            task_input_data = {}
-            for _,input_info in task.task_input["input_params"].items():
-                if input_info["input_schema"] == "from_user":
-                    task_input_data[input_info["key"]] = input_info["value"]
-                elif input_info["input_schema"] == "from_task":
-                    task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
-
-
-            if selected_node.gpu_id is not None: #gpu task
-                result_ref = remote_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    num_gpus=task.resources["gpu"],
-                    memory=task.resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=selected_node.node_id, soft=False)
-                ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=str(selected_node.gpu_id))
-                
-            else: #cpu task
-                result_ref = remote_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    memory=task.resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=selected_node.node_id, soft=False)
-                ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=None)
-                
-            self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,selected_node)
-            self.ref_to_workflow_id[result_ref] = task.workflow_id
-    
-    def clear_del_workflows(self):
-        with self.lock:
-            to_del_workflows_id = []
-            for workflow_id,workflow in self.workflows.items():
-                if workflow.to_delete:
-                    to_del_workflows_id.append(workflow_id)
-                    
-                    to_delete_ref = []
-                    for ref,workflow_id in self.ref_to_workflow_id.items():
-                        if workflow_id == workflow.workflow_id:
-                            to_delete_ref.append(ref)
-                    for ref in to_delete_ref:
-                        del self.ref_to_workflow_id[ref]
-
-            for workflow_id in to_del_workflows_id:
-                del self.workflows[workflow_id]  
-                   
-    def get_running_tasks(self):
-        with self.lock:
-            running_tasks = []
-            for workflow in self.workflows.values():
-                if not workflow.to_delete:
-                    running_tasks.extend(workflow.get_running_tasks())
-                
+        running_tasks = self.workflows[workflow_id].get_running_tasks()
+        for task in running_tasks:
+            ray.cancel(task.object_ref,force=True)
  
+        self.clear_workflow(workflow_id)
         return running_tasks
 
-    def set_task_result(self, object_refs:List, results:List):
-        with self.lock:
-            for ref,result in zip(object_refs,results):
-                workflow = self.workflows[self.ref_to_workflow_id[ref]]
-                workflow.set_task_result(ref,result)
+    def add_task(self, task:TaskRuntime):
+        '''
+        Add task to workflow. If the workflow does not exist, create a new workflow.(Means that the task is the first task of the workflow)
+        '''
+        if task.workflow_id not in self.workflows:
+            self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-    def get_tasks_by_refs(self,object_refs:List):
-        with self.lock:
-            tasks = []  
-            for ref in object_refs:
-                workflow = self.workflows[self.ref_to_workflow_id[ref]]
-                tasks.append(workflow.get_task_by_ref(ref))
-            
-            return tasks
+        self.workflows[task.workflow_id]    
+        self.workflows[task.workflow_id].add_task(task)
+    
+    def run_task(self,task:TaskRuntime,node:SelectedNode):
+        '''
+        Run task in node.
+        '''
+        if task.workflow_id not in self.workflows:
+            return 
 
-    def clear_workflow(self,workflow_id:str):
-        with self.lock:
-            self.workflows[workflow_id].to_delete = True
+        task_input_data = {}
+        for _,input_info in task.task_input["input_params"].items():
+            if input_info["input_schema"] == "from_user":
+                task_input_data[input_info["key"]] = input_info["value"]
+            elif input_info["input_schema"] == "from_task":
+                task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
+
+        #gpu task
+        if node.gpu_id is not None: 
+            result_ref = remote_task_runner.options(
+                num_cpus=task.resources["cpu"],
+                num_gpus=task.resources["gpu"],
+                memory=task.resources["cpu_mem"],
+                scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+            ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=str(node.gpu_id))     
+        #cpu task
+        else: 
+            result_ref = remote_task_runner.options(
+                num_cpus=task.resources["cpu"],
+                memory=task.resources["cpu_mem"],
+                scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+            ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=None)
+        
+        
+        self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
+        self.ref_to_workflow_id[result_ref] = task.workflow_id
+                   
+    def get_running_task_refs(self):
+        '''
+        Get running task refs.
+        '''
+        running_task_refs = []
+        for workflow in self.workflows.values():
+            running_task_refs.extend(workflow.get_running_task_refs())
+                
+        return running_task_refs
+
+    def set_task_result(self, task:TaskRuntime, result:Dict):
+        '''
+        Set task result.
+        '''
+        self.workflows[task.workflow_id].set_task_result(task,result)
+
+    def get_task_by_ref(self,object_ref) -> TaskRuntime:
+        '''
+        Get task by object_ref
+        '''
+        workflow = self._get_workflow_by_ref(object_ref)
+        if workflow is None:
+            return None
+        else:
+            return workflow.get_task_by_ref(object_ref)
+ 

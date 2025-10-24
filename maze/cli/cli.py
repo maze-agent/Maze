@@ -1,18 +1,35 @@
 import argparse
 import sys
 import uvicorn
+from maze.core.worker.worker import Worker
+import asyncio
 
-
-def start_head(port: int):
+async def _async_start_head(port: int, ray_head_port: int):
     from maze.core.server import app,mapath
-    mapath.start()
-    uvicorn.run(app, host="0.0.0.0", port=port)
 
+    mapath.init(ray_head_port=ray_head_port)  
+    monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+
+    try:
+        await asyncio.gather(
+            server.serve(),
+            monitor_coroutine
+        )
+    except KeyboardInterrupt:
+        print("Shutting down...")
+        monitor_coroutine.cancel()
+        await monitor_coroutine
+
+def start_head(port: int,ray_head_port: int):
+    asyncio.run(_async_start_head(port, ray_head_port))
+   
 
 def start_worker(addr: str):
     print(f"[WORKER] Starting worker node connecting to {addr}")
-    # 这里可以启动你的 worker 逻辑
-    # 例如：connect_to_head_and_work(addr)
+    Worker.connect_to_head(addr)
 
 def stop():
     print("[STOP] Stopping all maze processes...")
@@ -29,6 +46,7 @@ def main():
     start_group.add_argument("--worker", action="store_true", help="Start as worker node")
 
     start_parser.add_argument("--port", type=int, metavar="PORT", help="Port for head node (required if --head)",default=8000)
+    start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
 
     # === stop subcommand ===
@@ -41,7 +59,9 @@ def main():
         if args.head:
             if args.port is None:
                 parser.error("--port is required when using --head")
-            start_head(args.port)
+            if args.ray_head_port is None:
+                parser.error("--ray-head-port is required when using --head")
+            start_head(args.port, args.ray_head_port)
         elif args.worker:
             if args.addr is None:
                 parser.error("--addr is required when using --worker")

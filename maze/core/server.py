@@ -1,24 +1,16 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
-from typing import Optional, Dict, Any,List
 import uuid
-from fastapi import Request
-from fastapi import FastAPI, Request
-import uuid
-import multiprocessing as mp
-from typing import Any, Dict
-from maze.core.path.path import MaPath
 import signal
+from maze.core.path.path import MaPath
+from fastapi import FastAPI, WebSocket, Request
 
 app = FastAPI()
-
 mapath = MaPath(strategy="FCFS")
-  
-#异常退出时需要做相关清理
+   
 def signal_handler(signum, frame):
     mapath.cleanup()
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
+
 
 '''
 描述：前端设置一个“创建工作流”按钮，点击后发送该请求，前端创建一个单独的工作流页面
@@ -158,15 +150,24 @@ async def get_workflow_res(websocket: WebSocket, workflow_id: str):
         await websocket.accept()
         await mapath.get_workflow_res(workflow_id,websocket)
         await websocket.close()
-    except WebSocketDisconnect:
-        print(f"{workflow_id} websocket disconnect normally")
     except Exception as e:
-        print(f"{workflow_id} websocket disconnect : {e}")
-    finally:
-        mapath.clear_workflow_runtime(workflow_id)
-       
+        await mapath.stop_workflow(workflow_id)
+        await websocket.close()
 
-if __name__ == "__main__":
-    mapath.start()
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
-    
+
+################以下请求不是给前端页面用的
+'''
+描述：获取head节点的ray端口，worker连接使用
+'''
+@app.post("/get_head_ray_port")
+async def get_head_ray_port():
+    return await mapath.get_ray_head_port()
+      
+# '''
+# 描述：worker连接注册到head
+# '''
+# @app.post("/conect_to_head")
+# async def conect_to_head():
+#     return await mapath.conect_to_head()
+
+ 
