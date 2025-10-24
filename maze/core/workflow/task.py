@@ -1,9 +1,10 @@
 from typing import Any,Dict
 
 class CodeTask():
-    def __init__(self,workflow_id:str,task_id:str):
+    def __init__(self,workflow_id:str,task_id:str,task_name:str):
         self.workflow_id = workflow_id
         self.task_id = task_id
+        self.task_name=task_name
         
         self.task_input = None
         self.task_output = None

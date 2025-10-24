@@ -4,1008 +4,118 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Maze Framework</title>
+    
+    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
-    <style>
-        body, h1, h2, h3, p, a, span {
-            font-family: 'Orbitron', sans-serif;
-            color: white;
-        }
-
-        body {
-            margin: 0;
-            padding: 0;
-            font-size: 36px;
-            background: #0a0a1a;
-        }
-
-        /* Demo Modal Styles */
-        .demo-modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(10, 10, 26, 0.95);
-            backdrop-filter: blur(10px);
-            z-index: 10000;
-            overflow-y: auto;
-            animation: fadeIn 0.3s ease;
-        }
-
-        .demo-modal.active {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 40px 20px;
-        }
-
-        .demo-modal-content {
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 30px;
-            padding: 50px 40px;
-            max-width: 1200px;
-            width: 100%;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-            position: relative;
-            animation: slideUp 0.4s ease;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .demo-close {
-            position: absolute;
-            top: 20px;
-            right: 30px;
-            font-size: 40px;
-            color: white;
-            cursor: pointer;
-            background: rgba(255, 255, 255, 0.1);
-            width: 50px;
-            height: 50px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.3s ease;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .demo-close:hover {
-            background: rgba(255, 255, 255, 0.2);
-            transform: rotate(90deg);
-        }
-
-        .demo-modal-title {
-            font-size: 3rem;
-            margin-bottom: 15px;
-            text-align: center;
-            background: linear-gradient(135deg, #ffffff, #b49af3);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .demo-modal-subtitle {
-            font-size: 1.2rem;
-            color: #ccc;
-            text-align: center;
-            margin-bottom: 40px;
-            font-family: 'Roboto', sans-serif;
-        }
-
-        .demo-videos-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
-            gap: 30px;
-            margin-top: 30px;
-        }
-
-        .demo-video-card {
-            background: rgba(255, 255, 255, 0.03);
-            border-radius: 20px;
-            padding: 25px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: all 0.3s ease;
-        }
-
-        .demo-video-card:hover {
-            transform: translateY(-5px);
-            border-color: rgba(180, 154, 243, 0.5);
-            box-shadow: 0 10px 30px rgba(180, 154, 243, 0.2);
-        }
-
-        .demo-video-card h3 {
-            font-size: 1.5rem;
-            margin-bottom: 15px;
-            color: #b49af3;
-        }
-
-        .demo-video-card p {
-            font-size: 1rem;
-            color: #d0d0d0;
-            margin-bottom: 20px;
-            font-family: 'Roboto', sans-serif;
-            line-height: 1.6;
-        }
-
-        .video-wrapper {
-            position: relative;
-            width: 100%;
-            padding-bottom: 56.25%; /* 16:9 aspect ratio */
-            border-radius: 15px;
-            overflow: hidden;
-            background: #000;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
-        }
-
-        .video-wrapper video {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-
-        /* Original styles from your index.html */
-        .background-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            bottom: 0;
-            right: 0;
-            z-index: -10;
-            overflow: hidden;
-        }
-
-        .maze-container {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-        }
-
-        .maze-path {
-            position: absolute;
-            background: rgba(0, 255, 255, 0.06);
-            border: 1px solid rgba(0, 255, 255, 0.12);
-            box-shadow: 0 0 2px rgba(0, 255, 255, 0.08);
-        }
-
-        .maze-wall {
-            position: absolute;
-            background: rgba(0, 255, 255, 0.06);
-            border: 1px solid rgba(0, 255, 255, 0.12);
-            box-shadow: 0 0 2px rgba(0, 255, 255, 0.08);
-        }
-
-        .maze-walker {
-            position: absolute;
-            width: 16px;
-            height: 16px;
-            background: #00ffff;
-            border-radius: 50%;
-            box-shadow: 0 0 15px #00ffff, 0 0 30px #00ffff;
-            z-index: 2;
-            transition: all 0.4s ease;
-        }
-
-        .grid-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image:
-                    linear-gradient(rgba(0, 100, 200, 0.02) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(0, 100, 200, 0.02) 1px, transparent 1px);
-            background-size: 50px 50px;
-            animation: grid-move 30s linear infinite;
-        }
-
-        .particles {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-        }
-
-        .particle {
-            position: absolute;
-            width: 3px;
-            height: 3px;
-            background: #00ffff;
-            border-radius: 50%;
-            animation: float 12s linear infinite;
-            opacity: 0.5;
-        }
-
-        @keyframes grid-move {
-            0% { transform: translate(0, 0); }
-            100% { transform: translate(-50px, -50px); }
-        }
-
-        @keyframes float {
-            0% { transform: translateY(0) translateX(0); opacity: 0; }
-            10% { opacity: 0.5; }
-            90% { opacity: 0.5; }
-            100% { transform: translateY(-100vh) translateX(100px); opacity: 0; }
-        }
-
-        .top-navbar {
-            position: fixed;
-            top: 0;
-            width: 100%;
-            padding: 20px 0;
-            z-index: 1000;
-            display: flex;
-            justify-content: center;
-        }
-
-        .navbar-container {
-            width: 90%;
-            max-width: 1400px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            transform: translateX(-50px);
-        }
-
-        .navbar-left {
-            display: flex;
-            align-items: center;
-        }
-
-        .logo {
-            width: 88px;
-            height: 88px;
-            border-radius: 50%;
-            background-color: transparent;
-            padding: 4px;
-            margin-right: 12px;
-        }
-
-        .logo-text {
-            font-weight: 700;
-            font-size: 32px;
-        }
-
-        .navbar-center {
-            display: flex;
-            background: rgba(255, 255, 255, 0.08);
-            backdrop-filter: blur(12px);
-            border-radius: 9999px;
-            padding: 24px 48px;
-            gap: 55px;
-            border: 1px solid rgba(255, 255, 255, 0.15);
-        }
-
-        .navbar-center a {
-            text-decoration: none;
-            color: white;
-            font-weight: 600;
-            font-size: 22px;
-            cursor: pointer;
-        }
-
-        .navbar-center a:hover {
-            color: #00ffff;
-        }
-
-        .navbar-right {
-            display: flex;
-            gap: 30px;
-        }
-
-        .btn-outline, .btn-filled {
-            padding: 18px 18px;
-            border-radius: 999px;
-            font-weight: 600;
-            font-size: 22px;
-            text-decoration: none;
-            display: inline-block;
-            cursor: pointer;
-        }
-
-        .btn-outline {
-            border: 2px solid white;
-            color: white;
-            display: inline-block;
-            background: transparent;
-        }
-
-        .btn-outline:hover {
-            background-color: rgba(255, 255, 255, 0.2);
-        }
-
-        .btn-filled {
-            background-color: #b49af3;
-            color: black;
-        }
-
-        .btn-filled:hover {
-            background-color: #cbb8f5;
-        }
-
-        .hero-wrapper {
-            height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-            z-index: 5;
-            padding: 100px 20px;
-        }
-
-        .hero-content {
-            position: absolute;
-            bottom: 36vh;
-            left: 24vw;
-            z-index: 10;
-            color: white;
-            max-width: 1000px;
-            animation: fadeIn 2.5s ease-in-out;
-        }
-
-        .hero-title {
-            font-size: 4.8rem;
-            font-weight: bold;
-            line-height: 1.2;
-            margin-bottom: 20px;
-        }
-
-        .hero-subtitle {
-            font-size: 2.4rem;
-            margin-bottom: 30px;
-            max-width: 90%;
-            color: #ccc;
-        }
-
-        .hero-buttons {
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-        }
-
-        .btn-solid {
-            background-color: #b49af3;
-            color: black;
-            padding: 24px 38px;
-            font-weight: 600;
-            font-size: 1.4rem;
-            border-radius: 999px;
-            text-decoration: none;
-            transition: background-color 0.3s ease;
-            cursor: pointer;
-            border: none;
-        }
-
-        .btn-solid:hover {
-            background-color: #c9b5f9;
-        }
-
-        .btn-outline-white {
-            border: 2px solid white;
-            color: white;
-            padding: 24px 38px;
-            font-weight: 600;
-            font-size: 1.4rem;
-            border-radius: 999px;
-            text-decoration: none;
-            background: transparent;
-            transition: background-color 0.3s ease;
-            cursor: pointer;
-        }
-
-        .btn-outline-white:hover {
-            background-color: rgba(255, 255, 255, 0.15);
-        }
-
-        .features-section {
-            background: transparent;
-            padding: 100px 40px;
-            display: flex;
-            justify-content: center;
-            position: relative;
-            z-index: 5;
-        }
-
-        .features-container {
-            max-width: 1400px;
-            width: 100%;
-            display: flex;
-            justify-content: center;
-            flex-wrap: wrap;
-            gap: 30px;
-        }
-
-        .feature-card {
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 25px;
-            padding: 45px 35px;
-            flex: 1;
-            min-width: 350px;
-            max-width: 400px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
-            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            color: white;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .feature-card:hover {
-            transform: translateY(-10px);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-            border-color: rgba(106, 90, 249, 0.3);
-        }
-
-        .feature-icon {
-            font-size: 3rem;
-            margin-bottom: 25px;
-            background: #b49af3;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .feature-card h2 {
-            font-size: 1.8rem;
-            margin-bottom: 20px;
-            font-weight: 600;
-            color: white;
-        }
-
-        .feature-card p {
-            font-size: 1.1rem;
-            color: #d0d0d0;
-            line-height: 1.7;
-            font-family: 'Roboto', sans-serif;
-            font-weight: 300;
-        }
-
-        .architecture-section {
-            display: flex;
-            justify-content: center;
-            padding: 100px 5vw;
-            background: transparent;
-            z-index: 5;
-            flex-wrap: wrap;
-        }
-
-        .architecture-left {
-            width: 100%;
-            max-width: 600px;
-            margin: 0 auto 50px auto;
-            text-align: center;
-            padding: 0;
-        }
-
-        .architecture-left h2 {
-            font-size: 2.5rem;
-            margin-bottom: 40px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #ffffff, #b49af3);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .architecture-card {
-            background: rgba(255, 255, 255, 0.05);
-            width: 100%;
-            border-radius: 20px;
-            padding: 25px 30px;
-            margin: 0 auto 25px auto;
-            transition: all 0.3s ease;
-            color: white;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
-            position: relative;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .architecture-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25);
-            border-color: rgba(106, 90, 249, 0.3);
-        }
-
-        .architecture-icon {
-            font-size: 2rem;
-            position: absolute;
-            top: 20px;
-            right: 25px;
-            background: #b49af3;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .architecture-card h3 {
-            font-size: 1.5rem;
-            margin-bottom: 15px;
-            font-weight: 600;
-            color: white;
-        }
-
-        .architecture-card p {
-            font-size: 1.1rem;
-            color: #d0d0d0;
-            line-height: 1.6;
-            font-family: 'Roboto', sans-serif;
-            font-weight: 300;
-        }
-
-        .architecture-right {
-            flex: 1;
-            min-width: 500px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .architecture-right img {
-            width: 100%;
-            max-width: 600px;
-            border-radius: 25px;
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .footer-section {
-            background-color: transparent;
-            color: white;
-            text-align: center;
-            padding: 100px 20px 20px;
-            font-size: 8rem;
-            font-weight: bold;
-            position: relative;
-        }
-
-        .footer-brand {
-            font-size: 10vw;
-            font-weight: 900;
-            line-height: 1;
-            color: white;
-            margin-bottom: 40px;
-        }
-
-        .footer-status {
-            font-size: 1.2rem;
-            padding: 20px 40px;
-            background-color: transparent;
-            border-top: 1px solid #ccc;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-
-        .footer-left {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: #ccc;
-            font-size: 1rem;
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            background-color: transparent;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        .footer-right a {
-            color: #ccc;
-            text-decoration: none;
-            margin-left: 20px;
-            font-size: 1rem;
-        }
-
-        .footer-right a:hover {
-            color: #fff;
-        }
-
-        @media (max-width: 768px) {
-            .demo-videos-container {
-                grid-template-columns: 1fr;
-            }
-
-            .demo-modal-content {
-                padding: 30px 20px;
-            }
-        }
-    </style>
+    
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/background.css">
+    <link rel="stylesheet" href="css/navigation.css">
+    <link rel="stylesheet" href="css/hero.css">
+    <link rel="stylesheet" href="css/features.css">
+    <link rel="stylesheet" href="css/architecture.css">
+    <link rel="stylesheet" href="css/modal.css">
+    <link rel="stylesheet" href="css/footer.css">
 </head>
 <body>
-<!-- Background -->
-<div class="background-container">
-    <div class="grid-overlay"></div>
-    <div class="particles" id="particles"></div>
-    <div class="maze-container" id="mazeContainer">
-        <div class="maze-walker" id="mazeWalker"></div>
-    </div>
-</div>
+    <!-- Background -->
+    <div id="background-container"></div>
 
-<!-- Demo Modal -->
-<div class="demo-modal" id="demoModal">
-    <div class="demo-modal-content">
-        <span class="demo-close" id="closeDemo">&times;</span>
-        <h2 class="demo-modal-title">Maze Framework Demos</h2>
-        <p class="demo-modal-subtitle">Explore how Maze enables distributed agent collaboration</p>
+    <!-- Demo Modal -->
+    <div id="demo-modal-container"></div>
 
-        <div class="demo-videos-container">
-            <div class="demo-video-card">
-                <h3>🎯 Demo 1: Workflow Designer</h3>
-                <p>See how to visually design and orchestrate complex multi-agent workflows with our intuitive playground interface.</p>
-                <div class="video-wrapper">
-                    <video controls>
-                        <source src="https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.mp4" type="video/mp4">
-                        Your browser does not support the video tag.
-                    </video>
-                </div>
-            </div>
+    <!-- Navigation Bar -->
+    <div id="navigation-container"></div>
 
-            <div class="demo-video-card">
-                <h3>🚀 Demo 2: Distributed Execution</h3>
-                <p>Watch agents collaboratively execute tasks across distributed workers with real-time monitoring and results.</p>
-                <div class="video-wrapper">
-                    <video controls>
-                        <source src="https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.mp4" type="video/mp4">
-                        Your browser does not support the video tag.
-                    </video>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+    <!-- Hero Section -->
+    <div id="hero-container"></div>
 
-<!-- Navigation Bar -->
-<nav class="top-navbar">
-    <div class="navbar-container">
-        <div class="navbar-left">
-            <img src="maze-logo-icon.svg" alt="Maze Logo" class="logo" />
-            <span class="logo-text"></span>
-        </div>
-        <div class="navbar-center">
-            <a href="https://github.com/QinbinLi/Maze" target="_blank">Source Code ▾</a>
-            <a href="https://arxiv.org/" target="_blank">Paper ▾</a>
-            <a href="https://maze-doc.readthedocs.io/en/latest/index.html" target="_blank">Docs ▾</a>
-            <a onclick="openDemoModal()">Demo ▾</a>
-            <a href="#">About Us ▾</a>
-        </div>
-        <div class="navbar-right">
-            <a class="btn-outline" onclick="openDemoModal()">Get a demo</a>
-            <a class="btn-filled" href="#">Sign up</a>
-        </div>
-    </div>
-</nav>
+    <!-- Features Section -->
+    <div id="features-container"></div>
 
-<!-- Hero Section -->
-<section class="hero-wrapper">
-    <div class="hero-content">
-        <h1 class="hero-title">The framework for distributed agents.</h1>
-        <p class="hero-subtitle">Maze: multiple agent deploying and task level distribution</p>
-        <div class="hero-buttons">
-            <button class="btn-solid" onclick="openDemoModal()">Watch Demo</button>
-            <a href="#" class="btn-outline-white">See the docs</a>
-        </div>
-    </div>
-</section>
+    <!-- Architecture Section -->
+    <div id="architecture-container"></div>
 
-<!-- Features Section -->
-<section class="features-section">
-    <div class="features-container">
-        <div class="feature-card">
-            <div class="feature-icon">⚡</div>
-            <h2>Accelerate Agent Development</h2>
-            <p>Rapidly build, configure, and compose multiple agents using modular templates and visual IDE.</p>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon">🛡️</div>
-            <h2>Reliable Agent Deployment</h2>
-            <p>Multi-agent collaborative execution with human feedback, complex task scheduling and control.</p>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon">📊</div>
-            <h2>Observability & Quality Enhancement</h2>
-            <p>Real-time monitoring of agent execution, problem diagnosis, and continuous model behavior iteration.</p>
-        </div>
-    </div>
-</section>
+    <!-- Footer -->
+    <div id="footer-container"></div>
 
-<!-- Architecture Section -->
-<section class="architecture-section">
-    <div class="architecture-left">
-        <h2>Maze Architecture</h2>
-        <div class="architecture-card">
-            <div class="architecture-icon">🧠</div>
-            <h3>MaLearn</h3>
-            <p>Component for training and enhancing language models to improve intelligent decision-making and learning capabilities.</p>
-        </div>
-        <div class="architecture-card">
-            <div class="architecture-icon">⚙️</div>
-            <h3>MaWorker</h3>
-            <p>Executes various tasks and coordinates multiple agents to ensure efficient collaboration.</p>
-        </div>
-        <div class="architecture-card">
-            <div class="architecture-icon">📋</div>
-            <h3>MaRegister</h3>
-            <p>Registers and manages agents to ensure all agents in the system operate normally.</p>
-        </div>
-        <div class="architecture-card">
-            <div class="architecture-icon">🧭</div>
-            <h3>MaPath</h3>
-            <p>Defines agent paths and task flows to help agents execute multi-step tasks.</p>
-        </div>
-    </div>
-    <div class="architecture-right">
-        <img src="R.gif" alt="Maze Architecture Visualization" />
-    </div>
-</section>
+    <!-- JavaScript Files -->
+    <script src="js/config.js"></script>
+    <script src="js/site-config.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/maze.js"></script>
+    <script src="js/main.js"></script>
 
-<footer class="footer-section">
-    <div class="footer-brand">Maze</div>
-    <div class="footer-status">
-        <div class="footer-left">
-            <span class="status-dot"></span> All systems operational
-        </div>
-        <div class="footer-right">
-            <a href="#">Privacy Policy</a>
-            <a href="#">Terms of Service</a>
-        </div>
-    </div>
-</footer>
-
-<script>
-    // Demo Modal Functions
-    function openDemoModal() {
-        document.getElementById('demoModal').classList.add('active');
-        document.body.style.overflow = 'hidden';
-    }
-
-    function closeDemoModal() {
-        document.getElementById('demoModal').classList.remove('active');
-        document.body.style.overflow = 'auto';
-        // Pause all videos when closing
-        const videos = document.querySelectorAll('.demo-modal video');
-        videos.forEach(video => video.pause());
-    }
-
-    document.getElementById('closeDemo').addEventListener('click', closeDemoModal);
-
-    // Close modal when clicking outside
-    document.getElementById('demoModal').addEventListener('click', function(e) {
-        if (e.target === this) {
-            closeDemoModal();
-        }
-    });
-
-    // Close modal with Escape key
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
-            closeDemoModal();
-        }
-    });
-
-    // Original maze animation code
-    document.addEventListener('DOMContentLoaded', function() {
-        const mazeContainer = document.getElementById('mazeContainer');
-        const mazeWalker = document.getElementById('mazeWalker');
-        const particlesContainer = document.getElementById('particles');
-        let isWalkerMoving = true;
-        let moveWalkerTimeout = null;
-
-        createFullScreenMaze();
-        createParticles();
-        startMazeWalking();
-
-        function createFullScreenMaze() {
-            const screenWidth = window.innerWidth;
-            const screenHeight = window.innerHeight;
-            const centerX = screenWidth / 2;
-            const centerY = screenHeight / 2;
-            const scale = Math.max(screenWidth, screenHeight) / 800;
-            const paths = [];
-            const centerSize = 150 * scale;
-            const pathThickness = 25 * scale;
-
-            paths.push({x: centerX - centerSize/2, y: centerY - centerSize/2, width: centerSize, height: pathThickness});
-            paths.push({x: centerX - centerSize/2, y: centerY - centerSize/2, width: pathThickness, height: centerSize});
-            paths.push({x: centerX - centerSize/2, y: centerY + centerSize/2 - pathThickness, width: centerSize, height: pathThickness});
-            paths.push({x: centerX + centerSize/2 - pathThickness, y: centerY - centerSize/2, width: pathThickness, height: centerSize});
-
-            const armLength = 200 * scale;
-            paths.push({x: centerX + centerSize/2, y: centerY - pathThickness/2, width: armLength, height: pathThickness});
-            paths.push({x: centerX + centerSize/2 + armLength - pathThickness, y: centerY - centerSize/2, width: pathThickness, height: centerSize});
-            paths.push({x: centerX - centerSize/2 - armLength, y: centerY - pathThickness/2, width: armLength, height: pathThickness});
-            paths.push({x: centerX - centerSize/2 - armLength, y: centerY - centerSize/2, width: pathThickness, height: centerSize});
-            paths.push({x: centerX - centerSize/2, y: centerY - centerSize/2 - armLength, width: centerSize, height: pathThickness});
-            paths.push({x: centerX - pathThickness/2, y: centerY + centerSize/2, width: pathThickness, height: 188});
-            paths.push({x: centerX - centerSize/2, y: centerY + centerSize/2 + armLength - pathThickness, width: centerSize, height: pathThickness});
-
-            const diagonalLength = 80 * scale;
-            paths.push({x: centerX + centerSize/2 + 50 * scale, y: centerY - centerSize/2 - 50 * scale, width: pathThickness, height: diagonalLength});
-            paths.push({x: centerX + centerSize/2 + 50 * scale, y: centerY - centerSize/2 - 50 * scale, width: diagonalLength, height: pathThickness});
-            paths.push({x: centerX + centerSize/2 + 50 * scale, y: centerY + centerSize/2 - diagonalLength + 50 * scale, width: pathThickness, height: diagonalLength});
-            paths.push({x: centerX + centerSize/2 + 50 * scale, y: centerY + centerSize/2 + 50 * scale - pathThickness, width: diagonalLength, height: pathThickness});
-            paths.push({x: centerX - centerSize/2 - 50 * scale - diagonalLength, y: centerY - centerSize/2 - 50 * scale, width: diagonalLength, height: pathThickness});
-            paths.push({x: centerX - centerSize/2 - 50 * scale - diagonalLength, y: centerY - centerSize/2 - 50 * scale, width: pathThickness, height: diagonalLength});
-            paths.push({x: centerX - centerSize/2 - 50 * scale - diagonalLength, y: centerY + centerSize/2 + 50 * scale - pathThickness, width: diagonalLength, height: pathThickness});
-            paths.push({x: centerX - centerSize/2 - 50 * scale - diagonalLength, y: centerY + centerSize/2 - diagonalLength + 50 * scale, width: pathThickness, height: diagonalLength});
-
-            const innerSize = 80 * scale;
-            paths.push({x: centerX - innerSize/2, y: centerY - innerSize/2, width: innerSize, height: pathThickness});
-            paths.push({x: centerX - innerSize/2, y: centerY + innerSize/2 - pathThickness, width: innerSize, height: pathThickness});
-            paths.push({x: centerX - innerSize/2, y: centerY - innerSize/2, width: pathThickness, height: innerSize});
-            paths.push({x: centerX + innerSize/2 - pathThickness, y: centerY - innerSize/2, width: pathThickness, height: innerSize});
-
-            paths.forEach(path => {
-                const pathElement = document.createElement('div');
-                pathElement.className = 'maze-path';
-                pathElement.style.left = path.x + 'px';
-                pathElement.style.top = path.y + 'px';
-                pathElement.style.width = path.width + 'px';
-                pathElement.style.height = path.height + 'px';
-                mazeContainer.appendChild(pathElement);
-            });
-
-            const wallThickness = pathThickness;
-            const wallMargin = 50 * scale;
-            const walls = [
-                {x: wallMargin, y: wallMargin, width: screenWidth - 2 * wallMargin, height: wallThickness},
-                {x: wallMargin, y: wallMargin, width: wallThickness, height: screenHeight - 2 * wallMargin},
-                {x: wallMargin, y: screenHeight - wallMargin - wallThickness, width: screenWidth - 2 * wallMargin, height: wallThickness},
-                {x: screenWidth - wallMargin - wallThickness, y: wallMargin, width: wallThickness, height: screenHeight - 2 * wallMargin}
-            ];
-
-            walls.forEach(wall => {
-                const wallElement = document.createElement('div');
-                wallElement.className = 'maze-wall';
-                wallElement.style.left = wall.x + 'px';
-                wallElement.style.top = wall.y + 'px';
-                wallElement.style.width = wall.width + 'px';
-                wallElement.style.height = wall.height + 'px';
-                mazeContainer.appendChild(wallElement);
-            });
-        }
-
-        function createParticles() {
-            const particleCount = Math.min(25, Math.floor((window.innerWidth * window.innerHeight) / 20000));
-            for (let i = 0; i < particleCount; i++) {
-                const particle = document.createElement('div');
-                particle.className = 'particle';
-                particle.style.left = Math.random() * 100 + '%';
-                particle.style.top = Math.random() * 100 + '%';
-                particle.style.animationDelay = Math.random() * 12 + 's';
-                particle.style.animationDuration = (Math.random() * 25 + 20) + 's';
-                particlesContainer.appendChild(particle);
+    <!-- Component Loader -->
+    <script>
+        // Load HTML components
+        async function loadComponent(containerId, componentPath) {
+            try {
+                const response = await fetch(componentPath);
+                const html = await response.text();
+                document.getElementById(containerId).innerHTML = html;
+                console.log(`✅ Loaded component: ${componentPath}`);
+                return true;
+            } catch (error) {
+                console.error(`❌ Error loading component ${componentPath}:`, error);
+                return false;
             }
         }
 
-        function startMazeWalking() {
-            const screenWidth = window.innerWidth;
-            const screenHeight = window.innerHeight;
-            const centerX = screenWidth / 2;
-            const centerY = screenHeight / 2;
-            const scale = Math.max(screenWidth, screenHeight) / 800;
+        // Load all components when DOM is ready
+        document.addEventListener('DOMContentLoaded', async function() {
+            console.log('🚀 DOM loaded, starting component loading...');
 
-            const walkPath = [
-                {x: centerX, y: centerY},
-                {x: centerX + 75 * scale, y: centerY},
-                {x: centerX + 75 * scale, y: centerY - 75 * scale},
-                {x: centerX, y: centerY - 75 * scale},
-                {x: centerX - 75 * scale, y: centerY - 75 * scale},
-                {x: centerX - 75 * scale, y: centerY},
-                {x: centerX - 75 * scale, y: centerY + 75 * scale},
-                {x: centerX, y: centerY + 75 * scale},
-                {x: centerX + 75 * scale, y: centerY + 75 * scale},
-                {x: centerX + 75 * scale, y: centerY},
-                {x: centerX + 150 * scale, y: centerY},
-                {x: centerX + 150 * scale, y: centerY - 75 * scale},
-                {x: centerX + 200 * scale, y: centerY - 75 * scale},
-                {x: centerX + 250 * scale, y: centerY - 75 * scale},
-                {x: centerX + 250 * scale, y: centerY - 150 * scale},
-                {x: centerX + 250 * scale, y: centerY + 75 * scale},
-                {x: centerX + 200 * scale, y: centerY + 75 * scale},
-                {x: centerX + 150 * scale, y: centerY + 75 * scale},
-                {x: centerX + 75 * scale, y: centerY},
-                {x: centerX, y: centerY},
-                {x: centerX - 150 * scale, y: centerY},
-                {x: centerX - 150 * scale, y: centerY - 75 * scale},
-                {x: centerX - 200 * scale, y: centerY - 75 * scale},
-                {x: centerX - 250 * scale, y: centerY - 75 * scale},
-                {x: centerX - 250 * scale, y: centerY - 150 * scale},
-                {x: centerX - 250 * scale, y: centerY + 75 * scale},
-                {x: centerX - 200 * scale, y: centerY + 75 * scale},
-                {x: centerX - 150 * scale, y: centerY + 75 * scale},
-                {x: centerX - 75 * scale, y: centerY},
-                {x: centerX, y: centerY},
-                {x: centerX, y: centerY - 150 * scale},
-                {x: centerX - 75 * scale, y: centerY - 150 * scale},
-                {x: centerX - 150 * scale, y: centerY - 150 * scale},
-                {x: centerX - 200 * scale, y: centerY - 150 * scale},
-                {x: centerX - 200 * scale, y: centerY - 200 * scale},
-                {x: centerX + 75 * scale, y: centerY - 150 * scale},
-                {x: centerX + 150 * scale, y: centerY - 150 * scale},
-                {x: centerX + 200 * scale, y: centerY - 150 * scale},
-                {x: centerX + 200 * scale, y: centerY - 200 * scale},
-                {x: centerX, y: centerY},
-                {x: centerX, y: centerY + 150 * scale},
-                {x: centerX - 75 * scale, y: centerY + 150 * scale},
-                {x: centerX - 150 * scale, y: centerY + 150 * scale},
-                {x: centerX - 200 * scale, y: centerY + 150 * scale},
-                {x: centerX - 200 * scale, y: centerY + 200 * scale},
-                {x: centerX + 75 * scale, y: centerY + 150 * scale},
-                {x: centerX + 150 * scale, y: centerY + 150 * scale},
-                {x: centerX + 200 * scale, y: centerY + 150 * scale},
-                {x: centerX + 200 * scale, y: centerY + 200 * scale},
-                {x: centerX, y: centerY}
-            ];
+            const results = await Promise.all([
+                loadComponent('background-container', 'components/background.html'),
+                loadComponent('demo-modal-container', 'components/modal.html'),
+                loadComponent('navigation-container', 'components/navigation.html'),
+                loadComponent('hero-container', 'components/hero.html'),
+                loadComponent('features-container', 'components/features.html'),
+                loadComponent('architecture-container', 'components/architecture.html'),
+                loadComponent('footer-container', 'components/footer.html')
+            ]);
 
-            let currentIndex = 0;
+            const successCount = results.filter(r => r).length;
+            console.log(`📊 Component loading results: ${successCount}/7 components loaded successfully`);
 
-            function moveWalker() {
-                if (!isWalkerMoving) return;
-                if (currentIndex < walkPath.length) {
-                    const point = walkPath[currentIndex];
-                    mazeWalker.style.left = (point.x - 8) + 'px';
-                    mazeWalker.style.top = (point.y - 8) + 'px';
-                    currentIndex++;
-                    setTimeout(moveWalker, 400);
-                } else {
-                    currentIndex = 0;
-                    setTimeout(moveWalker, 400);
+            if (successCount === 0) {
+                console.log('⚠️ No components loaded - this is expected when running without HTTP server');
+            }
+
+            console.log('🔧 Initializing JavaScript...');
+
+            // Wait a bit more to ensure DOM is fully updated
+            setTimeout(() => {
+                // Re-initialize maze animation with new DOM elements
+                if (window.mazeAnimation) {
+                    window.mazeAnimation = null; // Clear old instance
                 }
-            }
 
-            function handleScroll() {
-                const scrollY = window.scrollY || window.pageYOffset;
-                if (scrollY > 50 && isWalkerMoving) {
-                    isWalkerMoving = false;
-                    if (moveWalkerTimeout) {
-                        clearTimeout(moveWalkerTimeout);
-                        moveWalkerTimeout = null;
-                    }
-                } else if (scrollY < 10 && !isWalkerMoving) {
-                    isWalkerMoving = true;
-                    startMazeWalking();
+                // Re-initialize modal with new DOM elements
+                if (window.demoModal) {
+                    window.demoModal = null; // Clear old instance
                 }
-            }
 
-            window.addEventListener('scroll', handleScroll);
-            moveWalker();
-        }
+                // Create new instances
+                try {
+                    window.mazeAnimation = new MazeAnimation();
+                    console.log('✅ Maze animation initialized');
+                } catch (error) {
+                    console.error('❌ Error initializing maze animation:', error);
+                }
 
-        window.addEventListener('resize', function() {
-            while (mazeContainer.firstChild) {
-                mazeContainer.removeChild(mazeContainer.firstChild);
-            }
-            mazeContainer.appendChild(mazeWalker);
-            createFullScreenMaze();
+                try {
+                    window.demoModal = new DemoModal();
+                    console.log('✅ Modal initialized');
+                } catch (error) {
+                    console.error('❌ Error initializing modal:', error);
+                }
+            }, 200);
         });
-    });
-</script>
+    </script>
 </body>
 </html>
+
+

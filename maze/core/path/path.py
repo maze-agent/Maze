@@ -37,13 +37,9 @@ class MaPath:
         Create a workflow.
         '''
         self.workflows[workflow_id] = Workflow(workflow_id)
-    
-    def add_task(self,workflow_id:str,task_id:str,task_type:str):
-        '''
-        Add a task to the workflow.
-
-        '''
-        self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id))
+            
+    def add_task(self,workflow_id:str,task_id:str,task_type:str,task_name:str):
+        self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id,task_name))
 
     def del_task(self,workflow_id:str,task_id:str):
         '''
@@ -72,6 +68,25 @@ class MaPath:
 
         '''
         self.workflows[workflow_id].del_edge(source_task_id,target_task_id)
+
+    def get_workflow_tasks(self,workflow_id:str):
+        """
+        获取工作流中的所有任务，返回任务列表（包含id和name）
+        """
+        if workflow_id not in self.workflows:
+            return []
+        
+        workflow = self.workflows[workflow_id]
+        tasks = []
+        
+        # 遍历工作流中的所有任务
+        for task_id, task in workflow.tasks.items():
+            tasks.append({
+                "id": task_id,
+                "name": task.task_name if hasattr(task, 'task_name') else f"任务_{task_id[:8]}"
+            })
+        
+        return tasks
 
     def run_workflow(self,workflow_id:str):
         """

@@ -52,19 +52,22 @@ export const mockAPI = {
       workflow_id: 'wf-001', 
       workflow_name: 'ML Training Pipeline', 
       created_at: '2025-10-15T08:00:00', 
-      total_runs: 12 
+      total_requests: 125,
+      service_status: 'running' // running, paused, stopped
     },
     { 
       workflow_id: 'wf-002', 
       workflow_name: 'Data Processing Job', 
       created_at: '2025-10-18T10:00:00', 
-      total_runs: 5 
+      total_requests: 58,
+      service_status: 'running'
     },
     { 
       workflow_id: 'wf-003', 
       workflow_name: 'Model Evaluation', 
       created_at: '2025-10-19T14:00:00', 
-      total_runs: 3 
+      total_requests: 32,
+      service_status: 'paused'
     },
   ],
   
@@ -85,8 +88,178 @@ export const mockAPI = {
         { from: 'node-3', to: 'node-4' },
         { from: 'node-4', to: 'node-5' },
         { from: 'node-4', to: 'node-6' },
-      ]
+      ],
+      // API 配置
+      api_config: {
+        endpoint: 'http://localhost:5173/wf-001',
+        method: 'POST',
+        auth: {
+          type: 'API Key',
+          header: 'X-Maze-API-Key',
+          required: true
+        },
+        request_schema: {
+          type: 'object',
+          properties: {
+            dataset_path: {
+              type: 'string',
+              description: '训练数据集路径',
+              required: true,
+              example: 's3://bucket/dataset.csv'
+            },
+            batch_size: {
+              type: 'integer',
+              description: '批次大小',
+              required: false,
+              default: 32,
+              example: 64
+            },
+            learning_rate: {
+              type: 'number',
+              description: '学习率',
+              required: false,
+              default: 0.001,
+              example: 0.01
+            },
+            epochs: {
+              type: 'integer',
+              description: '训练轮数',
+              required: false,
+              default: 10,
+              example: 50
+            }
+          }
+        },
+        response_schema: {
+          type: 'object',
+          properties: {
+            run_id: {
+              type: 'string',
+              description: '运行实例ID'
+            },
+            status: {
+              type: 'string',
+              description: '请求状态',
+              enum: ['accepted', 'queued', 'running', 'completed', 'failed']
+            },
+            message: {
+              type: 'string',
+              description: '响应消息'
+            }
+          }
+        }
+      }
     },
+    'wf-002': {
+      nodes: [
+        { id: 'node-1', name: 'Load Data', type: 'input', x: 100, y: 150 },
+        { id: 'node-2', name: 'Transform', type: 'transform', x: 300, y: 150 },
+        { id: 'node-3', name: 'Save Results', type: 'output', x: 500, y: 150 },
+      ],
+      edges: [
+        { from: 'node-1', to: 'node-2' },
+        { from: 'node-2', to: 'node-3' },
+      ],
+      api_config: {
+        endpoint: 'http://localhost:5173/wf-002',
+        method: 'POST',
+        auth: {
+          type: 'API Key',
+          header: 'X-Maze-API-Key',
+          required: true
+        },
+        request_schema: {
+          type: 'object',
+          properties: {
+            input_file: {
+              type: 'string',
+              description: '输入文件路径',
+              required: true,
+              example: '/data/input.json'
+            },
+            output_format: {
+              type: 'string',
+              description: '输出格式',
+              required: false,
+              default: 'parquet',
+              enum: ['parquet', 'csv', 'json'],
+              example: 'csv'
+            }
+          }
+        },
+        response_schema: {
+          type: 'object',
+          properties: {
+            run_id: {
+              type: 'string',
+              description: '运行实例ID'
+            },
+            status: {
+              type: 'string',
+              description: '请求状态'
+            }
+          }
+        }
+      }
+    },
+    'wf-003': {
+      nodes: [
+        { id: 'node-1', name: 'Load Model', type: 'input', x: 100, y: 150 },
+        { id: 'node-2', name: 'Evaluate', type: 'compute', x: 300, y: 150 },
+        { id: 'node-3', name: 'Generate Report', type: 'output', x: 500, y: 150 },
+      ],
+      edges: [
+        { from: 'node-1', to: 'node-2' },
+        { from: 'node-2', to: 'node-3' },
+      ],
+      api_config: {
+        endpoint: 'http://localhost:5173/wf-003',
+        method: 'POST',
+        auth: {
+          type: 'API Key',
+          header: 'X-Maze-API-Key',
+          required: true
+        },
+        request_schema: {
+          type: 'object',
+          properties: {
+            model_id: {
+              type: 'string',
+              description: '模型ID',
+              required: true,
+              example: 'model-v1.0.0'
+            },
+            test_dataset: {
+              type: 'string',
+              description: '测试数据集',
+              required: true,
+              example: 's3://bucket/test.csv'
+            },
+            metrics: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '评估指标列表',
+              required: false,
+              default: ['accuracy', 'f1'],
+              example: ['accuracy', 'precision', 'recall', 'f1']
+            }
+          }
+        },
+        response_schema: {
+          type: 'object',
+          properties: {
+            run_id: {
+              type: 'string',
+              description: '运行实例ID'
+            },
+            status: {
+              type: 'string',
+              description: '请求状态'
+            }
+          }
+        }
+      }
+    }
   }
 };
 
