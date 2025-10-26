@@ -2,7 +2,20 @@ import React from 'react';
 import WorkflowGraph from './components/WorkflowGraph';
 import TaskExecutionPanel from './components/TaskExecutionPanel';
 
-const WorkflowRunDetail = ({ run, workflowDetails, taskExecutions, onBack }) => {
+const WorkflowRunDetail = ({ mockRun, mockWorkflowDetails, mockTaskExecutions, onBack }) => {
+    // 使用 mock 数据（后续可以扩展为支持 API 模式）
+    const run = mockRun;
+    const workflowDetails = mockWorkflowDetails;
+    const taskExecutions = mockTaskExecutions;
+
+    if (!run) {
+        return (
+            <div className="space-y-6">
+                <div className="text-center text-gray-400 py-8">Run not found</div>
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-6">
             {/* 返回按钮 */}

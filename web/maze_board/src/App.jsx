@@ -6,14 +6,15 @@ import Workflows from './pages/Workflows/Workflows';
 import WorkflowDetail from './pages/Workflows/WorkflowDetail';
 import WorkflowRunDetail from './pages/Workflows/WorkflowRunDetail';
 import { mockAPI, workflowRuns, runTaskExecutions } from './utils/mockData';
+import { DataProvider } from './contexts/DataContext';
 
-const App = () => {
+const AppContent = () => {
   const [currentTab, setCurrentTab] = useState('dashboard');
   const [selectedWorkflow, setSelectedWorkflow] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
   
-  // 本地状态管理 workflows（用于模拟服务状态变化）
-  const [workflows, setWorkflows] = useState(mockAPI.workflows);
+  // 本地状态管理 workflows（用于 mock 模式的服务状态变化）
+  const [mockWorkflows, setMockWorkflows] = useState(mockAPI.workflows);
 
   const handleWorkflowClick = (workflowId) => {
     setSelectedWorkflow(workflowId);
@@ -37,12 +38,12 @@ const App = () => {
     setCurrentTab('workflow-detail');
   };
 
-  // 处理服务操作（启动、暂停、恢复、停止）
-  const handleServiceAction = (workflowId, action) => {
-    console.log(`Service action: ${action} for workflow ${workflowId}`);
+  // 处理服务操作（启动、暂停、恢复、停止）- Mock 模式使用
+  const handleMockServiceAction = (workflowId, action) => {
+    console.log(`[Mock Mode] Service action: ${action} for workflow ${workflowId}`);
     
     // 更新工作流状态
-    setWorkflows(prevWorkflows => 
+    setMockWorkflows(prevWorkflows => 
       prevWorkflows.map(workflow => {
         if (workflow.workflow_id === workflowId) {
           let newStatus = workflow.service_status;
@@ -79,31 +80,28 @@ const App = () => {
       stop: 'Service stopped'
     };
     
-    // 可以使用 toast 通知，这里暂时用 alert
-    alert(`${actionMessages[action]} for workflow: ${workflowId}`);
-    
-    // 在实际应用中，这里应该调用后端 API
-    // try {
-    //   await fetch(`/api/workflows/${workflowId}/${action}`, { method: 'POST' });
-    // } catch (error) {
-    //   console.error('Service action failed:', error);
-    // }
+    alert(`[Mock] ${actionMessages[action]} for workflow: ${workflowId}`);
   };
 
   const renderPage = () => {
     switch (currentTab) {
       case 'dashboard':
-        return <Dashboard workers={mockAPI.workers} workflows={workflows} />;
+        return (
+          <Dashboard 
+            mockWorkers={mockAPI.workers}
+            mockWorkflows={mockWorkflows}
+          />
+        );
 
       case 'workers':
-        return <Workers workers={mockAPI.workers} />;
+        return <Workers mockWorkers={mockAPI.workers} />;
 
       case 'workflows':
         return (
           <Workflows 
-            workflows={workflows} 
+            mockWorkflows={mockWorkflows}
             onWorkflowClick={handleWorkflowClick}
-            onServiceAction={handleServiceAction}
+            onMockServiceAction={handleMockServiceAction}
           />
         );
 
@@ -111,19 +109,19 @@ const App = () => {
         if (!selectedWorkflow) {
           return (
             <Workflows 
-              workflows={workflows} 
+              mockWorkflows={mockWorkflows}
               onWorkflowClick={handleWorkflowClick}
-              onServiceAction={handleServiceAction}
+              onMockServiceAction={handleMockServiceAction}
             />
           );
         }
-        const workflow = workflows.find(w => w.workflow_id === selectedWorkflow);
+        const workflow = mockWorkflows.find(w => w.workflow_id === selectedWorkflow);
         const runs = workflowRuns[selectedWorkflow] || [];
         return (
           <WorkflowDetail
-            workflow={workflow}
-            workflowDetails={mockAPI.workflowDetails[selectedWorkflow]}
-            runs={runs}
+            mockWorkflow={workflow}
+            mockWorkflowDetails={mockAPI.workflowDetails[selectedWorkflow]}
+            mockRuns={runs}
             onRunClick={handleRunClick}
             onBack={handleBackToWorkflows}
           />
@@ -135,15 +133,20 @@ const App = () => {
         const taskExecutions = runTaskExecutions[selectedRun] || [];
         return (
           <WorkflowRunDetail
-            run={run}
-            workflowDetails={mockAPI.workflowDetails[selectedWorkflow]}
-            taskExecutions={taskExecutions}
+            mockRun={run}
+            mockWorkflowDetails={mockAPI.workflowDetails[selectedWorkflow]}
+            mockTaskExecutions={taskExecutions}
             onBack={handleBackToWorkflowDetail}
           />
         );
 
       default:
-        return <Dashboard workers={mockAPI.workers} workflows={workflows} />;
+        return (
+          <Dashboard 
+            mockWorkers={mockAPI.workers}
+            mockWorkflows={mockWorkflows}
+          />
+        );
     }
   };
 
@@ -151,6 +154,14 @@ const App = () => {
     <MainLayout currentTab={currentTab} onTabChange={setCurrentTab}>
       {renderPage()}
     </MainLayout>
+  );
+};
+
+const App = () => {
+  return (
+    <DataProvider>
+      <AppContent />
+    </DataProvider>
   );
 };
 

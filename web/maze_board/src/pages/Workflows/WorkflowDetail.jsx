@@ -3,8 +3,21 @@ import WorkflowGraph from './components/WorkflowGraph';
 import RunList from './components/RunList';
 import ApiDocumentation from './components/ApiDocumentation';
 
-const WorkflowDetail = ({ workflow, workflowDetails, runs, onRunClick, onBack }) => {
+const WorkflowDetail = ({ mockWorkflow, mockWorkflowDetails, mockRuns, onRunClick, onBack }) => {
   const [activeTab, setActiveTab] = useState('structure'); // structure, runs, api
+
+  // 使用 mock 数据（后续可以扩展为支持 API 模式）
+  const workflow = mockWorkflow;
+  const workflowDetails = mockWorkflowDetails;
+  const runs = mockRuns;
+
+  if (!workflow) {
+    return (
+      <div className="space-y-6">
+        <div className="text-center text-gray-400 py-8">Workflow not found</div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
