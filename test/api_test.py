@@ -233,7 +233,7 @@ import time
 
 def task1(params):
     task_input = params.get("task1_input")
-
+    
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str
@@ -275,8 +275,7 @@ import time
 
 def task2(params):
     task_input = params.get("task2_input")
-    time.sleep(3)
-    a=1/0
+    
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str + "===="

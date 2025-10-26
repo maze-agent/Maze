@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 
 dependencies = [
     "fastapi==0.119.1",
-    "ray==2.50.0",
+    "ray==2.50.1",
     "uvicorn[standard]",
     "zmq==0.0.0",
     "networkx==3.4.2",

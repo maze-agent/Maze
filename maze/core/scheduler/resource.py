@@ -21,7 +21,7 @@ class Node():
         self.available_resources['cpu'] += cpu
         self.available_resources['cpu_mem'] += cpu_mem
         
-        if gpu_id:
+        if gpu_id is not None:
             self.available_resources['gpu_resource'][gpu_id]['gpu_mem'] += gpu_mem
             self.available_resources['gpu_resource'][gpu_id]['gpu_num'] += gpu
             

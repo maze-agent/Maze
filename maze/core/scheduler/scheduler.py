@@ -110,7 +110,7 @@ class Scheduler():
                 self.workflow_manager.add_task(self.cur_ready_task)
             else:
                 self.lock.acquire()    
-
+ 
             #Get the node can run the task
             selected_node: SelectedNode | None = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
             if selected_node:  
@@ -144,12 +144,10 @@ class Scheduler():
             with self.lock:
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
                 if len(running_task_refs) == 0:
-                    time.sleep(0.5)
                     continue
                 
                 finished_task_refs, _ = ray.wait(running_task_refs, num_returns=len(running_task_refs),timeout=0)
                 if len(finished_task_refs) == 0:
-                    time.sleep(1)
                     continue
                         
                 for finished_task_ref in finished_task_refs:
