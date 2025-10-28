@@ -1,9 +1,14 @@
+from ast import arg
 import uuid
 import signal
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from maze.core.path.path import MaPath
 from fastapi import FastAPI, WebSocket, Request
+import cloudpickle
+import binascii
+from pydantic import BaseModel
+
 
 app = FastAPI()
 
@@ -227,6 +232,22 @@ async def get_workflow_res(websocket: WebSocket, workflow_id: str):
 
 
 ################以下请求不是给前端页面用的
+'''
+描述：运行单个任务,兼容langgraph
+'''
+@app.post("/run_single_task")
+async def run_single_task(req:Request):
+    try:
+        # 1. 将 hex 字符串转回 bytes
+        data = await req.json()
+        result =await mapath.run_single_task(task_data = data.get("task_data"))
+        return {"status": "success","result": result}
+ 
+    except Exception as e:
+        print(e)
+        return {"status": "fail","result": e}
+         
+
 '''
 描述：获取head节点的ray端口，worker连接使用
 '''

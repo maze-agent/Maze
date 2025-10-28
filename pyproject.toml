@@ -16,10 +16,11 @@ dependencies = [
     "zmq==0.0.0",
     "networkx==3.4.2",
     "websocket-client==1.9.0",
+    "cloudpickle==3.1.1",
 ]
 
 [project.scripts]
-mazea = "maze.cli.cli:main"
+maze = "maze.cli.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "."

@@ -5,13 +5,15 @@ import threading
 import queue
 import json
 import os
+import cloudpickle
+import binascii
 import subprocess
 import multiprocessing as mp
 from queue import Queue
 from maze.core.scheduler.resource import SelectedNode
 from typing import Any,List,Dict
 from maze.core.scheduler.resource import ResourceManager
-from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime
+from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,SingleTaskRuntime
 
 def scheduler_process(port1:int,port2:int,strategy:str,ray_head_port:int,ready_queue:mp.Queue):
     if strategy == "FCFS":
@@ -74,6 +76,27 @@ class Scheduler():
                                                             code_str=task['code_str']
                                                             )  
                     self.task_queue.put(item=task_runtime)
+                elif(message_type =="run_single_task"):
+                    
+                    task = message_data["task"]
+                    workflow_id = message_data['workflow_id']
+                    task_id = message_data['task_id']
+
+                    task_bytes = binascii.unhexlify(task)
+                    task_data = cloudpickle.loads(task_bytes)
+                    func = cloudpickle.loads(task_data["func"])
+                    args = cloudpickle.loads(task_data["args"])
+                    kwargs = cloudpickle.loads(task_data["kwargs"])
+                    resources = task_data["resources"]  
+                   
+                    task_runtime = SingleTaskRuntime(workflow_id=workflow_id,
+                                                         task_id=task_id,
+                                                         func=func,
+                                                         args=args,
+                                                         kwargs=kwargs,
+                                                         resources=resources
+                                                        )  
+                    self.task_queue.put(item=task_runtime)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
                         self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
@@ -105,18 +128,16 @@ class Scheduler():
 
         while True:
             if self.cur_ready_task is None:
-                self.cur_ready_task =  self.task_queue.get()
+                self.cur_ready_task =  self.task_queue.get()   
                 self.lock.acquire()
                 self.workflow_manager.add_task(self.cur_ready_task)
-            else:
-                self.lock.acquire()    
- 
+                
             #Get the node can run the task
             selected_node: SelectedNode | None = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
-            if selected_node:  
+            if selected_node:
                 #Run task
                 self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
- 
+
                 #Send message to main
                 message = {
                     "type":"start_task",
@@ -128,7 +149,7 @@ class Scheduler():
                 }
                 serialized_message = json.dumps(message).encode('utf-8')
                 socket_to_main.send(serialized_message)
-
+            
                 self.cur_ready_task = None
                 self.lock.release()
             else:
@@ -142,6 +163,7 @@ class Scheduler():
 
         while True:
             with self.lock:
+                #self.resource_manager.show_all_node_resource()
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
                 if len(running_task_refs) == 0:
                     continue
@@ -179,7 +201,7 @@ class Scheduler():
                             self.workflow_manager.clear_workflow(finished_task.workflow_id) 
                             
                             #Send message to main
-                            message = {
+                            message: dict[str, str] = {
                                 "type":"task_exception",
                                 "workflow_id":finished_task.workflow_id,
                                 "task_id":finished_task.task_id,

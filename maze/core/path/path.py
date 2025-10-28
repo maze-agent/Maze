@@ -149,15 +149,18 @@ class MaPath:
                 assert(len(frames)==2)
                 identity, data = frames
                 message = json.loads(data.decode('utf-8'))
-               
+           
                 async with self.lock:
                     if message['workflow_id'] not in self.async_que:
                         continue
-
+ 
                     que: Queue[Any] = self.async_que[message['workflow_id']]
                     await que.put(message)
 
                     if(message["type"]=="finish_task"):
+                        if message['workflow_id'] not in self.workflows:
+                            continue #single task workflow（langgraph)
+
                         new_ready_tasks  = self.workflows[message["workflow_id"]].finish_task(task_id=message["task_id"])
                         if len(new_ready_tasks) > 0:
                             for task in new_ready_tasks:
@@ -167,9 +170,10 @@ class MaPath:
                                 }                 
                                 serialized: bytes = json.dumps(message).encode('utf-8')
                                 self.socket_to_receive.send(serialized)
+                  
             except Exception as e:
                 print(f"Error in monitor: {e}")
-                await asyncio.sleep(1)
+                
 
     async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
         """
@@ -189,13 +193,13 @@ class MaPath:
             if data["type"]=="finish_task":
                 count += 1
                 if(count == total_task_num):
-                    message = {"type":"finish_workflow","workflow_id":workflow_id}
+                    message = {"type":"clear_workflow","workflow_id":workflow_id}
                     serialized: bytes = json.dumps(message).encode('utf-8')
                     self.socket_to_receive.send(serialized)
                      
                     break
             elif data["type"]=="task_exception":
-                raise Exception(data["message"])
+                raise Exception("task_exception")
           
     async def stop_workflow(self,workflow_id:str):
         '''
@@ -208,6 +212,37 @@ class MaPath:
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_receive.send(serialized)
     
-    
+    async def run_single_task(self,task_data:str):
+        """
+        Run a single task.(for langgraph)
+        """
+        import uuid
+        workflow_id = str(uuid.uuid4())
+        task_id = str(uuid.uuid4())
+        que = asyncio.Queue()
+        self.async_que[workflow_id] = que
+        message: dict[str, str] = {
+            "type":"run_single_task",
+            "workflow_id":workflow_id,
+            "task_id":task_id,
+            "task":task_data
+        }
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_receive.send(serialized)
 
-   
+        result = None
+        while True:
+            data = await que.get()
+            
+            if data["type"]=="finish_task":
+                result = data["result"]
+                break              
+            elif data["type"]=="task_exception":
+                result = data["result"]
+
+        del self.async_que[workflow_id]
+        message = {"type":"clear_workflow","workflow_id":workflow_id}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_receive.send(serialized)
+        return result
+        

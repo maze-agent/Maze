@@ -1,12 +1,24 @@
+
 import ray
-from typing import Any, List,Dict
-from maze.core.scheduler.runner import remote_task_runner
+import cloudpickle
+from typing import Any, List,Dict,Callable
+from maze.core.scheduler.runner import remote_task_runner,remote_single_task_runner
 
 class SelectedNode():
     def __init__(self,node_id:str,node_ip:str,gpu_id:int=None):
         self.node_id = node_id
         self.node_ip = node_ip
         self.gpu_id = gpu_id
+
+class SingleTaskRuntime():
+    def __init__(self,workflow_id:str,task_id:str,func:Callable,args:List[Any],kwargs:Dict[Any, Any],resources:Dict):
+        self.status = "ready"
+        self.workflow_id: str = workflow_id
+        self.task_id: str = task_id
+        self.func: Callable = func
+        self.args: List[Any] = args
+        self.kwargs: Dict[Any, Any] = kwargs
+        self.resources: Dict[str, Any] = resources
 
 class TaskRuntime():
     def __init__(self,workflow_id:str,task_id:str,task_input:Dict,task_output:Dict,resources:Dict,code_str:str):
@@ -25,10 +37,10 @@ class TaskRuntime():
 class WorkflowRuntime():
     def __init__(self,workflow_id):
         self.workflow_id: str = workflow_id
-        self.tasks: Dict[str, TaskRuntime] = {}
+        self.tasks: Dict[str, TaskRuntime|SingleTaskRuntime] = {}
         self.ref_to_taskid = {}
  
-    def add_task(self, task:TaskRuntime):
+    def add_task(self, task:TaskRuntime|SingleTaskRuntime):
         '''
         Add task to workflow.
         '''
@@ -116,50 +128,84 @@ class WorkflowRuntimeManager():
         self.clear_workflow(workflow_id)
         return running_tasks
 
-    def add_task(self, task:TaskRuntime):
+    def add_task(self, task:TaskRuntime|SingleTaskRuntime):
         '''
         Add task to workflow. If the workflow does not exist, create a new workflow.(Means that the task is the first task of the workflow)
         '''
         if task.workflow_id not in self.workflows:
             self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-        self.workflows[task.workflow_id]    
+        
         self.workflows[task.workflow_id].add_task(task)
     
-    def run_task(self,task:TaskRuntime,node:SelectedNode):
+    def run_task(self,task:TaskRuntime|SingleTaskRuntime,node:SelectedNode):
         '''
         Run task in node.
         '''
         if task.workflow_id not in self.workflows:
             return 
 
-        task_input_data = {}
-        for _,input_info in task.task_input["input_params"].items():
-            if input_info["input_schema"] == "from_user":
-                task_input_data[input_info["key"]] = input_info["value"]
-            elif input_info["input_schema"] == "from_task":
-                task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
+        if isinstance(task, SingleTaskRuntime):
+            task_data = {
+                "func": cloudpickle.dumps(task.func),
+                "args": cloudpickle.dumps(task.args),
+                "kwargs": cloudpickle.dumps(task.kwargs),
+            }
+            task_data = cloudpickle.dumps(task_data).hex()
+ 
+            #gpu task
+            if node.gpu_id is not None: 
+                result_ref = remote_single_task_runner.options(
+                    num_cpus=task.resources["cpu"],
+                    num_gpus=task.resources["gpu"],
+                    memory=task.resources["cpu_mem"],
+                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+                ).remote(task_data=task_data,cuda_visible_devices=str(node.gpu_id))
+            #cpu task
+            else: 
+                result_ref = remote_single_task_runner.options(
+                    num_cpus=task.resources["cpu"],
+                    memory=task.resources["cpu_mem"],
+                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+                ).remote(task_data=task_data,cuda_visible_devices=None)
+            
+            
+            self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
+            self.ref_to_workflow_id[result_ref] = task.workflow_id
 
-        #gpu task
-        if node.gpu_id is not None: 
-            result_ref = remote_task_runner.options(
-                num_cpus=task.resources["cpu"],
-                num_gpus=task.resources["gpu"],
-                memory=task.resources["cpu_mem"],
-                scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-            ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=str(node.gpu_id))     
-        #cpu task
-        else: 
-            result_ref = remote_task_runner.options(
-                num_cpus=task.resources["cpu"],
-                memory=task.resources["cpu_mem"],
-                scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-            ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=None)
-        
-        
-        self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
-        self.ref_to_workflow_id[result_ref] = task.workflow_id
-                   
+        elif isinstance(task, TaskRuntime):
+            task_input_data = {}
+            for _,input_info in task.task_input["input_params"].items():
+                if input_info["input_schema"] == "from_user":
+                    task_input_data[input_info["key"]] = input_info["value"]
+                elif input_info["input_schema"] == "from_task":
+                    task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
+
+            #gpu task
+            if node.gpu_id is not None: 
+                result_ref = remote_task_runner.options(
+                    num_cpus=task.resources["cpu"],
+                    num_gpus=task.resources["gpu"],
+                    memory=task.resources["cpu_mem"],
+                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+                ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=str(node.gpu_id))     
+            #cpu task
+            else: 
+                result_ref = remote_task_runner.options(
+                    num_cpus=task.resources["cpu"],
+                    memory=task.resources["cpu_mem"],
+                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
+                ).remote(code_str=task.code_str,task_input_data=task_input_data,cuda_visible_devices=None)
+            
+            
+            self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
+            self.ref_to_workflow_id[result_ref] = task.workflow_id
+    
+    def run_single_task(self, task: SingleTaskRuntime,node:SelectedNode):
+        print("run_single_task")
+        print(task)
+        print(node)
+
     def get_running_task_refs(self):
         '''
         Get running task refs.

@@ -1,5 +1,7 @@
 import ray
 import ast
+import binascii
+import cloudpickle
 
 @ray.remote(max_retries=0)
 def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices=None):
@@ -10,6 +12,22 @@ def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices=No
     runner = Runner(code_str,task_input_data)
     output = runner.run()
     return output
+
+@ray.remote(max_retries=0)
+def remote_single_task_runner(task_data,cuda_visible_devices):
+    if cuda_visible_devices:
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+
+    task_bytes = binascii.unhexlify(task_data)
+    task_data = cloudpickle.loads(task_bytes)
+    func = cloudpickle.loads(task_data["func"])
+    args = cloudpickle.loads(task_data["args"])
+    kwargs = cloudpickle.loads(task_data["kwargs"])
+
+    output = func(*args, **kwargs)
+    return output
+ 
 
 class Runner():
     def __init__(self,code_str,task_input_data):
