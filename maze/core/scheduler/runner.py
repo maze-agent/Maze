@@ -1,10 +1,11 @@
 import ray
 import ast
 import binascii
+import base64
 import cloudpickle
 
 @ray.remote(max_retries=0)
-def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices=None):
+def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices:str|None=None):
     if cuda_visible_devices:
         import os
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
@@ -14,17 +15,17 @@ def remote_task_runner(code_str:str,task_input_data:dict,cuda_visible_devices=No
     return output
 
 @ray.remote(max_retries=0)
-def remote_single_task_runner(task_data,cuda_visible_devices):
+def remote_lgraph_task_runner(code_ser:str,args:str,kwargs:str,cuda_visible_devices:str|None=None):
     if cuda_visible_devices:
         import os
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
-    task_bytes = binascii.unhexlify(task_data)
-    task_data = cloudpickle.loads(task_bytes)
-    func = cloudpickle.loads(task_data["func"])
-    args = cloudpickle.loads(task_data["args"])
-    kwargs = cloudpickle.loads(task_data["kwargs"])
+    func = cloudpickle.loads(base64.b64decode(code_ser))
+    args = cloudpickle.loads(base64.b64decode(args))
+    kwargs = cloudpickle.loads(base64.b64decode(kwargs))
 
+    print(args)
+    print(kwargs)
     output = func(*args, **kwargs)
     return output
  

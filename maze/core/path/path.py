@@ -1,4 +1,6 @@
+from asyncio.queues import Queue
 import os
+import uuid
 import json
 import zmq.asyncio
 import asyncio
@@ -6,20 +8,20 @@ import multiprocessing as mp
 from fastapi import WebSocket
 from typing import Any,Dict,List
 from asyncio.queues import Queue
-from maze.core.workflow.task import CodeTask
-from maze.core.workflow.workflow import Workflow
+from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
+from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
 
 class MaPath:
     def __init__(self,strategy:str):
-        assert strategy == "FCFS" #暂时只支持FCFS策略
+        assert strategy == "FCFS" # Only support FCFS strategy currently
         self.strategy=strategy
 
         self.lock = lock = asyncio.Lock()
 
-        self.workflows: Dict[str, Workflow] = {}
-        self.async_que: Dict[str, asyncio.Queue] = {} #workflow_id:queue     
+        self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
+        self.async_que: Dict[str, asyncio.Queue] = {} 
          
     def cleanup(self):
         '''
@@ -37,38 +39,13 @@ class MaPath:
         Create a workflow.
         '''
         self.workflows[workflow_id] = Workflow(workflow_id)
-            
-    def add_task(self,workflow_id:str,task_id:str,task_type:str,task_name:str):
-        self.workflows[workflow_id].add_task(task_id,CodeTask(workflow_id,task_id,task_name))
 
-    def del_task(self,workflow_id:str,task_id:str):
+    def get_workflow(self,workflow_id:str) -> Workflow|LangGraphWorkflow:
         '''
-        Delete a task from the workflow.
+        Get a workflow.
         '''
-        self.workflows[workflow_id].del_task(task_id)
-
-    def save_task(self,workflow_id:str,task_id:str,task_input:str,task_output:str,code_str:str,resources:str):
-        '''
-        Save a task.
-
-        '''
-        task = self.workflows[workflow_id].get_task(task_id)
-        task.save_task(task_input=task_input, task_output=task_output, code_str = code_str, resources=resources)
-
-       
-    def add_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
-        '''
-        Add an edge to the workflow.
-        '''
-        self.workflows[workflow_id].add_edge(source_task_id,target_task_id)
-
-    def del_edge(self,workflow_id:str,source_task_id:str,target_task_id:str):
-        '''
-        Delete an edge from the workflow.
-
-        '''
-        self.workflows[workflow_id].del_edge(source_task_id,target_task_id)
-
+        return self.workflows[workflow_id]
+  
     def get_workflow_tasks(self,workflow_id:str):
         """
         获取工作流中的所有任务，返回任务列表（包含id和name）
@@ -95,14 +72,15 @@ class MaPath:
         workflow = self.workflows[workflow_id]
         self.async_que[workflow_id] = asyncio.Queue()
         start_task:List = workflow.get_start_task()
+        
         for task in start_task:
             message = {
                 "type":"run_task",
-                "task":task.to_json()
+                "data":task.to_json()
             }
             serialized: bytes = json.dumps(message).encode('utf-8')
             self.socket_to_receive.send(serialized)
-  
+        
     def get_ray_head_port(self):
         '''
         Get the ray head port.
@@ -147,34 +125,49 @@ class MaPath:
             try:
                 frames = await self.socket_from_submit_supervisor.recv_multipart()
                 assert(len(frames)==2)
-                identity, data = frames
+                _, data = frames
                 message = json.loads(data.decode('utf-8'))
-           
-                async with self.lock:
-                    if message['workflow_id'] not in self.async_que:
-                        continue
  
-                    que: Queue[Any] = self.async_que[message['workflow_id']]
-                    await que.put(message)
+                message_type = message["type"]
+                message_data = message["data"]
+              
+                async with self.lock:
+                    if(message_type=="finish_task"):
+                        if message_data["task_id"] in self.async_que: #langgraph task
+                            que: Queue[Any] = self.async_que[message_data['task_id']]
+                            await que.put(message)
+                        else:
+                            if message_data['workflow_id'] not in self.async_que or message_data['workflow_id'] not in self.workflows:
+                                continue
+    
+                            que: Queue[Any] = self.async_que[message_data['workflow_id']]
+                            await que.put(message)
+ 
+                            new_ready_tasks  = self.workflows[message_data["workflow_id"]].finish_task(task_id=message_data["task_id"])
+                            if len(new_ready_tasks) > 0:
+                                for task in new_ready_tasks:
+                                    message = {
+                                        "type":"run_task",
+                                        "data":task.to_json()
+                                    }                 
+                                    serialized: bytes = json.dumps(message).encode('utf-8')
+                                    self.socket_to_receive.send(serialized)
 
-                    if(message["type"]=="finish_task"):
-                        if message['workflow_id'] not in self.workflows:
-                            continue #single task workflow（langgraph)
+                    elif(message_type=="start_task"):
+                        if message_data["task_id"] in self.async_que: #langgraph task
+                            que: Queue[Any] = self.async_que[message_data['task_id']]
+                            await que.put(message)
+                        else:
+                            if message_data['workflow_id'] not in self.async_que or message_data['workflow_id'] not in self.workflows:
+                                continue
+    
+                            que: Queue[Any] = self.async_que[message_data['workflow_id']]
+                            await que.put(message)
+  
 
-                        new_ready_tasks  = self.workflows[message["workflow_id"]].finish_task(task_id=message["task_id"])
-                        if len(new_ready_tasks) > 0:
-                            for task in new_ready_tasks:
-                                message = {
-                                    "type":"run_task",
-                                    "task":task.to_json()
-                                }                 
-                                serialized: bytes = json.dumps(message).encode('utf-8')
-                                self.socket_to_receive.send(serialized)
-                  
             except Exception as e:
                 print(f"Error in monitor: {e}")
-                
-
+      
     async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
         """
         Get the workflow result and send to websocket.
@@ -193,7 +186,7 @@ class MaPath:
             if data["type"]=="finish_task":
                 count += 1
                 if(count == total_task_num):
-                    message = {"type":"clear_workflow","workflow_id":workflow_id}
+                    message = {"type":"clear_workflow","data":{"workflow_id":workflow_id}}
                     serialized: bytes = json.dumps(message).encode('utf-8')
                     self.socket_to_receive.send(serialized)
                      
@@ -208,41 +201,40 @@ class MaPath:
         async with self.lock:
             del self.async_que[workflow_id]
 
-        message = {"type":"stop_workflow","workflow_id":workflow_id}
+        message = {"type":"stop_workflow","data":{"workflow_id":workflow_id}}
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_receive.send(serialized)
     
-    async def run_single_task(self,task_data:str):
+    async def run_langgraph_task(self,workflow_id:str,task_id:str,args:str,kwargs:str):
         """
-        Run a single task.(for langgraph)
+        Run langgraph task
         """
-        import uuid
-        workflow_id = str(uuid.uuid4())
-        task_id = str(uuid.uuid4())
-        que = asyncio.Queue()
-        self.async_que[workflow_id] = que
+        que: Queue[Any] = asyncio.Queue()
+        self.async_que[task_id] = que #we use task_id in langgraph task
+
+        task: LangGraphTask = self.workflows[workflow_id].get_task(task_id)
+        task.set_args(args)
+        task.set_kwargs(kwargs)
         message: dict[str, str] = {
-            "type":"run_single_task",
-            "workflow_id":workflow_id,
-            "task_id":task_id,
-            "task":task_data
+            "type":"run_task",
+            "data":task.to_json(),
         }
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_receive.send(serialized)
 
         result = None
         while True:
-            data = await que.get()
+            message = await que.get()
+            message_type = message["type"]
+            message_data = message["data"]
             
-            if data["type"]=="finish_task":
-                result = data["result"]
+            if message_type=="finish_task":
+                result = message_data["result"]
                 break              
-            elif data["type"]=="task_exception":
-                result = data["result"]
+            elif message_type=="task_exception":
+                result = message_data["result"]
+                break
 
-        del self.async_que[workflow_id]
-        message = {"type":"clear_workflow","workflow_id":workflow_id}
-        serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_receive.send(serialized)
+        del self.async_que[task_id]
         return result
         

@@ -5,6 +5,7 @@ import threading
 import queue
 import json
 import os
+import base64
 import cloudpickle
 import binascii
 import subprocess
@@ -13,7 +14,8 @@ from queue import Queue
 from maze.core.scheduler.resource import SelectedNode
 from typing import Any,List,Dict
 from maze.core.scheduler.resource import ResourceManager
-from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,SingleTaskRuntime
+from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
+from maze.core.workflow.task import TaskType
 
 def scheduler_process(port1:int,port2:int,strategy:str,ray_head_port:int,ready_queue:mp.Queue):
     if strategy == "FCFS":
@@ -34,7 +36,7 @@ class Scheduler():
         self.workflow_manager = WorkflowRuntimeManager()
         self.resource_manager = ResourceManager()
 
-        self.task_queue: Queue[TaskRuntime] = queue.Queue()
+        self.task_queue: Queue[TaskRuntime|LanggraphTaskRuntime] = queue.Queue()
       
     def _cleanup(self):
         command = [
@@ -62,41 +64,32 @@ class Scheduler():
             while True:
                 frames = socket_from_main.recv_multipart()
                 assert(len(frames)==2)
-                identity, data = frames
-                message_data = json.loads(data.decode('utf-8'))
-                message_type = message_data["type"]
+                _, data = frames
+                message = json.loads(data.decode('utf-8'))
+              
+                message_type = message["type"]
+                message_data = message["data"]
                 
                 if(message_type =="run_task"):
-                    task = message_data["task"]
-                    task_runtime = TaskRuntime(workflow_id=task['workflow_id'],
-                                                            task_id=task['task_id'],
-                                                            task_input=task['task_input'],
-                                                            task_output=task['task_output'],
-                                                            resources=task['resources'],
-                                                            code_str=task['code_str']
-                                                            )  
-                    self.task_queue.put(item=task_runtime)
-                elif(message_type =="run_single_task"):
                     
-                    task = message_data["task"]
-                    workflow_id = message_data['workflow_id']
-                    task_id = message_data['task_id']
-
-                    task_bytes = binascii.unhexlify(task)
-                    task_data = cloudpickle.loads(task_bytes)
-                    func = cloudpickle.loads(task_data["func"])
-                    args = cloudpickle.loads(task_data["args"])
-                    kwargs = cloudpickle.loads(task_data["kwargs"])
-                    resources = task_data["resources"]  
-                   
-                    task_runtime = SingleTaskRuntime(workflow_id=workflow_id,
-                                                         task_id=task_id,
-                                                         func=func,
-                                                         args=args,
-                                                         kwargs=kwargs,
-                                                         resources=resources
-                                                        )  
-                    self.task_queue.put(item=task_runtime)
+                    if(message_data["task_type"]==TaskType.CODE.value):
+                        task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
+                                                                task_id=message_data['task_id'],
+                                                                task_input=message_data['task_input'],
+                                                                task_output=message_data['task_output'],
+                                                                resources=message_data['resources'],
+                                                                code_str=message_data['code_str']
+                                                                )  
+                        self.task_queue.put(item=task_runtime)
+                    elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
+                        task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
+                                                                                  task_id=message_data['task_id'],
+                                                                                  code_ser=message_data['code_ser'],
+                                                                                  args=message_data['args'],
+                                                                                  kwargs=message_data['kwargs'],
+                                                                                  resources=message_data['resources']
+                                                                                )  
+                        self.task_queue.put(item=task_runtime)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
                         self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
@@ -124,7 +117,7 @@ class Scheduler():
         socket_to_main = self.context.socket(zmq.DEALER)
         socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
          
-        self.cur_ready_task = None #FCFS  当前试分配资源的任务
+        self.cur_ready_task = None 
 
         while True:
             if self.cur_ready_task is None:
@@ -141,11 +134,13 @@ class Scheduler():
                 #Send message to main
                 message = {
                     "type":"start_task",
-                    "workflow_id":self.cur_ready_task.workflow_id,
-                    "task_id":self.cur_ready_task.task_id,
-                    "node_ip":selected_node.node_ip,
-                    "node_id":selected_node.node_id,
-                    "gpu_id":selected_node.gpu_id,
+                    "data":{
+                        "workflow_id":self.cur_ready_task.workflow_id,
+                        "task_id":self.cur_ready_task.task_id,
+                        "node_ip":selected_node.node_ip,
+                        "node_id":selected_node.node_id,
+                        "gpu_id":selected_node.gpu_id,
+                    }
                 }
                 serialized_message = json.dumps(message).encode('utf-8')
                 socket_to_main.send(serialized_message)
@@ -176,7 +171,6 @@ class Scheduler():
                     finished_task = self.workflow_manager.get_task_by_ref(finished_task_ref)
                     if finished_task is None:
                         continue # The workflow of task is deleted
-
                     try:
                         result = ray.get(finished_task_ref)
 
@@ -186,29 +180,36 @@ class Scheduler():
                         #Send message to main
                         message = {
                             "type":"finish_task",
-                            "workflow_id":finished_task.workflow_id,
-                            "task_id":finished_task.task_id,
-                            "result":finished_task.result
+                            "data":{
+                                "workflow_id":finished_task.workflow_id,
+                                "task_id":finished_task.task_id,
+                                "result":finished_task.result,
+                            },
                         }
                         serialized_message = json.dumps(message).encode('utf-8')
                         socket_to_main.send(serialized_message)
-
+ 
                     except ray.exceptions.RayTaskError as e:
                         #Internal exception in the code,stop the workflow
-                        cancled_tasks = self.workflow_manager.cancel_workflow(finished_task.workflow_id)
-                        if len(cancled_tasks) > 0:
-                            self.resource_manager.release_resource(tasks=cancled_tasks)
-                            self.workflow_manager.clear_workflow(finished_task.workflow_id) 
+                        canceld_tasks = self.workflow_manager.cancel_workflow(finished_task.workflow_id)
+                        if len(canceld_tasks) > 0:
+                            self.resource_manager.release_resource(tasks=canceld_tasks)
+                            self.workflow_manager.clear_workflow(finished_task.workflow_id)
                             
                             #Send message to main
                             message: dict[str, str] = {
                                 "type":"task_exception",
-                                "workflow_id":finished_task.workflow_id,
-                                "task_id":finished_task.task_id,
-                                "result":"ray.exceptions.RayTaskError"
+                                "data":{
+                                    "workflow_id":finished_task.workflow_id,
+                                    "task_id":finished_task.task_id,
+                                    "result":f"ray.exceptions.RayTaskError:{str(e)}"
+                                }
+                                
                             }
                             serialized_message = json.dumps(message).encode('utf-8')
                             socket_to_main.send(serialized_message)
+                    except ray.exceptions.TaskCancelledError as e:
+                        pass
                     except (ray.exceptions.NodeDiedError, ray.exceptions.ObjectLostError, ray.exceptions.TaskUnschedulableError) as e:
                         #The node of task running is dead,send the task back to the queue to retry.
                         self.task_queue.put(finished_task)

@@ -2,7 +2,7 @@
 import ray
 import cloudpickle
 from typing import Any, List,Dict,Callable
-from maze.core.scheduler.runner import remote_task_runner,remote_single_task_runner
+from maze.core.scheduler.runner import remote_task_runner,remote_lgraph_task_runner
 
 class SelectedNode():
     def __init__(self,node_id:str,node_ip:str,gpu_id:int=None):
@@ -10,14 +10,14 @@ class SelectedNode():
         self.node_ip = node_ip
         self.gpu_id = gpu_id
 
-class SingleTaskRuntime():
-    def __init__(self,workflow_id:str,task_id:str,func:Callable,args:List[Any],kwargs:Dict[Any, Any],resources:Dict):
+class LanggraphTaskRuntime():
+    def __init__(self,workflow_id:str,task_id:str,code_ser:str,args:str,kwargs:str,resources:Dict):
         self.status = "ready"
         self.workflow_id: str = workflow_id
         self.task_id: str = task_id
-        self.func: Callable = func
-        self.args: List[Any] = args
-        self.kwargs: Dict[Any, Any] = kwargs
+        self.code_ser: str = code_ser
+        self.args: str = args
+        self.kwargs: str = kwargs
         self.resources: Dict[str, Any] = resources
 
 class TaskRuntime():
@@ -37,10 +37,10 @@ class TaskRuntime():
 class WorkflowRuntime():
     def __init__(self,workflow_id):
         self.workflow_id: str = workflow_id
-        self.tasks: Dict[str, TaskRuntime|SingleTaskRuntime] = {}
+        self.tasks: Dict[str, TaskRuntime|LanggraphTaskRuntime] = {}
         self.ref_to_taskid = {}
  
-    def add_task(self, task:TaskRuntime|SingleTaskRuntime):
+    def add_task(self, task:TaskRuntime|LanggraphTaskRuntime):
         '''
         Add task to workflow.
         '''
@@ -128,46 +128,38 @@ class WorkflowRuntimeManager():
         self.clear_workflow(workflow_id)
         return running_tasks
 
-    def add_task(self, task:TaskRuntime|SingleTaskRuntime):
+    def add_task(self, task:TaskRuntime|LanggraphTaskRuntime):
         '''
         Add task to workflow. If the workflow does not exist, create a new workflow.(Means that the task is the first task of the workflow)
         '''
         if task.workflow_id not in self.workflows:
             self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-        
         self.workflows[task.workflow_id].add_task(task)
     
-    def run_task(self,task:TaskRuntime|SingleTaskRuntime,node:SelectedNode):
+    def run_task(self,task:TaskRuntime|LanggraphTaskRuntime,node:SelectedNode):
         '''
         Run task in node.
         '''
         if task.workflow_id not in self.workflows:
             return 
 
-        if isinstance(task, SingleTaskRuntime):
-            task_data = {
-                "func": cloudpickle.dumps(task.func),
-                "args": cloudpickle.dumps(task.args),
-                "kwargs": cloudpickle.dumps(task.kwargs),
-            }
-            task_data = cloudpickle.dumps(task_data).hex()
- 
+        if isinstance(task, LanggraphTaskRuntime):
             #gpu task
             if node.gpu_id is not None: 
-                result_ref = remote_single_task_runner.options(
+                result_ref = remote_lgraph_task_runner.options(
                     num_cpus=task.resources["cpu"],
                     num_gpus=task.resources["gpu"],
                     memory=task.resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(task_data=task_data,cuda_visible_devices=str(node.gpu_id))
+                ).remote(code_ser=task.code_ser,args=task.args,kwargs=task.kwargs,cuda_visible_devices=str(node.gpu_id))
             #cpu task
             else: 
-                result_ref = remote_single_task_runner.options(
+                result_ref = remote_lgraph_task_runner.options(
                     num_cpus=task.resources["cpu"],
                     memory=task.resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(task_data=task_data,cuda_visible_devices=None)
+                ).remote(code_ser=task.code_ser,task_data=task.args,kwargs=task.kwargs,cuda_visible_devices=None)
             
             
             self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
@@ -200,12 +192,7 @@ class WorkflowRuntimeManager():
             
             self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
             self.ref_to_workflow_id[result_ref] = task.workflow_id
-    
-    def run_single_task(self, task: SingleTaskRuntime,node:SelectedNode):
-        print("run_single_task")
-        print(task)
-        print(node)
-
+  
     def get_running_task_refs(self):
         '''
         Get running task refs.

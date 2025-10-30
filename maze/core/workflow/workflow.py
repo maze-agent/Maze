@@ -1,13 +1,41 @@
+from networkx.classes.digraph import DiGraph
 from typing import Any,List
-from maze.core.workflow.task import CodeTask
+from maze.core.workflow.task import CodeTask,LangGraphTask
 from typing import Dict
 import networkx as nx
+  
+class LangGraphWorkflow:
+    def __init__(self, id: str):
+        self.id: str = id
+        self.tasks: Dict[str, LangGraphTask] = {} 
+
+    def add_task(self, task_id: str, task: LangGraphTask) -> None:
+        """
+        Add a task to workflow
+        """
+        if task_id != task.task_id:
+            raise ValueError("task_id must match task.task_id")
+        self.tasks[task_id] = task
+        self.graph.add_node(task_id)
+
+    def del_task(self, task_id: str) -> None:
+        """
+        Delete a task from workflow
+        """
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+        
+    def get_task(self, task_id: str) -> LangGraphTask:
+        """
+        Get a task from workflow
+        """
+        return self.tasks.get(task_id)
 
 class Workflow:
     def __init__(self, id: str):
         self.id: str = id
-        self.graph = nx.DiGraph()  # 有向图表示工作流
-        self.tasks: Dict[str, CodeTask] = {}  # 任务ID -> CodeTask 映射
+        self.graph: DiGraph[Any] = nx.DiGraph()
+        self.tasks: Dict[str, CodeTask] = {} 
 
     def add_task(self, task_id: str, task: CodeTask) -> None:
         """
@@ -82,5 +110,4 @@ class Workflow:
         
         return ready_tasks
 
-    def __repr__(self):
-        return f"Workflow(id={self.id}, tasks={list(self.tasks.keys())})"
+    

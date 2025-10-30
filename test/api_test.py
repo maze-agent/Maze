@@ -5,9 +5,7 @@ import requests
 import websocket
 from websocket import WebSocketApp
 
-
-
-
+ 
 def create_workflow():
     # 定义请求的 URL
     url = "http://localhost:8000/create_workflow" 
@@ -27,11 +25,12 @@ def create_workflow():
     except requests.exceptions.RequestException as e:
         print("请求发生错误：", e)
 
-def add_task(workflow_id):
+def add_task(workflow_id,task_name):
     
     data = {
         'workflow_id': workflow_id,
         'task_type': 'code',
+        'task_name': task_name,
     }
 
     # 定义请求的 URL
@@ -40,12 +39,10 @@ def add_task(workflow_id):
     try:
         # 发送 POST 请求
         response = requests.post(url,json=data)
-
-
+ 
         # 检查响应状态码
         if response.status_code == 200:
             data = response.json()
-            #print(data)
             return data["task_id"]
         else:
             print(f"请求失败，状态码：{response.status_code}")
@@ -160,7 +157,6 @@ def del_edge(workflow_id,source_task_id,target_task_id):
     except requests.exceptions.RequestException as e:
         print("请求发生错误：", e)
 
-
 def run_workflow(workflow_id):
     data = {
         'workflow_id': workflow_id,
@@ -221,8 +217,8 @@ def get_workflow_status(workflow_id):
 workflow_id = create_workflow()
 
 #2.新增2个任务
-task_id1 = add_task(workflow_id)
-task_id2 = add_task(workflow_id)
+task_id1 = add_task(workflow_id, task_name="task1")
+task_id2 = add_task(workflow_id, task_name="task2")
 # del_task(workflow_id,task_id2)
 # task_id2 = add_task(workflow_id)
 

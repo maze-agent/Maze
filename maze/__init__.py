@@ -1,1 +1,3 @@
-from maze.core.client.lgraph.client import task,init
+from maze.client.langgraph.client import LanggraphClient
+
+__all__ = ["LanggraphClient"]
