@@ -1,13 +1,9 @@
-# maze/client.py
 from requests.models import Response
-
-
 import cloudpickle
 import requests
 import functools
 from typing import Any, Dict, Callable
 
-# 全局配置
 MAZE_SERVER_ADDR = None
 
 def init(addr: str):
@@ -17,7 +13,7 @@ def init(addr: str):
     MAZE_SERVER_ADDR = addr
     print(f"[maze] Connected to server at {MAZE_SERVER_ADDR}")
 
-def task(resources: Dict[str, float]):
+def client(resources: Dict[str, float]):
     def decorator(func: Callable):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -38,8 +34,6 @@ def task(resources: Dict[str, float]):
                 
                 if response.status_code == 200:
                     data = response.json()
-                    print("====")
-                    print(data)
                     return data["result"]
                 else:
                     print(f"请求失败，状态码：{response.status_code}")
