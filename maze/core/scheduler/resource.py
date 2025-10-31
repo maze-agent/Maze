@@ -1,4 +1,5 @@
 import ray
+import time
 from typing import Any,List,Dict
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
@@ -30,6 +31,9 @@ class ResourceManager():
         self.head_node_id = None
         self.head_node_ip = None
         self.nodes:Dict[str,Node] = {}
+        
+        self.last_time = time.time()
+        self.interval = 2
 
     def _get_head_node_resource(self):
         '''
@@ -84,8 +88,13 @@ class ResourceManager():
         '''
         Show all node resource
         '''
-        for node_id,node in self.nodes.items():
-            print(node_id,node.available_resources)
+        cur_time = time.time()
+        print( cur_time - self.last_time)
+        if cur_time - self.last_time >= self.interval:
+            self.last_time = cur_time
+            
+            for node_id,node in self.nodes.items():
+                print(node_id,node.available_resources)
 
     def stop_worker(self,node_id:str):
         '''

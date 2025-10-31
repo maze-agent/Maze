@@ -124,7 +124,9 @@ class Scheduler():
                 self.cur_ready_task =  self.task_queue.get()   
                 self.lock.acquire()
                 self.workflow_manager.add_task(self.cur_ready_task)
-                
+            else:
+                self.lock.acquire()
+                    
             #Get the node can run the task
             selected_node: SelectedNode | None = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
             if selected_node:
@@ -159,7 +161,9 @@ class Scheduler():
         while True:
             with self.lock:
                 self.resource_manager.check_dead_node()
-                #self.resource_manager.show_all_node_resource()
+
+                self.resource_manager.show_all_node_resource()
+               
 
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
                 if len(running_task_refs) == 0:

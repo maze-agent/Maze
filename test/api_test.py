@@ -1,10 +1,6 @@
-
-
 from typing import Any
 import requests
 import websocket
-from websocket import WebSocketApp
-
  
 def create_workflow():
     # 定义请求的 URL
@@ -229,7 +225,7 @@ import time
 
 def task1(params):
     task_input = params.get("task1_input")
-    
+    time.sleep(2)
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str
@@ -271,6 +267,8 @@ import time
 
 def task2(params):
     task_input = params.get("task2_input")
+
+    time.sleep(2)
     
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
