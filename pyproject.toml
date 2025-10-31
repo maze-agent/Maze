@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "maze"
 version = "1.0.0"
-description = "A unified command-line interface for launching the Maze system."
-authors = [{ name = "Your Name", email = "your.email@example.com" }]
+description = "Distributed Agent workflow system"
+#authors = [{ name = "", email = "" }]
 requires-python = ">=3.10"
 
 dependencies = [
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-maze = "maze.cli.cli:main"
+mazea = "maze.cli.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "."

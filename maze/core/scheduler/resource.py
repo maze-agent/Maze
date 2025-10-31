@@ -30,9 +30,7 @@ class ResourceManager():
         self.head_node_id = None
         self.head_node_ip = None
         self.nodes:Dict[str,Node] = {}
-        #self.nodes_available_resources = {} #各个节点的剩余资源
-        #self.nodeid_to_ip = None #{self.head_node_id:ray.util.get_node_ip_address()}
-    
+
     def _get_head_node_resource(self):
         '''
         Get the maze head node resource
@@ -76,6 +74,12 @@ class ResourceManager():
 
         self.nodes[self.head_node_id] = Node(self.head_node_id,self.head_node_ip,head_node_resource,head_node_resource)
     
+    def check_dead_node(self):
+        nodes = ray.nodes()
+        for node in nodes:
+            if not node["Alive"] and node["NodeID"] in self.nodes:
+                del self.nodes[node["NodeID"]]
+                
     def show_all_node_resource(self):
         '''
         Show all node resource
@@ -143,5 +147,3 @@ class ResourceManager():
         Start worker node
         ''' 
         self.nodes[node_id] = Node(node_id,node_ip,resources,resources)
-
- 

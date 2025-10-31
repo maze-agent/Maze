@@ -252,13 +252,18 @@ async def run_langgraph_task(req:Request):
 '''
 @app.post("/get_head_ray_port")
 async def get_head_ray_port():
-    return await mapath.get_ray_head_port()
-      
-# '''
-# 描述：worker连接注册到head
-# '''
-# @app.post("/conect_to_head")
-# async def conect_to_head():
-#     return await mapath.conect_to_head()
+    try:
+        port =  mapath.get_ray_head_port()
+        return {"status": "success","port": port}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/start_worker")
+async def start_worker(req:Request):
+    try:
+        data = await req.json()
+        mapath.start_worker(data["node_ip"], data["node_id"], data["resources"])
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
  

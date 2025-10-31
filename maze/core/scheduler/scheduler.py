@@ -158,7 +158,9 @@ class Scheduler():
 
         while True:
             with self.lock:
+                self.resource_manager.check_dead_node()
                 #self.resource_manager.show_all_node_resource()
+
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
                 if len(running_task_refs) == 0:
                     continue

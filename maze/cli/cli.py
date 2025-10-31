@@ -1,3 +1,4 @@
+import subprocess
 import argparse
 import sys
 import uvicorn
@@ -26,14 +27,26 @@ async def _async_start_head(port: int, ray_head_port: int):
 def start_head(port: int,ray_head_port: int):
     asyncio.run(_async_start_head(port, ray_head_port))
    
-
 def start_worker(addr: str):
-    print(f"[WORKER] Starting worker node connecting to {addr}")
-    Worker.connect_to_head(addr)
+    Worker.start_worker(addr)
 
 def stop():
-    print("[STOP] Stopping all maze processes...")
-    # 实现停止逻辑，例如发送信号、清理等
+    try:
+        command = [
+            "ray", "stop",
+        ]
+        result = subprocess.run(
+            command,
+            check=True,                  
+            text=True,                 
+            capture_output=True,      
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start Ray: {result.stderr}")
+
+    except Exception as e:
+        print(f"发生异常：{e}")
+
 
 def main():
     parser = argparse.ArgumentParser(prog="maze", description="Maze distributed task runner")

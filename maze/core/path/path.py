@@ -88,6 +88,18 @@ class MaPath:
         '''
         return self.ray_head_port
     
+    def start_worker(self,node_ip:str,node_id:str,resources:Dict):
+        message = {
+            "type":"start_worker",
+            "data":{
+                "node_ip":node_ip,
+                "node_id":node_id,
+                "resources":resources
+            }
+        }
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_receive.send(serialized)
+
     def init(self,ray_head_port):
         '''
         Initialize.
@@ -237,4 +249,4 @@ class MaPath:
 
         del self.async_que[task_id]
         return result
-        
+    
