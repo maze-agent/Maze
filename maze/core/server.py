@@ -138,7 +138,7 @@ async def save_task(req:Request):
 
 
 @app.post("/save_task_and_add_edge")
-async def save_task(req:Request):
+async def save_task_and_add_edge(req:Request):
     try:
         data = await req.json()
         workflow_id = data["workflow_id"]
@@ -156,9 +156,10 @@ async def save_task(req:Request):
                 raise HTTPException(status_code=500, detail="code_str or code_ser is required")
             task.save_task(task_input=task_input, task_output=task_output, code_str = code_str, code_ser = code_ser, resources=resources)
 
-            for _,input in task_input.items():
-                if(input['input_schema']=='from_task'):
-                    source_task_id = input['value'].split('.')[0]
+            # 修复：正确遍历 input_params
+            for _, input_param in task_input.get("input_params", {}).items():
+                if input_param.get('input_schema') == 'from_task':
+                    source_task_id = input_param['value'].split('.')[0]
                     target_task_id = task_id
                     workflow.add_edge(source_task_id, target_task_id)
         else:

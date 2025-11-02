@@ -75,11 +75,10 @@ task1 = workflow.add_task(
 # 添加用户自定义任务2（上传任务），引用task1的输出
 task2 = workflow.add_task(
     user_task2,
-    inputs={"task2_input": task1.outputs["task1_output"]}  # 直接引用task1的输出
+    inputs={"task2_input": task1.outputs["task1_output"]}  # 直接引用task1的输出，会自动添加边
 )
 
-# 添加任务依赖关系
-workflow.add_edge(task1, task2)
+# 不需要手动 add_edge，引用输出时会自动建立依赖关系
 
 # 运行工作流
 workflow.run()

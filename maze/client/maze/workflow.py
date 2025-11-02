@@ -118,8 +118,8 @@ class MaWorkflow:
         # 3. 构建输出参数配置
         task_output = self._build_task_output(metadata)
         
-        # 4. 保存任务配置
-        save_url = f"{self.server_url}/save_task"
+        # 4. 保存任务配置（使用新接口自动添加边）
+        save_url = f"{self.server_url}/save_task_and_add_edge"
         save_data = {
             'workflow_id': self.workflow_id,
             'task_id': task_id,
