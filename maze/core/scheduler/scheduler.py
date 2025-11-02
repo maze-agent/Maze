@@ -170,6 +170,7 @@ class Scheduler():
                 if len(running_task_refs) == 0:
                     continue
                 
+                
                 finished_task_refs, _ = ray.wait(running_task_refs, num_returns=len(running_task_refs),timeout=0)
                 if len(finished_task_refs) == 0:
                     continue
@@ -202,19 +203,19 @@ class Scheduler():
                         if len(canceld_tasks) > 0:
                             self.resource_manager.release_resource(tasks=canceld_tasks)
                             self.workflow_manager.clear_workflow(finished_task.workflow_id)
-                            
-                            #Send message to main
-                            message: dict[str, str] = {
-                                "type":"task_exception",
-                                "data":{
-                                    "workflow_id":finished_task.workflow_id,
-                                    "task_id":finished_task.task_id,
-                                    "result":f"ray.exceptions.RayTaskError:{str(e)}"
-                                }
-                                
+
+                        #Send message to main
+                        message = {
+                            "type":"task_exception",
+                            "data":{
+                                "workflow_id":finished_task.workflow_id,
+                                "task_id":finished_task.task_id,
+                                "result":f"ray.exceptions.RayTaskError:{str(e)}"
                             }
-                            serialized_message = json.dumps(message).encode('utf-8')
-                            socket_to_main.send(serialized_message)
+                            
+                        }
+                        serialized_message = json.dumps(message).encode('utf-8')
+                        socket_to_main.send(serialized_message)
                     except ray.exceptions.TaskCancelledError as e:
                         pass
                     except (ray.exceptions.NodeDiedError, ray.exceptions.ObjectLostError, ray.exceptions.TaskUnschedulableError) as e:

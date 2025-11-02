@@ -165,7 +165,7 @@ class MaPath:
                                     serialized: bytes = json.dumps(message).encode('utf-8')
                                     self.socket_to_receive.send(serialized)
 
-                    elif(message_type=="start_task"):
+                    elif(message_type=="start_task" or message_type=="task_exception"):
                         if message_data["task_id"] in self.async_que: #langgraph task
                             que: Queue[Any] = self.async_que[message_data['task_id']]
                             await que.put(message)
@@ -175,7 +175,7 @@ class MaPath:
     
                             que: Queue[Any] = self.async_que[message_data['workflow_id']]
                             await que.put(message)
-  
+               
 
             except Exception as e:
                 print(f"Error in monitor: {e}")

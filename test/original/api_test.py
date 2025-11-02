@@ -1,4 +1,3 @@
-Maze/test/test.shfrom typing import Any
 import requests
 import websocket
  
