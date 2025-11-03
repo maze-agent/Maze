@@ -69,9 +69,7 @@ class Scheduler():
               
                 message_type = message["type"]
                 message_data = message["data"]
-                
                 if(message_type =="run_task"):
-                    
                     if(message_data["task_type"]==TaskType.CODE.value):
                         task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
                                                                 task_id=message_data['task_id'],
@@ -231,13 +229,11 @@ class Scheduler():
             ]
             result = subprocess.run(
                 command,
-                check=True,                    # 如果命令失败（返回码非0），抛出异常
-                text=True,                     # 以字符串形式处理输出
-                capture_output=True,           # 捕获 stdout 和 stderr
+                check=True,                   
+                text=True,
+                capture_output=True,
             )
-            # print("Ray 头节点启动成功！")
-            # print("标准输出:\n", result.stdout)
-            # print("标准错误:\n", result.stderr)
+           
             
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to start Ray: {result.stderr}")

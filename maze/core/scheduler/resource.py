@@ -76,12 +76,17 @@ class ResourceManager():
         self.head_node_ip = ray.util.get_node_ip_address()
         head_node_resource = self._get_head_node_resource()
 
-        self.nodes[self.head_node_id] = Node(self.head_node_id,self.head_node_ip,head_node_resource,head_node_resource)
-    
+      
+        while True:
+            for node in ray.nodes():
+                if node["NodeID"] == self.head_node_id and node["Alive"]:     
+                    self.nodes[self.head_node_id] = Node(self.head_node_id,self.head_node_ip,head_node_resource,head_node_resource)
+                    return 
+                    
     def check_dead_node(self):
         nodes = ray.nodes()
         for node in nodes:
-            if not node["Alive"] and node["NodeID"] in self.nodes:
+            if node["NodeID"] in self.nodes and not node["Alive"]:
                 del self.nodes[node["NodeID"]]
                 
     def show_all_node_resource(self):
@@ -91,7 +96,6 @@ class ResourceManager():
         cur_time = time.time()
         if cur_time - self.last_time >= self.interval:
             self.last_time = cur_time
-            print( cur_time - self.last_time)
 
             for node_id,node in self.nodes.items():
                 print(node_id,node.available_resources)
@@ -110,7 +114,7 @@ class ResourceManager():
         cpu_mem_need = task_need_resources["cpu_mem"]
         gpu_need = task_need_resources["gpu"]
         gpu_mem_need = task_need_resources["gpu_mem"]
-        assert(gpu_need <= 1) #暂时只支持单GPU
+        assert(gpu_need <= 1)
 
         for node_id,node in self.nodes.items():
             if node.available_resources['cpu'] < cpu_need or node.available_resources['cpu_mem'] < cpu_mem_need:
