@@ -46,6 +46,22 @@ class LanggraphClient():
                 except Exception as e:
                     raise RuntimeError(f"Failed to execute remote task: {str(e)}")
 
+            for k, v in resources.items():
+                if k not in ["cpu", "gpu", "cpu_mem", "gpu_mem"]:
+                    raise ValueError(f"Invalid resource type: {k}")
+            for k in resources.keys():
+                if not isinstance(resources[k], (int, float)):
+                    raise ValueError(f"Resource values must be numbers, but got {type(resources[k])}")
+            #set default value
+            if "cpu" not in resources:
+                resources["cpu"] = 1
+            if "gpu" not in resources:
+                resources["gpu"] = 0
+            if "cpu_mem" not in resources:
+                resources["cpu_mem"] = 0
+            if "gpu_mem" not in resources:
+                resources["gpu_mem"] = 0
+                
             data = self._send_post_request(f"http://{self.maze_server_addr}/add_langgraph_task",data={
                 "workflow_id": self.workflow_id,
                 "task_type": "langgraph",

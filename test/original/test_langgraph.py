@@ -16,14 +16,18 @@ class GraphState(TypedDict):
 @client.task(resources={"cpu": 1,"gpu": 1,"cpu_mem": 31,"gpu_mem": 12})
 def cpu_tool_1(state: GraphState) -> GraphState:
     result = "CPU Tool 1 done"
+    import time
+    time.sleep(5)
     return {"result1":result}
 
 def cpu_tool_2(state: GraphState) -> GraphState:
     result = "CPU Tool 2 done"
+    print("CPU Tool 2 done")
     return {"result2":result}
 
 def cpu_tool_3(state: GraphState) -> GraphState:
     result = "CPU Tool 3 done"
+    print("CPU Tool 3 done")
     return {"result3":result}
 
 def start_node(state: GraphState) -> GraphState:
