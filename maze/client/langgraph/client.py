@@ -73,7 +73,7 @@ class LanggraphClient():
             except Exception as e:
                 raise RuntimeError(f"Failed to execute remote task: {str(e)}")
 
-        print(f"Adding task: {func}")
+       
         data = self._send_post_request(f"http://{self.maze_server_addr}/add_langgraph_task",data={
             "workflow_id": self.workflow_id,
             "task_type": "langgraph",
