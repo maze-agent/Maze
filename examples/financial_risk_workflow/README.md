@@ -1,222 +1,218 @@
-# 金融风险评估工作流 - LanggraphClient
+# Financial Risk Assessment Workflow - LanggraphClient
 
-## 🎯 整体业务场景
+## 🎯 Overall Business Scenario
 
-这是一个**投资组合风险管理系统**，模拟了银行或资产管理公司的风险评估流程。
+This is a **portfolio risk management system** that simulates the risk assessment process of banks or asset management companies.
 
-**实际业务流程：**
-假设你是一家资产管理公司的风险管理经理，客户委托你管理1亿元投资组合（60%股票 + 30%债券 + 10%现金）。在投资前，你需要评估这个组合可能面临的各种风险，给客户提供一份专业的风险评估报告。
+**Actual Business Process:**
+Imagine you are a risk management manager at an asset management company, and a client entrusts you with managing a 100 million yuan investment portfolio (60% stocks + 30% bonds + 10% cash). Before investing, you need to assess the various risks this portfolio may face and provide the client with a professional risk assessment report.
 
-## 📊 工作流执行流程
+## 📊 Workflow Execution Flow
 
 ```
-1. 投资组合描述输入
+1. Investment Portfolio Description Input
    ↓
-2. [LLM智能分析] 提取关键参数
+2. [LLM Intelligent Analysis] Extract Key Parameters
    ↓
-3. 并行执行三个风险评估 (同时进行，节省时间)
-   ├─ [市场风险] 计算可能的市场损失
-   ├─ [信用风险] 评估违约风险
-   └─ [流动性风险] 测试变现能力
+3. Execute Three Risk Assessments in Parallel (simultaneously to save time)
+   ├─ [Market Risk] Calculate Potential Market Losses
+   ├─ [Credit Risk] Assess Default Risk
+   └─ [Liquidity Risk] Test Liquidation Capability
    ↓
-4. [汇总报告] 生成综合风险评估
+4. [Summary Report] Generate Comprehensive Risk Assessment
 ```
 
-## 🔍 每个函数的详细作用
+## 🔍 Detailed Function Description
 
-### 1. llm_analysis_node - LLM 智能分析节点
+### 1. llm_analysis_node - LLM Intelligent Analysis Node
 
-**业务作用：** 就像一个经验丰富的金融分析师，阅读投资组合的文字描述，自动提取关键数据。
+**Business Purpose:** Acts like an experienced financial analyst, reading text descriptions of investment portfolios and automatically extracting key data.
 
-**输入：**
+**Input:**
 ```
-"混合型投资组合，总规模1亿元人民币，
-包含60%股票、30%债券、10%现金，
-投资期限1年，风险偏好为中等。"
+"Mixed investment portfolio with a total scale of 100 million yuan,
+containing 60% stocks, 30% bonds, 10% cash,
+investment period of 1 year, with moderate risk preference."
 ```
 
-**LLM做什么：**
-- 理解这段自然语言描述
-- 提取关键参数：总价值、波动率、置信水平、时间跨度等
-- 将文字转换为可计算的数值参数
+**What LLM Does:**
+- Understands this natural language description
+- Extracts key parameters: total value, volatility, confidence level, time horizon, etc.
+- Converts text into computable numerical parameters
 
-**输出：**
+**Output:**
 ```python
 {
-    "portfolio_value": 10000,      # 1亿元
-    "volatility": 0.25,            # 波动率25%
-    "confidence_level": 0.95,      # 95%置信度
-    "num_simulations": 500000,     # 模拟50万次
-    "time_horizon": 252            # 1年(252个交易日)
+    "portfolio_value": 10000,      # 100 million yuan
+    "volatility": 0.25,            # 25% volatility
+    "confidence_level": 0.95,      # 95% confidence level
+    "num_simulations": 500000,     # 500,000 simulations
+    "time_horizon": 252            # 1 year (252 trading days)
 }
 ```
 
-**为什么需要LLM？** 
-在实际业务中，客户或业务部门提供的是文字描述，不是结构化数据。LLM可以自动理解并提取，省去人工录入的工作。
+**Why LLM is Needed?** 
+In actual business, clients or business departments provide text descriptions, not structured data. LLM can automatically understand and extract this information, eliminating manual data entry work.
 
 ---
 
-### 2. market_risk_var_tool - 市场风险评估工具
+### 2. market_risk_var_tool - Market Risk Assessment Tool
 
-**业务作用：** 回答"如果市场下跌，最坏情况下我会损失多少钱？"
+**Business Purpose:** Answers "If the market declines, how much money will I lose in the worst case?"
 
-**使用算法：** 蒙特卡洛模拟 + VaR (Value at Risk) 计算
+**Algorithm Used:** Monte Carlo Simulation + VaR (Value at Risk) Calculation
 
-**具体做什么：**
-1. **模拟50万条未来价格路径**
-   - 每条路径代表一种可能的市场走势
-   - 使用几何布朗运动模型（金融市场标准模型）
-   - 考虑波动率：25%（市场每天的价格波动）
+**What It Does:**
+1. **Simulate 500,000 Future Price Paths**
+   - Each path represents a possible market trend
+   - Uses Geometric Brownian Motion model (financial market standard model)
+   - Considers volatility: 25% (daily price fluctuation of the market)
 
-2. **计算VaR值**
-   - 在95%置信水平下，找出最差的5%情况
-   - 这5%情况下的平均损失就是VaR
+2. **Calculate VaR Value**
+   - At 95% confidence level, find the worst 5% scenarios
+   - The average loss in these 5% scenarios is the VaR
 
-**实际业务意义：**
+**Actual Business Meaning:**
 ```
-输出结果示例：
-"在95%的概率下，1年内最大损失不会超过2500万元"
+Example Output:
+"With 95% probability, the maximum loss within 1 year will not exceed 25 million yuan"
 ```
-这告诉客户：正常情况下（95%概率），损失不会超过这个数。但还有5%的极端情况可能损失更多。
-
+This tells the client: under normal circumstances (95% probability), the loss will not exceed this amount. However, there is still a 5% chance of extreme cases with greater losses.
 
 ---
 
-### 3. credit_risk_monte_carlo_tool - 信用风险评估工具
+### 3. credit_risk_monte_carlo_tool - Credit Risk Assessment Tool
 
-**业务作用：** 回答"如果债券发行方违约，我会损失多少？"
+**Business Purpose:** Answers "If bond issuers default, how much will I lose?"
 
-**业务背景：** 
-投资组合中有30%是企业债券。企业可能破产违约，导致本金损失。
+**Business Background:** 
+The investment portfolio contains 30% corporate bonds. Companies may go bankrupt and default, resulting in principal loss.
 
-**具体做什么：**
-1. **假设100个债券发行人**
-   - 每个发行人有2%的违约概率
-   - 违约后损失60%的本金
+**What It Does:**
+1. **Assume 100 Bond Issuers**
+   - Each issuer has a 2% default probability
+   - 60% of principal is lost upon default
 
-2. **模拟50万次违约场景**
-   - 每次随机决定哪些企业违约
-   - 计算每种情况下的总损失
+2. **Simulate 500,000 Default Scenarios**
+   - Each time randomly determines which companies default
+   - Calculates total loss in each scenario
 
-3. **统计分析**
-   - 预期损失：平均情况下损失多少
-   - 95% CVaR：95%概率下的最大损失
-   - 99% CVaR：99%概率下的最大损失
+3. **Statistical Analysis**
+   - Expected Loss: average loss
+   - 95% CVaR: maximum loss at 95% probability
+   - 99% CVaR: maximum loss at 99% probability
 
-**实际业务意义：**
+**Actual Business Meaning:**
 ```
-输出结果示例：
-"预期损失：120万元
-95%置信度下最大损失：350万元
-99%置信度下最大损失：520万元"
+Example Output:
+"Expected Loss: 1.2 million yuan
+Maximum Loss at 95% Confidence: 3.5 million yuan
+Maximum Loss at 99% Confidence: 5.2 million yuan"
 ```
 
-这帮助客户了解：平均会损失120万，但极端情况可能损失500多万。
+This helps clients understand: on average, the loss will be 1.2 million, but in extreme cases, it could exceed 5 million.
 
 ---
 
-### 4. liquidity_risk_stress_test_tool - 流动性风险评估工具
+### 4. liquidity_risk_stress_test_tool - Liquidity Risk Assessment Tool
 
-**业务作用：** 回答"如果突然需要变现，会损失多少？"
+**Business Purpose:** Answers "If liquidation is suddenly needed, how much will be lost?"
 
-**业务背景：**
-客户可能突然需要赎回资金（比如紧急用钱）。此时需要快速卖出资产，但市场可能没有足够买家，导致被迫降价出售。
+**Business Background:**
+Clients may suddenly need to redeem funds (e.g., urgent need for money). At this time, assets need to be sold quickly, but the market may not have enough buyers, forcing discounted sales.
 
-**具体做什么：**
-1. **模拟1000个压力场景**
-   - 不同的赎回压力（客户要拿回多少钱）
-   - 不同的市场流动性状况（买家多不多）
+**What It Does:**
+1. **Simulate 1,000 Stress Scenarios**
+   - Different redemption pressures (how much money clients want back)
+   - Different market liquidity conditions (availability of buyers)
 
-2. **每个场景模拟500次** (共50万次)
-   - 赎回率：客户要拿回多少比例的钱
-   - 变现折价：紧急卖出时被迫降价多少（5%-30%）
-   - 现金储备：手上有多少现金可以直接给客户
+2. **Simulate 500 Times Per Scenario** (500,000 total)
+   - Redemption rate: what percentage of money clients want back
+   - Liquidation discount: how much discount is forced during urgent sales (5%-30%)
+   - Cash reserves: how much cash is available to give clients directly
 
-3. **计算流动性损失**
-   - 如果现金不够，需要卖资产
-   - 卖资产时的折价损失
+3. **Calculate Liquidity Loss**
+   - If cash is insufficient, assets need to be sold
+   - Discount loss when selling assets
 
-**实际业务意义：**
+**Actual Business Meaning:**
 ```
-输出结果示例：
-"平均流动性损失：180万元
-最大流动性损失：850万元
-95%分位数：420万元"
+Example Output:
+"Average Liquidity Loss: 1.8 million yuan
+Maximum Liquidity Loss: 8.5 million yuan
+95th Percentile: 4.2 million yuan"
 ```
 
-这告诉客户：如果需要紧急赎回，平均损失180万，最坏可能损失850万。
+This tells clients: if urgent redemption is needed, the average loss is 1.8 million, with a worst-case scenario of 8.5 million.
 
 ---
 
-### 5. generate_report_node - 综合报告生成节点
+### 5. generate_report_node - Comprehensive Report Generation Node
 
-**业务作用：** 把三个维度的风险评估结果整合成一份完整报告
+**Business Purpose:** Integrates the three-dimensional risk assessment results into a complete report
 
-**具体做什么：**
-- 收集前面三个工具的评估结果
-- 按格式排版
-- 输出一份专业的风险评估报告
+**What It Does:**
+- Collects evaluation results from the three previous tools
+- Formats according to specifications
+- Outputs a professional risk assessment report
 
-**输出示例：**
+**Output Example:**
 ```
 ====================================
-投资组合综合风险评估报告
+Investment Portfolio Comprehensive Risk Assessment Report
 ====================================
 
-【风险维度 1】市场风险
-- VaR值：2500万元
-- 最大潜在损失占比：25%
+【Risk Dimension 1】Market Risk
+- VaR Value: 25 million yuan
+- Maximum Potential Loss Ratio: 25%
 
-【风险维度 2】信用风险
-- 预期损失：120万元
-- 95% CVaR：350万元
+【Risk Dimension 2】Credit Risk
+- Expected Loss: 1.2 million yuan
+- 95% CVaR: 3.5 million yuan
 
-【风险维度 3】流动性风险
-- 平均流动性损失：180万元
-- 最大流动性损失：850万元
+【Risk Dimension 3】Liquidity Risk
+- Average Liquidity Loss: 1.8 million yuan
+- Maximum Liquidity Loss: 8.5 million yuan
 ====================================
 ```
 
+## 🎓 Workflow Summary
 
-## 🎓 工作流总结
+This workflow simulates a **complete investment portfolio risk management process**:
 
-这个工作流模拟了一个**完整的投资组合风险管理流程**：
+1. **Natural Language Understanding** (LLM) → Extract Parameters
+2. **Parallel Risk Calculation** (3 Tools) → Multi-dimensional Assessment  
+3. **Report Generation** → Professional Report for Clients
 
-1. **自然语言理解** (LLM) → 提取参数
-2. **并行风险计算** (3个工具) → 多维度评估  
-3. **报告生成** → 给客户看的专业报告
+In real business, such a system can:
+- Automatically process client investment intentions
+- Quickly assess various risks
+- Generate reports compliant with regulatory requirements
+- Help investment managers make decisions
 
-在真实业务中，这样的系统可以：
-- 自动处理客户的投资意向
-- 快速评估各类风险
-- 生成符合监管要求的报告
-- 帮助投资经理做决策
+## Execution Process
 
-## 运行流程
-
-
-### 1. 安装依赖
+### 1. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 2. 配置API Key
+## 2. Configure API Key
 
-设置通义千问 API Key：
+Set Tongyi Qianwen API Key:
 
 ```bash
 export DASHSCOPE_API_KEY="your_api_key_here"
 ```
 
-## 3.启动Maze
-启动Maze Head（如果有多台机器，可启动Maze worker）
+## 3. Start Maze
+Start Maze Head (if you have multiple machines, you can start Maze workers)
 ```bash
 mazea start --head 
 ```
-## 4.运行main.py
+## 4. Run main.py
 
 ```bash
 python main.py
 ```
- 
