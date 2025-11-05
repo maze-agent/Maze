@@ -44,11 +44,11 @@
    Launch Maze Head.
 
    ```
-   mazea start --head --port HEAD_PORT
+   maze start --head --port HEAD_PORT
    ```
    If there are multiple machines, you can start multiple Maze workers.
    ```
-   mazea start --worker --addr HEAD_IP:HEAD_PORT
+   maze start --worker --addr HEAD_IP:HEAD_PORT
    ```
 ## 3. Example
 
