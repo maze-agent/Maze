@@ -33,7 +33,7 @@ dev = [
 ]
 
 [project.scripts]
-mazea = "maze.cli.cli:main"
+maze = "maze.cli.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "."

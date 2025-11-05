@@ -52,7 +52,45 @@
    ```
 ## 3. Example
 
-```
+```python
+from typing import Any
+from maze import MaClient,task
+
+#1.Define your task functions using the @task decorator
+@task(
+    inputs=["text"],
+    outputs=["result"],
+)
+def my_task(params):
+    text: Any = params.get("text")
+    return {"result": f"Hello {text}"}
+
+#2.Create the maze client
+client = MaClient("http://localhost:8000")
+
+#3.Create the workflow
+workflow = client.create_workflow()
+task1 = workflow.add_task(
+    my_task,
+    inputs={"text": "Maze"}
+)
+
+#4.Submit the workflow and get results
+workflow.run() 
+for message in workflow.get_results():
+    msg_type = message.get("type")
+    msg_data = message.get("data", {})
+
+    if msg_type == "start_task":
+        print(f"▶ Task started: {msg_data.get('task_id')}")
+
+    elif msg_type == "finish_task":
+        print(f"✓ Task completed: {msg_data.get('task_id')}")
+        print(f"  Result: {msg_data.get('result')}\n")
+
+    elif msg_type == "finish_workflow":
+        print("🎉 Workflow completed!")
+        break
    
 ```
 <br>
