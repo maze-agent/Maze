@@ -6,22 +6,14 @@ import cloudpickle
 
 @ray.remote(max_retries=0)
 def remote_task_runner(code_str:str=None, code_ser:str=None, task_input_data:dict=None, cuda_visible_devices:str|None=None):
-    """
-    远程任务执行器，支持两种方式：
-    1. code_str: 字符串代码（旧方式，要求 import 在函数内部）
-    2. code_ser: 序列化的函数（新方式，支持外部 import）
-    """
     if cuda_visible_devices:
         import os
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     
-    # 优先使用 code_ser（新方式）
     if code_ser is not None:
-        # 使用 cloudpickle 反序列化函数并执行
         func = cloudpickle.loads(base64.b64decode(code_ser))
         output = func(task_input_data)
         return output
-    # 兼容旧方式
     elif code_str is not None:
         runner = Runner(code_str, task_input_data)
         output = runner.run()
@@ -62,32 +54,24 @@ class Runner():
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
                 func = node
-                break #提取顶层函数
+                break
         return func
 
     def run(self):
-        # 提取函数
         func_node = self._extract_function()
-         
-        # 提取导入语句
         import_nodes = self._extract_imports()
-        
-        # 创建一个命名空间来执行代码
         namespace = {}
         
-        # 执行导入语句
+    
         for imp in import_nodes:
-            # 将Import/ImportFrom节点编译成可执行的代码对象
             module = ast.Module(body=[imp], type_ignores=[])
             code = compile(module, '<string>', 'exec')
             exec(code, namespace)
         
-        # 将FunctionDef节点编译成可执行的代码对象
         module = ast.Module(body=[func_node], type_ignores=[])
         code = compile(module, '<string>', 'exec')
         exec(code, namespace)
         
-        # 获取函数名并调用
         func_name = func_node.name
         if func_name in namespace:
             return namespace[func_name](self.task_input_data)

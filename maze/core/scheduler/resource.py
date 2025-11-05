@@ -126,7 +126,6 @@ class ResourceManager():
                     if gpu_resource['gpu_mem'] < gpu_mem_need or gpu_resource['gpu_num'] < gpu_need:
                         continue
                     
-                    #更新资源
                     self.nodes[node_id].available_resources['cpu'] -= cpu_need
                     self.nodes[node_id].available_resources['cpu_mem'] -= cpu_mem_need
                     self.nodes[node_id].available_resources['gpu_resource'][gpu_id]['gpu_mem'] -= gpu_mem_need
@@ -136,7 +135,6 @@ class ResourceManager():
         
             #cpu task
             else: 
-                #更新资源
                 self.nodes[node_id].available_resources['cpu'] -= cpu_need
                 self.nodes[node_id].available_resources['cpu_mem'] -= cpu_mem_need
                 

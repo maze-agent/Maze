@@ -18,7 +18,6 @@ async def _async_start_head(port: int, ray_head_port: int, playground: bool = Fa
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
 
-    # 启动 Playground（如果需要）
     playground_processes = []
     if playground:
         playground_processes = start_playground()
@@ -38,10 +37,8 @@ async def _async_start_head(port: int, ray_head_port: int, playground: bool = Fa
             stop_playground(playground_processes)
 
 def start_playground():
-    """启动 Playground 前后端"""
     processes = []
     
-    # 获取项目根目录
     project_root = Path(__file__).parent.parent.parent
     backend_dir = project_root / "web" / "maze_playground" / "backend"
     frontend_dir = project_root / "web" / "maze_playground" / "frontend"
@@ -50,7 +47,6 @@ def start_playground():
     print("🎮 Starting Maze Playground...")
     print("="*60)
     
-    # 启动后端
     if backend_dir.exists():
         print("🔧 starting playground backend (http://localhost:3001)...")
         try:
@@ -62,16 +58,16 @@ def start_playground():
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
             processes.append(('backend', backend_process))
-            time.sleep(2)  # 等待后端启动
+            time.sleep(2) 
             print("✅ Playground backend started")
         except Exception as e:
             print(f"❌ Failed to start backend: {e}")
     
-    # 启动前端
+
     if frontend_dir.exists():
         print("🎨 starting playground frontend (http://localhost:5173)...")
         try:
-            # Windows 使用 npm.cmd，其他系统使用 npm
+      
             npm_cmd = "npm.cmd" if sys.platform == 'win32' else "npm"
             frontend_process = subprocess.Popen(
                 [npm_cmd, "run", "dev"],
@@ -81,7 +77,7 @@ def start_playground():
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
             processes.append(('frontend', frontend_process))
-            time.sleep(3)  # 等待前端启动
+            time.sleep(3) 
             print("✅ Playground frontend started")
         except Exception as e:
             print(f"❌ Failed to start frontend: {e}")
@@ -98,16 +94,15 @@ def start_playground():
     return processes
 
 def stop_playground(processes):
-    """停止 Playground 进程"""
     print("\n🛑 shutting down Playground...")
     for name, process in processes:
         try:
             if sys.platform == 'win32':
-                # Windows 使用 taskkill
+               
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], 
                              capture_output=True)
             else:
-                # Unix 系统使用 SIGTERM
+                
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             print(f"✅ {name} stopped")
         except Exception as e:
@@ -166,7 +161,7 @@ def main():
             if args.ray_head_port is None:
                 parser.error("--ray-head-port is required when using --head")
             
-            # 检查 playground 参数
+           
             if hasattr(args, 'playground') and args.playground:
                 start_head(args.port, args.ray_head_port, playground=True)
             else:

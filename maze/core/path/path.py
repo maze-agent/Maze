@@ -48,7 +48,7 @@ class MaPath:
   
     def get_workflow_tasks(self,workflow_id:str):
         """
-        获取工作流中的所有任务，返回任务列表（包含id和name）
+        Get all tasks in a workflow.
         """
         if workflow_id not in self.workflows:
             return []
@@ -56,7 +56,7 @@ class MaPath:
         workflow = self.workflows[workflow_id]
         tasks = []
         
-        # 遍历工作流中的所有任务
+       
         for task_id, task in workflow.tasks.items():
             tasks.append({
                 "id": task_id,
@@ -198,11 +198,9 @@ class MaPath:
             if data["type"]=="finish_task":
                 count += 1
                 if(count == total_task_num):
-                    # 发送工作流完成消息
                     finish_message = {"type":"finish_workflow","data":{"workflow_id":workflow_id}}
                     await websocket.send_json(finish_message)
                     
-                    # 发送清理消息
                     message = {"type":"clear_workflow","data":{"workflow_id":workflow_id}}
                     serialized: bytes = json.dumps(message).encode('utf-8')
                     self.socket_to_receive.send(serialized)

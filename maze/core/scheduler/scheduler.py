@@ -44,18 +44,15 @@ class Scheduler():
         ]
         result = subprocess.run(
             command,
-            check=True,                    # 如果命令失败（返回码非0），抛出异常
-            text=True,                     # 以字符串形式处理输出
-            capture_output=True,           # 捕获 stdout 和 stderr
+            check=True,                   
+            text=True,                    
+            capture_output=True,      
         )
-        # print("Ray 关闭成功！")
-        # print("标准输出:\n", result.stdout)
-        # print("标准错误:\n", result.stderr)
+      
         os._exit(1)
     
     def _receive_thread(self,port1:int):
-        print("====_receive_thread======")
-        
+   
         assert(self.context is not None)
         socket_from_main = self.context.socket(zmq.ROUTER)
         socket_from_main.bind(f"tcp://127.0.0.1:{port1}")
@@ -112,7 +109,6 @@ class Scheduler():
             self._cleanup()
      
     def _submit_thread(self,port2:int):
-        print("====_submit_thread======")
         socket_to_main = self.context.socket(zmq.DEALER)
         socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
          
@@ -153,7 +149,6 @@ class Scheduler():
                 time.sleep(1)
 
     def _supervisor_thread(self, port2:int):
-        print("====_supervisor_thread======")
         socket_to_main = self.context.socket(zmq.DEALER)
         socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
 

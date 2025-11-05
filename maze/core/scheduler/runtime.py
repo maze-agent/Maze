@@ -29,7 +29,7 @@ class TaskRuntime():
         self.task_output: Dict[Any, Any] = task_output
         self.resources: Dict[str, Any] = resources
         self.code_str: str = code_str
-        self.code_ser: str = code_ser  # 添加序列化代码支持
+        self.code_ser: str = code_ser 
 
         self.object_ref = None
         self.result: None|Dict[Any, Any] = None

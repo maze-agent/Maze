@@ -52,7 +52,7 @@ class Workflow:
         """
         if task_id in self.tasks:
             del self.tasks[task_id]
-        self.graph.remove_node(task_id)  # 移除节点及其所有边
+        self.graph.remove_node(task_id)
 
     def get_task(self, task_id: str) -> CodeTask:
         """
@@ -107,7 +107,6 @@ class Workflow:
         for successor in self.graph.successors(task_id):
             pred_tasks = [self.tasks[p] for p in self.graph.predecessors(successor)]
             
-            # 如果所有前驱任务都已完成，则该后继任务就绪
             if all(pred.completed  for pred in pred_tasks): 
                 ready_tasks.append(self.tasks[successor])
         
