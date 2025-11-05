@@ -4,7 +4,7 @@
 <p align="center">
   <img
     src="./assets/imgs/maze_logo.jpg"
-    alt="AgentScope Logo"
+    alt="Maze Logo"
     width="200"
   />
 </p>
