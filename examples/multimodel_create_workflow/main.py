@@ -27,8 +27,7 @@
 python example/multimodal_content_generator.py
 """
 
-from maze.client.maze.client import MaClient
-from maze.client.maze.decorator import task
+from maze import MaClient, task
 import os
 
 # 输出目录配置（使用绝对路径）

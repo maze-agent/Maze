@@ -45,6 +45,37 @@ const SITE_CONFIG = {
         }
     ],
     
+    // Cookbook examples
+    cookbook: [
+        {
+            title: "🚀 Quick Start: Simple Two-Task Workflow",
+            badge: "Interactive",
+            description: "A minimal example showing how to create a workflow with two sequential tasks. Each task receives input, processes it with a timestamp, and passes the result to the next task.",
+            structure: "Task 1 → Task 2",
+            features: ["⚡ Sequential Execution", "🔗 Auto Dependencies", "📊 Resource Management"],
+            hasTypewriter: true,
+            codeFile: "simple_workflow.py"
+        },
+        {
+            title: "💰 Financial Risk Assessment Workflow",
+            badge: "Advanced",
+            description: "Multi-dimensional risk assessment combining LLM analysis with parallel Monte Carlo simulations. This example demonstrates heterogeneous resource allocation with CPU-intensive risk calculations.",
+            structure: "LLM Analysis → [Market Risk, Credit Risk, Liquidity Risk] → Report Generation",
+            features: ["🧠 LLM + Monte Carlo", "⚡ Parallel Execution", "📈 Financial Analysis"],
+            hasTypewriter: false,
+            githubUrl: "https://github.com/QinbinLi/Maze/tree/main/examples/financial_risk_workflow"
+        },
+        {
+            title: "🎨 Multimodal Creative Content Generator",
+            badge: "Advanced",
+            description: "Generate text, image, and audio content in parallel from a single description. Demonstrates GPU/CPU heterogeneous scheduling with HuggingFace models (GPT-2, Stable Diffusion, Bark TTS).",
+            structure: "Input Processing → [Text Gen (CPU), Image Gen (GPU), Audio Gen (CPU)] → HTML Report",
+            features: ["🎨 3 Modalities", "🖥️ GPU + CPU", "🤖 HuggingFace Models"],
+            hasTypewriter: false,
+            githubUrl: "https://github.com/QinbinLi/Maze/tree/main/examples/multimodel_create_workflow"
+        }
+    ],
+    
     // Architecture components
     architecture: [
         {

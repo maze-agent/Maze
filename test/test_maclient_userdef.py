@@ -6,8 +6,7 @@
 
 import pytest
 from datetime import datetime
-from maze.client.maze.client import MaClient
-from maze.client.maze.decorator import task
+from maze import MaClient, task
 
 
 # 定义用户自定义任务1

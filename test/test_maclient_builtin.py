@@ -4,7 +4,7 @@
 """
 
 import pytest
-from maze.client.maze.client import MaClient
+from maze import MaClient
 from maze.client.maze.builtin import simpleTask
 
 

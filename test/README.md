@@ -209,7 +209,7 @@ pytest test/test_simple_api.py::TestSimpleWorkflow::test_builtin_task_workflow -
 
 ```python
 import pytest
-from maze.client.maze.client import MaClient
+from maze import MaClient
 
 @pytest.fixture
 def client():
