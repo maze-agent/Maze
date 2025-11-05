@@ -55,21 +55,21 @@ def preprocess_and_enhance(params):
     """
     description = params.get("user_description")
     
-    print(f"[Task A] 处理用户输入: {description}")
+    print(f"[Task A] Processing user input: {description}")
     
-    # 为文本生成增强提示
+    # Enhance prompts for text generation
     text_prompt = f"Write a creative short story (3-4 paragraphs) about: {description}. Make it engaging and vivid."
     
-    # 为图像生成优化提示（Stable Diffusion 友好）
+    # Optimize prompts for image generation (Stable Diffusion friendly)
     image_prompt = f"{description}, highly detailed, digital art, trending on artstation, vibrant colors, 8k uhd"
     
-    # 为音频准备简短的描述文本
+    # Prepare concise text for audio synthesis
     audio_text = f"This is a story about {description}."
     
-    print(f"[Task A] ✓ 提示词增强完成")
-    print(f"  - 文本提示: {text_prompt[:50]}...")
-    print(f"  - 图像提示: {image_prompt[:50]}...")
-    print(f"  - 音频文本: {audio_text}")
+    print(f"[Task A] ✓ Prompt enhancement completed")
+    print(f"  - Text prompt: {text_prompt[:50]}...")
+    print(f"  - Image prompt: {image_prompt[:50]}...")
+    print(f"  - Audio text: {audio_text}")
     
     return {
         "enhanced_text_prompt": text_prompt,
@@ -95,19 +95,19 @@ def generate_story(params):
     """
     prompt = params.get("text_prompt")
     
-    print(f"[Task B] 开始生成文本故事...")
-    print(f"[Task B] 加载 GPT-2 Large 模型...")
+    print(f"[Task B] Starting text story generation...")
+    print(f"[Task B] Loading GPT-2 Large model...")
     
     from transformers import GPT2LMHeadModel, GPT2Tokenizer
     import torch
     
-    # 加载模型
+    # Load model
     model_name = "gpt2-large"
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     model = GPT2LMHeadModel.from_pretrained(model_name)
     model.eval()
     
-    print(f"[Task B] 模型加载完成，开始生成...")
+    print(f"[Task B] Model loaded, starting generation...")
     
     # 编码输入
     inputs = tokenizer.encode(prompt, return_tensors="pt")
@@ -132,10 +132,10 @@ def generate_story(params):
     with open(story_file, "w", encoding="utf-8") as f:
         f.write(story)
     
-    print(f"[Task B] ✓ 故事生成完成!")
-    print(f"[Task B]   故事长度: {len(story)} 字符")
-    print(f"[Task B]   已保存到: {story_file}")
-    print(f"[Task B]   预览: {story[:150]}...")
+    print(f"[Task B] ✓ Story generation completed!")
+    print(f"[Task B]   Story length: {len(story)} characters")
+    print(f"[Task B]   Saved to: {story_file}")
+    print(f"[Task B]   Preview: {story[:150]}...")
     
     return {
         "generated_story": story,
@@ -160,9 +160,9 @@ def generate_image(params):
     """
     prompt = params.get("image_prompt")
     
-    print(f"[Task C] 开始生成图像...")
-    print(f"[Task C] 提示词: {prompt}")
-    print(f"[Task C] 加载 Stable Diffusion 模型...")
+    print(f"[Task C] Starting image generation...")
+    print(f"[Task C] Prompt: {prompt}")
+    print(f"[Task C] Loading Stable Diffusion model...")
     
     from diffusers import StableDiffusionPipeline
     import torch
@@ -176,7 +176,7 @@ def generate_image(params):
     )
     pipe = pipe.to("cuda")
     
-    print(f"[Task C] 模型加载完成，开始生成图像...")
+    print(f"[Task C] Model loaded, starting image generation...")
     
     # 生成图像
     with torch.no_grad():
@@ -195,9 +195,9 @@ def generate_image(params):
     # 获取图像信息
     image_info = f"512x512, Stable Diffusion v1.5, 50 steps"
     
-    print(f"[Task C] ✓ 图像生成完成!")
-    print(f"[Task C]   尺寸: 512x512")
-    print(f"[Task C]   已保存到: {image_file}")
+    print(f"[Task C] ✓ Image generation completed!")
+    print(f"[Task C]   Size: 512x512")
+    print(f"[Task C]   Saved to: {image_file}")
     
     # 清理 GPU 内存
     del pipe
@@ -226,9 +226,9 @@ def generate_audio(params):
     """
     text = params.get("audio_text")
     
-    print(f"[Task D] 开始生成音频...")
-    print(f"[Task D] 文本: {text}")
-    print(f"[Task D] 加载 Bark TTS 模型...")
+    print(f"[Task D] Starting audio generation...")
+    print(f"[Task D] Text: {text}")
+    print(f"[Task D] Loading Bark TTS model...")
     
     from transformers import AutoProcessor, BarkModel
     import scipy.io.wavfile as wavfile
@@ -239,7 +239,7 @@ def generate_audio(params):
     model = BarkModel.from_pretrained("suno/bark-small")
     model.eval()
     
-    print(f"[Task D] 模型加载完成，开始合成语音...")
+    print(f"[Task D] Model loaded, starting speech synthesis...")
     
     # 处理输入
     inputs = processor(text, voice_preset="v2/en_speaker_6")
@@ -259,10 +259,10 @@ def generate_audio(params):
     # 计算时长
     duration = len(audio_array) / sample_rate
     
-    print(f"[Task D] ✓ 音频生成完成!")
-    print(f"[Task D]   时长: {duration:.2f} 秒")
-    print(f"[Task D]   采样率: {sample_rate} Hz")
-    print(f"[Task D]   已保存到: {audio_file}")
+    print(f"[Task D] ✓ Audio generation completed!")
+    print(f"[Task D]   Duration: {duration:.2f} seconds")
+    print(f"[Task D]   Sample rate: {sample_rate} Hz")
+    print(f"[Task D]   Saved to: {audio_file}")
     
     return {
         "audio_file_path": audio_file,
@@ -289,7 +289,7 @@ def summarize_results(params):
     image_info = params.get("image_info")
     audio_duration = params.get("audio_duration")
     
-    print(f"[Task E] 汇总所有生成内容...")
+    print(f"[Task E] Aggregating all generated content...")
     
     # 创建 HTML 展示页面
     html_content = f"""
@@ -440,7 +440,7 @@ def summarize_results(params):
 {'='*70}
 """
     
-    print(f"[Task E] ✓ 汇总完成!")
+    print(f"[Task E] ✓ Aggregation completed!")
     print(summary)
     
     return {
@@ -454,59 +454,59 @@ def summarize_results(params):
 # ============================================================================
 def main():
     print("=" * 70)
-    print("🎨 多模态创意内容生成器")
+    print("🎨 Multimodal Creative Content Generator")
     print("=" * 70)
     print()
     
-    # 用户输入
-    user_input = input("请输入您想要创作的主题 (例如: a magical forest at sunset): ").strip()
+    # User input
+    user_input = input("Enter your creative theme (e.g., a magical forest at sunset): ").strip()
     if not user_input:
         user_input = "a magical forest at sunset with glowing fireflies"
-        print(f"使用默认主题: {user_input}")
+        print(f"Using default theme: {user_input}")
     
     print()
-    print("🚀 开始创建工作流...")
+    print("🚀 Starting workflow creation...")
     print()
     
     # 1. 创建客户端
     client = MaClient("http://localhost:8000")
     
-    # 2. 创建工作流
+    # 2. Create workflow
     workflow = client.create_workflow()
-    print(f"✓ 工作流已创建: {workflow.workflow_id}")
+    print(f"✓ Workflow created: {workflow.workflow_id}")
     
-    # 3. 添加任务 A: 预处理
-    print("✓ 添加任务 A: 文本预处理和提示词增强")
+    # 3. Add Task A: Preprocessing
+    print("✓ Adding Task A: Text preprocessing and prompt enhancement")
     task_a = workflow.add_task(
         preprocess_and_enhance,
         inputs={"user_description": user_input},
-        task_name="预处理和提示词增强"
+        task_name="Preprocessing and Prompt Enhancement"
     )
     
-    # 4. 添加并行任务 B, C, D
-    print("✓ 添加任务 B: 文本故事生成 (CPU)")
+    # 4. Add parallel tasks B, C, D
+    print("✓ Adding Task B: Text story generation (CPU)")
     task_b = workflow.add_task(
         generate_story,
         inputs={"text_prompt": task_a.outputs["enhanced_text_prompt"]},
-        task_name="文本故事生成"
+        task_name="Text Story Generation"
     )
     
-    print("✓ 添加任务 C: 图像生成 (GPU)")
+    print("✓ Adding Task C: Image generation (GPU)")
     task_c = workflow.add_task(
         generate_image,
         inputs={"image_prompt": task_a.outputs["enhanced_image_prompt"]},
-        task_name="图像生成"
+        task_name="Image Generation"
     )
     
-    print("✓ 添加任务 D: 音频生成 (CPU)")
+    print("✓ Adding Task D: Audio generation (CPU)")
     task_d = workflow.add_task(
         generate_audio,
         inputs={"audio_text": task_a.outputs["audio_text"]},
-        task_name="音频生成"
+        task_name="Audio Generation"
     )
     
-    # 5. 添加任务 E: 汇总
-    print("✓ 添加任务 E: 结果汇总")
+    # 5. Add Task E: Aggregation
+    print("✓ Adding Task E: Result aggregation")
     task_e = workflow.add_task(
         summarize_results,
         inputs={
@@ -517,30 +517,30 @@ def main():
             "image_info": task_c.outputs["image_info"],
             "audio_duration": task_d.outputs["audio_duration"]
         },
-        task_name="结果汇总"
+        task_name="Result Aggregation"
     )
     
     print()
-    print("📊 工作流结构:")
-    print("    Task A (预处理)")
+    print("📊 Workflow structure:")
+    print("    Task A (Preprocessing)")
     print("       ↓")
     print("    ┌──┴──┬──────┐")
     print("    ↓     ↓      ↓")
-    print("  Task B Task C Task D  ← 并行执行")
+    print("  Task B Task C Task D  ← Parallel execution")
     print("  (CPU)  (GPU)  (CPU)")
     print("    └──┬──┴──────┘")
     print("       ↓")
-    print("    Task E (汇总)")
+    print("    Task E (Aggregation)")
     print()
     
-    # 6. 运行工作流
-    print("🚀 开始执行工作流...")
+    # 6. Run workflow
+    print("🚀 Starting workflow execution...")
     print("=" * 70)
     print()
     
     workflow.run()
     
-    # 7. 获取实时结果
+    # 7. Get real-time results
     task_count = 0
     for message in workflow.get_results(verbose=False):
         msg_type = message.get("type")
@@ -549,22 +549,22 @@ def main():
         if msg_type == "start_task":
             task_count += 1
             task_id = msg_data.get("task_id", "")[:8]
-            print(f"⏳ [{task_count}/5] 任务开始: {task_id}...")
+            print(f"⏳ [{task_count}/5] Task started: {task_id}...")
             
         elif msg_type == "finish_task":
             task_id = msg_data.get("task_id", "")[:8]
-            print(f"✅ 任务完成: {task_id}")
+            print(f"✅ Task completed: {task_id}")
             
         elif msg_type == "finish_workflow":
             print()
             print("=" * 70)
-            print("🎉 工作流执行完成!")
+            print("🎉 Workflow execution completed!")
             print("=" * 70)
             break
     
     print()
-    print("📁 所有文件已保存到:", OUTPUT_DIR)
-    print("🌐 打开 result.html 查看完整结果")
+    print("📁 All files saved to:", OUTPUT_DIR)
+    print("🌐 Open result.html to view complete results")
     print()
 
 
@@ -572,9 +572,9 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断执行")
+        print("\n\n⚠️  User interrupted execution")
     except Exception as e:
-        print(f"\n\n❌ 执行出错: {e}")
+        print(f"\n\n❌ Execution error: {e}")
         import traceback
         traceback.print_exc()
 

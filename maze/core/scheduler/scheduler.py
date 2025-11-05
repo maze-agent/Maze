@@ -220,7 +220,7 @@ class Scheduler():
                         #The node of task running is dead,send the task back to the queue to retry.
                         self.task_queue.put(finished_task)
                     except Exception as e:
-                        print(f"发生异常{type(e)}：{e}")
+                        print(f"Exception occurred {type(e)}: {e}")
                  
     def _launch_ray_head(self):
         try:
@@ -239,7 +239,7 @@ class Scheduler():
                 raise RuntimeError(f"Failed to start Ray: {result.stderr}")
 
         except Exception as e:
-            print(f"发生异常：{e}")
+            print(f"Exception occurred: {e}")
 
     def start(self): 
         self.context = zmq.Context() #zmq context

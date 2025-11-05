@@ -305,13 +305,13 @@ class ServerWorkflow:
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success":
-                    print(f"✅ Agent '{self.name}' 已注册到 server")
+                    print(f"✅ Agent '{self.name}' registered to server")
                 else:
-                    print(f"⚠️  Agent 注册失败: {data.get('message')}")
+                    print(f"⚠️  Agent registration failed: {data.get('message')}")
             else:
-                print(f"⚠️  Agent 注册请求失败: {response.status_code}")
+                print(f"⚠️  Agent registration request failed: {response.status_code}")
         except Exception as e:
-            print(f"⚠️  Agent 注册异常（但不影响服务启动）: {e}")
+            print(f"⚠️  Agent registration exception (but service startup is not affected): {e}")
     
     def deploy(self, host: str = "0.0.0.0", **kwargs):
         """
@@ -372,12 +372,12 @@ class ServerWorkflow:
                 "total_runs": len(self.run_results)
             }
         
-        # 启动服务
-        print(f"🚀 部署 {self.name} Agent 服务...")
-        print(f"   地址: http://{host}:{self.agent_port}")
-        print(f"   运行接口: POST http://{host}:{self.agent_port}/{self.name}/run")
-        print(f"   结果接口: GET http://{host}:{self.agent_port}/{self.name}/result/{{run_id}}")
-        print(f"   信息接口: GET http://{host}:{self.agent_port}/{self.name}/info")
+        # Start service
+        print(f"🚀 Deploying {self.name} Agent service...")
+        print(f"   Address: http://{host}:{self.agent_port}")
+        print(f"   Run endpoint: POST http://{host}:{self.agent_port}/{self.name}/run")
+        print(f"   Result endpoint: GET http://{host}:{self.agent_port}/{self.name}/result/{{run_id}}")
+        print(f"   Info endpoint: GET http://{host}:{self.agent_port}/{self.name}/info")
         
         # 阻塞式运行（按 Ctrl+C 停止）
         uvicorn.run(self.app, host=host, port=self.agent_port, **kwargs)

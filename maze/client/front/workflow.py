@@ -382,7 +382,7 @@ class MaWorkflow:
             msg_data = json.loads(message)
             messages.append(msg_data)
             if verbose:
-                print(f"收到消息: {msg_data}", file=sys.stderr)
+                print(f"Received message: {msg_data}", file=sys.stderr)
         
         def on_error(ws, error):
             nonlocal exception_occurred
@@ -396,15 +396,15 @@ class MaWorkflow:
                     pass
             exception_occurred = True
             if verbose:
-                print(f"WebSocket错误: {error}", file=sys.stderr)
+                print(f"WebSocket error: {error}", file=sys.stderr)
         
         def on_close(ws, close_status_code, close_msg):
             if verbose:
-                print("WebSocket连接已关闭", file=sys.stderr)
+                print("WebSocket connection closed", file=sys.stderr)
         
         def on_open(ws):
             if verbose:
-                print(f"已连接到 {url}", file=sys.stderr)
+                print(f"Connected to {url}", file=sys.stderr)
         
         ws = websocket.WebSocketApp(
             url,
@@ -440,21 +440,21 @@ class MaWorkflow:
                     if msg_type == "start_task":
                         task_id = msg_data.get('task_id')
                         if task_id:
-                            print(f"▶ 任务开始: {task_id[:8]}...", file=sys.stderr)
+                            print(f"▶ Task started: {task_id[:8]}...", file=sys.stderr)
                     elif msg_type == "finish_task":
                         task_id = msg_data.get('task_id')
                         if task_id:
-                            print(f"✓ 任务完成: {task_id[:8]}...", file=sys.stderr)
+                            print(f"✓ Task completed: {task_id[:8]}...", file=sys.stderr)
                     elif msg_type == "task_exception":
                         task_id = msg_data.get('task_id')
                         if task_id:
-                            print(f"\n❌ 任务异常: {task_id[:8]}...", file=sys.stderr)
-                        print(f"   错误类型: {msg_data.get('result')}", file=sys.stderr)
+                            print(f"\n❌ Task exception: {task_id[:8]}...", file=sys.stderr)
+                        print(f"   Error type: {msg_data.get('result')}", file=sys.stderr)
                         
-                        # 显示详细错误信息（如果有）
+                        # Show detailed error information (if available)
                         if 'error_details' in msg_data:
                             details = msg_data['error_details']
-                            print(f"\n详细错误信息:", file=sys.stderr)
+                            print(f"\nDetailed error information:", file=sys.stderr)
                             print(f"  {details.get('error_message', 'N/A')}", file=sys.stderr)
                             if 'traceback' in details:
                                 print(f"\nTraceback:", file=sys.stderr)
@@ -481,18 +481,18 @@ class MaWorkflow:
                 
                 elif msg_type == "finish_workflow":
                     if verbose:
-                        print("✓ 工作流完成", file=sys.stderr)
+                        print("✓ Workflow completed", file=sys.stderr)
                 
                 last_count += 1
             time.sleep(0.1)
         
         if exception_occurred:
-            raise Exception("工作流执行过程中发生异常")
+            raise Exception("An exception occurred during workflow execution")
         
-        # 只下载最后一个任务的文件
+        # Only download files from the last task
         if last_task_result and isinstance(last_task_result, dict):
             if verbose:
-                print("\n下载结果文件...", file=sys.stderr)
+                print("\nDownloading result files...", file=sys.stderr)
             
             final_result = {}
             for key, value in last_task_result.items():
@@ -512,7 +512,7 @@ class MaWorkflow:
                             print(f"  ✓ {key}: {downloaded_path}", file=sys.stderr)
                     except Exception as e:
                         if verbose:
-                            print(f"  ✗ {key}: 下载失败 ({e})", file=sys.stderr)
+                            print(f"  ✗ {key}: Download failed ({e})", file=sys.stderr)
                         final_result[key] = value
                 else:
                     final_result[key] = value

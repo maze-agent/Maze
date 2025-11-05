@@ -318,7 +318,7 @@ class MaWorkflow:
         示例:
             workflow.run()
             for message in workflow.get_results():
-                print(f"收到消息: {message}")
+                print(f"Received message: {message}")
         """
         ws_url = self.server_url.replace('http://', 'ws://').replace('https://', 'wss://')
         url = f"{ws_url}/get_workflow_res/{self.workflow_id}"
@@ -331,7 +331,7 @@ class MaWorkflow:
             msg_data = json.loads(message)
             messages.append(msg_data)
             if verbose:
-                print(f"收到消息: {msg_data}")
+                print(f"Received message: {msg_data}")
         
         def on_error(ws, error):
             nonlocal exception_occurred
@@ -345,15 +345,15 @@ class MaWorkflow:
                     pass
             exception_occurred = True
             if verbose:
-                print(f"WebSocket错误: {error}")
+                print(f"WebSocket error: {error}")
         
         def on_close(ws, close_status_code, close_msg):
             if verbose:
-                print("WebSocket连接已关闭")
+                print("WebSocket connection closed")
         
         def on_open(ws):
             if verbose:
-                print(f"已连接到 {url}")
+                print(f"Connected to {url}")
         
         ws = websocket.WebSocketApp(
             url,
