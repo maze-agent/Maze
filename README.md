@@ -16,11 +16,11 @@
 # 🌟Why  Maze？
 - Task-level parallelism
 
-  Unlike LangGraph’s agent-level execution model—which runs the entire agent workflow sequentially in a single process—Maze employs task-level parallelism, enabling true concurrent execution of individual tasks. In compute-intensive scenarios, Maze can significantly improve end-to-end (e2e) performance. Moreover, Maze can serve as a runtime backend for LangGraph, allowing existing LangGraph workflows to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic.[**An example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
+  Unlike LangGraph’s agent-level execution model—which runs the entire agent workflow sequentially in a single process—Maze employs task-level parallelism, enabling true concurrent execution of individual tasks. In compute-intensive scenarios, Maze can significantly improve end-to-end (e2e) performance. Moreover, Maze can serve as a runtime backend for LangGraph, allowing existing LangGraph workflows to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic. [**Example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
 
 - Resource Management
 
-  When multiple tasks run in parallel within a single workflow—or when multiple workflows execute concurrently—resource contention can occur. Without proper coordination, this may lead to severe resource overloads, such as GPU out-of-memory (OOM) errors.[**An example**]()
+  When multiple tasks run in parallel within a single workflow—or when multiple workflows execute concurrently—resource contention can occur. Without proper coordination, this may lead to severe resource overloads, such as GPU out-of-memory (OOM) errors.
 
 - Distributed Deployment
 
@@ -41,13 +41,14 @@
    pip install -e .
    ```
 ## 2. Launch Maze
+   Launch Maze Head.
 
    ```
-   mazea start --head --port HEAD_PORT
+   maze start --head --port HEAD_PORT
    ```
    If there are multiple machines, you can start multiple Maze workers.
    ```
-   mazea start --worker --addr HEAD_IP:HEAD_PORT
+   maze start --worker --addr HEAD_IP:HEAD_PORT
    ```
 ## 3. Example
 

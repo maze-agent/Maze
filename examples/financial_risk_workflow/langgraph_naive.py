@@ -12,23 +12,17 @@ Workflow:
 2. Execute three compute-intensive risk assessment tools in parallel
 3. Aggregate results and generate risk report
 """
-
+import json
 import os
 from typing import TypedDict, Annotated, List
 from operator import add
 import numpy as np
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langgraph.graph import StateGraph, START, END
-from maze import LanggraphClient
-client = LanggraphClient("localhost:8000")
 
-
-# Configure environment variables
 os.environ["DASHSCOPE_API_KEY"] = os.getenv("DASHSCOPE_API_KEY")
 model = ChatTongyi(streaming=True)
 
-
-# Define state
 class GraphState(TypedDict):
     """Workflow state"""
     portfolio_description: str  # Portfolio description
@@ -63,25 +57,13 @@ def llm_analysis_node(state: GraphState) :
     # Invoke LLM
     response = model.invoke(prompt)
     llm_output = response.content
-    print(f"LLM Analysis Result:\n{llm_output}")
-    
-    # Parse parameters (simplified handling, stricter JSON parsing needed in production)
-    # Using default parameters here to ensure workflow can run
-    portfolio_params = {
-        "portfolio_value": 10000,  # 100 million CNY
-        "volatility": 0.25,
-        "confidence_level": 0.95,
-        "num_simulations": 500000,  # 500k simulations to ensure compute-intensive
-        "time_horizon": 252  # 1 year trading days
-    }
-    
-    print(f"Extracted parameters: {portfolio_params}")
+    json_output = json.loads(llm_output)
+    print(f"Extracted parameters: {json_output}")
     
     return {
-        "portfolio_params": portfolio_params
+        "portfolio_params": json_output
     }
 
-@client.task
 def market_risk_var_tool(state: GraphState) :
     """
     Market Risk Tool: Calculate VaR (Value at Risk) - Monte Carlo method
@@ -126,7 +108,6 @@ def market_risk_var_tool(state: GraphState) :
         "risk_reports": [result]
     }
 
-@client.task
 def credit_risk_monte_carlo_tool(state: GraphState) :
     """
     Credit Risk Tool: Monte Carlo Simulation of Credit Losses
@@ -178,7 +159,6 @@ def credit_risk_monte_carlo_tool(state: GraphState) :
         "risk_reports": [result]
     }
 
-@client.task
 def liquidity_risk_stress_test_tool(state: GraphState) :
     """
     Liquidity Risk Tool: Stress testing - Simulate asset liquidity under extreme market conditions
@@ -271,7 +251,6 @@ def generate_report_node(state: GraphState) :
     
     return state
 
-# Build workflow
 def create_workflow():
     """Create financial risk assessment workflow"""
     builder = StateGraph(GraphState)
@@ -317,6 +296,7 @@ def main():
             "30% bonds (AAA corporate bonds and government bonds), "
             "10% cash and money market instruments. "
             "Investment period of 1 year, moderate risk appetite."
+            "I want to simulate 500000 times."
         ),
         "portfolio_params": {},
         "market_risk_result": "",
@@ -332,7 +312,6 @@ def main():
     print("\n" + "=" * 60)
     print("Workflow execution completed!")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
