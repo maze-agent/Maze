@@ -1,4 +1,4 @@
-# Maze
+# Maze:A Task-Level Distributed Agent Framework
 
 [**Documentation**](https://maze-doc-new.readthedocs.io/en/latest/)
 <p align="center">
@@ -14,12 +14,13 @@
 
 
 # 🌟Why  Maze？
+- Task-level parallelism: 
+
+  Unlike LangGraph's agent-level approach—which executes the entire agent workflow sequentially in a single process—Maze decomposes the workflow into fine-grained tasks and enables true parallel execution across tasks. This mechanism significantly boosts end-to-end (e2e) performance in compute-intensive scenarios. [**An example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
+
 - Resource Management:
 
   When multiple tasks run in parallel within a single workflow—or when multiple workflows execute concurrently—resource contention can occur. Without proper coordination, this may lead to severe resource overloads, such as GPU out-of-memory (OOM) errors.
-- Task Parallelism:
-
-  Maze enables true parallel execution of ready-to-run tasks. In contrast, the LangGraph framework is constrained by Python’s Global Interpreter Lock (GIL), which prevents genuine parallelism. Maze supports seamless migration from LangGraph-based workflows while unlocking true parallel execution for ready tasks.
 
 - Distributed Deployment:
 
@@ -57,8 +58,8 @@
 
 
 
-# 🖥️ Front-end
-We support  building workflows through a drag-and-drop interface on the front-end.
+# 🖥️ Maze Playground
+We support building workflows through a drag-and-drop interface on the Maze Playground.Here are two pages for reference. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
 
 ### Design Workflow
