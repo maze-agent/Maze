@@ -14,13 +14,13 @@
 
 
 # 🌟Why  Maze？
-- **Task-level parallelism**
+- **Task-level**
 
-  Maze employs task-level parallelism, enabling true concurrent execution of tasks. In compute-intensive scenarios, Maze can significantly improve end-to-end (e2e) performance. 
+  Maze enables fine-grained, task-level management, enhancing system flexibility and composability while supporting task parallelism to significantly improve the end-to-end performance of agent workflows.
 
 - **Resource Management**
 
-  When multiple tasks run in parallel within a single workflow—or when multiple workflows execute concurrently—resource contention can occur. Without proper coordination, this may lead to severe resource overloads, such as GPU out-of-memory (OOM) errors.
+  Maze supports resource allocation for workflow tasks, effectively preventing resource contention both among parallel tasks within a single workflow and across multiple concurrently executing workflows.
 
 - **Distributed Deployment**
 
