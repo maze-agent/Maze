@@ -45,7 +45,8 @@ class WorkflowRuntime():
         '''
         Add task to workflow.
         '''
-        self.tasks[task.task_id] = task
+        if task.task_id not in self.tasks:
+            self.tasks[task.task_id] = task
      
          
     def get_task_result(self,key):
@@ -136,8 +137,7 @@ class WorkflowRuntimeManager():
         if task.workflow_id not in self.workflows:
             self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-        if task.workflow_id not in self.workflows:
-            self.workflows[task.workflow_id].add_task(task)
+        self.workflows[task.workflow_id].add_task(task)
     
     def run_task(self,task:TaskRuntime|LanggraphTaskRuntime,node:SelectedNode):
         '''
