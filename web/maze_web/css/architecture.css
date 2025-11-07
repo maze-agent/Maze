@@ -1,0 +1,92 @@
+/* Architecture section styles */
+.architecture-section {
+    display: flex;
+    justify-content: center;
+    padding: 100px 5vw;
+    background: transparent;
+    z-index: 5;
+    flex-wrap: wrap;
+}
+
+.architecture-left {
+    width: 100%;
+    max-width: 600px;
+    margin: 0 auto 50px auto;
+    text-align: center;
+    padding: 0;
+}
+
+.architecture-left h2 {
+    font-size: 2.5rem;
+    margin-bottom: 40px;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--text-primary), var(--primary-color));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.architecture-card {
+    background: var(--glass-bg);
+    width: 100%;
+    border-radius: 20px;
+    padding: 25px 30px;
+    margin: 0 auto 25px auto;
+    transition: all 0.3s ease;
+    color: var(--text-primary);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 10px 25px var(--shadow-light);
+    position: relative;
+    border: 1px solid var(--glass-border);
+}
+
+.architecture-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 15px 35px var(--shadow-medium);
+    border-color: rgba(106, 90, 249, 0.3);
+}
+
+.architecture-icon {
+    font-size: 2rem;
+    position: absolute;
+    top: 20px;
+    right: 25px;
+    background: var(--primary-color);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.architecture-card h3 {
+    font-size: 1.5rem;
+    margin-bottom: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.architecture-card p {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    font-family: 'Roboto', sans-serif;
+    font-weight: 300;
+}
+
+.architecture-right {
+    flex: 1;
+    min-width: 500px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+}
+
+.architecture-right img {
+    width: 100%;
+    max-width: 600px;
+    border-radius: 25px;
+    box-shadow: 0 20px 50px var(--shadow-medium);
+    border: 1px solid var(--glass-border);
+}
+
+

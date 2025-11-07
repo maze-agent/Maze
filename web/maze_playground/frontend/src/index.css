@@ -1,0 +1,78 @@
+@import 'reactflow/dist/style.css';
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #213547;
+  background-color: #ffffff;
+  
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ReactFlow自定义样式 */
+.react-flow__node {
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.react-flow__node.selected {
+  box-shadow: 0 0 0 2px #1890ff;
+}
+
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid white;
+}
+
+.react-flow__handle-left {
+  left: -5px;
+  background: #1890ff;
+}
+
+.react-flow__handle-right {
+  right: -5px;
+  background: #52c41a;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+/* Ant Design样式调整 */
+.ant-drawer-body {
+  padding: 16px;
+}
+
+/* 代码编辑器样式 */
+.monaco-editor-wrapper {
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  overflow: hidden;
+}
+

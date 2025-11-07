@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Maze Framework</title>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
+    
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/background.css">
+    <link rel="stylesheet" href="css/navigation.css">
+    <link rel="stylesheet" href="css/hero.css">
+    <link rel="stylesheet" href="css/features.css">
+    <link rel="stylesheet" href="css/architecture.css">
+    <link rel="stylesheet" href="css/examples.css">
+    <link rel="stylesheet" href="css/modal.css">
+    <link rel="stylesheet" href="css/footer.css">
+</head>
+<body>
+    <!-- Background -->
+    <div id="background-container"></div>
+
+    <!-- Demo Modal -->
+    <div id="demo-modal-container"></div>
+
+    <!-- Navigation Bar -->
+    <div id="navigation-container"></div>
+
+    <!-- Hero Section -->
+    <div id="hero-container"></div>
+
+    <!-- Features Section -->
+    <div id="features-container"></div>
+
+    <!-- Architecture Section -->
+    <div id="architecture-container"></div>
+
+    <!-- Examples Section -->
+    <div id="examples-container"></div>
+
+    <!-- Footer -->
+    <div id="footer-container"></div>
+
+    <!-- JavaScript Files -->
+    <script src="js/config.js"></script>
+    <script src="js/site-config.js"></script>
+    <script src="js/modal.js"></script>
+    <script src="js/maze.js"></script>
+    <script src="js/typewriter.js"></script>
+    <script src="js/main.js"></script>
+
+    <!-- Component Loader -->
+    <script>
+        // Load HTML components
+        async function loadComponent(containerId, componentPath) {
+            try {
+                const response = await fetch(componentPath);
+                const html = await response.text();
+                document.getElementById(containerId).innerHTML = html;
+                console.log(`✅ Loaded component: ${componentPath}`);
+                return true;
+            } catch (error) {
+                console.error(`❌ Error loading component ${componentPath}:`, error);
+                return false;
+            }
+        }
+
+        // Load all components when DOM is ready
+        document.addEventListener('DOMContentLoaded', async function() {
+            console.log('🚀 DOM loaded, starting component loading...');
+
+            const results = await Promise.all([
+                loadComponent('background-container', 'components/background.html'),
+                loadComponent('demo-modal-container', 'components/modal.html'),
+                loadComponent('navigation-container', 'components/navigation.html'),
+                loadComponent('hero-container', 'components/hero.html'),
+                loadComponent('features-container', 'components/features.html'),
+                loadComponent('architecture-container', 'components/architecture.html'),
+                loadComponent('examples-container', 'components/examples.html'),
+                loadComponent('footer-container', 'components/footer.html')
+            ]);
+
+            const successCount = results.filter(r => r).length;
+            console.log(`📊 Component loading results: ${successCount}/8 components loaded successfully`);
+
+            if (successCount === 0) {
+                console.log('⚠️ No components loaded - this is expected when running without HTTP server');
+            }
+
+            console.log('🔧 Initializing JavaScript...');
+
+            // Wait a bit more to ensure DOM is fully updated
+            setTimeout(() => {
+                // Re-initialize maze animation with new DOM elements
+                if (window.mazeAnimation) {
+                    window.mazeAnimation = null; // Clear old instance
+                }
+
+                // Re-initialize modal with new DOM elements
+                if (window.demoModal) {
+                    window.demoModal = null; // Clear old instance
+                }
+
+                // Create new instances
+                try {
+                    window.mazeAnimation = new MazeAnimation();
+                    console.log('✅ Maze animation initialized');
+                } catch (error) {
+                    console.error('❌ Error initializing maze animation:', error);
+                }
+
+                try {
+                    window.demoModal = new DemoModal();
+                    console.log('✅ Modal initialized');
+                } catch (error) {
+                    console.error('❌ Error initializing modal:', error);
+                }
+
+                // Initialize typewriter animation for main page
+                try {
+                    if (window.initMainTypewriter) {
+                        window.initMainTypewriter();
+                        console.log('✅ Main typewriter initialized');
+                    }
+                } catch (error) {
+                    console.error('❌ Error initializing main typewriter:', error);
+                }
+            }, 200);
+        });
+    </script>
+</body>
+</html>
+
+

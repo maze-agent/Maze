@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maze-agent"
+version = "1.0.0"
+description = "A Task-Level Distributed Agent Workflow Framework for building scalable, resource-efficient multi-agent systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Maze Development Team", email = "your-email@example.com"}
+]
+maintainers = [
+    {name = "Maze Development Team", email = "your-email@example.com"}
+]
+keywords = [
+    "agent",
+    "workflow",
+    "distributed",
+    "multi-agent",
+    "task-scheduling",
+    "ray",
+    "langgraph",
+    "ai-agent",
+    "resource-management"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+]
+
+dependencies = [
+    "fastapi==0.119.1",
+    "ray==2.50.1",
+    "uvicorn[standard]",
+    "zmq==0.0.0",
+    "networkx==3.4.2",
+    "websocket-client==1.9.0",
+    "cloudpickle==3.1.1",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/QinbinLi/Maze"
+Documentation = "https://maze-doc-new.readthedocs.io/en/latest/"
+Repository = "https://github.com/QinbinLi/Maze"
+"Bug Tracker" = "https://github.com/QinbinLi/Maze/issues"
+
+[project.scripts]
+maze = "maze.cli.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "."
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["maze*"]
+exclude = ["test*", "examples*", "web*", "docs*", "build*"]
+
+[tool.setuptools.package-data]
+maze = ["py.typed"]

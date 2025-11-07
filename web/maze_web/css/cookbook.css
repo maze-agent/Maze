@@ -1,0 +1,411 @@
+/* Cookbook Section Styles */
+
+.cookbook-section {
+    padding: 120px 40px;
+    background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+    position: relative;
+    overflow: hidden;
+}
+
+.cookbook-section::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: 
+        radial-gradient(circle at 20% 30%, rgba(74, 144, 226, 0.05) 0%, transparent 50%),
+        radial-gradient(circle at 80% 70%, rgba(138, 43, 226, 0.05) 0%, transparent 50%);
+    pointer-events: none;
+}
+
+.cookbook-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    position: relative;
+    z-index: 1;
+}
+
+.cookbook-title {
+    font-size: 3.5em;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, #4a90e2 0%, #8a2be2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.cookbook-subtitle {
+    text-align: center;
+    font-size: 1.3em;
+    color: rgba(255, 255, 255, 0.7);
+    margin-bottom: 60px;
+}
+
+/* Example Cards */
+.cookbook-example {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    padding: 40px;
+    margin-bottom: 50px;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.cookbook-example:hover {
+    border-color: rgba(74, 144, 226, 0.5);
+    box-shadow: 0 8px 32px rgba(74, 144, 226, 0.15);
+    transform: translateY(-5px);
+}
+
+.cookbook-example.featured-example {
+    border: 2px solid rgba(74, 144, 226, 0.3);
+    background: rgba(74, 144, 226, 0.05);
+}
+
+.example-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.example-header h3 {
+    font-size: 1.8em;
+    color: #ffffff;
+    margin: 0;
+}
+
+.example-badge {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    font-weight: 600;
+    background: linear-gradient(135deg, #4a90e2, #357abd);
+    color: white;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.example-badge.advanced {
+    background: linear-gradient(135deg, #8a2be2, #6a1bb2);
+}
+
+.example-description {
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 1.1em;
+    line-height: 1.8;
+    margin-bottom: 30px;
+}
+
+/* Workflow Structure Diagram */
+.example-structure {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 25px;
+    margin-bottom: 30px;
+}
+
+.structure-title {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.95em;
+    margin-bottom: 15px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.structure-diagram {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.structure-diagram.complex {
+    flex-direction: column;
+    gap: 20px;
+}
+
+.structure-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    position: relative;
+}
+
+.structure-row.parallel {
+    gap: 25px;
+}
+
+.structure-row.parallel::before {
+    content: '';
+    position: absolute;
+    top: -15px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    height: 15px;
+    background: linear-gradient(to bottom, rgba(74, 144, 226, 0.5), transparent);
+}
+
+.structure-row.parallel::after {
+    content: '';
+    position: absolute;
+    bottom: -15px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    height: 15px;
+    background: linear-gradient(to top, rgba(74, 144, 226, 0.5), transparent);
+}
+
+.structure-node {
+    background: linear-gradient(135deg, rgba(74, 144, 226, 0.2), rgba(138, 43, 226, 0.2));
+    border: 2px solid rgba(74, 144, 226, 0.4);
+    padding: 12px 24px;
+    border-radius: 8px;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 0.95em;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.structure-node.small {
+    font-size: 0.85em;
+    padding: 10px 18px;
+    min-width: 120px;
+}
+
+.structure-arrow {
+    color: rgba(74, 144, 226, 0.6);
+    font-size: 1.5em;
+    font-weight: bold;
+}
+
+.resource-tag {
+    display: inline-block;
+    font-size: 0.75em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(74, 144, 226, 0.3);
+    margin-top: 4px;
+}
+
+.resource-tag.gpu {
+    background: rgba(138, 43, 226, 0.3);
+}
+
+/* Code Container */
+.code-container {
+    background: #1e1e1e;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 25px;
+}
+
+.code-header {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 15px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.code-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.95em;
+    font-weight: 600;
+}
+
+.code-icon {
+    font-size: 1.2em;
+}
+
+.code-replay-btn,
+.code-expand-btn {
+    background: rgba(74, 144, 226, 0.2);
+    border: 1px solid rgba(74, 144, 226, 0.4);
+    color: #4a90e2;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s ease;
+}
+
+.code-replay-btn:hover,
+.code-expand-btn:hover {
+    background: rgba(74, 144, 226, 0.3);
+    border-color: rgba(74, 144, 226, 0.6);
+    transform: scale(1.05);
+}
+
+.replay-icon {
+    font-size: 1.1em;
+    display: inline-block;
+}
+
+.code-replay-btn:hover .replay-icon {
+    animation: spin 0.5s ease;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.expand-icon {
+    transition: transform 0.3s ease;
+}
+
+.code-expand-btn.expanded .expand-icon {
+    transform: rotate(180deg);
+}
+
+.code-expand-btn.expanded .expand-text::after {
+    content: 'Collapse';
+}
+
+.code-expand-btn:not(.expanded) .expand-text::after {
+    content: 'Expand';
+}
+
+.code-content {
+    padding: 0;
+    margin: 0;
+    overflow-x: auto;
+    max-height: 600px;
+    transition: max-height 0.5s ease;
+}
+
+.code-content.collapsed {
+    max-height: 0;
+    overflow: hidden;
+}
+
+.code-content code {
+    display: block;
+    padding: 25px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
+    line-height: 1.6;
+    color: #d4d4d4;
+    white-space: pre;
+    overflow-wrap: normal;
+}
+
+/* Syntax Highlighting Colors */
+.code-content code .keyword {
+    color: #569cd6;
+}
+
+.code-content code .string {
+    color: #ce9178;
+}
+
+.code-content code .comment {
+    color: #6a9955;
+    font-style: italic;
+}
+
+.code-content code .function {
+    color: #dcdcaa;
+}
+
+.code-content code .number {
+    color: #b5cea8;
+}
+
+/* Typewriter Cursor */
+.typewriter-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.2em;
+    background-color: #4a90e2;
+    margin-left: 2px;
+    animation: blink 1s infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+}
+
+/* Example Footer */
+.example-footer {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    padding-top: 20px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.example-feature {
+    background: rgba(74, 144, 226, 0.15);
+    border: 1px solid rgba(74, 144, 226, 0.3);
+    padding: 8px 16px;
+    border-radius: 20px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.9em;
+    font-weight: 500;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .cookbook-section {
+        padding: 80px 20px;
+    }
+    
+    .cookbook-title {
+        font-size: 2.5em;
+    }
+    
+    .cookbook-subtitle {
+        font-size: 1.1em;
+    }
+    
+    .cookbook-example {
+        padding: 25px;
+    }
+    
+    .example-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 15px;
+    }
+    
+    .structure-diagram {
+        flex-direction: column;
+    }
+    
+    .structure-row.parallel {
+        flex-direction: column;
+        gap: 15px;
+    }
+    
+    .code-content code {
+        font-size: 0.8em;
+        padding: 15px;
+    }
+}
+
+
+

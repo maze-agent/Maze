@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a1a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Text gradient from cyan to purple -->
+    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00ffff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#b49af3;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Glow effect -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <!-- Stronger glow for accents -->
+    <filter id="strongGlow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="url(#bgGradient)"/>
+  
+  <!-- Outer decorative ring -->
+  <circle cx="100" cy="100" r="88" fill="none" stroke="url(#textGradient)" stroke-width="1.5" opacity="0.3"/>
+  
+  <!-- MAZE text - bold and centered -->
+  <text x="100" y="115" 
+        font-family="Orbitron, Arial, sans-serif" 
+        font-size="52" 
+        font-weight="900" 
+        text-anchor="middle" 
+        fill="url(#textGradient)"
+        filter="url(#glow)">MAZE</text>
+  
+  <!-- Subtle underline accent -->
+  <line x1="40" y1="130" x2="160" y2="130" 
+        stroke="#00ffff" 
+        stroke-width="2" 
+        opacity="0.6"
+        filter="url(#glow)"/>
+  
+  <!-- Corner decorative elements - small maze-like patterns -->
+  <g stroke="#00ffff" stroke-width="1.5" fill="none" opacity="0.4">
+    <!-- Top left -->
+    <path d="M 30 30 L 30 40 M 30 30 L 40 30"/>
+    <!-- Top right -->
+    <path d="M 170 30 L 170 40 M 170 30 L 160 30"/>
+    <!-- Bottom left -->
+    <path d="M 30 170 L 30 160 M 30 170 L 40 170"/>
+    <!-- Bottom right -->
+    <path d="M 170 170 L 170 160 M 170 170 L 160 170"/>
+  </g>
+  
+  <!-- Small accent dots -->
+  <circle cx="50" cy="50" r="2" fill="#b49af3" opacity="0.8">
+    <animate attributeName="opacity" values="0.4;0.8;0.4" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="150" cy="50" r="2" fill="#00ffff" opacity="0.8">
+    <animate attributeName="opacity" values="0.8;0.4;0.8" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="50" cy="150" r="2" fill="#00ffff" opacity="0.8">
+    <animate attributeName="opacity" values="0.8;0.4;0.8" dur="3s" repeatCount="indefinite" begin="1.5s"/>
+  </circle>
+  <circle cx="150" cy="150" r="2" fill="#b49af3" opacity="0.8">
+    <animate attributeName="opacity" values="0.4;0.8;0.4" dur="3s" repeatCount="indefinite" begin="1.5s"/>
+  </circle>
+  
+  <!-- Outer subtle glow ring -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="url(#textGradient)" stroke-width="0.5" opacity="0.15"/>
+</svg>

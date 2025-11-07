@@ -1,0 +1,268 @@
+/* Examples Section Styles */
+.examples-section {
+    padding: 80px 20px;
+    background: transparent;
+    position: relative;
+}
+
+.examples-section .container {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+/* Section Headers */
+.section-title {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: #ffffff;
+    text-align: center;
+    margin-bottom: 16px;
+    font-family: 'Orbitron', sans-serif;
+}
+
+.section-subtitle {
+    font-size: 1.1rem;
+    color: rgba(255, 255, 255, 0.7);
+    text-align: center;
+    margin-bottom: 60px;
+}
+
+/* Simple Example with Typewriter */
+.simple-example-wrapper {
+    max-width: 900px;
+    margin: 0 auto 80px;
+}
+
+.typewriter-demo {
+    background: rgba(15, 23, 42, 0.4);
+    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(74, 144, 226, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.code-header {
+    background: rgba(10, 14, 39, 0.6);
+    backdrop-filter: blur(5px);
+    padding: 12px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(74, 144, 226, 0.2);
+}
+
+.code-title {
+    color: rgba(255, 255, 255, 0.9);
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+}
+
+.code-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.code-action-btn {
+    background: rgba(74, 144, 226, 0.2);
+    border: 1px solid rgba(74, 144, 226, 0.4);
+    color: #4a90e2;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.3s ease;
+}
+
+.code-action-btn:hover {
+    background: rgba(74, 144, 226, 0.3);
+    transform: translateY(-2px);
+}
+
+.code-block {
+    margin: 0;
+    padding: 24px;
+    background: rgba(10, 14, 39, 0.3);
+    overflow-x: auto;
+}
+
+.code-block code {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: #e2e8f0;
+    white-space: pre;
+}
+
+/* Typewriter cursor animation */
+.typewriter-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    background-color: #4a90e2;
+    margin-left: 2px;
+    animation: blink 1s infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+/* Advanced Examples Grid */
+.advanced-examples-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+    gap: 40px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+/* Example Cards */
+.example-card {
+    background: rgba(15, 23, 42, 0.4);
+    backdrop-filter: blur(10px);
+    border-radius: 16px;
+    padding: 32px;
+    border: 1px solid rgba(74, 144, 226, 0.3);
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.example-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #4a90e2, #7b68ee);
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 0.3s ease;
+}
+
+.example-card:hover {
+    transform: translateY(-8px);
+    background: rgba(15, 23, 42, 0.6);
+    border-color: rgba(74, 144, 226, 0.6);
+    box-shadow: 0 12px 40px rgba(74, 144, 226, 0.2);
+}
+
+.example-card:hover::before {
+    transform: scaleX(1);
+}
+
+.example-badge {
+    display: inline-block;
+    background: rgba(123, 104, 238, 0.2);
+    color: #9f7aea;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-bottom: 16px;
+    border: 1px solid rgba(123, 104, 238, 0.3);
+}
+
+.example-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 16px;
+    font-family: 'Orbitron', sans-serif;
+}
+
+.example-description {
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 1.6;
+    margin-bottom: 20px;
+    font-size: 0.95rem;
+}
+
+.example-features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.feature-tag {
+    background: rgba(74, 144, 226, 0.15);
+    color: #4a90e2;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    border: 1px solid rgba(74, 144, 226, 0.3);
+}
+
+.example-structure {
+    background: rgba(10, 14, 39, 0.5);
+    backdrop-filter: blur(5px);
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    border-left: 3px solid #4a90e2;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.example-structure strong {
+    color: #4a90e2;
+    margin-right: 8px;
+}
+
+.example-cta {
+    color: #4a90e2;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    font-size: 0.9rem;
+}
+
+.example-cta span {
+    transition: transform 0.3s ease;
+}
+
+.example-card:hover .example-cta span {
+    transform: translateX(5px);
+}
+
+/* Responsive Design */
+@media (max-width: 1100px) {
+    .advanced-examples-grid {
+        grid-template-columns: 1fr;
+        max-width: 600px;
+    }
+}
+
+@media (max-width: 768px) {
+    .section-title {
+        font-size: 2rem;
+    }
+    
+    .section-subtitle {
+        font-size: 1rem;
+    }
+    
+    .example-card {
+        padding: 24px;
+    }
+    
+    .example-title {
+        font-size: 1.3rem;
+    }
+    
+    .code-block {
+        padding: 16px;
+    }
+    
+    .code-block code {
+        font-size: 0.8rem;
+    }
+}
+

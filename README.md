@@ -1,296 +1,122 @@
-# 🚀 AgentOS 项目运行指南
+# Maze:A Task-Level Distributed Agent Workflow Framework
 
-欢迎使用 AgentOS 系统！本指南将引导您完成项目环境的准备、不同模式的运行和任务的提交流程。
+[**Documentation**](https://maze-doc-new.readthedocs.io/en/latest/)
+<p align="center">
+  <img
+    src="./assets/imgs/maze_logo.jpg"
+    alt="Maze Logo"
+    width="200"
+  />
+</p>
+<br>
+ 
 
-## 目录
 
-  - [AgentOS 核心框架运行指南](#agent-core)
-  - [Baseline (HEFT/CPOP) 运行指南](#baseline)
-  - [Agent 框架集成运行指南](#zhinan)
-      - [AutoGen 模式](#autogen)
-      - [AgentScope 模式](#agentscope)
 
------
+# 🌟Why  Maze？
+- **Task-level**
 
-## 📦 AgentOS 核心框架运行指南 {#agentos-core}
+  Maze enables fine-grained, task-level management, enhancing system flexibility and composability while supporting task parallelism to significantly improve the end-to-end performance of agent workflows.
 
-此部分介绍如何运行 AgentOS 的核心调度系统。
+- **Resource Management**
 
-### 1\. 环境准备
+  Maze supports resource allocation for workflow tasks, effectively preventing resource contention both among parallel tasks within a single workflow and across multiple concurrently executing workflows.
 
-首先，我们需要为项目创建一个独立的 Conda 环境并安装所有依赖。
+- **Distributed Deployment**
 
-```bash
-# 创建一个名为 agentos 的 Python 3.10 环境
-conda create --name agentos python==3.10
+  Maze supports not only standalone but also distributed deployment, allowing you to build highly available and scalable Maze clusters to meet the demands of large-scale concurrency and high-performance computing.
 
-# 激活新创建的环境
-conda activate agentos
+- **Multi-Agent Support**
 
-# 安装所有必要的依赖库
-pip install -r requirements.txt
+  Maze can serve as a runtime backend for other agent frameworks.For example, it allows LangGraph to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic. [**Example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
+
+<br>
+
+
+# 🚀Quick Start
+
+## 1. Install
+
+**From PyPI (Recommended)**
+
+   ```bash
+   pip install maze-agent
+   ```
+
+**From source**
+
+   ```bash
+   git clone https://github.com/QinbinLi/Maze.git
+   cd Maze
+   pip install -e .
+   ```
+## 2. Launch Maze
+   Launch Maze Head.
+
+   ```
+   maze start --head --port HEAD_PORT
+   ```
+   If there are multiple machines, you can start multiple Maze workers.
+   ```
+   maze start --worker --addr HEAD_IP:HEAD_PORT
+   ```
+## 3. Example
+
+```python
+from typing import Any
+from maze import MaClient,task
+
+#1.Define your task functions using the @task decorator
+@task(
+    inputs=["text"],
+    outputs=["result"],
+)
+def my_task(params):
+    text: Any = params.get("text")
+    return {"result": f"Hello {text}"}
+
+#2.Create the maze client
+client = MaClient("http://localhost:8000")
+
+#3.Create the workflow
+workflow = client.create_workflow()
+task1 = workflow.add_task(
+    my_task,
+    inputs={"text": "Maze"}
+)
+
+#4.Submit the workflow and get results
+workflow.run() 
+for message in workflow.get_results():
+    msg_type = message.get("type")
+    msg_data = message.get("data", {})
+
+    if msg_type == "start_task":
+        print(f"▶ Task started: {msg_data.get('task_id')}")
+
+    elif msg_type == "finish_task":
+        print(f"✓ Task completed: {msg_data.get('task_id')}")
+        print(f"  Result: {msg_data.get('result')}\n")
+
+    elif msg_type == "finish_workflow":
+        print("🎉 Workflow completed!")
+        break
+   
 ```
+<br>
 
-### 2\. 启动基础服务
 
-AgentOS 的运行依赖于 Ray 集群和 Redis 服务。
 
-#### 启动 Ray 集群
+# 🖥️ Maze Playground
+We support building workflows through a drag-and-drop interface on the Maze Playground.Here are two pages for reference. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
-Ray 用于分布式计算和任务执行。
 
-```bash
-# 在头节点（Head Node）上启动 Ray
-ray start --head
+### Design Workflow
+![Design Workflow Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.png)  
+[Design Workflow Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.mp4)
 
-# 在其他工作节点（Worker Node）上启动 Ray，并将其连接到头节点
-# 请将 'head_node_ip:head_node_port' 替换为头节点的实际 IP 和端口
-ray start --address='head_node_ip:head_node_port'
-```
+### Check Result
+![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.png)  
+[Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.mp4)
 
-#### 启动 Redis 服务
 
-Redis 在这里用作消息队列和数据存储。
-
-```bash
-# 启动一个 Redis 服务，监听在 6380 端口
-redis-server --port 6380 --bind 0.0.0.0 --protected-mode no &
-```
-
-> **注意**: 在实验室的 `node10` 服务器上，我们推荐使用 Docker 启动 Redis，目前该服务已配置并运行，您可以通过 `docker ps` 命令查看。
-
-### 3\. 启动 AgentOS 服务
-
-AgentOS 分为资源层和调度层，需要依次启动。
-
-#### 第一步：启动资源层 (Resource Layer)
-
-资源层负责管理和提供底层的计算资源。
-
-```bash
-cd AgentOS/src/agentos/resource
-python api_server.py --redis_ip 127.0.0.1 --redis_port 6380 --flask_port 5000
-```
-
-#### 第二步：启动调度层 (Scheduler Layer)
-
-调度层负责接收任务并根据策略进行智能调度。
-
-```bash
-cd AgentOS/src/agentos/scheduler
-python scheduler.py --master_addr 127.0.0.1:5000 --redis_ip 127.0.0.1 --redis_port 6380 --strategy mlq --flask_port 5001
-```
-
-### 4\. 运行一个演示任务
-
-所有服务启动后，您可以运行一个示例来验证系统是否工作正常。
-
-```bash
-cd AgentOS/src/agentos/scheduler
-python dispatch_task.py
-```
-
------
-
-## 📊 Baseline (HEFT/CPOP) 运行指南 {#baseline}
-
-此部分介绍如何以经典的 HEFT 或 CPOP 调度算法模式运行一个基线版本。
-
-### 1\. 启动 Master 节点
-
-在主节点上运行 `master_api.py`。它负责接收任务、进行调度并将任务分发给 Slaver 节点。
-
-```bash
-python master_api.py --host "172.17.0.3" --port 5002 --compute_nodes "172.17.0.3:5003,172.17.0.4:5003,172.17.0.5:5003,172.17.0.6:5003" --scheduler_strategy "heft"
-```
-
-**参数解释**:
-
-  * `--host "172.17.0.3"`: 指定 Master 节点自己的服务所监听的 IP 地址。
-  * `--port 5002`: 指定 Master 节点自己的服务所监听的端口。
-  * `--compute_nodes "..."`: **非常重要**，提供一个所有 Slaver 节点地址的列表（用逗号分隔）。Master 将向这些地址分发任务。
-  * `--scheduler_strategy "heft"`: 指定使用的调度算法。可以是 `heft` 或 `cpop`。
-
-### 2\. 启动 Slaver 节点
-
-在所有计算节点上（包括作为计算节点的主节点）分别运行 `slaver_api.py`。
-
-```bash
-# 在节点 1 上运行
-python slaver_api.py --master_addr 172.17.0.3:5002 --host 172.17.0.3 --port 5003
-
-# 在节点 2 上运行
-python slaver_api.py --master_addr 172.17.0.3:5002 --host 172.17.0.4 --port 5003
-
-# ...以此类推
-```
-
-**参数解释**:
-
-  * `--master_addr 172.17.0.3:5002`: Slaver 需要知道 Master 的地址，以便在任务完成后向其发送**回调通知**。
-  * `--host 172.17.0.3`: 当前 Slaver 节点自己的服务所监听的 IP 地址。
-  * `--port 5003`: 当前 Slaver 节点自己的服务所监听的端口。
-
-### 3\. 分发一个 DAG 任务
-
-在任意一台可以访问 Master 节点的机器上运行 `dispatch_task.py` 来提交任务。
-
-```bash
-python dispatch_task.py --master_addr "172.17.0.3:5002"
-```
-
-**参数解释**:
-
-  * `--master_addr "172.17.0.3:5002"`: 告诉客户端 Master 的 API 地址在哪里，以便将任务提交过去。
-
------
-
-## 🤖 Agent 框架运行指南
-
-此部分介绍如何运行与 AutoGen 和 AgentScope 集成的模式。
-
-好的，我已经详细分析了您提供的最新 AutoGen 代码 (`run_host.py`, `run_worker.py`, `worker_agent.py`, `dispatch_task.py`)，并为您更新了 `readme.md` 文件中关于 **AutoGen 模式** 的部分。
-
-新的代码引入了基于“工作流类型 (workflow type)”的路由和分发机制，使得架构更加灵活和强大。下面的文档内容反映了这些最新的变化。
-
------
-
-### 🤖 Agent 框架集成运行指南 {#zhinan}
-
-此部分介绍如何运行与 AutoGen 和 AgentScope 集成的模式。
-
-### AutoGen 模式 {#autogen}
-
-新的 AutoGen 模式引入了基于 **工作流类型 (`workflow_type`)** 的动态任务路由机制。主节点 (Host) 管理不同类型的 Agent 池，而工作节点 (Worker) 在启动时声明自己能处理的特定工作流类型，从而实现更灵活和专业化的任务处理。
-
-#### 1\. 启动主节点 (Host)
-
-主节点负责监听来自 Worker 的连接、接收外部提交的任务，并根据任务的 `workflow_type` 将其路由到合适的 Agent 池。
-
-```bash
-python run_host.py --host_addr 127.0.0.1:5003 --flask_port 5002 --agent_pools '{"gaia_file": ["agent1", "agent2"], "gaia_speech": ["agent3"]}'
-```
-
-**参数解释**:
-
-  * `--host_addr 127.0.0.1:5003`: 主节点的核心 gRPC 服务地址，供 Worker 节点连接。
-  * `--flask_port 5002`: 用于接收 DAG 任务提交的 Flask API 服务端口。
-  * `--agent_pools '...'`: **(核心变更)** 定义工作流类型与 Agent 池的映射。这是一个 JSON 格式的字符串。
-      * **键 (Key)**: 代表一个工作流类型，例如 `"gaia_file"` 或 `"gaia_speech"`。这个类型由任务提交时指定的 `dag_source` 和 `dag_type` 组合而成。
-      * **值 (Value)**: 一个字符串列表，其中包含所有能够处理该类型工作流的 **Worker Agent 的名称**。主节点将通过轮询 (Round-Robin) 方式向这个列表中的 Agent 分发任务。
-
-#### 2\. 启动工作节点 (Worker)
-
-为 Agent 池中定义的每一个 Agent 名称，都需要启动一个对应的 Worker 进程。Worker 在启动时需要明确指定自己的名称和它能处理的工作流类型。
-
-```bash
-# 启动处理 'gaia_file' 类型的第一个 Worker
-python run_worker.py --host 127.0.0.1:5003 --name agent1 --workflow_type gaia_file
-
-# 启动处理 'gaia_file' 类型的第二个 Worker
-python run_worker.py --host 127.0.0.1:5003 --name agent2 --workflow_type gaia_file
-
-# 启动处理 'gaia_speech' 类型的 Worker
-python run_worker.py --host 127.0.0.1:5003 --name agent3 --workflow_type gaia_speech
-```
-
-**参数解释**:
-
-  * `--host 127.0.0.1:5003`: 需要连接的主节点 (Host) 的地址。
-  * `--name file_agent_1`: **(必须)** 为当前 Worker 指定一个唯一的名称。此名称**必须**与启动主节点时在 `--agent_pools` 中定义的名称完全对应。
-  * `--workflow_type gaia_file`: **(必须)** 声明此 Worker 要处理的工作流类型。这决定了 Worker 将加载哪一套具体的任务逻辑（例如 `GAIA_File_Process_Agent`），并且**必须**与 `--agent_pools` 中的键名相匹配。
-
-#### 3\. 分发 DAG 任务
-
-分发任务的命令保持不变。客户端通过 Flask API 将任务提交给主节点。
-
-```bash
-python dispatch_task.py --master_addr "127.0.0.1:5002"
-```
-
-**参数解释**:
-
-  * `--master_addr "127.0.0.1:5002"`: 客户端将任务提交到主节点上运行的、端口为 `5002` 的任务接收服务。
-  * **任务路由逻辑**: `dispatch_task.py` 脚本内部会定义任务的 `dag_source` 和 `dag_type`。主节点 会将它们组合成 `workflow_type` (如 `gaia_file`)，然后根据这个类型在 `agent_pools` 中查找可用的 Worker 列表，并将任务分发出去。
-
-**参数解释**:
-
-  * `--master_addr "172.17.0.3:5002"`: 客户端将任务提交到主节点上运行的、端口为 `5002` 的任务接收服务。
-
-Of course. Based on the provided Python files for your AgentScope integration, I have prepared a comprehensive `readme.md` section. This guide details the updated architecture and provides clear, step-by-step instructions for running your system.
-
------
-
-### 🤖 AgentScope 模式运行指南 {#agentscope}
-
-此模式利用 AgentScope 的 RPC (Remote Procedure Call) 功能构建一个分布式 Agent 系统。该系统由一个中心 **主节点 (Host)** 和多个 **工作节点 (Worker)** 组成。主节点负责接收任务并将其智能分发给相应的 Worker，而 Worker 负责实际执行任务。
-
-#### 架构总览
-
-1.  **主节点 (Host)**: 运行 `run_host.py`。它不直接执行任务，而是作为一个调度中心。它通过一个 Flask API 接收外部任务，并根据预定义的 **Agent 池 (`agent_pools`)** 配置，将任务以轮询方式分发给指定的 Worker 地址。
-2.  **工作节点 (Worker)**: 运行 `run_worker.py`。每个 Worker 启动一个 AgentScope RPC 服务，监听在特定的主机和端口上。Worker 在启动时声明自己的名称 (`agent_name`) 和能够处理的工作流类型 (`workflow_types`)。
-3.  **任务提交通知 (Client)**: `dispatch_task.py` 是一个客户端脚本，它通过 HTTP 请求将一批任务提交给主节点的 Flask API，并轮询任务状态直到所有任务完成。
-
------
-
-### 运行步骤
-
-#### 第一步：启动主节点 (Host)
-
-主节点是系统的“大脑”，必须首先启动。它需要知道所有 Worker 的地址信息，以便进行任务分发。
-
-```bash
-python run_host.py --port 5002 --agent_pools '{"gaia_file":["file_agent@127.0.0.1:6001"], "gaia_vision":["vision_agent@127.0.0.1:6002"], "gaia_speech":["speech_agent@127.0.0.1:6003"], "gaia_reason":["reason_agent@127.0.0.1:6004"]}'
-```
-
-**参数解释**:
-
-  * `--port 5002`: 指定主节点上用于接收任务的 Flask API 的监听端口。
-  * `--agent_pools '<JSON_STRING>'`: **(核心配置)** 定义了工作流类型到 Worker 的映射。
-      * **键 (Key)**: 工作流类型，例如 `"gaia_file"`。
-      * **值 (Value)**: 一个列表，包含能够处理该类型任务的 Worker 的 ID。ID 格式为 `"agent_name@host:port"`。这里的地址和端口必须与之后启动 Worker 进程时使用的完全一致。
-
-#### 第二步：启动工作节点 (Worker)
-
-根据主节点 `--agent_pools` 中的配置，为每一个 Worker 地址启动一个对应的 `run_worker.py` 进程。
-
-**示例 Worker 启动命令:**
-
-```bash
-# 启动处理 'gaia_file' 类型的 Worker
-# 对应 agent_pools 中的 "file_agent@127.0.0.1:6001"
-python run_worker.py --host 127.0.0.1 --port 6001 --agent_name file_agent --workflow_types gaia_file
-
-# 启动处理 'gaia_vision' 类型的 Worker
-# 对应 agent_pools 中的 "vision_agent@127.0.0.1:6002"
-python run_worker.py --host 127.0.0.1 --port 6002 --agent_name vision_agent --workflow_types gaia_vision
-
-# 启动处理 'gaia_speech' 类型的 Worker
-# 对应 agent_pools 中的 "speech_agent@127.0.0.1:6003"
-python run_worker.py --host 127.0.0.1 --port 6003 --agent_name speech_agent --workflow_types gaia_speech
-
-# 启动处理 'gaia_reason' 类型的 Worker
-# 对应 agent_pools 中的 "reason_agent@127.0.0.1:6004"
-python run_worker.py --host 127.0.0.1 --port 6004 --agent_name reason_agent --workflow_types gaia_reason
-```
-
-**参数解释**:
-
-  * `--host 127.0.0.1`: 当前 Worker 服务监听的 IP 地址。
-  * `--port 6001`: 当前 Worker 服务监听的端口。**此端口必须与主节点 `agent_pools` 中为它配置的端口完全一致**。
-  * `--agent_name file_agent`: 为此 Worker 上的 Agent 指定名称。**此名称必须与主节点 `agent_pools` 中为它配置的名称完全一致**。
-  * `--workflow_types gaia_file`: 声明此 Worker 能够处理的工作流类型，可以是用逗号分隔的多个类型。
-
-#### 第三步：分发 DAG 任务
-
-在所有主节点和工作节点都成功启动后，运行 `dispatch_task.py` 脚本来提交一批预定义的任务。
-
-```bash
-python dispatch_task.py --master_addr "127.0.0.1:5002"
-```
-
-**参数解释**:
-
-  * `--master_addr "127.0.0.1:5002"`: 告诉客户端主节点的 Flask API 地址，以便提交任务。
-
-脚本会提交任务，然后持续轮询每个任务的状态，直到所有任务完成或超时，并最终打印出执行结果。

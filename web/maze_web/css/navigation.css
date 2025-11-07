@@ -1,0 +1,97 @@
+/* Navigation bar styles */
+.top-navbar {
+    position: fixed;
+    top: 0;
+    width: 100%;
+    padding: 20px 0;
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+}
+
+.navbar-container {
+    width: 90%;
+    max-width: 1400px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transform: translateX(-50px);
+}
+
+.navbar-left {
+    display: flex;
+    align-items: center;
+}
+
+.logo {
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    background-color: transparent;
+    padding: 4px;
+    margin-right: 12px;
+}
+
+.logo-text {
+    font-weight: 700;
+    font-size: 32px;
+}
+
+.navbar-center {
+    display: flex;
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(12px);
+    border-radius: 9999px;
+    padding: 24px 48px;
+    gap: 55px;
+    border: 1px solid var(--glass-border);
+}
+
+.navbar-center a {
+    text-decoration: none;
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 22px;
+    cursor: pointer;
+}
+
+.navbar-center a:hover {
+    color: var(--accent-color);
+}
+
+.navbar-right {
+    display: flex;
+    gap: 30px;
+}
+
+.btn-outline, .btn-filled {
+    padding: 18px 18px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 22px;
+    text-decoration: none;
+    display: inline-block;
+    cursor: pointer;
+}
+
+.btn-outline {
+    border: 2px solid var(--text-primary);
+    color: var(--text-primary);
+    display: inline-block;
+    background: transparent;
+}
+
+.btn-outline:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+.btn-filled {
+    background-color: var(--primary-color);
+    color: black;
+}
+
+.btn-filled:hover {
+    background-color: var(--primary-light);
+}
+
+

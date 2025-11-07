@@ -1,0 +1,5 @@
+langgraph>=0.0.20
+langchain>=0.1.0
+langchain-community>=0.0.10
+numpy>=1.24.0
+dashscope>=1.14.0

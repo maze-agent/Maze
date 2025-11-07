@@ -7,7 +7,7 @@ __pycache__/
 dist/
 build/
 *.pyd
-
+docs/
 # Testing
 .pytest_cache/
 .mypy_cache/
@@ -23,7 +23,6 @@ htmlcov/
 *.swo
 
 # Logs and databases
-*.log
 *.sqlite
 *.db
 
@@ -37,11 +36,16 @@ env/
 log.txt
 
 # Ignore sensitive configuration files
-config.py
 secrets.py
+.pypirc.template
 
 # macOS
 .DS_Store
 
 # Jupyter Notebook
 .ipynb_checkpoints/
+
+# PyPI publishing
+*.whl
+*.tar.gz
+twine.log
