@@ -87,21 +87,7 @@ task1 = workflow.add_task(
 
 #4.Submit the workflow and get results
 workflow.run() 
-for message in workflow.get_results():
-    msg_type = message.get("type")
-    msg_data = message.get("data", {})
-
-    if msg_type == "start_task":
-        print(f"▶ Task started: {msg_data.get('task_id')}")
-
-    elif msg_type == "finish_task":
-        print(f"✓ Task completed: {msg_data.get('task_id')}")
-        print(f"  Result: {msg_data.get('result')}\n")
-
-    elif msg_type == "finish_workflow":
-        print("🎉 Workflow completed!")
-        break
-   
+workflow.show_results()
 ```
 <br>
 
