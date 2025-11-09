@@ -32,7 +32,7 @@ def task(inputs: List[str],
     Args:
         inputs: List of input parameter names
         outputs: List of output parameter names
-        resources: Resource requirements configuration, defaults to {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+        resources: Resource requirements configuration, defaults to {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
         data_types: Parameter data type mapping, defaults to "str" for all
         
     Example:
@@ -65,7 +65,7 @@ def task(inputs: List[str],
         
         # Default resource configuration
         if resources is None:
-            resources_config = {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+            resources_config = {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
         else:
             resources_config = resources
         
