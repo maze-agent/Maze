@@ -2,6 +2,7 @@ from asyncio.queues import Queue
 import os
 import uuid
 import json
+from venv import logger
 import zmq.asyncio
 import asyncio
 import multiprocessing as mp

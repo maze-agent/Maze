@@ -148,6 +148,7 @@ class Scheduler():
                 self.cur_ready_task = None
                 self.lock.release()
             else:
+                logger.debug("No node can run the task")
                 self.lock.release()
                 self.task_queue.put(self.cur_ready_task)
                 time.sleep(1)
@@ -196,6 +197,7 @@ class Scheduler():
                         socket_to_main.send(serialized_message)
  
                     except ray.exceptions.RayTaskError as e:
+                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         #Internal exception in the code,stop the workflow
                         canceld_tasks = self.workflow_manager.cancel_workflow(finished_task.workflow_id)
                         if len(canceld_tasks) > 0:
@@ -215,11 +217,14 @@ class Scheduler():
                         serialized_message = json.dumps(message).encode('utf-8')
                         socket_to_main.send(serialized_message)
                     except ray.exceptions.TaskCancelledError as e:
+                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         pass
                     except (ray.exceptions.NodeDiedError, ray.exceptions.ObjectLostError, ray.exceptions.TaskUnschedulableError) as e:
                         #The node of task running is dead,send the task back to the queue to retry.
+                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")                        
                         self.task_queue.put(finished_task)
                     except Exception as e:
+                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         print(f"Exception occurred {type(e)}: {e}")
                  
     def _launch_ray_head(self):

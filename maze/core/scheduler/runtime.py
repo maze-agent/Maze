@@ -108,8 +108,8 @@ class WorkflowRuntimeManager():
             return
 
         refs_to_del = []
-        for ref,workflow_id in self.ref_to_workflow_id.items():
-            if workflow_id == workflow_id:
+        for ref,id in self.ref_to_workflow_id.items():
+            if id == workflow_id:
                 refs_to_del.append(ref)
         for ref in refs_to_del:
             del self.ref_to_workflow_id[ref]

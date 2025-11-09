@@ -36,7 +36,7 @@ class ResourceManager():
         self.nodes:Dict[str,Node] = {}
         
         self.last_time = time.time()
-        self.interval = 2
+        self.interval = 3
 
     def _get_head_node_resource(self):
         '''
