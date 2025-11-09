@@ -81,11 +81,13 @@ def api_client():
             assert response.status_code == 200, f"运行工作流失败: {response.text}"
             result = response.json()
             assert result["status"] == "success"
+            assert result["run_id"] is not None
+            return result['run_id']
         
         @staticmethod
-        def get_workflow_results(workflow_id: str) -> List[Dict[str, Any]]:
+        def get_workflow_results(workflow_id: str,run_id:str) -> List[Dict[str, Any]]:
             """通过WebSocket获取工作流结果"""
-            url = f"{WS_BASE_URL}/get_workflow_res/{workflow_id}"
+            url = f"{WS_BASE_URL}/get_workflow_res/{workflow_id}/{run_id}"
             messages = []
             error = None
             
@@ -283,11 +285,11 @@ def task2(params):
         print(f"✓ 添加边: {task_id1} -> {task_id2}")
         
         # 5. 运行工作流
-        api_client.run_workflow(workflow_id)
-        print(f"✓ 开始运行工作流")
+        run_id = api_client.run_workflow(workflow_id)
+        print(f"✓ 开始运行工作流,run_id:{run_id}")
         
         # 6. 获取结果
-        messages = api_client.get_workflow_results(workflow_id)
+        messages = api_client.get_workflow_results(workflow_id,run_id)
         
         # 验证结果
         assert len(messages) > 0, "应该收到至少一条消息"

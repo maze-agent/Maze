@@ -84,6 +84,8 @@ class MaPath:
             }
             serialized: bytes = json.dumps(message).encode('utf-8')
             self.socket_to_receive.send(serialized)
+
+        return submit_id
         
     def get_ray_head_port(self):
         '''
@@ -177,6 +179,7 @@ class MaPath:
                             que: Queue[Any] = self.async_que[message_data['task_id']]
                             await que.put(message)
                         else:
+                            submit_id = message_data['workflow_id']
                             if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
     
