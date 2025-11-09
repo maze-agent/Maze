@@ -2,7 +2,7 @@ from asyncio.queues import Queue
 import os
 import uuid
 import json
-from venv import logger
+import copy
 import zmq.asyncio
 import asyncio
 import multiprocessing as mp
@@ -20,6 +20,7 @@ class MaPath:
         self.lock = lock = asyncio.Lock()
 
         self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
+        self.submit_workflows: Dict[str, Workflow] = {}
         self.async_que: Dict[str, asyncio.Queue] = {} 
          
     def cleanup(self):
@@ -68,14 +69,18 @@ class MaPath:
         """
         Start a workflow.
         """
-        workflow = self.workflows[workflow_id]
-        self.async_que[workflow_id] = asyncio.Queue()
-        start_task:List = workflow.get_start_task()
+        submit_id = str(uuid.uuid4())
+        submit_workflow = copy.deepcopy(self.workflows[workflow_id])
+        self.submit_workflows[submit_id] = submit_workflow
+        self.async_que[submit_id] = asyncio.Queue()
+        start_task:List = submit_workflow.get_start_task()
         
         for task in start_task:
+            data = task.to_json()
+            data['workflow_id'] = submit_id
             message = {
                 "type":"run_task",
-                "data":task.to_json()
+                "data": data
             }
             serialized: bytes = json.dumps(message).encode('utf-8')
             self.socket_to_receive.send(serialized)
@@ -148,18 +153,21 @@ class MaPath:
                             que: Queue[Any] = self.async_que[message_data['task_id']]
                             await que.put(message)
                         else:
-                            if message_data['workflow_id'] not in self.async_que or message_data['workflow_id'] not in self.workflows:
+                            submit_id = message_data['workflow_id']
+                            if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
     
-                            que: Queue[Any] = self.async_que[message_data['workflow_id']]
+                            que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
  
-                            new_ready_tasks  = self.workflows[message_data["workflow_id"]].finish_task(task_id=message_data["task_id"])
+                            new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"])
                             if len(new_ready_tasks) > 0:
                                 for task in new_ready_tasks:
+                                    data = task.to_json()
+                                    data['workflow_id'] = submit_id
                                     message = {
                                         "type":"run_task",
-                                        "data":task.to_json()
+                                        "data":data
                                     }                 
                                     serialized: bytes = json.dumps(message).encode('utf-8')
                                     self.socket_to_receive.send(serialized)
@@ -169,24 +177,24 @@ class MaPath:
                             que: Queue[Any] = self.async_que[message_data['task_id']]
                             await que.put(message)
                         else:
-                            if message_data['workflow_id'] not in self.async_que or message_data['workflow_id'] not in self.workflows:
+                            if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
     
-                            que: Queue[Any] = self.async_que[message_data['workflow_id']]
+                            que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
                
 
             except Exception as e:
                 print(f"Error in monitor: {e}")
       
-    async def get_workflow_res(self,workflow_id:str,websocket:WebSocket):    
+    async def get_workflow_res(self,workflow_id:str,submit_id:str,websocket:WebSocket):    
         """
         Get the workflow result and send to websocket.
         """
-        workflow = self.workflows[workflow_id]
-        total_task_num = workflow.get_total_task_num()
+        submit_workflow = self.submit_workflows[submit_id]
+        total_task_num = submit_workflow.get_total_task_num()
 
-        que = self.async_que[workflow_id]
+        que = self.async_que[submit_id]
         assert que != None
 
         count = 0
@@ -197,10 +205,10 @@ class MaPath:
             if data["type"]=="finish_task":
                 count += 1
                 if(count == total_task_num):
-                    finish_message = {"type":"finish_workflow","data":{"workflow_id":workflow_id}}
+                    finish_message = {"type":"finish_workflow","data":{"run_id":submit_id}}
                     await websocket.send_json(finish_message)
                     
-                    message = {"type":"clear_workflow","data":{"workflow_id":workflow_id}}
+                    message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
                     serialized: bytes = json.dumps(message).encode('utf-8')
                     self.socket_to_receive.send(serialized)
                      
@@ -208,14 +216,14 @@ class MaPath:
             elif data["type"]=="task_exception":
                 raise Exception("task_exception")
           
-    async def stop_workflow(self,workflow_id:str):
+    async def stop_workflow(self,submit_id:str):
         '''
         Stop workflow
         '''
         async with self.lock:
-            del self.async_que[workflow_id]
+            del self.async_que[submit_id]
 
-        message = {"type":"stop_workflow","data":{"workflow_id":workflow_id}}
+        message = {"type":"stop_workflow","data":{"workflow_id":submit_id}}
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_receive.send(serialized)
     

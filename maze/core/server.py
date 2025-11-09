@@ -166,19 +166,19 @@ async def run_workflow(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         
-        mapath.run_workflow(workflow_id)
-        return {"status":"success"}
+        run_id = mapath.run_workflow(workflow_id)
+        return {"status":"success","run_id": run_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/get_workflow_res/{workflow_id}")
-async def get_workflow_res(websocket: WebSocket, workflow_id: str):
+@app.websocket("/get_workflow_res/{workflow_id}/{run_id}")
+async def get_workflow_res(websocket: WebSocket, workflow_id: str, run_id: str):
     try:
         await websocket.accept()
-        await mapath.get_workflow_res(workflow_id,websocket)
+        await mapath.get_workflow_res(workflow_id,run_id,websocket)
         await websocket.close()
     except Exception as e:
-        await mapath.stop_workflow(workflow_id)
+        await mapath.stop_workflow(run_id)
         await websocket.close()
 
 @app.post("/add_langgraph_task")
