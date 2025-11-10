@@ -12,13 +12,16 @@ class SelectedNode():
 
 class LanggraphTaskRuntime():
     def __init__(self,workflow_id:str,task_id:str,code_ser:str,args:str,kwargs:str,resources:Dict):
-        self.status = "ready"
+        self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
         self.task_id: str = task_id
         self.code_ser: str = code_ser
         self.args: str = args
         self.kwargs: str = kwargs
         self.resources: Dict[str, Any] = resources
+
+    def set_task_status(self, status):
+        self.status = status
 
 class TaskRuntime():
     def __init__(self,workflow_id:str,task_id:str,task_input:Dict,task_output:Dict,resources:Dict,code_str:str=None,code_ser:str=None):
@@ -34,6 +37,9 @@ class TaskRuntime():
         self.object_ref = None
         self.result: None|Dict[Any, Any] = None
         self.selected_node = None
+    
+    def set_task_status(self, status):
+        self.status = status
         
 class WorkflowRuntime():
     def __init__(self,workflow_id):
@@ -115,7 +121,7 @@ class WorkflowRuntimeManager():
             del self.ref_to_workflow_id[ref]
 
         del self.workflows[workflow_id]
-
+        
     def cancel_workflow(self, workflow_id:str):
         '''
         Cancel running tasks of workflow and return running tasks.

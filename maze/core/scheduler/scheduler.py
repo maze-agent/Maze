@@ -220,10 +220,11 @@ class Scheduler():
                         logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                     except (ray.exceptions.NodeDiedError, ray.exceptions.ObjectLostError, ray.exceptions.TaskUnschedulableError) as e:
                         #The node of task running is dead,send the task back to the queue to retry.
-                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")                        
+                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
+                        finished_task.set_task_status('ready')
                         self.task_queue.put(finished_task)
                     except Exception as e:
-                        logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
+                        logger.error(f"Task {finished_task.task_id} failed with exception: {e}")
                         print(f"Exception occurred {type(e)}: {e}")
                  
     def _launch_ray_head(self):
