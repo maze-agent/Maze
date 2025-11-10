@@ -164,4 +164,6 @@ class ResourceManager():
         Start worker node
         ''' 
         logger.info("New worker node join: node_id:%s,node_ip:%s", node_id,node_ip)
+        gpu_resource = {int(k): v for k, v in resources['gpu_resource'].items()}
+        resources["gpu_resource"] = gpu_resource
         self.nodes[node_id] = Node(node_id,node_ip,resources,resources)
