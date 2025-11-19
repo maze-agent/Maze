@@ -1,4 +1,8 @@
-## <img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze:A Task-Level Distributed Agent Workflow Framework
+<div style="text-align:center;">
+  <h2 style="display:inline-block;">
+    <img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze: A Task-Level Distributed Agent Workflow Framework
+  </h2>
+</div>
 
 [**Documentation**](https://maze-doc-new.readthedocs.io/en/latest/)
 
