@@ -1,12 +1,10 @@
 <h2 align="center"><img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze:A Task-Level Distributed Agent Workflow Framework</h2>
 
 
-
 [**Documentation**](https://maze-doc-new.readthedocs.io/en/latest/)
 
  
-
-
+<br />
 
 ## 🌟Why  Maze？
 - **Task-level**
