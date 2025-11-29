@@ -86,15 +86,19 @@ workflow.show_results()
 
 
 ## 🖥️ Maze Playground
-We support building workflows through a drag-and-drop interface on the Maze Playground.Here are two pages for reference. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
+We support building workflows through a drag-and-drop interface on the Maze Playground.You can start the playground with the following command option.
+```
+maze start --worker --addr HEAD_IP:HEAD_PORT --playground 
+```
+Here are two vedios which show the process of using builtin tasks and uploading user-defined taks in maze playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
 
-### Design Workflow
-![Design Workflow Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.png)  
-[Design Workflow Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/create_workflow.mp4)
+### Builtin Task Workflow
+![Design Workflow Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/builtin_task.png)  
+[Design Workflow Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/builtin_task.mp4)
 
-### Check Result
-![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.png)  
-[Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/check_result.mp4)
+### User Defined Task Workflow
+![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.png)  
+[Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.mp4)
 
 
