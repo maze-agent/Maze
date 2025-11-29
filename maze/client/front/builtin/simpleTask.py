@@ -4,7 +4,7 @@ Built-in simple task examples
 These tasks are defined using the @task decorator and include metadata for inputs, outputs, and resource requirements
 """
 
-from maze.client.front.decorator import task
+from maze import task
 
 
 @task(

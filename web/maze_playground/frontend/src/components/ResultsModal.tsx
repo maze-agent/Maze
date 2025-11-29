@@ -17,47 +17,35 @@ export default function ResultsModal() {
 
   useEffect(() => {
     if (isRunning && workflowId) {
-      console.log('[ResultsModal] 建立 WebSocket 连接:', workflowId);
-      // 建立 WebSocket 连接
       const websocket = api.connectWebSocket(workflowId, {
         onConnected: () => {
-          console.log('[ResultsModal] WebSocket 已连接');
           setStatus('running');
         },
         onWorkflowStarted: () => {
-          console.log('[ResultsModal] 工作流开始运行');
           setStatus('running');
         },
         onBuilding: () => {
-          console.log('[ResultsModal] 工作流构建中');
           setStatus('running');
         },
         onWorkflowCompleted: (res) => {
-          console.log('[ResultsModal] 工作流完成，结果:', res);
           setStatus('completed');
           setResults(res);
-          // 不要立即关闭 isRunning，保持 Modal 打开
-          // setIsRunning(false); // 移除这行
         },
         onWorkflowFailed: (err, trace) => {
-          console.log('[ResultsModal] 工作流失败:', err);
           setStatus('failed');
           setError(err);
           setTraceback(trace || '');
-          // setIsRunning(false); // 移除这行
         },
         onError: (error) => {
-          console.error('[ResultsModal] WebSocket 错误:', error);
+          console.error('WebSocket error:', error);
           setStatus('failed');
-          setError('WebSocket 连接失败');
-          // setIsRunning(false); // 移除这行
+          setError('WebSocket connection failed');
         },
       });
 
       setWs(websocket);
 
       return () => {
-        console.log('[ResultsModal] 清理 WebSocket 连接');
         if (websocket.readyState === WebSocket.OPEN) {
           websocket.close();
         }
@@ -66,11 +54,9 @@ export default function ResultsModal() {
   }, [isRunning, workflowId]);
 
   const handleClose = () => {
-    console.log('[ResultsModal] 用户关闭窗口');
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
     }
-    // 重置所有状态
     setIsRunning(false);
     clearRunResults();
     setStatus('connecting');
@@ -79,13 +65,7 @@ export default function ResultsModal() {
     setTraceback('');
   };
 
-  // Modal 应该在以下情况显示：
-  // 1. isRunning=true (工作流正在运行)
-  // 2. status='completed' (工作流完成但未关闭)
-  // 3. status='failed' (工作流失败但未关闭)
   const shouldShow = isRunning || status === 'completed' || status === 'failed';
-  
-  console.log('[ResultsModal] 渲染状态:', { isRunning, status, shouldShow, hasResults: !!results });
 
   return (
     <Modal
@@ -94,14 +74,14 @@ export default function ResultsModal() {
           {status === 'running' && <LoadingOutlined style={{ color: '#1890ff' }} />}
           {status === 'completed' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
           {status === 'failed' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-          工作流运行结果
+          Workflow Results
         </div>
       }
       open={shouldShow}
       onCancel={handleClose}
       footer={[
         <Button key="close" onClick={handleClose}>
-          关闭
+          Close
         </Button>,
       ]}
       width={800}
@@ -110,7 +90,7 @@ export default function ResultsModal() {
         <div style={{ textAlign: 'center', padding: '40px' }}>
           <Spin size="large" />
           <div style={{ marginTop: '16px' }}>
-            <Text type="secondary">正在连接...</Text>
+            <Text type="secondary">Connecting...</Text>
           </div>
         </div>
       )}
@@ -119,7 +99,7 @@ export default function ResultsModal() {
         <div style={{ textAlign: 'center', padding: '40px' }}>
           <Spin size="large" />
           <div style={{ marginTop: '16px' }}>
-            <Text type="secondary">工作流正在运行中，请稍候...</Text>
+            <Text type="secondary">Workflow is running, please wait...</Text>
           </div>
         </div>
       )}
@@ -127,7 +107,7 @@ export default function ResultsModal() {
       {status === 'completed' && results && (
         <div>
           <Alert
-            message="工作流执行成功"
+            message="Workflow completed successfully"
             type="success"
             showIcon
             style={{ marginBottom: '16px' }}
@@ -140,7 +120,7 @@ export default function ResultsModal() {
                 label: (
                   <span>
                     <FileTextOutlined />
-                    友好展示
+                    Formatted
                   </span>
                 ),
                 children: (
@@ -157,7 +137,7 @@ export default function ResultsModal() {
                 label: (
                   <span>
                     <CodeOutlined />
-                    原始 JSON
+                    Raw JSON
                   </span>
                 ),
                 children: (
@@ -182,7 +162,7 @@ export default function ResultsModal() {
       {status === 'failed' && (
         <div>
           <Alert
-            message="工作流执行失败"
+            message="Workflow execution failed"
             description={error}
             type="error"
             showIcon
@@ -190,7 +170,7 @@ export default function ResultsModal() {
           />
           {traceback && (
             <>
-              <Title level={5}>错误详情</Title>
+              <Title level={5}>Error Details</Title>
               <div style={{ 
                 background: '#fff2f0', 
                 padding: '12px', 
@@ -210,4 +190,3 @@ export default function ResultsModal() {
     </Modal>
   );
 }
-

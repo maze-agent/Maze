@@ -45,19 +45,18 @@ def user_task1(params):
 def user_task2(params):
     """
     用户自定义任务2：获取输入并添加当前时间戳和后缀
-    
+        
     输入:
         task2_input: 输入字符串
-        
+            
     输出:
         task2_output: 输入字符串 + 时间戳 + "===="
     """
     task_input = params.get("task2_input")
-    
+        
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str + "===="
-
     return {
         "task2_output": result
     }

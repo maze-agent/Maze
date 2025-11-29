@@ -2,17 +2,17 @@ import { create } from 'zustand';
 import type { WorkflowNode, WorkflowEdge, BuiltinTaskMeta, RunResult } from '@/types/workflow';
 
 interface WorkflowStore {
-  // 工作流状态
+  // Workflow state
   workflowId: string | null;
   workflowName: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   selectedNode: WorkflowNode | null;
   
-  // 内置任务
+  // Builtin tasks
   builtinTasks: BuiltinTaskMeta[];
   
-  // 运行状态
+  // Run state
   isRunning: boolean;
   runResults: RunResult[];
   
@@ -35,7 +35,7 @@ interface WorkflowStore {
 export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   // Initial state
   workflowId: null,
-  workflowName: '未命名工作流',
+  workflowName: 'Untitled Workflow',
   nodes: [],
   edges: [],
   selectedNode: null,
@@ -86,7 +86,7 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
   
   reset: () => set({
     workflowId: null,
-    workflowName: '未命名工作流',
+    workflowName: 'Untitled Workflow',
     nodes: [],
     edges: [],
     selectedNode: null,
@@ -94,4 +94,3 @@ export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
     runResults: [],
   }),
 }));
-

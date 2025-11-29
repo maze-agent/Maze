@@ -131,7 +131,6 @@ class MaWorkflow:
             'task_input': task_input,
             'task_output': task_output,
             'resources': metadata.resources,
-            'node_type': metadata.node_type,  # Pass node type
         }
         
         save_response = requests.post(save_url, json=save_data)

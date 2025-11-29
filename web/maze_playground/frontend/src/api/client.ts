@@ -4,16 +4,15 @@ import type { BuiltinTaskMeta, Workflow, WorkflowNode, RunResult } from '@/types
 const API_BASE = '/api';
 
 export const api = {
-  // 获取内置任务列表
+  // Get builtin tasks list
   async getBuiltinTasks(): Promise<BuiltinTaskMeta[]> {
     const response = await axios.get(`${API_BASE}/builtin-tasks`);
     return response.data;
   },
 
-  // 解析自定义函数
+  // Parse custom function
   async parseCustomFunction(code: string): Promise<{
     name: string;
-    nodeType: 'task' | 'tool';
     inputs: Array<{ name: string; dataType: string }>;
     outputs: Array<{ name: string; dataType: string }>;
     resources?: any;
@@ -22,7 +21,7 @@ export const api = {
     return response.data;
   },
 
-  // 创建工作流
+  // Create workflow
   async createWorkflow(name?: string): Promise<{ 
     workflowId: string; 
     name: string;
@@ -32,13 +31,13 @@ export const api = {
     return response.data;
   },
 
-  // 获取工作流详情
+  // Get workflow details
   async getWorkflow(workflowId: string): Promise<Workflow> {
     const response = await axios.get(`${API_BASE}/workflows/${workflowId}`);
     return response.data;
   },
 
-  // 保存工作流（节点和边）
+  // Save workflow (nodes and edges)
   async saveWorkflow(workflowId: string, data: {
     nodes: WorkflowNode[];
     edges: any[];
@@ -46,7 +45,7 @@ export const api = {
     await axios.put(`${API_BASE}/workflows/${workflowId}`, data);
   },
 
-  // 运行工作流
+  // Run workflow
   async runWorkflow(workflowId: string): Promise<{ 
     message: string;
     workflowId: string;
@@ -55,7 +54,7 @@ export const api = {
     return response.data;
   },
 
-  // 获取工作流结果
+  // Get workflow results
   async getWorkflowResults(workflowId: string): Promise<{
     status: string;
     results: any;
@@ -65,7 +64,7 @@ export const api = {
     return response.data;
   },
 
-  // 连接WebSocket获取实时结果
+  // Connect WebSocket for real-time results
   connectWebSocket(
     workflowId: string, 
     callbacks: {
@@ -83,61 +82,52 @@ export const api = {
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      console.log('✅ WebSocket 连接已建立');
       callbacks.onConnected?.();
     };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log('📨 收到消息:', data);
         
         callbacks.onMessage?.(data);
 
         switch (data.type) {
           case 'connected':
-            console.log('🔌 已连接到结果推送');
             break;
           
           case 'workflow_started':
-            console.log('🚀 工作流开始运行');
             callbacks.onWorkflowStarted?.();
             break;
           
           case 'building':
-            console.log('🏗️ 正在构建工作流...');
             callbacks.onBuilding?.(data.message);
             break;
           
           case 'workflow_completed':
-            console.log('✅ 工作流执行完成');
             callbacks.onWorkflowCompleted?.(data.results);
             break;
           
           case 'workflow_failed':
-            console.error('❌ 工作流执行失败:', data.error);
             callbacks.onWorkflowFailed?.(data.error, data.traceback);
             break;
           
           case 'workflow_running':
-            console.log('⏳ 工作流运行中...');
             break;
           
           default:
-            console.log('📦 未知消息类型:', data.type);
+            break;
         }
       } catch (error) {
-        console.error('解析 WebSocket 消息失败:', error);
+        console.error('Failed to parse WebSocket message:', error);
       }
     };
 
     ws.onerror = (error) => {
-      console.error('❌ WebSocket 错误:', error);
+      console.error('WebSocket error:', error);
       callbacks.onError?.(error);
     };
 
     ws.onclose = () => {
-      console.log('🔌 WebSocket 连接已关闭');
       callbacks.onClose?.();
     };
 

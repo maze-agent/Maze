@@ -19,9 +19,9 @@ if sys.platform == 'win32':
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.insert(0, project_root)
 
-# 使用 front 客户端模块
+# 使用客户端模块
 from maze.client.front.client import MaClient
-from maze.client.front.decorator import task, tool, get_task_metadata
+from maze import task, get_task_metadata
 from maze.client.front.builtin import simpleTask
 import inspect
 import importlib
@@ -41,7 +41,6 @@ def get_builtin_tasks():
                     tasks.append({
                         "name": name,
                         "displayName": name.replace('_', ' ').title(),
-                        "nodeType": metadata.node_type,
                         "inputs": [
                             {
                                 "name": inp,
@@ -56,7 +55,7 @@ def get_builtin_tasks():
                             }
                             for out in metadata.outputs
                         ],
-                        "resources": metadata.resources if metadata.node_type == "task" else None,
+                        "resources": metadata.resources,
                         "functionRef": name,
                         "module": module_name
                     })
@@ -67,27 +66,27 @@ def get_builtin_tasks():
 
 
 def parse_custom_function(code):
-    """解析用户提交的自定义函数"""
+    """Parse user-submitted custom function"""
     import tempfile
     import importlib.util
     
-    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     try:
         temp_file.write(code)
         temp_file.close()
         
-        # 动态加载模块
+        # Dynamically load module
         spec = importlib.util.spec_from_file_location("custom_task", temp_file.name)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         
-        # 查找装饰的函数
+        # Find decorated function
         for name, obj in inspect.getmembers(module):
             if hasattr(obj, '_maze_task_metadata'):
-                metadata = get_task_metadata(obj)
+                metadata = obj._maze_task_metadata
+                
                 return {
                     "name": name,
-                    "nodeType": metadata.node_type,
                     "inputs": [
                         {"name": inp, "dataType": metadata.data_types.get(inp, "str")}
                         for inp in metadata.inputs
@@ -96,17 +95,26 @@ def parse_custom_function(code):
                         {"name": out, "dataType": metadata.data_types.get(out, "str")}
                         for out in metadata.outputs
                     ],
-                    "resources": metadata.resources if metadata.node_type == "task" else None,
+                    "resources": metadata.resources,
                     "codeStr": code
                 }
         
-        return {"error": "未找到使用 @task 或 @tool 装饰的函数"}
+        return {"error": "No function decorated with @task found"}
+    
+    except SyntaxError as e:
+        return {"error": f"Syntax error: {e}", "traceback": traceback.format_exc()}
+    
+    except ImportError as e:
+        return {"error": f"Import failed: {e}. Please use 'from maze import task'", "traceback": traceback.format_exc()}
     
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}
     
     finally:
-        os.unlink(temp_file.name)
+        try:
+            os.unlink(temp_file.name)
+        except:
+            pass
 
 
 def create_maze_workflow(workflow_id, server_url="http://localhost:8000"):
@@ -178,14 +186,14 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                 print(f"[DEBUG] 任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
             
             elif category == "custom":
-                # 自定义任务
+                # Custom task
                 custom_code = node_data.get("customCode", "")
                 
-                # 动态执行自定义代码并获取函数
+                # Dynamically execute custom code and get function
                 import tempfile
                 import importlib.util
                 
-                temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+                temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
                 try:
                     temp_file.write(custom_code)
                     temp_file.close()
@@ -194,7 +202,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                     custom_module = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(custom_module)
                     
-                    # 找到装饰的函数
+                    # Find decorated function
                     task_func = None
                     for name, obj in inspect.getmembers(custom_module):
                         if hasattr(obj, '_maze_task_metadata'):
@@ -202,9 +210,9 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                             break
                     
                     if not task_func:
-                        return {"success": False, "error": "自定义函数未找到装饰器"}
+                        return {"success": False, "error": "No @task decorated function found"}
                     
-                    # 构建输入
+                    # Build inputs
                     task_inputs = {}
                     for inp in node_data["inputs"]:
                         if inp["source"] == "user":
@@ -217,8 +225,10 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                                 if source_node_id in task_map:
                                     source_task = task_map[source_node_id]
                                     task_inputs[inp["name"]] = source_task.outputs[output_key]
+                                else:
+                                    return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
                     
-                    # 添加任务
+                    # Add task
                     ma_task = workflow.add_task(task_func, inputs=task_inputs)
                     task_map[node_id] = ma_task
                 
@@ -239,13 +249,14 @@ def build_and_run_workflow(workflow_id, nodes, edges):
             else:
                 print(f"[WARNING] 跳过无效边: {source_node_id} -> {target_node_id}", file=sys.stderr)
         
-        # Step 3: 运行工作流
+        # Step 3: 运行工作流并获取 run_id
         print(f"[DEBUG] 开始运行工作流...", file=sys.stderr)
-        workflow.run()
+        run_id = workflow.run()
+        print(f"[DEBUG] 工作流已提交，run_id: {run_id}", file=sys.stderr)
         
-        # Step 4: 获取结果
-        print(f"[DEBUG] 获取运行结果...", file=sys.stderr)
-        results = workflow.get_results(verbose=True)
+        # Step 4: 通过 run_id 获取结果
+        print(f"[DEBUG] 获取运行结果 (run_id: {run_id})...", file=sys.stderr)
+        results = workflow.get_results(run_id, verbose=True)
         print(f"[DEBUG] 结果: {results}", file=sys.stderr)
         
         # Step 5: 清理（当前服务器不支持 cleanup endpoint，已降级）

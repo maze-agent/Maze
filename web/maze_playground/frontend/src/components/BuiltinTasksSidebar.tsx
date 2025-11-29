@@ -1,5 +1,5 @@
 import { Card, List, Tag, Empty, Button, Space, Divider, message } from 'antd';
-import { ThunderboltOutlined, ToolOutlined, ReloadOutlined, PlusOutlined, CodeOutlined } from '@ant-design/icons';
+import { ThunderboltOutlined, ReloadOutlined, PlusOutlined, CodeOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type { BuiltinTaskMeta } from '@/types/workflow';
 import { api } from '@/api/client';
@@ -29,10 +29,10 @@ export default function BuiltinTasksSidebar() {
     try {
       const tasks = await api.getBuiltinTasks();
       setBuiltinTasks(tasks);
-      message.success('刷新成功');
+      message.success('Refresh successful');
     } catch (error) {
-      console.error('加载内置任务失败:', error);
-      message.error('刷新失败');
+      console.error('Failed to load builtin tasks:', error);
+      message.error('Refresh failed');
     } finally {
       setLoading(false);
     }
@@ -41,10 +41,10 @@ export default function BuiltinTasksSidebar() {
   return (
     <div style={{ width: '280px', borderRight: '1px solid #f0f0f0', background: '#fafafa', overflowY: 'auto' }}>
       <div style={{ padding: '16px' }}>
-        {/* 自定义任务区域 */}
-        <h3 style={{ marginBottom: '12px' }}>自定义任务</h3>
+        {/* Custom Task Section */}
+        <h3 style={{ marginBottom: '12px' }}>Custom Task</h3>
         <p style={{ fontSize: '12px', color: '#999', marginBottom: '8px' }}>
-          拖拽到画布创建自定义任务
+          Drag to canvas to create custom task
         </p>
         <Card
           size="small"
@@ -62,17 +62,17 @@ export default function BuiltinTasksSidebar() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <CodeOutlined style={{ fontSize: '20px' }} />
             <div>
-              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>自定义任务</div>
-              <div style={{ fontSize: '12px', opacity: 0.9 }}>编写自己的任务代码</div>
+              <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>Custom Task</div>
+              <div style={{ fontSize: '12px', opacity: 0.9 }}>Write your own task code</div>
             </div>
           </div>
         </Card>
 
         <Divider />
 
-        {/* 内置任务区域 */}
+        {/* Builtin Tasks Section */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-          <h3 style={{ margin: 0 }}>内置任务</h3>
+          <h3 style={{ margin: 0 }}>Builtin Tasks</h3>
           <Button 
             type="text" 
             size="small"
@@ -80,15 +80,15 @@ export default function BuiltinTasksSidebar() {
             onClick={handleRefresh}
             loading={loading}
           >
-            刷新
+            Refresh
           </Button>
         </div>
         <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
-          拖拽任务到画布上
+          Drag tasks to the canvas
         </p>
         {builtinTasks.length === 0 ? (
           <Empty 
-            description="暂无内置任务" 
+            description="No builtin tasks" 
             image={Empty.PRESENTED_IMAGE_SIMPLE}
           >
             <Button 
@@ -97,7 +97,7 @@ export default function BuiltinTasksSidebar() {
               icon={<ReloadOutlined />}
               onClick={handleRefresh}
             >
-              加载内置任务
+              Load Builtin Tasks
             </Button>
           </Empty>
         ) : (
@@ -112,14 +112,10 @@ export default function BuiltinTasksSidebar() {
                 onDragStart={(e) => onDragStart(e, task)}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                  {task.nodeType === 'task' ? (
-                    <ThunderboltOutlined style={{ color: '#1890ff' }} />
-                  ) : (
-                    <ToolOutlined style={{ color: '#52c41a' }} />
-                  )}
+                  <ThunderboltOutlined style={{ color: '#1890ff' }} />
                   <strong>{task.displayName}</strong>
                 </div>
-                <Tag color={task.nodeType === 'task' ? 'blue' : 'green'}>{task.nodeType}</Tag>
+                <Tag color="blue">task</Tag>
               </Card>
             )}
           />
@@ -128,4 +124,3 @@ export default function BuiltinTasksSidebar() {
     </div>
   );
 }
-

@@ -17,48 +17,45 @@ export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEdit
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
 
-  // 当编辑器打开时，从最新的节点数据加载代码
   useEffect(() => {
     if (open) {
       const currentNode = nodes.find(n => n.id === node.id);
       const currentCode = currentNode?.data.customCode || '';
-      
-      console.log('🔍 编辑器打开');
-      console.log('   节点ID:', node.id);
-      console.log('   当前节点:', currentNode ? '找到' : '未找到');
-      console.log('   代码长度:', currentCode.length);
-      console.log('   代码预览:', currentCode.substring(0, 80) + (currentCode.length > 80 ? '...' : ''));
-      
       setCode(currentCode);
       setParseError(null);
     }
   }, [open, node.id, nodes]);
 
-  const defaultCode = `from maze.core.client.decorator import task
+  const defaultCode = `from maze import task
 
 @task(
-    inputs={"text": str},
-    outputs={"result": str}
+    inputs=["text"],
+    outputs=["result"],
+    resources={"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
 )
-def my_custom_task(text: str) -> dict:
+def my_custom_task(params):
     """
-    自定义任务示例
+    Custom task example
     
     Args:
-        text: 输入文本
+        params: Dictionary containing input parameters
         
     Returns:
-        包含 result 的字典
+        Dictionary with output values
     """
-    # 在这里编写你的任务逻辑
-    result = f"处理结果: {text}"
+    # Get input parameters from params
+    text = params.get("text")
     
+    # Write your task logic here
+    result = f"Processed: {text}"
+    
+    # Return dictionary with keys matching outputs
     return {"result": result}
 `;
 
   const handleParse = async () => {
     if (!code.trim()) {
-      message.warning('请输入代码');
+      message.warning('Please enter code');
       return;
     }
 
@@ -68,13 +65,10 @@ def my_custom_task(text: str) -> dict:
     try {
       const parsed = await api.parseCustomFunction(code);
       
-      console.log('✅ 解析成功，函数名:', parsed.name, '代码长度:', code.length);
-      
-      // 更新节点配置
       const updatedData = {
         customCode: code,
-        label: parsed.name || '自定义任务',
-        nodeType: parsed.nodeType,
+        label: parsed.name || 'Custom Task',
+        nodeType: 'task' as const,
         inputs: parsed.inputs.map(inp => ({
           name: inp.name,
           dataType: inp.dataType,
@@ -86,7 +80,6 @@ def my_custom_task(text: str) -> dict:
         configured: true,
       };
       
-      // 构建更新后的节点对象
       const updatedNode = {
         ...node,
         data: {
@@ -95,29 +88,16 @@ def my_custom_task(text: str) -> dict:
         }
       };
       
-      console.log('📝 更新节点到 store');
-      console.log('   节点ID:', node.id);
-      console.log('   代码长度:', code.length);
-      console.log('   任务名:', parsed.name);
-      
-      // 先更新 selectedNode（立即生效）
       selectNode(updatedNode);
-      
-      // 再更新 store 中的 nodes 数组（稍后生效）
       updateNode(node.id, updatedData);
-      
-      console.log('✅ 节点更新完成');
-      console.log('   updatedNode.data.customCode 长度:', updatedNode.data.customCode?.length);
 
-      message.success(`解析成功！任务名称: ${parsed.name}`);
-      
-      // 关闭编辑器
+      message.success(`Parse successful! Task name: ${parsed.name}`);
       onClose();
     } catch (error: any) {
-      console.error('❌ 解析自定义函数失败:', error);
-      const errorMsg = error.response?.data?.error || error.message || '解析失败';
+      console.error('Failed to parse custom function:', error);
+      const errorMsg = error.response?.data?.error || error.message || 'Parse failed';
       setParseError(errorMsg);
-      message.error('解析失败');
+      message.error('Parse failed');
     } finally {
       setParsing(false);
     }
@@ -133,7 +113,7 @@ def my_custom_task(text: str) -> dict:
       title={
         <Space>
           <CodeOutlined />
-          <span>编辑自定义任务代码</span>
+          <span>Edit Custom Task Code</span>
         </Space>
       }
       open={open}
@@ -141,10 +121,10 @@ def my_custom_task(text: str) -> dict:
       width={800}
       footer={[
         <Button key="reset" icon={<ReloadOutlined />} onClick={handleReset}>
-          重置为示例
+          Reset to Example
         </Button>,
         <Button key="cancel" onClick={onClose}>
-          取消
+          Cancel
         </Button>,
         <Button 
           key="parse" 
@@ -153,20 +133,22 @@ def my_custom_task(text: str) -> dict:
           onClick={handleParse}
           loading={parsing}
         >
-          解析并配置
+          Parse & Configure
         </Button>,
       ]}
     >
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <Alert
-          message="提示"
+          message="Guidelines"
           description={
             <div>
-              <p>请使用 <code>@task</code> 或 <code>@tool</code> 装饰器编写您的函数。</p>
+              <p>Use the <code>@task</code> decorator (<code>from maze import task</code>):</p>
               <ul style={{ marginBottom: 0 }}>
-                <li>使用 <code>inputs</code> 参数定义输入参数</li>
-                <li>使用 <code>outputs</code> 参数定义输出参数</li>
-                <li>函数需要返回一个字典，key 对应 outputs 中定义的名称</li>
+                <li><code>inputs</code>: List of input parameter names, e.g. <code>["text", "count"]</code></li>
+                <li><code>outputs</code>: List of output parameter names, e.g. <code>["result"]</code></li>
+                <li><code>resources</code> (optional): Resource config, e.g. <code>{`{"cpu": 1, "gpu": 0}`}</code></li>
+                <li>Function signature: <code>def my_task(params):</code>, use <code>params.get("name")</code> to get inputs</li>
+                <li>Return: Dictionary with keys matching outputs</li>
               </ul>
             </div>
           }
@@ -176,7 +158,7 @@ def my_custom_task(text: str) -> dict:
 
         {parseError && (
           <Alert
-            message="解析错误"
+            message="Parse Error"
             description={<pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{parseError}</pre>}
             type="error"
             showIcon
@@ -189,7 +171,7 @@ def my_custom_task(text: str) -> dict:
           <textarea
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            placeholder="在这里输入您的任务代码..."
+            placeholder="Enter your task code here..."
             style={{
               width: '100%',
               height: '450px',
@@ -217,7 +199,7 @@ def my_custom_task(text: str) -> dict:
                 borderRadius: '4px'
               }}
             >
-              <Spin size="large" tip="正在解析代码..." />
+              <Spin size="large" />
             </div>
           )}
         </div>
@@ -225,4 +207,3 @@ def my_custom_task(text: str) -> dict:
     </Modal>
   );
 }
-

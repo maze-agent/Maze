@@ -17,68 +17,59 @@ export default function Toolbar() {
     clearRunResults,
   } = useWorkflowStore();
 
-  // 创建新工作流
   const handleCreateWorkflow = async () => {
     try {
       const { workflowId: newId } = await api.createWorkflow();
       setWorkflowId(newId);
-      message.success('工作流创建成功');
+      message.success('Workflow created successfully');
     } catch (error) {
-      console.error('创建工作流失败:', error);
-      message.error('创建工作流失败');
+      console.error('Failed to create workflow:', error);
+      message.error('Failed to create workflow');
     }
   };
 
-  // 保存工作流
   const handleSaveWorkflow = async () => {
     if (!workflowId) {
-      message.warning('请先创建工作流');
+      message.warning('Please create a workflow first');
       return;
     }
 
     try {
       await api.saveWorkflow(workflowId, { nodes, edges });
-      message.success('工作流保存成功');
+      message.success('Workflow saved successfully');
     } catch (error) {
-      console.error('保存工作流失败:', error);
-      message.error('保存工作流失败');
+      console.error('Failed to save workflow:', error);
+      message.error('Failed to save workflow');
     }
   };
 
-  // 运行工作流
   const handleRunWorkflow = async () => {
     if (!workflowId) {
-      message.warning('请先创建工作流');
+      message.warning('Please create a workflow first');
       return;
     }
 
     if (nodes.length === 0) {
-      message.warning('请至少添加一个任务节点');
+      message.warning('Please add at least one task node');
       return;
     }
 
-    // 检查是否所有节点都已配置
     const unconfiguredNodes = nodes.filter(n => !n.data.configured);
     if (unconfiguredNodes.length > 0) {
-      message.warning('有节点未配置，请先配置所有节点');
+      message.warning('Some nodes are not configured, please configure all nodes first');
       return;
     }
 
     try {
-      // 先保存工作流
       await api.saveWorkflow(workflowId, { nodes, edges });
-      
-      // 设置运行状态，触发 ResultsModal 显示
       setIsRunning(true);
       clearRunResults();
-      
-      // 发起运行请求（ResultsModal 会自动建立 WebSocket 连接）
       await api.runWorkflow(workflowId);
-      message.info('工作流已开始运行');
+      message.info('Workflow started running');
       
     } catch (error) {
-      console.error('运行工作流失败:', error);
-      message.error('运行工作流失败');
+      console.error('Failed to run workflow:', error);
+      message.error('Failed to run workflow');
       setIsRunning(false);
     }
   };
@@ -95,7 +86,6 @@ export default function Toolbar() {
         background: '#fff',
       }}
     >
-      {/* 左侧 */}
       <Space size="large">
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <ProjectOutlined style={{ fontSize: '24px', color: '#1890ff' }} />
@@ -111,14 +101,13 @@ export default function Toolbar() {
         )}
       </Space>
 
-      {/* 右侧操作按钮 */}
       <Space>
         <Button 
           type="primary" 
           icon={<PlusOutlined />}
           onClick={handleCreateWorkflow}
         >
-          新建工作流
+          New Workflow
         </Button>
         
         <Button 
@@ -126,7 +115,7 @@ export default function Toolbar() {
           onClick={handleSaveWorkflow}
           disabled={!workflowId}
         >
-          保存
+          Save
         </Button>
         
         <Button 
@@ -137,10 +126,9 @@ export default function Toolbar() {
           loading={isRunning}
           style={{ background: '#52c41a', borderColor: '#52c41a' }}
         >
-          {isRunning ? '运行中...' : '运行'}
+          {isRunning ? 'Running...' : 'Run'}
         </Button>
       </Space>
     </div>
   );
 }
-

@@ -27,7 +27,6 @@ export interface TaskOutputConfig {
 export interface BuiltinTaskMeta {
   name: string;
   displayName: string;
-  nodeType: NodeType;
   inputs: Array<{ name: string; dataType: string }>;
   outputs: Array<{ name: string; dataType: string }>;
   resources?: Resources;
