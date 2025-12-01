@@ -7,7 +7,7 @@ import base64
  
 
 class LanggraphClient():
-    def __init__(self,addr:str) -> None:
+    def __init__(self,addr:str="localhost:8000") -> None:
         self.maze_server_addr = addr
         self.default_resources = {"cpu": 1, "gpu": 0, "cpu_mem": 0, "gpu_mem": 0}
         
