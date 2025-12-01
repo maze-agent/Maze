@@ -70,6 +70,7 @@ def my_task(params):
 #2.Create the maze client
 client = MaClient("http://localhost:8000")
 
+
 #3.Create the workflow
 workflow = client.create_workflow()
 task1 = workflow.add_task(
@@ -78,8 +79,8 @@ task1 = workflow.add_task(
 )
 
 #4.Submit the workflow and get results
-workflow.run() 
-workflow.show_results()
+run_id = workflow.run()
+workflow.show_results(run_id)
 ```
 <br>
 
