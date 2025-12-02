@@ -1,4 +1,4 @@
-<h2 align="center"><img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze:A Task-Level Distributed Agent Workflow Framework</h2>
+<h2 align="center"><img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze: A Distributed Framework for LLM Agents</h2>
 
 <p align="center">
 <a href="https://maze-doc-new.readthedocs.io/en/latest/">
