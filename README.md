@@ -1,8 +1,12 @@
 <h2 align="center"><img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze: A Distributed Framework for LLM Agents</h2>
 
 <p align="center">
-<a href="https://maze-doc-new.readthedocs.io/en/latest/">
-      Documentation</a>
+    <a href="https://mazeagent.net/">
+        <img src="https://img.shields.io/badge/Website-mazeagent.net-blue?style=for-the-badge&logo=google-chrome&logoColor=white" alt="Website">
+    </a>
+    <a href="https://maze-doc-new.readthedocs.io/en/latest/">
+        <img src="https://img.shields.io/badge/Docs-ReadTheDocs-black?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation">
+    </a>
 </p>
 
 ## 🌟Why  Maze？
