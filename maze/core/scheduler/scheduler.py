@@ -2,6 +2,10 @@ from logging import Logger
 
 
 import logging
+import resource
+
+from traitlets import Instance
+from zmq.backend import select
 import ray
 import time
 import zmq
@@ -18,6 +22,7 @@ from queue import Queue
 from maze.core.scheduler.resource import SelectedNode
 from typing import Any,List,Dict
 from maze.core.scheduler.resource import ResourceManager
+from maze.core.scheduler.llm_instance import LlmInstanceManager,LlmInstanceMessage
 from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
 from maze.core.workflow.task import TaskType
 
@@ -42,8 +47,10 @@ class Scheduler():
  
         self.workflow_manager = WorkflowRuntimeManager()
         self.resource_manager = ResourceManager()
+        self.llm_instance_manager = LlmInstanceManager()
 
         self.task_queue: Queue[TaskRuntime|LanggraphTaskRuntime] = queue.Queue()
+        self.llm_instance_queue: Queue = queue.Queue()
       
     def _cleanup(self):
         command = [
@@ -100,7 +107,7 @@ class Scheduler():
                     with self.lock:
                         canceld_tasks = self.workflow_manager.cancel_workflow(workflow_id=message_data["workflow_id"])
                         if len(canceld_tasks) > 0:
-                            self.resource_manager.release_resource(tasks=canceld_tasks)
+                            self.resource_manager.release_task_resource(tasks=canceld_tasks)
                             self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"]) 
                 elif(message_type=="start_worker"):
                     with self.lock:
@@ -108,13 +115,70 @@ class Scheduler():
                 elif(message_type=="stop_worker"):
                     with self.lock:
                         self.resource_manager.stop_worker(node_id=message_data["node_id"])
+                elif(message_type=="start_llm_instance" or message_type=="stop_llm_instance"):
+                    self.llm_instance_queue.put(LlmInstanceMessage(message_type, message_data)) 
                 elif(message_type=="shutdown"):
                     self._cleanup()
                  
         except Exception as e:
             print(f"_receive_thread error: {e}")
             self._cleanup()
-     
+    
+    def _llm_instance_thread(self,port2:int):
+        logger.info(f"Llm instance start")
+        socket_to_main = self.context.socket(zmq.DEALER)
+        socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
+
+        while True:
+            llm_instance_message = self.llm_instance_queue.get()
+            message_data = llm_instance_message.message_data
+
+            self.lock.acquire()
+            if(llm_instance_message.message_type=="start_llm_instance"):
+                need_resources = {
+                    'cpu':message_data.get('cpu_nums', 0),
+                    'cpu_mem':message_data.get('memory', 0),
+                    'gpu':message_data.get('gpu_nums', 0),
+                    'gpu_mem':message_data.get('gpu_mem', 0)
+                }
+                selected_node: SelectedNode | None = self.resource_manager.select_node(task_need_resources=need_resources)
+                if selected_node:
+                    port = self.llm_instance_manager.start_llm_instance(
+                                                    instance_id = message_data["instance_id"],
+                                                    model=message_data["model"],
+                                                    node_ip=selected_node.node_ip,
+                                                    node_id=selected_node.node_id, 
+                                                    gpu_id=selected_node.gpu_id,
+                                                    resources=need_resources,
+                                                )
+                    
+                    #Send message to main
+                    message = {
+                        "type":"finish_llm_instance_launch",
+                        "data":{
+                            "host":selected_node.node_ip,
+                            "port":port,
+                            "instance_id":message_data["instance_id"]
+                        }
+                    }
+                    serialized_message = json.dumps(message).encode('utf-8')
+                    socket_to_main.send(serialized_message)
+
+                    self.lock.release()
+                else:
+                    logger.debug("No node can run the task")
+                    self.lock.release()
+                    self.llm_instance_queue.put(llm_instance_message)
+                    time.sleep(1)
+                    self.lock.release()
+            elif(llm_instance_message.message_type=="stop_llm_instance"):
+                instance_id = message_data["instance_id"]
+                resource_detail = self.llm_instance_manager.get_instance_resource_detail(instance_id=instance_id)
+                self.resource_manager.release_instance_resource(resource_detail=resource_detail)
+
+                self.llm_instance_manager.stop_llm_instance(instance_id=instance_id)
+                self.lock.release()
+
     def _submit_thread(self,port2:int):
         logger.info(f"Submit start")
         socket_to_main = self.context.socket(zmq.DEALER)
@@ -182,7 +246,7 @@ class Scheduler():
                         result = ray.get(finished_task_ref)
 
                         self.workflow_manager.set_task_result(finished_task,result) 
-                        self.resource_manager.release_resource(tasks=[finished_task])
+                        self.resource_manager.release_task_resource(tasks=[finished_task])
 
                         #Send message to main
                         message = {
@@ -201,7 +265,7 @@ class Scheduler():
                         #Internal exception in the code,stop the workflow
                         canceld_tasks = self.workflow_manager.cancel_workflow(finished_task.workflow_id)
                         if len(canceld_tasks) > 0:
-                            self.resource_manager.release_resource(tasks=canceld_tasks)
+                            self.resource_manager.release_task_resource(tasks=canceld_tasks)
                             self.workflow_manager.clear_workflow(finished_task.workflow_id)
 
                         #Send message to main
@@ -260,6 +324,9 @@ class Scheduler():
         
         self.submit_thread = threading.Thread(target=self._submit_thread,args=(self.port2,)) 
         self.submit_thread.start()
+
+        self.llm_instance_thread = threading.Thread(target=self._llm_instance_thread,args=(self.port2,)) 
+        self.llm_instance_thread.start()
 
         self.ready_queue.put("ready")
         self.receive_thread.join()

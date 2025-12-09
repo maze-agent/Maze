@@ -22,6 +22,7 @@ class MaPath:
         self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
         self.submit_workflows: Dict[str, Workflow] = {}
         self.async_que: Dict[str, asyncio.Queue] = {} 
+        self.llm_instance_async_que: Dict[str, asyncio.Queue] = {} 
          
     def cleanup(self):
         '''
@@ -29,7 +30,7 @@ class MaPath:
         '''
         message = {"type":"shutdown"}
         serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_receive.send(serialized)
+        self.socket_to_scheduler.send(serialized)
 
         self.scheduler_process.join()
         os._exit(1)
@@ -83,7 +84,7 @@ class MaPath:
                 "data": data
             }
             serialized: bytes = json.dumps(message).encode('utf-8')
-            self.socket_to_receive.send(serialized)
+            self.socket_to_scheduler.send(serialized)
 
         return submit_id
         
@@ -104,7 +105,7 @@ class MaPath:
             }
         }
         serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_receive.send(serialized)
+        self.socket_to_scheduler.send(serialized)
 
     def init(self,ray_head_port):
         '''
@@ -118,11 +119,11 @@ class MaPath:
         port2 = available_ports[1]
 
          
-        self.socket_to_receive = self.context.socket(zmq.DEALER)
-        self.socket_to_receive.connect(f"tcp://127.0.0.1:{port1}")
+        self.socket_to_scheduler = self.context.socket(zmq.DEALER)
+        self.socket_to_scheduler.connect(f"tcp://127.0.0.1:{port1}")
         
-        self.socket_from_submit_supervisor = self.context.socket(zmq.ROUTER)
-        self.socket_from_submit_supervisor.bind(f"tcp://127.0.0.1:{port2}")
+        self.socket_from_scheduler = self.context.socket(zmq.ROUTER)
+        self.socket_from_scheduler.bind(f"tcp://127.0.0.1:{port2}")
 
         
         #Create the scheduler process and wait for it to be ready
@@ -141,7 +142,7 @@ class MaPath:
         '''
         while True:
             try:
-                frames = await self.socket_from_submit_supervisor.recv_multipart()
+                frames = await self.socket_from_scheduler.recv_multipart()
                 assert(len(frames)==2)
                 _, data = frames
                 message = json.loads(data.decode('utf-8'))
@@ -172,7 +173,7 @@ class MaPath:
                                         "data":data
                                     }                 
                                     serialized: bytes = json.dumps(message).encode('utf-8')
-                                    self.socket_to_receive.send(serialized)
+                                    self.socket_to_scheduler.send(serialized)
 
                     elif(message_type=="start_task" or message_type=="task_exception"):
                         if message_data["task_id"] in self.async_que: #langgraph task
@@ -185,7 +186,10 @@ class MaPath:
     
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
-               
+                    
+                    elif(message_type=="finish_llm_instance_launch"):
+                        que: Queue[Any] = self.llm_instance_async_que[message_data['instance_id']]
+                        await que.put(message_data)
 
             except Exception as e:
                 print(f"Error in monitor: {e}")
@@ -213,7 +217,7 @@ class MaPath:
                     
                     message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
                     serialized: bytes = json.dumps(message).encode('utf-8')
-                    self.socket_to_receive.send(serialized)
+                    self.socket_to_scheduler.send(serialized)
                      
                     break
             elif data["type"]=="task_exception":
@@ -228,7 +232,7 @@ class MaPath:
 
         message = {"type":"stop_workflow","data":{"workflow_id":submit_id}}
         serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_receive.send(serialized)
+        self.socket_to_scheduler.send(serialized)
     
     async def run_langgraph_task(self,workflow_id:str,task_id:str,args:str,kwargs:str):
         """
@@ -245,7 +249,7 @@ class MaPath:
             "data":task.to_json(),
         }
         serialized: bytes = json.dumps(message).encode('utf-8')
-        self.socket_to_receive.send(serialized)
+        self.socket_to_scheduler.send(serialized)
 
         result = None
         while True:
@@ -263,3 +267,20 @@ class MaPath:
         del self.async_que[task_id]
         return result
     
+    async def start_llm_instance(self, instance_id:str, model: str, cpu_nums: int, gpu_nums: int, memory:int, gpu_mem: int):
+        self.llm_instance_async_que[instance_id] = asyncio.Queue()
+
+        message = {"type":"start_llm_instance","data":{"instance_id":instance_id,"model":model,"cpu_nums":cpu_nums,"gpu_nums":gpu_nums,"gpu_mem":gpu_mem,"memory":memory}}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler.send(serialized)
+
+        while True:
+            data = await self.llm_instance_async_que[instance_id].get()
+            del self.llm_instance_async_que[instance_id]
+            return data['host'],data['port']
+
+
+    async def stop_llm_instance(self, instance_id:str):
+        message = {"type":"stop_llm_instance","data":{"instance_id":instance_id}}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler.send(serialized)
