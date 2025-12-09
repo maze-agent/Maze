@@ -71,3 +71,34 @@ class MaClient:
         else:
             raise Exception(f"Failed to get Ray port, status code: {response.status_code}")
 
+    def start_llm_instance(self, model: str):
+        """
+        Start LLM instance
+        """
+        url = f"{self.server_url}/start_llm_instance"
+        payload = {
+            "model": "facebook/opt-125m",
+            "cpu_nums": 5,
+            "memory": 1024,
+            "gpu_nums": 1,
+        }
+
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            data = response.json()
+            return data['host'],data['port'],data['instance_id']
+        else:
+            raise Exception(f"Failed to start LLM instance, status code: {response.status_code}")
+
+    def stop_llm_instance(self, instance_id: str):
+        """
+        Stop LLM instance
+        """
+        url = f"{self.server_url}/stop_llm_instance"
+        response = requests.post(url, json={"instance_id": instance_id})
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to stop LLM instance, status code: {response.status_code}")
