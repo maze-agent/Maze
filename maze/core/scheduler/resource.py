@@ -149,16 +149,26 @@ class ResourceManager():
             
         return None
 
-    def release_resource(self,tasks:List[TaskRuntime]):
+    def release_task_resource(self,tasks:List[TaskRuntime]):
         '''
-        Release resource
+        Release resource according to task
         '''
         assert isinstance(tasks,list)
         for task in tasks:
             node_id = task.selected_node.node_id
             assert(node_id in self.nodes)
             self.nodes[node_id].release_resource(task.resources,task.selected_node.gpu_id)
+
+    def release_instance_resource(self,resource_detail:dict):
+        '''
+        Release resource
+        '''
+        node_id = resource_detail["node_id"]
+        gpu_id = resource_detail["gpu_id"]
+        resources = resource_detail["resources"]
+        self.nodes[node_id].release_resource(resources,gpu_id)
         
+
     def start_worker(self,node_id:str,node_ip:str,resources:dict,):
         '''
         Start worker node
