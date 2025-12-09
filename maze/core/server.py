@@ -231,23 +231,4 @@ async def start_worker(req:Request):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# for multiple llm inference instance
-@app.post("/start_llm_instance")
-async def start_llm_instance(req:Request):
-    try:
-        data = await req.json()
-        instance_id = str(uuid.uuid4())
-        host,port = await mapath.start_llm_instance(instance_id, data["model"], data["cpu_nums"], data["gpu_nums"], data["memory"], data.get("gpu_mem",0))
-        return {"status": "success","host": host,"port": port,"instance_id": instance_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/stop_llm_instance")
-async def stop_llm_instance(req:Request):
-    try:
-        data = await req.json()
-        await mapath.stop_llm_instance(data["instance_id"])
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+ 

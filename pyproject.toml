@@ -42,7 +42,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastapi>=0.119.1",
+    "fastapi==0.119.1",
     "ray==2.50.1",
     "uvicorn[standard]",
     "zmq==0.0.0",
