@@ -19,6 +19,7 @@ class MaClient:
         Args:
             server_url: Maze server address, defaults to http://localhost:8000
         """
+        self.llm_instance = {}
         self.server_url = server_url.rstrip('/')
         
     def create_workflow(self) -> MaWorkflow:
@@ -87,7 +88,11 @@ class MaClient:
 
         if response.status_code == 200:
             data = response.json()
-            return data['host'],data['port'],data['instance_id']
+            host = data['host']
+            port = data['port']
+            instance_id = data['instance_id']
+            self.llm_instance[instance_id] = {"model": model, "host": host, "port": port}
+            return instance_id
         else:
             raise Exception(f"Failed to start LLM instance, status code: {response.status_code}")
 
@@ -99,6 +104,27 @@ class MaClient:
         response = requests.post(url, json={"instance_id": instance_id})
 
         if response.status_code == 200:
+            del self.llm_instance[instance_id]
             return response.json()
         else:
             raise Exception(f"Failed to stop LLM instance, status code: {response.status_code}")
+
+    def query_llm_instance(self, query: str, instance_id: str):
+        """
+        Query LLM instance status
+        """
+        from openai import OpenAI
+
+        openai_api_key = "EMPTY"
+        openai_api_base = "http://"+self.llm_instance[instance_id]["host"] + ":" + str(self.llm_instance[instance_id]["port"]) +"/v1"
+        client = OpenAI(
+            api_key=openai_api_key,
+            base_url=openai_api_base,
+        )
+        completion = client.completions.create(
+            model=self.llm_instance[instance_id]["model"],
+            prompt=query,
+        )
+        return completion.choices[0].text
+
+        
