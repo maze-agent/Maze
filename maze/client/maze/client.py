@@ -77,7 +77,7 @@ class MaClient:
         """
         url = f"{self.server_url}/start_llm_instance"
         payload = {
-            "model": "facebook/opt-125m",
+            "model": model,
             "cpu_nums": 5,
             "memory": 1024,
             "gpu_nums": 1,
