@@ -42,7 +42,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastapi==0.119.1",
+    "fastapi>=0.119.1",
     "ray==2.50.1",
     "uvicorn[standard]",
     "zmq==0.0.0",
@@ -56,6 +56,10 @@ dependencies = [
     "mutagen>=1.46.0",
     "Pillow>=9.0.0",
     "opencv-python>=4.8.0",
+    "joblib>=1.5.3",
+    "pandas>=2.3.3",
+    "xgboost>=3.1.2",
+    "scikit-learn>=1.7.2",
 ]
 
 [project.optional-dependencies]

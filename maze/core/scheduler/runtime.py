@@ -19,6 +19,11 @@ class LanggraphTaskRuntime():
         self.args: str = args
         self.kwargs: str = kwargs
         self.resources: Dict[str, Any] = resources
+        self.priority = 0
+        
+
+    def set_priority(self, priority):
+        self.priority = priority
 
     def set_task_status(self, status):
         self.status = status
@@ -37,7 +42,12 @@ class TaskRuntime():
         self.object_ref = None
         self.result: None|Dict[Any, Any] = None
         self.selected_node = None
+
+        self.priority = 0
     
+    def set_priority(self, priority):
+        self.priority = priority
+
     def set_task_status(self, status):
         self.status = status
         

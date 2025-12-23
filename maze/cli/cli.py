@@ -13,30 +13,43 @@ from maze.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
-async def _async_start_head(port: int, ray_head_port: int, playground: bool = False):
-    from maze.core.server import app,mapath
+async def _async_start_head(port: int, ray_head_port: int, strategy: str = "Default", playground: bool = False):
+  
+    from maze.core.server import app as server_app, mapath
+    from maze.core.predictor.server import app as predictor_app
 
-    mapath.init(ray_head_port=ray_head_port)  
+    mapath.init(ray_head_port=ray_head_port, strategy=strategy)  
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
+    server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(server_config)
+    
+    if strategy != "Default":
+        predictor_port = port + 1
+        predictor_config = uvicorn.Config(predictor_app, host="0.0.0.0", port=predictor_port, log_level="info")
+        predictor_server = uvicorn.Server(predictor_config)
 
     playground_processes = []
     if playground:
         playground_processes = start_playground()
 
     try:
-        await asyncio.gather(
-            server.serve(),
-            monitor_coroutine
-        )
+        if strategy != "Default":
+            await asyncio.gather(
+                server.serve(),
+                predictor_server.serve(),
+                monitor_coroutine
+            )
+        else:
+            await asyncio.gather(
+                server.serve(),
+                monitor_coroutine
+            )
     except KeyboardInterrupt:
         print("Shutting down...")
         monitor_coroutine.cancel()
         await monitor_coroutine
         
-        # 停止 Playground 进程
         if playground_processes:
             stop_playground(playground_processes)
 
@@ -113,8 +126,8 @@ def stop_playground(processes):
             print(f"⚠️  Failed to stop {name}: {e}")
     print("✅ Playground closed")
 
-def start_head(port: int, ray_head_port: int, playground: bool = False):
-    asyncio.run(_async_start_head(port, ray_head_port, playground))
+def start_head(port: int, ray_head_port: int, strategy: str = "Default", playground: bool = False):
+    asyncio.run(_async_start_head(port, ray_head_port, strategy, playground))
    
 def start_worker(addr: str):
     Worker.start_worker(addr)
@@ -133,6 +146,7 @@ def main():
     start_group.add_argument("--worker", action="store_true", help="Start as worker node")
 
     start_parser.add_argument("--port", type=int, metavar="PORT", help="Port for head node (required if --head)",default=8000)
+    start_parser.add_argument("--strategy", metavar="STRATEGY", help="Strategy for task scheduling",default="Default")
     start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
     start_parser.add_argument("--playground", action="store_true", help="Start Maze Playground visual interface (only applicable to --head)")
@@ -158,9 +172,9 @@ def main():
             
            
             if hasattr(args, 'playground') and args.playground:
-                start_head(args.port, args.ray_head_port, playground=True)
+                start_head(args.port, args.ray_head_port, args.strategy, playground=True)
             else:
-                start_head(args.port, args.ray_head_port, playground=False)
+                start_head(args.port, args.ray_head_port, args.strategy, playground=False)
         elif args.worker:
             if args.addr is None:
                 parser.error("--addr is required when using --worker")

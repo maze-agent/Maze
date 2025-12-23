@@ -162,13 +162,14 @@ async def del_edge(req:Request):
 
 @app.post("/run_workflow")
 async def run_workflow(req:Request):
-    try:
+    try: 
         data = await req.json()
         workflow_id = data["workflow_id"]
         
         run_id = mapath.run_workflow(workflow_id)
         return {"status":"success","run_id": run_id}
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/get_workflow_res/{workflow_id}/{run_id}")

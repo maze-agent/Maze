@@ -1,4 +1,5 @@
 from logging import Logger
+import heapq
 
 
 import logging
@@ -28,13 +29,45 @@ from maze.core.workflow.task import TaskType
 
 logger = logging.getLogger(__name__)
 
+class PriorityQueue:
+    def __init__(self):
+        self._queue = []
+        self._index = 0
+        self._lock = threading.Lock()
+        self._not_empty = threading.Condition(self._lock) 
+
+    def put(self, item, priority):
+        with self._not_empty:
+            heapq.heappush(self._queue, (priority, self._index, item))
+            self._index += 1
+            self._not_empty.notify()
+
+    def get(self, block=True, timeout=None):
+        with self._not_empty:
+            if not block:
+                if self.is_empty():
+                    raise IndexError("get from empty priority queue")
+            else:
+                success = self._not_empty.wait_for(
+                    lambda: not self.is_empty(),
+                    timeout=timeout
+                )
+                if not success:
+                    raise TimeoutError("get timeout")
+
+            _, _, item = heapq.heappop(self._queue)
+            return item
+
+    def is_empty(self):
+        return len(self._queue) == 0
+
+    def size(self):
+        with self._lock:
+            return len(self._queue)
+
 
 def scheduler_process(port1:int,port2:int,strategy:str,ray_head_port:int,ready_queue:mp.Queue):
-    if strategy == "Default":
-        scheduler = Scheduler(port1,port2,ray_head_port,ready_queue)
-    else:
-        raise NotImplementedError
-
+    scheduler = Scheduler(port1,port2,ray_head_port,ready_queue)
     scheduler.start()
  
 class Scheduler():
@@ -49,9 +82,9 @@ class Scheduler():
         self.resource_manager = ResourceManager()
         self.llm_instance_manager = LlmInstanceManager()
 
-        self.task_queue: Queue[TaskRuntime|LanggraphTaskRuntime] = queue.Queue()
+        self.task_queue: PriorityQueue[TaskRuntime|LanggraphTaskRuntime] = PriorityQueue()
         self.llm_instance_queue: Queue = queue.Queue()
-      
+       
     def _cleanup(self):
         command = [
             "ray", "stop", 
@@ -89,8 +122,10 @@ class Scheduler():
                                                                 resources=message_data['resources'],
                                                                 code_str=message_data.get('code_str'),
                                                                 code_ser=message_data.get('code_ser')
-                                                                )  
-                        self.task_queue.put(item=task_runtime)
+                                                                )
+                        priority =  message_data.get('priority', 0)
+                        task_runtime.set_priority(priority)
+                        self.task_queue.put(task_runtime,priority)
                     elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
                         task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
                                                                                   task_id=message_data['task_id'],
@@ -98,8 +133,10 @@ class Scheduler():
                                                                                   args=message_data['args'],
                                                                                   kwargs=message_data['kwargs'],
                                                                                   resources=message_data['resources']
-                                                                                )  
-                        self.task_queue.put(item=task_runtime)
+                                                                                )
+                        priority =  message_data.get('priority', 0)
+                        task_runtime.set_priority(priority)                                                        
+                        self.task_queue.put(task_runtime,0)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
                         self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
@@ -214,7 +251,7 @@ class Scheduler():
             else:
                 logger.debug("No node can run the task")
                 self.lock.release()
-                self.task_queue.put(self.cur_ready_task)
+                self.task_queue.put(self.cur_ready_task, self.cur_ready_task.priority)
                 time.sleep(1)
 
     def _supervisor_thread(self, port2:int):
@@ -286,7 +323,7 @@ class Scheduler():
                         #The node of task running is dead,send the task back to the queue to retry.
                         logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         finished_task.set_task_status('ready')
-                        self.task_queue.put(finished_task)
+                        self.task_queue.put(finished_task, finished_task.priority)
                     except Exception as e:
                         logger.error(f"Task {finished_task.task_id} failed with exception: {e}")
                         print(f"Exception occurred {type(e)}: {e}")

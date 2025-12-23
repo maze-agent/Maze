@@ -1,11 +1,11 @@
-from tkinter import NO
+import time
 from typing import Any,Dict
 from enum import Enum
+from maze.core.predictor.predictor import FEATURES
 
 class TaskType(Enum):
     CODE = "code"
     LANGGRAPH = "langgraph"
- 
 
 class CodeTask():
     def __init__(self,workflow_id:str,task_id:str,task_name:str):
@@ -22,6 +22,20 @@ class CodeTask():
 
         self.completed = False
         
+        self.start_time = time.time()
+        self.finish_time = None
+        self.can_predict = False
+        if self.task_name in FEATURES:
+            self.can_predict = True
+            self.predict_feature = {}
+            predict_feature_list = FEATURES[self.task_name]
+            for feature in predict_feature_list:
+                self.predict_feature[feature] = 0 #default value
+            
+    def set_predict_feature(self, feature: str, value: float):
+        if feature in self.predict_feature:
+            self.predict_feature[feature] = value
+
     def save_task(self,task_input:Dict, task_output:Dict, code_str:str,code_ser:str,resources:Dict):
         '''save task info'''
         
@@ -41,7 +55,7 @@ class CodeTask():
             "task_output":self.task_output,
             "resources":self.resources,
             "code_str":self.code_str,
-            "code_ser":self.code_ser
+            "code_ser":self.code_ser,
         }
 
 class LangGraphTask():

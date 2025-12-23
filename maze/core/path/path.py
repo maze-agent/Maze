@@ -1,6 +1,8 @@
 from asyncio.queues import Queue
+import math
 import os
 import uuid
+import httpx
 import json
 import copy
 import zmq.asyncio
@@ -13,16 +15,18 @@ from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
 from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
+HISTORY_AVG_GPU_COUNT = 5.0
 
 class MaPath:
-    def __init__(self,strategy:str="Default"):
-        self.strategy=strategy
+    def __init__(self):
         self.lock = lock = asyncio.Lock()
 
         self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
         self.submit_workflows: Dict[str, Workflow] = {}
         self.async_que: Dict[str, asyncio.Queue] = {} 
-        self.llm_instance_async_que: Dict[str, asyncio.Queue] = {} 
+        self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
+
+        self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
          
     def cleanup(self):
         '''
@@ -66,6 +70,28 @@ class MaPath:
         
         return tasks
 
+    async def _get_daps_priority(self, task_name:str, features:Dict, remaining_task_num:int, total_task_num:int, w1:int, w2:int):
+        payload = {"task_name": task_name, "features": features}
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://127.0.0.1:8001/predict", json=payload)
+        predict_time = response.json()['predict_time']
+
+        score_urgency = 1.0 - (remaining_task_num / total_task_num)
+        return w1 * score_urgency + w2 * predict_time
+
+    
+    async def _get_hacs_priority(self, task_name:str, features:Dict, remaining_task_num:int):
+        payload = {"task_name": task_name, "features": features}
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://127.0.0.1:8001/predict", json=payload)
+        predict_time = response.json()['predict_time']
+
+        srpt_factor = HISTORY_AVG_GPU_COUNT / remaining_task_num
+        local_load = remaining_task_num
+        u_micro = 1.0 + math.log2(1 + local_load)
+        base = (srpt_factor * u_micro) / predict_time
+        return base
+        
     def run_workflow(self,workflow_id:str):
         """
         Start a workflow.
@@ -79,6 +105,7 @@ class MaPath:
         for task in start_task:
             data = task.to_json()
             data['workflow_id'] = submit_id
+            data['priority'] = 0
             message = {
                 "type":"run_task",
                 "data": data
@@ -107,10 +134,11 @@ class MaPath:
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
 
-    def init(self,ray_head_port):
+    def init(self,ray_head_port,strategy):
         '''
         Initialize.
         '''
+        self.strategy = strategy
         self.ray_head_port = ray_head_port
         self.context = zmq.asyncio.Context()
         available_ports = get_available_ports(2)
@@ -163,14 +191,27 @@ class MaPath:
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
  
-                            new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"])
+                            new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"],task_result=message_data["result"],strategy=self.strategy)
                             if len(new_ready_tasks) > 0:
                                 for task in new_ready_tasks:
                                     data = task.to_json()
                                     data['workflow_id'] = submit_id
+                                    if self.strategy == "Default":
+                                        data['priority'] = 0
+                                    else:
+                                        if task.can_predict:
+                                            if self.strategy == "DAPS":
+                                                remaining_task_num: int = self.submit_workflows[submit_id].remaining_task_num
+                                                total_task_num: int = len(self.submit_workflows[submit_id].tasks)
+                                                data['priority'] = await self._get_daps_priority(task.task_name, task.predict_feature,remaining_task_num,total_task_num,0.5,0.5)
+                                            elif self.strategy == "HACS":
+                                                remaining_task_num: int = self.submit_workflows[submit_id].remaining_task_num
+                                                data['priority'] = await self._get_hacs_priority(task.task_name, task.predict_feature,remaining_task_num)
+                                        else:
+                                            data['priority'] = 0
                                     message = {
                                         "type":"run_task",
-                                        "data":data
+                                        "data":data,
                                     }                 
                                     serialized: bytes = json.dumps(message).encode('utf-8')
                                     self.socket_to_scheduler.send(serialized)
@@ -244,10 +285,12 @@ class MaPath:
         task: LangGraphTask = self.workflows[workflow_id].get_task(task_id)
         task.set_args(args)
         task.set_kwargs(kwargs)
+        data = task.to_json()
+        data['priority'] = 0
         message: dict[str, str] = {
             "type":"run_task",
-            "data":task.to_json(),
-        }
+            "data":data,
+         }
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
 
@@ -278,7 +321,6 @@ class MaPath:
             data = await self.llm_instance_async_que[instance_id].get()
             del self.llm_instance_async_que[instance_id]
             return data['host'],data['port']
-
 
     async def stop_llm_instance(self, instance_id:str):
         message = {"type":"stop_llm_instance","data":{"instance_id":instance_id}}
