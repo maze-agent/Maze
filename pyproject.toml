@@ -60,6 +60,12 @@ dependencies = [
     "pandas>=2.3.3",
     "xgboost>=3.1.2",
     "scikit-learn>=1.7.2",
+    "docker>=7.1.0",
+    "aiohttp>=3.13.3",
+    "openai>=2.15.0",
+    "dashscope>=1.25.8",
+    "mcp>=1.25.0",
+    "uv>=0.9.26"
 ]
 
 [project.optional-dependencies]
@@ -77,6 +83,7 @@ Repository = "https://github.com/QinbinLi/Maze"
 
 [project.scripts]
 maze = "maze.cli.cli:main"
+maze-sandbox = "maze.cli.sandbox_cli:main"
 
 [tool.setuptools.package-dir]
 "" = "."

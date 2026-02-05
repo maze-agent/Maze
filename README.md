@@ -29,6 +29,13 @@
 <br>
 
 
+## 📰 News
+
+
+- **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
+
+<br>
+
 ## 🚀Quick Start
 
 ## 1. Install
@@ -105,5 +112,3 @@ Here are two vedios which show the process of using builtin tasks and uploading 
 ### User Defined Task Workflow
 ![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.png)  
 [Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.mp4)
-
-
