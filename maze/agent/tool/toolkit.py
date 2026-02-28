@@ -1,7 +1,7 @@
 """Toolkit class to manage and register tools."""
 from typing import Dict, Callable, Any, Awaitable, Optional
 import inspect
-from Maze.maze.mcp.mcp_tool_wrapper import McpTool
+from maze.mcp.mcp_tool_wrapper import McpTool
 
 class Toolkit:
     """Class to manage and register tools."""
