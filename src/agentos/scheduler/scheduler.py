@@ -11,18 +11,19 @@ import threading
 from datetime import datetime, timedelta
 import queue
 import os
-import importlib.util
 import redis
 import time
 import copy
-from agentos.scheduler.mlq import dag_manager_mlq
-from agentos.scheduler.heft import dag_manager_heft
-from agentos.scheduler.cpop import dag_manager_cpop
+from pathlib import Path
+
 from agentos.scheduler.fcfs import dag_manager_fcfs
-from agentos.scheduler.ltf import dag_manager_ltf
+from agentos.scheduler.hacs import dag_manager_hacs
+from agentos.scheduler.atlas import dag_manager_atlas
 from agentos.scheduler.peft import dag_manager_peft
-from agentos.scheduler.daps import dag_manager_daps
+
 import csv
+
+_DEFAULT_PROJ_ROOT = str(Path(__file__).resolve().parents[3])
 app = Flask(__name__) 
 dag_que = multiprocessing.Queue() 
 dag_status_dict = multiprocessing.Manager().dict()
@@ -36,8 +37,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run script with parameters.")
     # parser.add_argument("--proj_path",  default="/app/workplace/AgentOS", 
     #                     help="Path to the directory of the AgentOS framework")
-    parser.add_argument("--proj_path",  default="/root/workspace/d23oa7cp420c73acue30/AgentOS", 
-                        help="Path to the directory of the AgentOS framework")
+    parser.add_argument(
+        "--proj_path",
+        default=_DEFAULT_PROJ_ROOT,
+        help="Path to the maze-sc repository root (directory that contains src/agentos)",
+    )
     parser.add_argument("--tokenizer_path",  default="model_cache/Qwen/Qwen3-32B", 
                         help="Path to the directory of the AgentOS framework")    
     parser.add_argument("--data_path", default= "data",
@@ -50,8 +54,11 @@ def parse_args():
                         help="IP address of the Redis server for task queue management")
     parser.add_argument("--redis_port", default="6379",
                         help="Port number of the Redis server (default: 6379)")
-    parser.add_argument("--strategy", default="mlq", 
-                        help="Task submission strategy (choices: mlq, fifo, priority; default: mlq)")
+    parser.add_argument(
+        "--strategy",
+        default="hacs",
+        help="Scheduler strategy: hacs (default), fcfs, atlas, peft",
+    )
     parser.add_argument("--flask_port", default="5001", 
                         help="HTTP port for running the Flask server (default: 5001)")
     parser.add_argument("--time_pred_model_path",  default="src/agentos/utils/timepred/model", 
@@ -259,27 +266,22 @@ if __name__ == '__main__':
             pass
         print(f"'{args.task_exec_result_jsonl}' created with headers.")
     
-    if args.strategy == "heft":
-        dag_manager_pro = multiprocessing.Process(target=dag_manager_heft,
-                                                args=(args, dag_que, dag_status_dict))
-    elif args.strategy == "cpop":
-        dag_manager_pro = multiprocessing.Process(target=dag_manager_cpop,
-                                                args=(args, dag_que, dag_status_dict))
-    elif args.strategy == "mlq":
-        dag_manager_pro = multiprocessing.Process(target=dag_manager_mlq, 
-                                                args= (args, dag_que, dag_status_dict))
-    elif args.strategy == "fcfs":
-        dag_manager_pro = multiprocessing.Process(target=dag_manager_fcfs, 
-                                                args= (args, dag_que, dag_status_dict))
-    elif args.strategy == "ltf":
-        dag_manager_pro = multiprocessing.Process(target=dag_manager_ltf,
-                                                args= (args, dag_que, dag_status_dict))
-    elif args.strategy == "peft":
-        dag_manager_pro= multiprocessing.Process(target=dag_manager_peft,
-                                                args= (args, dag_que, dag_status_dict))
-    elif args.strategy == "daps":
-        dag_manager_pro= multiprocessing.Process(target=dag_manager_daps,
-                                                args= (args, dag_que, dag_status_dict))
+    _targets = {
+        "hacs": dag_manager_hacs,
+        "fcfs": dag_manager_fcfs,
+        "atlas": dag_manager_atlas,
+        "peft": dag_manager_peft,
+    }
+    strategy = (args.strategy or "hacs").strip().lower()
+    if strategy not in _targets:
+        raise SystemExit(
+            f"Unknown --strategy {args.strategy!r}. "
+            f"Shipped in this tree: {', '.join(sorted(_targets))}."
+        )
+    dag_manager_pro = multiprocessing.Process(
+        target=_targets[strategy],
+        args=(args, dag_que, dag_status_dict),
+    )
 
     dag_manager_pro.start()
     print(f"😊 Flask{args.flask_port}")
