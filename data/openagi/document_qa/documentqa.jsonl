@@ -1,0 +1,8 @@
+{"dag_id": "6081d691-7144-4060-9445-e8f744a151bf", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "767ce999-380a-4d6a-a30d-3c257140e77e", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "63edb40f-e12b-43ff-a619-f4e9bb67f98a", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "065b9f39-0f16-4f91-ac9f-5da5004682e1", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "3b6953e7-4acb-4251-8469-3a59b367e4c8", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "e28dfdc1-21ab-436a-9672-df1667fc1c2b", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "d8e70cc4-cc79-4b9e-bf86-13170bfd5b3a", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}
+{"dag_id": "407f7741-bf52-4faa-a813-4eb8f65ef8a3", "dag_source": "openagi", "dag_type": "document_qa", "dag_supplementary_files": ["question.txt", "context.txt", "questions.txt"]}

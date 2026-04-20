@@ -1,0 +1,20 @@
+clock, clock
+person, skateboard, person, person, person, person
+knife, carrot, knife
+tie, person, person, person, bottle, bottle, bottle
+motorcycle, chair, chair, person, person, bicycle
+fork, bowl, bowl, broccoli, broccoli, broccoli, broccoli, broccoli, broccoli, broccoli, broccoli, broccoli, broccoli
+tie, person
+fork, pizza, pizza, pizza, pizza, pizza, pizza
+person, person, person, person, sheep
+traffic light, traffic light, traffic light, traffic light, car, car, traffic light
+person, banana, banana, banana, banana, person, person
+fire hydrant, bicycle
+person, person, person, person, frisbee, person, person, person, person, person
+person, person, person, laptop, laptop, laptop, laptop, mouse, keyboard, person, person, person, person, person, cup, laptop, keyboard, keyboard, keyboard, cup, cup, cup, keyboard, person
+umbrella, person
+tv, person, mouse, keyboard, tv, tv
+bottle, clock, dining table, person, person, person, cup, cup, spoon, spoon, bowl, bowl, bowl, bowl, bowl, person, cup, cup, cup, bowl, chair, person, cup, cup, cup, cup, spoon, person, cup
+person, fire hydrant, person, person, truck
+tv, person, sink, sink
+tie, car, person, person, person, person, suitcase, car, car, backpack, suitcase, backpack, car

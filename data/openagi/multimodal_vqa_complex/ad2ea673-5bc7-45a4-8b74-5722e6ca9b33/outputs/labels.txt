@@ -1,0 +1,20 @@
+Tisch, Becher, Gabel, Brokkoli, Brokkoli, Brokkoli, Karotte, Karotte, Karotte, Löffel, Karotte
+couch, person, person, cup, remote, remote, person, person, wine glass, wine glass, wine glass, person, person
+tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie.
+tie, person
+TV, Couch, Stuhl
+Person, Surfbrett
+Katze, Laptop, TV
+Schere, Person, Person, Person, Person, Person, Person, Person, Person, Person, Person, Person, Person, Person, Handtasche, Fahrrad, Person, Schere, Person
+Bus, Auto, Person, Person, Person, Person, Person, Person, Person, Auto
+Handy, Person
+Person, Person, Person, Person, Surfbrett, Surfbrett, Flasche, Person
+Flugzeug, Flugzeug
+Toilette
+Person, Ski
+person, person, tennisschläger, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person, person
+Löffel, Schale, Schale
+Schaf, Schaf, Schaf, Schaf
+Banane, Banane
+Bahn, Person, Person, Auto, Person, Person, Person, Person, Person, Person, LKW
+Waschbecken, Waschbecken

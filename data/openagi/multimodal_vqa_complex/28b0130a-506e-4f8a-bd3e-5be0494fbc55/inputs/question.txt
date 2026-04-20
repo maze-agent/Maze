@@ -1,0 +1,1 @@
+Given grayscale image, how to return the class label in English step by step?

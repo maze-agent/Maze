@@ -1,0 +1,1 @@
+Given grayscale image, how to return the caption in English step by step?

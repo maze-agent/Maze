@@ -1,0 +1,1 @@
+from agentos.task.local_model import modelscope_query

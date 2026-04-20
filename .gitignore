@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.pyd
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.mo
+*.pot
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Environment files
+.env
+.venv/
+venv/
+env/
+
+# Project specific
+log.txt
+
+# Not published on GitHub (kept locally for paper / artifact materials)
+docs/
+
+# Ignore sensitive configuration files
+config.py
+secrets.py
+
+# macOS
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints/

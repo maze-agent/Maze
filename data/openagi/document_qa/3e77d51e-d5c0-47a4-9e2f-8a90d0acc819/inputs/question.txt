@@ -1,0 +1,1 @@
+Given clozed English document and English query, how to answer the question in English step by step?

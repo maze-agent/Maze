@@ -1,0 +1,20 @@
+zebra, zebra
+bed, chair, chair, dining table
+bus, person, person, tie, tie, person, traffic light, traffic light
+bowl, apple
+person, person, baseball bat, person, person
+knife, knife, cake, wine glass, wine glass, wine glass, wine glass, wine glass, wine glass, wine glass, wine glass, wine glass, cup, cup, dining table, knife
+person, surfboard
+tie, tie, tie, tie, person, person, person, person, person, person, person, person, person, person, person, person, tie, tie, tie, tie, tie, person, person
+wine glass, cup, cup, knife, spoon, spoon, dining table, person, person
+person, person, person, person, skis
+person, skis
+banana, donut
+dining table, cup, knife
+bottle, bottle, bottle, bottle, bottle, bottle, bottle, person, person, person, person, bottle, wine glass, cup, person, handbag, wine glass, cup, person
+bird, bird, bird, boat, boat, boat, boat
+person, sink, toilet
+person, person, person, person, skis, backpack, backpack, person, backpack, person
+broccoli, broccoli, bowl
+person, skateboard
+banana, keyboard, cup

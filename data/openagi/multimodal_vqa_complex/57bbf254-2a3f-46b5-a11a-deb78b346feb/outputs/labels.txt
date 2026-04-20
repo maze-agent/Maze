@@ -1,0 +1,20 @@
+surfboard, person
+person, person, person, person, person, person, baseball bat, person, bench, bench, baseball glove, bottle, person, person, bottle, person
+apple, orange
+car, car, car, bus, truck, truck
+tv, person, person, tie, dining table, cell phone, person
+cell phone, person, person, person, person, person, person, person, person
+toilet
+person, elephant
+person, person, person, person, person, frisbee, frisbee
+umbrella, truck, person, car
+elephant, elephant, elephant, elephant, elephant
+person, surfboard
+horse, horse, person, person, person, person, person, person, person, person, person, person
+dog, motorcycle, bicycle, bicycle, truck
+person, person, person, person, person, kite, kite, backpack, person, person, person, person, person, person, person, person, person
+bottle, bottle, refrigerator, wine glass, wine glass, oven, sink, bowl, bowl, microwave, vase, vase
+kite
+bed, bed, clock, remote
+motorcycle, person, person, person, person, person, person, person, person, person, person
+dining table, wine glass, wine glass, wine glass, knife, vase, fork, chair, knife, knife, chair

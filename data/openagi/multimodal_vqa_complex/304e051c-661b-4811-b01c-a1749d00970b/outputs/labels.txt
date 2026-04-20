@@ -1,0 +1,20 @@
+Zebra, Zebra
+Bett, Stuhl, Stuhl, Esstisch
+bus, person, tie, tie, person, traffic light, traffic light
+Schüssel, Apfel
+Person, Person, Baseballschläger, Person, Person
+Messer, Messer, Kuchen, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Weinglas, Tasse, Tasse, Esstisch, Messer
+Person, Surfbrett
+tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie, tie
+Weinglas, Tasse, Tasse, Messer, Löffel, Löffel, Esstisch, Person, Person
+Person, Person, Person, Person, Ski
+Person, Ski
+Banane, Donut
+Tisch, Becher, Messer
+bottle, bottle, bottle, bottle, bottle, bottle, bottle, bottle, bottle, person, person, person, bottle, wine glass, cup, person, handbag, wine glass, cup, person
+Vogel, Vogel, Vogel, Boot, Boot, Boot, Boot
+Person, Waschbecken, Toilette
+Person, Person, Person, Person, Ski, Rucksack, Rucksack, Person, Rucksack, Person
+Brokkoli, Brokkoli, Schüssel
+Person, Skateboard
+Banane, Tastatur, Becher

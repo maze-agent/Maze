@@ -1,0 +1,1 @@
+Given low-resolutioned blurry image, how to return the caption in German step by step?

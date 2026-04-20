@@ -1,0 +1,1 @@
+Given English document and clozed English query, how to answer the question in German step by step?

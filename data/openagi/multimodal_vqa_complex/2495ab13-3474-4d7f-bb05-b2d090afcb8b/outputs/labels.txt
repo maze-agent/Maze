@@ -1,0 +1,20 @@
+Pier
+Pickup, Pickup-LKW
+Bostonbulle, Boston-Tier
+Zebra
+limousine, Limousine
+Bustard
+Sonnenuhr
+Gefängnis, Gefängnishaus
+Brieföffner, Papiermesser, Papiermesser
+Ohr, Spike, Kapitulum
+Ringlet, Ringlet Schmetterling
+Vier-Seiten-Poster
+Gasmaske, Atemschutz, Gashelm
+Fensterschatten
+Posaune
+Bäckerei, Bäckerei, Backerei
+Gewehr
+Raumheizung
+Pflüge, Pflüge
+Großer Schweizer Berghund
