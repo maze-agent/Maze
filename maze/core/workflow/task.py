@@ -22,7 +22,8 @@ class CodeTask():
 
         self.completed = False
         
-        self.start_time = time.time()
+        self.created_time = time.time()
+        self.start_time = None
         self.finish_time = None
         self.can_predict = False
         if self.task_name in FEATURES:
@@ -31,6 +32,9 @@ class CodeTask():
             predict_feature_list = FEATURES[self.task_name]
             for feature in predict_feature_list:
                 self.predict_feature[feature] = 0 #default value
+
+    def mark_started(self):
+        self.start_time = time.time()
             
     def set_predict_feature(self, feature: str, value: float):
         if feature in self.predict_feature:

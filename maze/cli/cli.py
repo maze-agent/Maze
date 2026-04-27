@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 async def _async_start_head(port: int, ray_head_port: int, strategy: str = "Default", playground: bool = False):
   
     from maze.core.server import app as server_app, mapath
-    from maze.core.predictor.server import app as predictor_app
+    use_predictor = strategy == "DAPS"
+    if use_predictor:
+        from maze.core.predictor.server import app as predictor_app
 
     mapath.init(ray_head_port=ray_head_port, strategy=strategy)  
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
@@ -24,7 +26,7 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "Defa
     server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(server_config)
     
-    if strategy != "Default":
+    if use_predictor:
         predictor_port = port + 1
         predictor_config = uvicorn.Config(predictor_app, host="0.0.0.0", port=predictor_port, log_level="info")
         predictor_server = uvicorn.Server(predictor_config)
@@ -34,7 +36,7 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "Defa
         playground_processes = start_playground()
 
     try:
-        if strategy != "Default":
+        if use_predictor:
             await asyncio.gather(
                 server.serve(),
                 predictor_server.serve(),

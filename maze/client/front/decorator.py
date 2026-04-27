@@ -8,6 +8,7 @@ import cloudpickle
 import base64
 from typing import Dict, List, Any, Callable
 from dataclasses import dataclass
+from maze.utils.resource_infer import infer_gpu_resources_from_function
 
 
 @dataclass
@@ -24,7 +25,7 @@ class TaskMetadata:
     node_type: str  # Node type
 
 
-def _normalize_resources(resources: Dict[str, Any] = None) -> Dict[str, Any]:
+def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None = None) -> Dict[str, Any]:
     """
     Normalize and validate resource configuration
     
@@ -48,17 +49,29 @@ def _normalize_resources(resources: Dict[str, Any] = None) -> Dict[str, Any]:
         "gpu_mem": 0
     }
     
-    # If no resources provided, return defaults
-    if resources is None:
-        return default_resources.copy()
-    
     # Start with defaults
     normalized = default_resources.copy()
+    explicit_gpu = False
+    explicit_gpu_mem = False
+
+    if resources is None:
+        resources = {}
+    else:
+        explicit_gpu = "gpu" in resources
+        explicit_gpu_mem = "gpu_mem" in resources
     
     # Update with user-provided values
     for key in ["cpu", "cpu_mem", "gpu", "gpu_mem"]:
         if key in resources:
             normalized[key] = resources[key]
+
+    if func is not None and not explicit_gpu_mem:
+        should_infer_gpu = (not explicit_gpu) or normalized["gpu"] > 0
+        if should_infer_gpu:
+            inferred_gpu = infer_gpu_resources_from_function(func)
+            normalized["gpu_mem"] = max(normalized["gpu_mem"], inferred_gpu["gpu_mem"])
+            if not explicit_gpu:
+                normalized["gpu"] = max(normalized["gpu"], inferred_gpu["gpu"])
     
     # Ensure cpu is at least 1 if specified
     if normalized["cpu"] < 1:
@@ -117,7 +130,7 @@ def task(inputs: List[str],
         code_ser = base64.b64encode(cloudpickle.dumps(func)).decode('utf-8')
         
         # Normalize and validate resource configuration
-        resources_config = _normalize_resources(resources)
+        resources_config = _normalize_resources(resources, func)
         
         # Default data types are all str
         if data_types is None:
@@ -239,4 +252,3 @@ def get_task_metadata(func: Callable) -> TaskMetadata:
         raise ValueError(f"Function {func.__name__} is not decorated with @task or @tool")
     
     return func._maze_task_metadata
-

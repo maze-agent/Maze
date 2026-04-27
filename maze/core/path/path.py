@@ -15,7 +15,7 @@ from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
 from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.utils.utils import get_available_ports
-HISTORY_AVG_GPU_COUNT = 5.0
+EPSILON = 1e-3
 
 class MaPath:
     def __init__(self):
@@ -25,6 +25,7 @@ class MaPath:
         self.submit_workflows: Dict[str, Workflow] = {}
         self.async_que: Dict[str, asyncio.Queue] = {} 
         self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
+        self.atlas_enqueue_index = 0
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
          
@@ -80,24 +81,53 @@ class MaPath:
         return w1 * score_urgency + w2 * predict_time
 
     
-    async def _get_hacs_priority(self, task_name:str, features:Dict, remaining_task_num:int):
-        payload = {"task_name": task_name, "features": features}
-        async with httpx.AsyncClient() as client:
-            response = await client.post("http://127.0.0.1:8001/predict", json=payload)
-        predict_time = response.json()['predict_time']
+    def _get_hacs_priority(self, workflow: Workflow, task_id: str):
+        node_info = workflow.graph.nodes[task_id]
+        n_desc = node_info.get("n_desc", 0)
+        pred_time = max(node_info.get("pred_time", 3.0), EPSILON)
+        is_dynamic = 0
+        omega = math.log2(2.0 + 2.0 * n_desc)
+        return (omega, pred_time, is_dynamic)
 
-        srpt_factor = HISTORY_AVG_GPU_COUNT / remaining_task_num
-        local_load = remaining_task_num
-        u_micro = 1.0 + math.log2(1 + local_load)
-        base = (srpt_factor * u_micro) / predict_time
-        return base
-        
+    def _get_atlas_priority(self, workflow: Workflow, task_id: str):
+        attained_service = workflow.graph.nodes[task_id].get("attained_service", 0.0)
+        submission_time = workflow.graph.graph.get("submission_time", 0.0)
+        priority = (attained_service, submission_time, self.atlas_enqueue_index)
+        self.atlas_enqueue_index += 1
+        return priority
+
+    async def _get_task_priority(self, workflow: Workflow, task: CodeTask):
+        if self.strategy == "Default":
+            return 0
+
+        if task.can_predict and self.strategy == "DAPS":
+            remaining_task_num: int = workflow.remaining_task_num
+            total_task_num: int = len(workflow.tasks)
+            return await self._get_daps_priority(
+                task.task_name,
+                task.predict_feature,
+                remaining_task_num,
+                total_task_num,
+                0.5,
+                0.5,
+            )
+
+        if self.strategy == "HACS":
+            return self._get_hacs_priority(workflow, task.task_id)
+
+        if self.strategy == "ATLAS":
+            return self._get_atlas_priority(workflow, task.task_id)
+
+        return 0
+
     def run_workflow(self,workflow_id:str):
         """
         Start a workflow.
         """
         submit_id = str(uuid.uuid4())
         submit_workflow = copy.deepcopy(self.workflows[workflow_id])
+        submit_workflow.prepare_for_strategy(self.strategy)
+        submit_workflow.graph.graph["submission_time"] = time.time()
         self.submit_workflows[submit_id] = submit_workflow
         self.async_que[submit_id] = asyncio.Queue()
         start_task:List = submit_workflow.get_start_task()
@@ -105,7 +135,12 @@ class MaPath:
         for task in start_task:
             data = task.to_json()
             data['workflow_id'] = submit_id
-            data['priority'] = 0
+            if self.strategy == "HACS":
+                data['priority'] = self._get_hacs_priority(submit_workflow, task.task_id)
+            elif self.strategy == "ATLAS":
+                data['priority'] = self._get_atlas_priority(submit_workflow, task.task_id)
+            else:
+                data['priority'] = 0
             message = {
                 "type":"run_task",
                 "data": data
@@ -196,19 +231,10 @@ class MaPath:
                                 for task in new_ready_tasks:
                                     data = task.to_json()
                                     data['workflow_id'] = submit_id
-                                    if self.strategy == "Default":
-                                        data['priority'] = 0
-                                    else:
-                                        if task.can_predict:
-                                            if self.strategy == "DAPS":
-                                                remaining_task_num: int = self.submit_workflows[submit_id].remaining_task_num
-                                                total_task_num: int = len(self.submit_workflows[submit_id].tasks)
-                                                data['priority'] = await self._get_daps_priority(task.task_name, task.predict_feature,remaining_task_num,total_task_num,0.5,0.5)
-                                            elif self.strategy == "HACS":
-                                                remaining_task_num: int = self.submit_workflows[submit_id].remaining_task_num
-                                                data['priority'] = await self._get_hacs_priority(task.task_name, task.predict_feature,remaining_task_num)
-                                        else:
-                                            data['priority'] = 0
+                                    data['priority'] = await self._get_task_priority(
+                                        self.submit_workflows[submit_id],
+                                        task,
+                                    )
                                     message = {
                                         "type":"run_task",
                                         "data":data,
@@ -224,6 +250,9 @@ class MaPath:
                             submit_id = message_data['workflow_id']
                             if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
+
+                            if message_type == "start_task":
+                                self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
     
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
