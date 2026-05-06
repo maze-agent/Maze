@@ -1,5 +1,13 @@
 import axios from 'axios';
-import type { BuiltinTaskMeta, Workflow, WorkflowNode } from '@/types/workflow';
+import type {
+  BuiltinTaskMeta,
+  TaskDefinition,
+  WorkspaceTasksResponse,
+  WorkspaceWorkflowsResponse,
+  Workflow,
+  WorkflowEdge,
+  WorkflowNode,
+} from '@/types/workflow';
 
 const API_BASE = '/api';
 
@@ -7,6 +15,141 @@ export const api = {
   // Get builtin tasks list
   async getBuiltinTasks(): Promise<BuiltinTaskMeta[]> {
     const response = await axios.get(`${API_BASE}/builtin-tasks`);
+    return response.data;
+  },
+
+  // Get workspace tasks from <workspaceDir>/tasks
+  async getWorkspaceTasks(workspaceDir?: string): Promise<WorkspaceTasksResponse> {
+    const response = await axios.get(`${API_BASE}/workspace-tasks`, {
+      params: workspaceDir ? { workspaceDir } : undefined,
+    });
+    return response.data;
+  },
+
+  // Save a workspace task file
+  async saveWorkspaceTask(data: {
+    workspaceDir: string;
+    relativePath: string;
+    code: string;
+    parse?: boolean;
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE}/workspace-tasks`, data);
+    return response.data;
+  },
+
+  // Delete a workspace task file
+  async deleteWorkspaceTask(data: {
+    workspaceDir: string;
+    relativePath: string;
+  }): Promise<any> {
+    const response = await axios.delete(`${API_BASE}/workspace-tasks`, { data });
+    return response.data;
+  },
+
+  // Rename a workspace task function
+  async renameWorkspaceTask(data: {
+    workspaceDir: string;
+    relativePath: string;
+    oldFunctionName: string;
+    newName: string;
+  }): Promise<any> {
+    const response = await axios.patch(`${API_BASE}/workspace-tasks/rename`, data);
+    return response.data;
+  },
+
+  // Get saved workflows from <workspaceDir>/workflows
+  async getWorkspaceWorkflows(workspaceDir?: string): Promise<WorkspaceWorkflowsResponse> {
+    const response = await axios.get(`${API_BASE}/workspace-workflows`, {
+      params: workspaceDir ? { workspaceDir } : undefined,
+    });
+    return response.data;
+  },
+
+  // Save current workflow into <workspaceDir>/workflows
+  async saveWorkspaceWorkflow(data: {
+    workspaceDir: string;
+    relativePath?: string | null;
+    name: string;
+    workflowId?: string | null;
+    nodes: WorkflowNode[];
+    edges: WorkflowEdge[];
+    taskDefinitions?: TaskDefinition[];
+  }): Promise<{
+    success: boolean;
+    workspaceDir: string;
+    relativePath: string;
+    workflow: {
+      name: string;
+      nodes: WorkflowNode[];
+      edges: WorkflowEdge[];
+      taskDefinitions?: TaskDefinition[];
+    };
+  }> {
+    const response = await axios.post(`${API_BASE}/workspace-workflows/save`, data);
+    return response.data;
+  },
+
+  // Load a saved workspace workflow file
+  async loadWorkspaceWorkflow(data: {
+    workspaceDir: string;
+    relativePath: string;
+  }): Promise<{
+    success: boolean;
+    workspaceDir: string;
+    relativePath: string;
+    workflow: {
+      name: string;
+      nodes: WorkflowNode[];
+      edges: WorkflowEdge[];
+      taskDefinitions?: TaskDefinition[];
+    };
+    importedTaskDefinitions?: {
+      imported: Array<{ relativePath: string }>;
+      skipped: Array<{ relativePath: string; reason: string }>;
+    };
+  }> {
+    const response = await axios.post(`${API_BASE}/workspace-workflows/load`, data);
+    return response.data;
+  },
+
+  // Import an external workflow payload and materialize its task definitions into workspace tasks
+  async importWorkspaceWorkflow(data: {
+    workspaceDir?: string;
+    payload: any;
+  }): Promise<{
+    success: boolean;
+    workspaceDir: string;
+    workflow: {
+      name: string;
+      nodes: WorkflowNode[];
+      edges: WorkflowEdge[];
+      taskDefinitions?: TaskDefinition[];
+    };
+    importedTaskDefinitions?: {
+      imported: Array<{ relativePath: string }>;
+      skipped: Array<{ relativePath: string; reason: string }>;
+    };
+  }> {
+    const response = await axios.post(`${API_BASE}/workspace-workflows/import`, data);
+    return response.data;
+  },
+
+  // Delete a saved workspace workflow file
+  async deleteWorkspaceWorkflow(data: {
+    workspaceDir: string;
+    relativePath: string;
+  }): Promise<any> {
+    const response = await axios.delete(`${API_BASE}/workspace-workflows`, { data });
+    return response.data;
+  },
+
+  // Rename a saved workspace workflow
+  async renameWorkspaceWorkflow(data: {
+    workspaceDir: string;
+    relativePath: string;
+    name: string;
+  }): Promise<any> {
+    const response = await axios.patch(`${API_BASE}/workspace-workflows/rename`, data);
     return response.data;
   },
 
@@ -39,6 +182,7 @@ export const api = {
 
   // Save workflow (nodes and edges)
   async saveWorkflow(workflowId: string, data: {
+    name?: string;
     nodes: WorkflowNode[];
     edges: any[];
   }): Promise<void> {

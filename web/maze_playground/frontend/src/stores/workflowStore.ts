@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { WorkflowNode, WorkflowEdge, BuiltinTaskMeta, RunResult } from '@/types/workflow';
+import type { WorkflowNode, WorkflowEdge, BuiltinTaskMeta, WorkspaceTaskMeta, WorkspaceWorkflowMeta, RunResult } from '@/types/workflow';
 
 interface WorkflowStore {
   // Workflow state
@@ -11,6 +11,12 @@ interface WorkflowStore {
   
   // Builtin tasks
   builtinTasks: BuiltinTaskMeta[];
+
+  // Workspace tasks
+  workspaceDir: string;
+  workspaceTasks: WorkspaceTaskMeta[];
+  workspaceWorkflows: WorkspaceWorkflowMeta[];
+  currentWorkspaceWorkflowPath: string | null;
   
   // Run state
   isRunning: boolean;
@@ -26,6 +32,10 @@ interface WorkflowStore {
   deleteNode: (nodeId: string) => void;
   selectNode: (node: WorkflowNode | null) => void;
   setBuiltinTasks: (tasks: BuiltinTaskMeta[]) => void;
+  setWorkspaceDir: (dir: string) => void;
+  setWorkspaceTasks: (tasks: WorkspaceTaskMeta[]) => void;
+  setWorkspaceWorkflows: (workflows: WorkspaceWorkflowMeta[]) => void;
+  setCurrentWorkspaceWorkflowPath: (path: string | null) => void;
   setIsRunning: (isRunning: boolean) => void;
   addRunResult: (result: RunResult) => void;
   clearRunResults: () => void;
@@ -40,6 +50,10 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   edges: [],
   selectedNode: null,
   builtinTasks: [],
+  workspaceDir: '',
+  workspaceTasks: [],
+  workspaceWorkflows: [],
+  currentWorkspaceWorkflowPath: null,
   isRunning: false,
   runResults: [],
 
@@ -75,6 +89,14 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   selectNode: (node) => set({ selectedNode: node }),
   
   setBuiltinTasks: (tasks) => set({ builtinTasks: tasks }),
+
+  setWorkspaceDir: (dir) => set({ workspaceDir: dir }),
+
+  setWorkspaceTasks: (tasks) => set({ workspaceTasks: tasks }),
+
+  setWorkspaceWorkflows: (workflows) => set({ workspaceWorkflows: workflows }),
+
+  setCurrentWorkspaceWorkflowPath: (path) => set({ currentWorkspaceWorkflowPath: path }),
   
   setIsRunning: (isRunning) => set({ isRunning }),
   
@@ -90,6 +112,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     nodes: [],
     edges: [],
     selectedNode: null,
+    currentWorkspaceWorkflowPath: null,
     isRunning: false,
     runResults: [],
   }),

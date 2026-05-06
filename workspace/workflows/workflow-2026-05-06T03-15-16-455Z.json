@@ -1,0 +1,144 @@
+{
+  "schema": "maze-playground-workflow",
+  "version": 2,
+  "savedAt": "2026-05-06T03:15:16.455Z",
+  "workflow": {
+    "name": "啦啦啦",
+    "sourceWorkflowId": "3e8f3d3b-5dae-43a8-bc4b-af6c52e51393",
+    "nodes": [
+      {
+        "id": "node-1778036022905",
+        "type": "taskNode",
+        "position": {
+          "x": 308.72304753249557,
+          "y": 348.3959396526616
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "File Process",
+          "customCode": "from maze import task\n\n@task(\n    inputs=[\"text\"],\n    outputs=[\"result\"],\n    resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0}\n)\ndef file_process(params):\n    \"\"\"Process text and return a result.\"\"\"\n    text = params.get(\"text\", \"\")\n    return {\"result\": f\"Processed: {text}\"}\n",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/workspace_task_1778029656164.py",
+          "functionName": "file_process",
+          "inputs": [
+            {
+              "name": "text",
+              "dataType": "str",
+              "source": "user",
+              "value": ""
+            }
+          ],
+          "outputs": [
+            {
+              "name": "result",
+              "dataType": "str"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-1778036309781",
+        "type": "taskNode",
+        "position": {
+          "x": 481.74533090987546,
+          "y": 634.7778007820508
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Read Csv File",
+          "customCode": "from maze import task\n\n@task(\n    inputs=[\"text\"],\n    outputs=[\"result\"],\n    resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0}\n)\ndef read_csv_file(params):\n    \"\"\"Process text and return a result.\"\"\"\n    text = params.get(\"text\", \"\")\n    return {\"result\": f\"Processed: {text}\"}\n",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/workspace_task_1778029674481.py",
+          "functionName": "read_csv_file",
+          "inputs": [
+            {
+              "name": "text",
+              "dataType": "str",
+              "source": "user",
+              "value": ""
+            }
+          ],
+          "outputs": [
+            {
+              "name": "result",
+              "dataType": "str"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      }
+    ],
+    "edges": [],
+    "taskDefinitions": [
+      {
+        "type": "workspace",
+        "relativePath": "tasks/workspace_task_1778029656164.py",
+        "functionName": "file_process",
+        "displayName": "File Process",
+        "code": "from maze import task\n\n@task(\n    inputs=[\"text\"],\n    outputs=[\"result\"],\n    resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0}\n)\ndef file_process(params):\n    \"\"\"Process text and return a result.\"\"\"\n    text = params.get(\"text\", \"\")\n    return {\"result\": f\"Processed: {text}\"}\n",
+        "inputs": [
+          {
+            "name": "text",
+            "dataType": "str",
+            "source": "user",
+            "value": ""
+          }
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "dataType": "str"
+          }
+        ],
+        "resources": {
+          "cpu": 1,
+          "cpu_mem": 128,
+          "gpu": 0,
+          "gpu_mem": 0
+        }
+      },
+      {
+        "type": "workspace",
+        "relativePath": "tasks/workspace_task_1778029674481.py",
+        "functionName": "read_csv_file",
+        "displayName": "Read Csv File",
+        "code": "from maze import task\n\n@task(\n    inputs=[\"text\"],\n    outputs=[\"result\"],\n    resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0}\n)\ndef read_csv_file(params):\n    \"\"\"Process text and return a result.\"\"\"\n    text = params.get(\"text\", \"\")\n    return {\"result\": f\"Processed: {text}\"}\n",
+        "inputs": [
+          {
+            "name": "text",
+            "dataType": "str",
+            "source": "user",
+            "value": ""
+          }
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "dataType": "str"
+          }
+        ],
+        "resources": {
+          "cpu": 1,
+          "cpu_mem": 128,
+          "gpu": 0,
+          "gpu_mem": 0
+        }
+      }
+    ]
+  }
+}

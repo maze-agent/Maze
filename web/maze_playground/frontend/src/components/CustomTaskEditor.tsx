@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
-import { Modal, Button, message, Alert, Spin, Space } from 'antd';
+import { useState, useEffect, useRef } from 'react';
+import { Modal, Button, message, Alert, Spin, Space, Typography } from 'antd';
 import { CodeOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { WorkflowNode } from '@/types/workflow';
+
+const { Text } = Typography;
 
 interface CustomTaskEditorProps {
   node: WorkflowNode;
@@ -12,19 +14,62 @@ interface CustomTaskEditorProps {
 }
 
 export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEditorProps) {
-  const { updateNode, selectNode, nodes } = useWorkflowStore();
+  const { updateNode, selectNode, workspaceDir, setWorkspaceDir, setWorkspaceTasks } = useWorkflowStore();
   const [code, setCode] = useState('');
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'failed'>('idle');
+  const lastSavedCodeRef = useRef('');
+
+  const isWorkspaceTask = node.data.category === 'workspace';
+  const targetWorkspaceDir = node.data.workspaceDir || workspaceDir;
+  const targetTaskPath = node.data.taskPath;
 
   useEffect(() => {
     if (open) {
-      const currentNode = nodes.find(n => n.id === node.id);
-      const currentCode = currentNode?.data.customCode || '';
+      const currentCode = node.data.customCode || '';
       setCode(currentCode);
       setParseError(null);
+      lastSavedCodeRef.current = currentCode;
+      setSaveState(isWorkspaceTask ? 'saved' : 'idle');
     }
-  }, [open, node.id, nodes]);
+  }, [open, node.id, node.data.customCode, isWorkspaceTask]);
+
+  useEffect(() => {
+    if (!open || !isWorkspaceTask || !targetWorkspaceDir || !targetTaskPath) {
+      return;
+    }
+
+    if (code === lastSavedCodeRef.current) {
+      return;
+    }
+
+    setSaveState('unsaved');
+    const timer = window.setTimeout(async () => {
+      try {
+        setSaveState('saving');
+        const saved = await api.saveWorkspaceTask({
+          workspaceDir: targetWorkspaceDir,
+          relativePath: targetTaskPath,
+          code,
+          parse: false,
+        });
+
+        lastSavedCodeRef.current = code;
+        updateNode(node.id, {
+          customCode: code,
+          workspaceDir: saved.workspaceDir,
+          taskPath: saved.relativePath,
+        });
+        setSaveState('saved');
+      } catch (error) {
+        console.error('Failed to autosave workspace task:', error);
+        setSaveState('failed');
+      }
+    }, 800);
+
+    return () => window.clearTimeout(timer);
+  }, [code, open, isWorkspaceTask, targetWorkspaceDir, targetTaskPath, node.id, updateNode]);
 
   const defaultCode = `from maze import task
 
@@ -63,13 +108,26 @@ def my_custom_task(params):
     setParseError(null);
 
     try {
-      const parsed = await api.parseCustomFunction(code);
+      const parsedResult = isWorkspaceTask && targetWorkspaceDir && targetTaskPath
+        ? await api.saveWorkspaceTask({
+            workspaceDir: targetWorkspaceDir,
+            relativePath: targetTaskPath,
+            code,
+            parse: true,
+          })
+        : await api.parseCustomFunction(code);
+
+      const parsed = parsedResult.task || parsedResult;
       
       const updatedData = {
+        category: isWorkspaceTask ? 'workspace' as const : node.data.category,
         customCode: code,
-        label: parsed.name || 'Custom Task',
+        label: parsed.displayName || parsed.name || 'Custom Task',
         nodeType: 'task' as const,
-        inputs: parsed.inputs.map(inp => ({
+        workspaceDir: parsed.workspaceDir || targetWorkspaceDir,
+        taskPath: parsed.relativePath || targetTaskPath,
+        functionName: parsed.functionName || parsed.name,
+        inputs: parsed.inputs.map((inp: { name: string; dataType: string }) => ({
           name: inp.name,
           dataType: inp.dataType,
           source: 'user' as const,
@@ -91,7 +149,15 @@ def my_custom_task(params):
       selectNode(updatedNode);
       updateNode(node.id, updatedData);
 
-      message.success(`Parse successful! Task name: ${parsed.name}`);
+      if (isWorkspaceTask && (parsed.workspaceDir || targetWorkspaceDir)) {
+        const refreshed = await api.getWorkspaceTasks(parsed.workspaceDir || targetWorkspaceDir);
+        setWorkspaceDir(refreshed.workspaceDir);
+        setWorkspaceTasks(refreshed.tasks || []);
+        lastSavedCodeRef.current = code;
+        setSaveState('saved');
+      }
+
+      message.success(isWorkspaceTask ? `Saved and parsed: ${parsed.name}` : `Parse successful! Task name: ${parsed.name}`);
       onClose();
     } catch (error: any) {
       console.error('Failed to parse custom function:', error);
@@ -108,12 +174,40 @@ def my_custom_task(params):
     setParseError(null);
   };
 
+  const renderSaveState = () => {
+    if (!isWorkspaceTask) {
+      return null;
+    }
+
+    const labelMap = {
+      idle: '',
+      unsaved: 'Unsaved changes',
+      saving: 'Saving...',
+      saved: 'Saved',
+      failed: 'Autosave failed',
+    };
+
+    const colorMap = {
+      idle: undefined,
+      unsaved: 'secondary' as const,
+      saving: 'secondary' as const,
+      saved: 'success' as const,
+      failed: 'danger' as const,
+    };
+
+    return (
+      <Text type={colorMap[saveState]} style={{ fontSize: '12px' }}>
+        {labelMap[saveState]}
+      </Text>
+    );
+  };
+
   return (
     <Modal
       title={
         <Space>
           <CodeOutlined />
-          <span>Edit Custom Task Code</span>
+          <span>{isWorkspaceTask ? 'Edit Workspace Task' : 'Edit Custom Task Code'}</span>
         </Space>
       }
       open={open}
@@ -133,11 +227,25 @@ def my_custom_task(params):
           onClick={handleParse}
           loading={parsing}
         >
-          Parse & Configure
+          {isWorkspaceTask ? 'Parse & Save' : 'Parse & Configure'}
         </Button>,
       ]}
     >
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
+        {isWorkspaceTask && (
+          <Alert
+            message={targetTaskPath || 'Workspace task'}
+            description={
+              <Space direction="vertical" size={2}>
+                <Text type="secondary">{targetWorkspaceDir}</Text>
+                {renderSaveState()}
+              </Space>
+            }
+            type="info"
+            showIcon
+          />
+        )}
+
         <Alert
           message="Guidelines"
           description={

@@ -8,6 +8,9 @@ import json
 import os
 import traceback
 import io
+import re
+
+sys.dont_write_bytecode = True
 
 # 设置标准输出和标准错误为 UTF-8 编码
 if sys.platform == 'win32':
@@ -25,6 +28,8 @@ from maze import task, get_task_metadata
 from maze.client.front.builtin import simpleTask
 import inspect
 import importlib
+import importlib.util
+import hashlib
 
 
 def get_builtin_tasks():
@@ -87,7 +92,6 @@ def emit_progress(event):
 def parse_custom_function(code):
     """Parse user-submitted custom function"""
     import tempfile
-    import importlib.util
     
     temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
     try:
@@ -134,6 +138,322 @@ def parse_custom_function(code):
             os.unlink(temp_file.name)
         except:
             pass
+
+
+def _task_description(func, metadata):
+    """Build a compact task description for the UI."""
+    description = inspect.getdoc(func) or ""
+    if description:
+        return description
+
+    input_names = ", ".join(metadata.inputs) or "none"
+    output_names = ", ".join(metadata.outputs) or "none"
+    return f"Inputs: {input_names}. Outputs: {output_names}."
+
+
+def _task_metadata_payload(func, name, code, workspace_dir=None, relative_path=None):
+    """Convert a decorated Maze task function to frontend metadata."""
+    metadata = get_task_metadata(func)
+    payload = {
+        "name": name,
+        "displayName": name.replace("_", " ").title(),
+        "description": _task_description(func, metadata),
+        "inputs": [
+            {"name": inp, "dataType": metadata.data_types.get(inp, "str")}
+            for inp in metadata.inputs
+        ],
+        "outputs": [
+            {"name": out, "dataType": metadata.data_types.get(out, "str")}
+            for out in metadata.outputs
+        ],
+        "resources": metadata.resources,
+        "functionName": name,
+        "code": code,
+    }
+
+    if workspace_dir is not None:
+        payload["workspaceDir"] = workspace_dir
+    if relative_path is not None:
+        payload["relativePath"] = relative_path
+
+    return payload
+
+
+def _load_module_from_file(file_path, workspace_dir):
+    """Load a Python file as an isolated module while allowing local imports."""
+    module_hash = hashlib.sha1(file_path.encode("utf-8")).hexdigest()[:12]
+    module_name = f"maze_workspace_task_{module_hash}"
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module from {file_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    original_sys_path = list(sys.path)
+    try:
+        sys.path.insert(0, workspace_dir)
+        sys.path.insert(0, os.path.dirname(file_path))
+        spec.loader.exec_module(module)
+    finally:
+        sys.path = original_sys_path
+
+    return module
+
+
+def _resolve_workspace_dir(workspace_dir):
+    if not workspace_dir:
+        workspace_dir = project_root
+
+    resolved = os.path.abspath(os.path.expanduser(workspace_dir))
+    if not os.path.isdir(resolved):
+        return None, {"error": f"Workspace directory does not exist: {resolved}"}
+
+    return resolved, None
+
+
+def _normalize_task_relative_path(relative_path):
+    relative_path = (relative_path or "tasks/custom_task.py").replace("\\", "/").strip()
+    relative_path = relative_path.lstrip("/")
+
+    if not relative_path.startswith("tasks/"):
+        relative_path = f"tasks/{relative_path}"
+
+    normalized = os.path.normpath(relative_path).replace("\\", "/")
+    if normalized == "tasks" or not normalized.endswith(".py"):
+        normalized = f"{normalized}.py"
+
+    if normalized.startswith("../") or "/../" in normalized or normalized == "..":
+        raise ValueError("Task path must stay inside the workspace tasks directory")
+
+    return normalized
+
+
+def _task_file_path(workspace_dir, relative_path):
+    normalized = _normalize_task_relative_path(relative_path)
+    full_path = os.path.abspath(os.path.join(workspace_dir, normalized))
+    tasks_dir = os.path.abspath(os.path.join(workspace_dir, "tasks"))
+
+    if not (full_path == tasks_dir or full_path.startswith(tasks_dir + os.sep)):
+        raise ValueError("Task path must stay inside the workspace tasks directory")
+
+    return normalized, full_path
+
+
+def _extract_tasks_from_file(file_path, workspace_dir, relative_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        code = f.read()
+
+    module = _load_module_from_file(file_path, workspace_dir)
+    tasks = []
+    for name, obj in inspect.getmembers(module):
+        if hasattr(obj, "_maze_task_metadata"):
+            tasks.append(_task_metadata_payload(
+                obj,
+                name,
+                code,
+                workspace_dir=workspace_dir,
+                relative_path=relative_path,
+            ))
+
+    return tasks
+
+
+def get_workspace_tasks(workspace_dir):
+    """Scan <workspace>/tasks/**/*.py and return decorated Maze tasks."""
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        return error
+
+    tasks_dir = os.path.join(workspace_dir, "tasks")
+    tasks = []
+    errors = []
+
+    if not os.path.isdir(tasks_dir):
+        return {
+            "workspaceDir": workspace_dir,
+            "tasksDir": tasks_dir,
+            "tasks": [],
+            "errors": [],
+        }
+
+    for root, _, files in os.walk(tasks_dir):
+        for file_name in files:
+            if not file_name.endswith(".py") or file_name.startswith("__"):
+                continue
+
+            file_path = os.path.join(root, file_name)
+            relative_path = os.path.relpath(file_path, workspace_dir).replace("\\", "/")
+            try:
+                tasks.extend(_extract_tasks_from_file(file_path, workspace_dir, relative_path))
+            except Exception as e:
+                errors.append({
+                    "relativePath": relative_path,
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                })
+
+    return {
+        "workspaceDir": workspace_dir,
+        "tasksDir": tasks_dir,
+        "tasks": tasks,
+        "errors": errors,
+    }
+
+
+def save_workspace_task(workspace_dir, relative_path, code, parse=True):
+    """Save a workspace task file, optionally parsing it afterwards."""
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        return error
+
+    if code is None:
+        return {"error": "Task code cannot be empty"}
+
+    if parse and not code.strip():
+        return {"error": "Task code cannot be empty"}
+
+    try:
+        relative_path, file_path = _task_file_path(workspace_dir, relative_path)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        response = {
+            "success": True,
+            "workspaceDir": workspace_dir,
+            "tasksDir": os.path.join(workspace_dir, "tasks"),
+            "relativePath": relative_path,
+        }
+
+        if parse:
+            tasks = _extract_tasks_from_file(file_path, workspace_dir, relative_path)
+            if not tasks:
+                return {
+                    **response,
+                    "success": False,
+                    "error": "No function decorated with @task found",
+                }
+            response["tasks"] = tasks
+            response["task"] = tasks[0]
+
+        return response
+    except SyntaxError as e:
+        return {"error": f"Syntax error: {e}", "traceback": traceback.format_exc()}
+    except ImportError as e:
+        return {"error": f"Import failed: {e}", "traceback": traceback.format_exc()}
+    except Exception as e:
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+def delete_workspace_task(workspace_dir, relative_path):
+    """Delete a task file from <workspace>/tasks."""
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        return error
+
+    try:
+        relative_path, file_path = _task_file_path(workspace_dir, relative_path)
+
+        if not os.path.isfile(file_path):
+            return {"error": f"Workspace task file not found: {relative_path}"}
+
+        os.unlink(file_path)
+        return {
+            "success": True,
+            "workspaceDir": workspace_dir,
+            "relativePath": relative_path,
+        }
+    except Exception as e:
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+def _normalize_python_identifier(name):
+    raw_name = (name or "").strip()
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw_name):
+        return raw_name
+
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw_name).strip("_").lower()
+    if not normalized:
+        raise ValueError("Task name cannot be empty")
+    if normalized[0].isdigit():
+        normalized = f"task_{normalized}"
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", normalized):
+        raise ValueError("Task name must be a valid Python identifier")
+
+    return normalized
+
+
+def rename_workspace_task(workspace_dir, relative_path, old_function_name, new_name):
+    """Rename a decorated task function inside a workspace task file."""
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        return error
+
+    try:
+        new_function_name = _normalize_python_identifier(new_name)
+        relative_path, file_path = _task_file_path(workspace_dir, relative_path)
+
+        if not os.path.isfile(file_path):
+            return {"error": f"Workspace task file not found: {relative_path}"}
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        pattern = re.compile(
+            r"(\b(?:async\s+def|def)\s+)" + re.escape(old_function_name) + r"(\s*\()"
+        )
+        code, count = pattern.subn(r"\1" + new_function_name + r"\2", code, count=1)
+
+        if count == 0:
+            return {"error": f"Task function not found: {old_function_name}"}
+
+        result = save_workspace_task(workspace_dir, relative_path, code, parse=True)
+        if result.get("error") or result.get("success") is False:
+            return result
+
+        result["oldFunctionName"] = old_function_name
+        result["newFunctionName"] = new_function_name
+        return result
+    except Exception as e:
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+def _build_task_inputs(node_data, task_map):
+    task_inputs = {}
+    for inp in node_data["inputs"]:
+        if inp["source"] == "user":
+            task_inputs[inp["name"]] = inp.get("value", "")
+        elif inp["source"] == "task":
+            task_source = inp.get("taskSource")
+            if task_source:
+                source_node_id = task_source["taskId"]
+                output_key = task_source["outputKey"]
+                if source_node_id in task_map:
+                    source_task = task_map[source_node_id]
+                    task_inputs[inp["name"]] = source_task.outputs[output_key]
+                else:
+                    raise ValueError(f"Task dependency error: {source_node_id} not found")
+
+    return task_inputs
+
+
+def _load_workspace_task_func(workspace_dir, relative_path, function_name):
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        raise ValueError(error["error"])
+
+    relative_path, file_path = _task_file_path(workspace_dir, relative_path)
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Workspace task file not found: {relative_path}")
+
+    module = _load_module_from_file(file_path, workspace_dir)
+    task_func = getattr(module, function_name, None)
+    if task_func is None:
+        raise AttributeError(f"Workspace task function not found: {function_name}")
+    if not hasattr(task_func, "_maze_task_metadata"):
+        raise ValueError(f"Workspace function is not decorated with @task: {function_name}")
+
+    return task_func
 
 
 def create_maze_workflow(workflow_id, server_url="http://localhost:8000"):
@@ -203,6 +523,35 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                 ma_task = workflow.add_task(task_func, inputs=task_inputs)
                 task_map[node_id] = ma_task
                 print(f"[DEBUG] 任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
+
+            elif category == "workspace":
+                workspace_dir = node_data.get("workspaceDir", project_root)
+                task_path = node_data.get("taskPath") or node_data.get("relativePath")
+                function_name = node_data.get("functionName") or node_data.get("label")
+
+                if not task_path or not function_name:
+                    return {
+                        "success": False,
+                        "error": f"Workspace task is missing file path or function name: {node_id}",
+                    }
+
+                try:
+                    task_func = _load_workspace_task_func(workspace_dir, task_path, function_name)
+                    task_inputs = _build_task_inputs(node_data, task_map)
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                    }
+
+                print(
+                    f"[DEBUG] 添加工作区任务: {task_path}:{function_name}, 输入: {list(task_inputs.keys())}",
+                    file=sys.stderr,
+                )
+                ma_task = workflow.add_task(task_func, inputs=task_inputs)
+                task_map[node_id] = ma_task
+                print(f"[DEBUG] 工作区任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
             
             elif category == "custom":
                 # Custom task
@@ -310,6 +659,31 @@ def main():
     try:
         if action == 'get_builtin_tasks':
             result = get_builtin_tasks()
+
+        elif action == 'get_workspace_tasks':
+            result = get_workspace_tasks(params.get('workspaceDir', ''))
+
+        elif action == 'save_workspace_task':
+            result = save_workspace_task(
+                params.get('workspaceDir', ''),
+                params.get('relativePath', ''),
+                params.get('code', ''),
+                params.get('parse', True),
+            )
+
+        elif action == 'delete_workspace_task':
+            result = delete_workspace_task(
+                params.get('workspaceDir', ''),
+                params.get('relativePath', ''),
+            )
+
+        elif action == 'rename_workspace_task':
+            result = rename_workspace_task(
+                params.get('workspaceDir', ''),
+                params.get('relativePath', ''),
+                params.get('oldFunctionName', ''),
+                params.get('newName', ''),
+            )
         
         elif action == 'parse_custom_function':
             result = parse_custom_function(params.get('code', ''))

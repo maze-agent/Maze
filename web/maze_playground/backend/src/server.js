@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
+import fs from 'fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -20,6 +21,249 @@ app.use(express.json({ limit: '10mb' }));
 const workflows = new Map();
 // 存储 WebSocket 连接
 const wsConnections = new Map(); // workflowId -> Set<WebSocket>
+const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
+const DEFAULT_WORKSPACE_DIR = process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace');
+
+// ========== 工作目录文件辅助函数 ==========
+
+function toPosixPath(filePath) {
+  return filePath.split(path.sep).join('/');
+}
+
+function safeFileName(name, fallbackPrefix = 'workflow') {
+  const safeName = String(name || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9-_]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+
+  if (safeName && safeName !== 'untitled-workflow') {
+    return safeName;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${fallbackPrefix}-${stamp}`;
+}
+
+async function ensureWorkspaceDirs(workspaceDir) {
+  const resolved = path.resolve(String(workspaceDir || DEFAULT_WORKSPACE_DIR));
+  await fs.mkdir(resolved, { recursive: true });
+  await fs.mkdir(path.join(resolved, 'tasks'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
+  return resolved;
+}
+
+function normalizeWorkflowRelativePath(relativePath, workflowName) {
+  let normalized = String(relativePath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+
+  if (!normalized) {
+    normalized = `workflows/${safeFileName(workflowName)}.json`;
+  } else if (!normalized.startsWith('workflows/')) {
+    normalized = `workflows/${normalized}`;
+  }
+
+  normalized = path.posix.normalize(normalized);
+
+  if (!normalized.startsWith('workflows/') || normalized.includes('/../') || normalized.startsWith('../')) {
+    throw new Error('Workflow path must stay inside the workspace workflows directory');
+  }
+
+  if (!normalized.endsWith('.json')) {
+    normalized = `${normalized}.json`;
+  }
+
+  return normalized;
+}
+
+function resolveWorkflowFile(workspaceDir, relativePath, workflowName) {
+  const normalized = normalizeWorkflowRelativePath(relativePath, workflowName);
+  const workflowsDir = path.resolve(workspaceDir, 'workflows');
+  const fullPath = path.resolve(workspaceDir, normalized);
+
+  if (!fullPath.startsWith(workflowsDir + path.sep)) {
+    throw new Error('Workflow path must stay inside the workspace workflows directory');
+  }
+
+  return { relativePath: normalized, fullPath, workflowsDir };
+}
+
+async function listWorkflowFiles(dir) {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const files = [];
+
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listWorkflowFiles(entryPath));
+    } else if (entry.isFile() && entry.name.endsWith('.json')) {
+      files.push(entryPath);
+    }
+  }
+
+  return files;
+}
+
+function normalizeWorkflowPayload(payload) {
+  const workflow = payload?.workflow || payload;
+  const nodes = workflow?.nodes;
+  const edges = workflow?.edges;
+  const rawTaskDefinitions = workflow?.taskDefinitions || payload?.taskDefinitions || [];
+
+  if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+    throw new Error('Invalid workflow file: nodes and edges are required');
+  }
+
+  return {
+    name: workflow?.name || 'Imported Workflow',
+    nodes: nodes.map((node) => ({
+      ...node,
+      type: 'taskNode',
+    })),
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle || undefined,
+      targetHandle: edge.targetHandle || undefined,
+    })),
+    taskDefinitions: Array.isArray(rawTaskDefinitions) ? rawTaskDefinitions : [],
+  };
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeTaskRelativePath(relativePath) {
+  let normalized = String(relativePath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+
+  if (!normalized) {
+    throw new Error('Task definition needs a relativePath');
+  }
+  if (!normalized.startsWith('tasks/')) {
+    normalized = `tasks/${normalized}`;
+  }
+
+  normalized = path.posix.normalize(normalized);
+
+  if (!normalized.startsWith('tasks/') || normalized.includes('/../') || normalized.startsWith('../')) {
+    throw new Error('Task path must stay inside the workspace tasks directory');
+  }
+  if (!normalized.endsWith('.py')) {
+    normalized = `${normalized}.py`;
+  }
+
+  return normalized;
+}
+
+function resolveTaskDefinitionFile(workspaceDir, relativePath) {
+  const normalized = normalizeTaskRelativePath(relativePath);
+  const tasksDir = path.resolve(workspaceDir, 'tasks');
+  const fullPath = path.resolve(workspaceDir, normalized);
+
+  if (!fullPath.startsWith(tasksDir + path.sep)) {
+    throw new Error('Task path must stay inside the workspace tasks directory');
+  }
+
+  return { relativePath: normalized, fullPath };
+}
+
+function collectTaskDefinitions(nodes, explicitDefinitions = []) {
+  const definitions = new Map();
+
+  const upsert = (definition) => {
+    const relativePath = definition?.relativePath || definition?.taskPath;
+    if (!relativePath) {
+      return;
+    }
+
+    const normalizedPath = normalizeTaskRelativePath(relativePath);
+    const existing = definitions.get(normalizedPath);
+    const incomingCode = definition?.code ?? '';
+    const code = String(incomingCode).trim() ? incomingCode : existing?.code ?? '';
+    definitions.set(normalizedPath, {
+      type: 'workspace',
+      ...(existing || {}),
+      ...definition,
+      relativePath: normalizedPath,
+      code,
+    });
+  };
+
+  explicitDefinitions.forEach(upsert);
+
+  nodes.forEach((node) => {
+    if (node?.data?.category !== 'workspace') {
+      return;
+    }
+
+    upsert({
+      relativePath: node.data.taskPath || node.data.relativePath,
+      functionName: node.data.functionName,
+      displayName: node.data.label,
+      code: node.data.customCode || '',
+      inputs: node.data.inputs || [],
+      outputs: node.data.outputs || [],
+      resources: node.data.resources,
+    });
+  });
+
+  return Array.from(definitions.values());
+}
+
+async function importTaskDefinitions(workspaceDir, taskDefinitions = []) {
+  const imported = [];
+  const skipped = [];
+
+  for (const definition of collectTaskDefinitions([], taskDefinitions)) {
+    if (!definition.code || !String(definition.code).trim()) {
+      skipped.push({ relativePath: definition.relativePath, reason: 'empty-code' });
+      continue;
+    }
+
+    const { relativePath, fullPath } = resolveTaskDefinitionFile(workspaceDir, definition.relativePath);
+    if (await fileExists(fullPath)) {
+      skipped.push({ relativePath, reason: 'exists' });
+      continue;
+    }
+
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, definition.code, 'utf-8');
+    imported.push({ relativePath });
+  }
+
+  return { imported, skipped };
+}
+
+function applyWorkspaceToWorkflowNodes(nodes, workspaceDir, taskDefinitions = []) {
+  const definitionsByPath = new Map(
+    collectTaskDefinitions([], taskDefinitions).map((definition) => [definition.relativePath, definition])
+  );
+
+  return nodes.map((node) => {
+    if (node?.data?.category !== 'workspace') {
+      return node;
+    }
+
+    const relativePath = normalizeTaskRelativePath(node.data.taskPath || node.data.relativePath);
+    const definition = definitionsByPath.get(relativePath);
+
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        workspaceDir,
+        taskPath: relativePath,
+        customCode: definition?.code || node.data.customCode || '',
+      },
+    };
+  });
+}
 
 // ========== Python 桥接函数 ==========
 
@@ -134,6 +378,380 @@ app.get('/api/builtin-tasks', async (req, res) => {
   }
 });
 
+// 1.1 获取工作目录任务列表
+app.get('/api/workspace-tasks', async (req, res) => {
+  try {
+    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    console.log(`📁 扫描工作目录任务: ${workspaceDir}`);
+
+    const result = await callPython('get_workspace_tasks', { workspaceDir });
+
+    if (result.error) {
+      console.error('❌ 扫描工作目录失败:', result.error);
+      return res.status(400).json({ error: result.error, traceback: result.traceback });
+    }
+
+    console.log(`✅ 成功获取 ${result.tasks.length} 个工作区任务`);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ 获取工作区任务失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.2 保存工作目录任务
+app.post('/api/workspace-tasks', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath = 'tasks/custom_task.py',
+      code,
+      parse = true,
+    } = req.body;
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+
+    console.log(`💾 保存工作区任务: ${workspaceDir}/${relativePath}`);
+
+    if ((!code || !code.trim()) && parse) {
+      return res.status(400).json({ error: '代码不能为空' });
+    }
+
+    const result = await callPython('save_workspace_task', {
+      workspaceDir,
+      relativePath,
+      code,
+      parse,
+    });
+
+    if (result.error || result.success === false) {
+      console.error('❌ 保存工作区任务失败:', result.error);
+      return res.status(400).json({ error: result.error, traceback: result.traceback });
+    }
+
+    console.log('✅ 工作区任务保存成功');
+    res.json(result);
+  } catch (error) {
+    console.error('❌ 保存工作区任务失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.2.1 删除工作目录任务
+app.delete('/api/workspace-tasks', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+    } = req.body;
+
+    if (!relativePath) {
+      return res.status(400).json({ error: 'relativePath is required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    console.log(`🗑️ 删除工作区任务: ${workspaceDir}/${relativePath}`);
+
+    const result = await callPython('delete_workspace_task', {
+      workspaceDir,
+      relativePath,
+    });
+
+    if (result.error || result.success === false) {
+      console.error('❌ 删除工作区任务失败:', result.error);
+      return res.status(400).json({ error: result.error, traceback: result.traceback });
+    }
+
+    console.log('✅ 工作区任务删除成功');
+    res.json(result);
+  } catch (error) {
+    console.error('❌ 删除工作区任务失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.2.2 重命名工作目录任务
+app.patch('/api/workspace-tasks/rename', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+      oldFunctionName,
+      newName,
+    } = req.body;
+
+    if (!relativePath || !oldFunctionName || !newName) {
+      return res.status(400).json({ error: 'relativePath, oldFunctionName, and newName are required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    console.log(`✏️ 重命名工作区任务: ${relativePath} ${oldFunctionName} -> ${newName}`);
+
+    const result = await callPython('rename_workspace_task', {
+      workspaceDir,
+      relativePath,
+      oldFunctionName,
+      newName,
+    });
+
+    if (result.error || result.success === false) {
+      console.error('❌ 重命名工作区任务失败:', result.error);
+      return res.status(400).json({ error: result.error, traceback: result.traceback });
+    }
+
+    console.log('✅ 工作区任务重命名成功');
+    res.json(result);
+  } catch (error) {
+    console.error('❌ 重命名工作区任务失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.3 获取工作目录工作流列表
+app.get('/api/workspace-workflows', async (req, res) => {
+  try {
+    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const workflowsDir = path.join(workspaceDir, 'workflows');
+    const files = await listWorkflowFiles(workflowsDir);
+    const workflowItems = [];
+    const errors = [];
+
+    for (const filePath of files) {
+      const relativePath = toPosixPath(path.relative(workspaceDir, filePath));
+      try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        const payload = JSON.parse(raw);
+        const workflow = normalizeWorkflowPayload(payload);
+        const stat = await fs.stat(filePath);
+
+        workflowItems.push({
+          name: workflow.name,
+          relativePath,
+          nodeCount: workflow.nodes.length,
+          edgeCount: workflow.edges.length,
+          updatedAt: payload?.savedAt || payload?.exportedAt || stat.mtime.toISOString(),
+          size: stat.size,
+        });
+      } catch (error) {
+        errors.push({
+          relativePath,
+          error: error.message,
+        });
+      }
+    }
+
+    workflowItems.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+    res.json({
+      workspaceDir,
+      workflowsDir,
+      workflows: workflowItems,
+      errors,
+    });
+  } catch (error) {
+    console.error('❌ 获取工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.3.1 删除工作目录工作流
+app.delete('/api/workspace-workflows', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+    } = req.body;
+
+    if (!relativePath) {
+      return res.status(400).json({ error: 'relativePath is required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, 'workflow');
+    await fs.unlink(fullPath);
+
+    console.log(`🗑️ 工作流已删除: ${workflowPath}`);
+    res.json({
+      success: true,
+      workspaceDir,
+      relativePath: workflowPath,
+    });
+  } catch (error) {
+    console.error('❌ 删除工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.3.2 重命名工作目录工作流
+app.patch('/api/workspace-workflows/rename', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+      name,
+    } = req.body;
+
+    if (!relativePath || !name || !String(name).trim()) {
+      return res.status(400).json({ error: 'relativePath and name are required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
+    const raw = await fs.readFile(fullPath, 'utf-8');
+    const payload = JSON.parse(raw);
+    const normalized = normalizeWorkflowPayload(payload);
+    const nextPayload = {
+      schema: payload?.schema || 'maze-playground-workflow',
+      version: Math.max(payload?.version || 1, 2),
+      savedAt: new Date().toISOString(),
+      workflow: {
+        ...(payload?.workflow || {}),
+        name: String(name).trim(),
+        nodes: normalized.nodes,
+        edges: normalized.edges,
+        taskDefinitions: collectTaskDefinitions(normalized.nodes, normalized.taskDefinitions),
+      },
+    };
+
+    await fs.writeFile(fullPath, JSON.stringify(nextPayload, null, 2), 'utf-8');
+
+    console.log(`✏️ 工作流已重命名: ${workflowPath}`);
+    res.json({
+      success: true,
+      workspaceDir,
+      relativePath: workflowPath,
+      workflow: nextPayload.workflow,
+    });
+  } catch (error) {
+    console.error('❌ 重命名工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.4 保存当前工作流到工作目录
+app.post('/api/workspace-workflows/save', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+      name = 'Untitled Workflow',
+      workflowId = null,
+      nodes = [],
+      edges = [],
+      taskDefinitions = [],
+    } = req.body;
+
+    if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+      return res.status(400).json({ error: 'nodes and edges must be arrays' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const workflowNodes = nodes.map((node) => {
+      if (node?.data?.category === 'workspace') {
+        const relativePath = normalizeTaskRelativePath(node.data.taskPath || node.data.relativePath);
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            workspaceDir,
+            taskPath: relativePath,
+          },
+        };
+      }
+      return node;
+    });
+    const workflowTaskDefinitions = collectTaskDefinitions(workflowNodes, taskDefinitions);
+    const { relativePath: savedRelativePath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
+    const payload = {
+      schema: 'maze-playground-workflow',
+      version: 2,
+      savedAt: new Date().toISOString(),
+      workflow: {
+        name,
+        sourceWorkflowId: workflowId,
+        nodes: workflowNodes,
+        edges,
+        taskDefinitions: workflowTaskDefinitions,
+      },
+    };
+
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, JSON.stringify(payload, null, 2), 'utf-8');
+
+    console.log(`💾 工作流已保存到工作区: ${savedRelativePath}`);
+    res.json({
+      success: true,
+      workspaceDir,
+      relativePath: savedRelativePath,
+      workflow: payload.workflow,
+    });
+  } catch (error) {
+    console.error('❌ 保存工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.5 从工作目录加载工作流
+app.post('/api/workspace-workflows/load', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      relativePath,
+    } = req.body;
+
+    if (!relativePath) {
+      return res.status(400).json({ error: 'relativePath is required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const { relativePath: loadedRelativePath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, 'workflow');
+    const raw = await fs.readFile(fullPath, 'utf-8');
+    const payload = JSON.parse(raw);
+    const workflow = normalizeWorkflowPayload(payload);
+    const importedTaskDefinitions = await importTaskDefinitions(workspaceDir, workflow.taskDefinitions);
+    workflow.nodes = applyWorkspaceToWorkflowNodes(workflow.nodes, workspaceDir, workflow.taskDefinitions);
+
+    res.json({
+      success: true,
+      workspaceDir,
+      relativePath: loadedRelativePath,
+      workflow,
+      importedTaskDefinitions,
+    });
+  } catch (error) {
+    console.error('❌ 加载工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.6 导入外部工作流 payload，同时导入其任务定义
+app.post('/api/workspace-workflows/import', async (req, res) => {
+  try {
+    const {
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      payload,
+    } = req.body;
+
+    if (!payload) {
+      return res.status(400).json({ error: 'payload is required' });
+    }
+
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const workflow = normalizeWorkflowPayload(payload);
+    const importedTaskDefinitions = await importTaskDefinitions(workspaceDir, workflow.taskDefinitions);
+    workflow.nodes = applyWorkspaceToWorkflowNodes(workflow.nodes, workspaceDir, workflow.taskDefinitions);
+
+    res.json({
+      success: true,
+      workspaceDir,
+      workflow,
+      importedTaskDefinitions,
+    });
+  } catch (error) {
+    console.error('❌ 导入工作区工作流失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 2. 解析自定义函数
 app.post('/api/parse-custom-function', async (req, res) => {
   try {
@@ -222,7 +840,7 @@ app.get('/api/workflows/:id', async (req, res) => {
 app.put('/api/workflows/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { nodes, edges } = req.body;
+    const { name, nodes, edges } = req.body;
     
     const workflow = workflows.get(id);
     if (!workflow) {
@@ -230,10 +848,18 @@ app.put('/api/workflows/:id', async (req, res) => {
     }
     
     console.log(`💾 保存工作流: ${id}`);
-    console.log(`   节点数: ${nodes.length}, 边数: ${edges.length}`);
+    if (typeof name === 'string' && name.trim()) {
+      workflow.name = name.trim();
+    }
+    if (Array.isArray(nodes)) {
+      workflow.nodes = nodes;
+    }
+    if (Array.isArray(edges)) {
+      workflow.edges = edges;
+    }
+    console.log(`   名称: ${workflow.name}`);
+    console.log(`   节点数: ${workflow.nodes.length}, 边数: ${workflow.edges.length}`);
     
-    workflow.nodes = nodes;
-    workflow.edges = edges;
     workflow.updatedAt = new Date().toISOString();
     workflows.set(id, workflow);
     

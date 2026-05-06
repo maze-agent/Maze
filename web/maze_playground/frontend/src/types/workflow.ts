@@ -1,5 +1,5 @@
 export type NodeType = 'task' | 'tool';
-export type NodeCategory = 'builtin' | 'custom';
+export type NodeCategory = 'builtin' | 'custom' | 'workspace';
 
 export interface Resources {
   cpu: number;
@@ -35,6 +35,60 @@ export interface BuiltinTaskMeta {
   module: string;
 }
 
+export interface WorkspaceTaskMeta {
+  name: string;
+  displayName: string;
+  description?: string;
+  inputs: Array<{ name: string; dataType: string }>;
+  outputs: Array<{ name: string; dataType: string }>;
+  resources?: Resources;
+  functionName: string;
+  workspaceDir: string;
+  relativePath: string;
+  code: string;
+}
+
+export interface WorkspaceTasksResponse {
+  workspaceDir: string;
+  tasksDir: string;
+  tasks: WorkspaceTaskMeta[];
+  errors?: Array<{
+    relativePath: string;
+    error: string;
+    traceback?: string;
+  }>;
+}
+
+export interface WorkspaceWorkflowMeta {
+  name: string;
+  relativePath: string;
+  nodeCount: number;
+  edgeCount: number;
+  updatedAt: string;
+  size?: number;
+}
+
+export interface WorkspaceWorkflowsResponse {
+  workspaceDir: string;
+  workflowsDir: string;
+  workflows: WorkspaceWorkflowMeta[];
+  errors?: Array<{
+    relativePath: string;
+    error: string;
+  }>;
+}
+
+export interface TaskDefinition {
+  type: 'workspace';
+  relativePath: string;
+  functionName?: string;
+  displayName?: string;
+  code: string;
+  inputs?: TaskInputConfig[];
+  outputs?: TaskOutputConfig[];
+  resources?: Resources;
+}
+
 export interface WorkflowNode {
   id: string;
   type: 'taskNode';
@@ -45,6 +99,9 @@ export interface WorkflowNode {
     label: string;
     taskRef?: string;  // 内置任务引用 (module.functionName)
     customCode?: string;
+    workspaceDir?: string;
+    taskPath?: string;
+    functionName?: string;
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;

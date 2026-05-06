@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { KeyboardEvent, useEffect, useState } from 'react';
 import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert } from 'antd';
 import { DeleteOutlined, CheckOutlined, CodeOutlined, EditOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
@@ -9,12 +9,20 @@ const { Title } = Typography;
 export default function NodePanel() {
   const { selectedNode, selectNode, updateNode, deleteNode, nodes } = useWorkflowStore();
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelDraft, setLabelDraft] = useState('');
 
-  if (!selectedNode) {
+  const currentNode = selectedNode ? (nodes.find(n => n.id === selectedNode.id) || selectedNode) : null;
+
+  useEffect(() => {
+    if (!editingLabel) {
+      setLabelDraft(currentNode?.data.label || '');
+    }
+  }, [currentNode?.id, currentNode?.data.label, editingLabel]);
+
+  if (!currentNode) {
     return null;
   }
-
-  const currentNode = nodes.find(n => n.id === selectedNode.id) || selectedNode;
 
   const handleEditorClose = () => {
     setEditorOpen(false);
@@ -34,15 +42,71 @@ export default function NodePanel() {
   };
 
   const isCustomTask = currentNode.data.category === 'custom';
+  const isWorkspaceTask = currentNode.data.category === 'workspace';
+  const isEditableTask = isCustomTask || isWorkspaceTask;
   const isConfigured = currentNode.data.configured;
+
+  const commitLabel = () => {
+    const nextLabel = labelDraft.trim() || currentNode.data.label;
+    setEditingLabel(false);
+    setLabelDraft(nextLabel);
+
+    if (nextLabel === currentNode.data.label) {
+      return;
+    }
+
+    const updatedNode = {
+      ...currentNode,
+      data: {
+        ...currentNode.data,
+        label: nextLabel,
+      },
+    };
+
+    updateNode(currentNode.id, { label: nextLabel });
+    selectNode(updatedNode);
+  };
+
+  const cancelLabelEdit = () => {
+    setLabelDraft(currentNode.data.label);
+    setEditingLabel(false);
+  };
+
+  const handleLabelKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.currentTarget.blur();
+    }
+    if (event.key === 'Escape') {
+      cancelLabelEdit();
+    }
+  };
 
   return (
     <>
       <Drawer
         title={
           <Space>
-            <span>{currentNode.data.label}</span>
+            {editingLabel ? (
+              <Input
+                autoFocus
+                size="small"
+                value={labelDraft}
+                onChange={(event) => setLabelDraft(event.target.value)}
+                onBlur={commitLabel}
+                onKeyDown={handleLabelKeyDown}
+                style={{ width: '240px' }}
+              />
+            ) : (
+              <span
+                onClick={() => setEditingLabel(true)}
+                title="Click to rename task"
+                style={{ cursor: 'text' }}
+              >
+                {currentNode.data.label}
+              </span>
+            )}
             {isCustomTask && <Tag color="purple">custom</Tag>}
+            {isWorkspaceTask && <Tag color="purple">workspace</Tag>}
           </Space>
         }
         placement="right"
@@ -51,7 +115,7 @@ export default function NodePanel() {
         width={450}
       >
         <Form layout="vertical">
-          {isCustomTask && !isConfigured && (
+          {isEditableTask && !isConfigured && (
             <Alert
               message="Not Configured"
               description="Please write and parse task code first before configuring input/output parameters."
@@ -71,7 +135,7 @@ export default function NodePanel() {
             />
           )}
 
-          {isCustomTask && isConfigured && (
+          {isEditableTask && isConfigured && (
             <Button
               type="dashed"
               icon={<EditOutlined />}
@@ -79,7 +143,7 @@ export default function NodePanel() {
               onClick={() => setEditorOpen(true)}
               style={{ marginBottom: '16px' }}
             >
-              Edit Task Code
+              {isWorkspaceTask ? 'Edit Workspace Task' : 'Edit Task Code'}
             </Button>
           )}
 
@@ -219,7 +283,7 @@ export default function NodePanel() {
         </Form>
       </Drawer>
 
-      {isCustomTask && (
+      {isEditableTask && (
         <CustomTaskEditor
           node={currentNode}
           open={editorOpen}

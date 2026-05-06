@@ -1,9 +1,9 @@
-import { ChangeEvent, useRef } from 'react';
-import { Button, Space, Typography, message } from 'antd';
+import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { Button, Input, Space, Typography, message } from 'antd';
 import { DownloadOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { WorkflowEdge, WorkflowNode } from '@/types/workflow';
+import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
 
 const { Text } = Typography;
 
@@ -12,6 +12,8 @@ export default function Toolbar() {
   const { 
     workflowId, 
     workflowName, 
+    workspaceDir,
+    currentWorkspaceWorkflowPath,
     nodes, 
     edges, 
     isRunning,
@@ -19,19 +21,101 @@ export default function Toolbar() {
     setWorkflowName,
     setNodes,
     setEdges,
+    setWorkspaceDir,
+    setWorkspaceTasks,
     selectNode,
+    setCurrentWorkspaceWorkflowPath,
+    setWorkspaceWorkflows,
     setIsRunning,
     clearRunResults,
   } = useWorkflowStore();
+  const [editingWorkflowName, setEditingWorkflowName] = useState(false);
+  const [workflowNameDraft, setWorkflowNameDraft] = useState(workflowName);
+
+  useEffect(() => {
+    if (!editingWorkflowName) {
+      setWorkflowNameDraft(workflowName);
+    }
+  }, [workflowName, editingWorkflowName]);
 
   const handleCreateWorkflow = async () => {
     try {
-      const { workflowId: newId } = await api.createWorkflow();
+      const { workflowId: newId } = await api.createWorkflow(workflowName);
       setWorkflowId(newId);
+      setCurrentWorkspaceWorkflowPath(null);
       message.success('Workflow created successfully');
     } catch (error) {
       console.error('Failed to create workflow:', error);
       message.error('Failed to create workflow');
+    }
+  };
+
+  const refreshWorkspaceWorkflows = async () => {
+    if (!workspaceDir) {
+      return;
+    }
+
+    try {
+      const result = await api.getWorkspaceWorkflows(workspaceDir);
+      setWorkspaceWorkflows(result.workflows || []);
+    } catch (error) {
+      console.error('Failed to refresh workspace workflows:', error);
+    }
+  };
+
+  const commitWorkflowName = async () => {
+    const nextName = workflowNameDraft.trim() || 'Untitled Workflow';
+    setEditingWorkflowName(false);
+    setWorkflowNameDraft(nextName);
+
+    if (nextName === workflowName) {
+      return;
+    }
+
+    setWorkflowName(nextName);
+
+    if (workflowId) {
+      try {
+        await api.saveWorkflow(workflowId, {
+          name: nextName,
+          nodes,
+          edges,
+        });
+      } catch (error) {
+        console.error('Failed to update workflow name:', error);
+        message.error('Failed to update workflow name');
+      }
+    }
+
+    if (currentWorkspaceWorkflowPath && workspaceDir) {
+      try {
+        await api.saveWorkspaceWorkflow({
+          workspaceDir,
+          relativePath: currentWorkspaceWorkflowPath,
+          name: nextName,
+          workflowId,
+          nodes,
+          edges,
+        });
+        await refreshWorkspaceWorkflows();
+      } catch (error) {
+        console.error('Failed to update workspace workflow file:', error);
+        message.error('Failed to update workspace workflow file');
+      }
+    }
+  };
+
+  const cancelWorkflowRename = () => {
+    setWorkflowNameDraft(workflowName);
+    setEditingWorkflowName(false);
+  };
+
+  const handleWorkflowNameKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.currentTarget.blur();
+    }
+    if (event.key === 'Escape') {
+      cancelWorkflowRename();
     }
   };
 
@@ -44,6 +128,53 @@ export default function Toolbar() {
     return `${safeName}-${date}.json`;
   };
 
+  const normalizeTaskRelativePath = (relativePath?: string) => {
+    let normalized = String(relativePath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!normalized) {
+      return null;
+    }
+    if (!normalized.startsWith('tasks/')) {
+      normalized = `tasks/${normalized}`;
+    }
+    if (!normalized.endsWith('.py')) {
+      normalized = `${normalized}.py`;
+    }
+    return normalized;
+  };
+
+  const collectWorkflowTaskDefinitions = (workflowNodes: WorkflowNode[]): TaskDefinition[] => {
+    const definitions = new Map<string, TaskDefinition>();
+
+    workflowNodes.forEach((node) => {
+      if (node.data.category !== 'workspace') {
+        return;
+      }
+
+      const relativePath = normalizeTaskRelativePath(node.data.taskPath);
+      if (!relativePath) {
+        return;
+      }
+
+      const existing = definitions.get(relativePath);
+      const incomingCode = node.data.customCode || '';
+      const code = incomingCode.trim() ? incomingCode : existing?.code || '';
+
+      definitions.set(relativePath, {
+        type: 'workspace',
+        ...(existing || {}),
+        relativePath,
+        functionName: node.data.functionName,
+        displayName: node.data.label,
+        code,
+        inputs: node.data.inputs,
+        outputs: node.data.outputs,
+        resources: node.data.resources,
+      });
+    });
+
+    return Array.from(definitions.values());
+  };
+
   const handleExportWorkflow = () => {
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before exporting');
@@ -51,15 +182,17 @@ export default function Toolbar() {
     }
 
     try {
+      const taskDefinitions = collectWorkflowTaskDefinitions(nodes);
       const payload = {
         schema: 'maze-playground-workflow',
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
         workflow: {
           name: workflowName,
           sourceWorkflowId: workflowId,
           nodes,
           edges,
+          taskDefinitions,
         },
       };
 
@@ -74,56 +207,11 @@ export default function Toolbar() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      message.success('Workflow exported');
+      message.success(`Workflow exported with ${taskDefinitions.length} workspace task definition${taskDefinitions.length === 1 ? '' : 's'}`);
     } catch (error) {
       console.error('Failed to export workflow:', error);
       message.error('Failed to export workflow');
     }
-  };
-
-  const normalizeImportedWorkflow = (payload: any): {
-    name: string;
-    nodes: WorkflowNode[];
-    edges: WorkflowEdge[];
-  } => {
-    const workflow = payload?.workflow || payload;
-    const importedNodes = workflow?.nodes;
-    const importedEdges = workflow?.edges;
-
-    if (!Array.isArray(importedNodes) || !Array.isArray(importedEdges)) {
-      throw new Error('Invalid workflow file: nodes and edges are required');
-    }
-
-    const normalizedNodes = importedNodes.map((node: any) => {
-      if (!node?.id || !node?.data || !node?.position) {
-        throw new Error('Invalid workflow file: every node needs id, position, and data');
-      }
-
-      return {
-        ...node,
-        type: 'taskNode' as const,
-      };
-    });
-
-    const normalizedEdges = importedEdges.map((edge: any) => {
-      if (!edge?.id || !edge?.source || !edge?.target) {
-        throw new Error('Invalid workflow file: every edge needs id, source, and target');
-      }
-
-      return {
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: edge.sourceHandle || undefined,
-        targetHandle: edge.targetHandle || undefined,
-      };
-    });
-
-    return {
-      name: workflow?.name || 'Imported Workflow',
-      nodes: normalizedNodes,
-      edges: normalizedEdges,
-    };
   };
 
   const handleImportWorkflow = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -137,21 +225,38 @@ export default function Toolbar() {
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
-      const imported = normalizeImportedWorkflow(payload);
-      const { workflowId: newId } = await api.createWorkflow(imported.name);
+      const imported = await api.importWorkspaceWorkflow({
+        workspaceDir: workspaceDir || undefined,
+        payload,
+      });
+      const { workflow } = imported;
+      const { workflowId: newId } = await api.createWorkflow(workflow.name);
 
       await api.saveWorkflow(newId, {
-        nodes: imported.nodes,
-        edges: imported.edges,
+        name: workflow.name,
+        nodes: workflow.nodes,
+        edges: workflow.edges,
       });
 
       setWorkflowId(newId);
-      setWorkflowName(imported.name);
-      setNodes(imported.nodes);
-      setEdges(imported.edges);
+      setWorkflowName(workflow.name);
+      setNodes(workflow.nodes);
+      setEdges(workflow.edges);
       selectNode(null);
+      setCurrentWorkspaceWorkflowPath(null);
+      setWorkspaceDir(imported.workspaceDir);
       clearRunResults();
-      message.success('Workflow imported');
+
+      const [tasksResult, workflowsResult] = await Promise.all([
+        api.getWorkspaceTasks(imported.workspaceDir),
+        api.getWorkspaceWorkflows(imported.workspaceDir),
+      ]);
+      setWorkspaceTasks(tasksResult.tasks || []);
+      setWorkspaceWorkflows(workflowsResult.workflows || []);
+
+      const importedCount = imported.importedTaskDefinitions?.imported.length || 0;
+      const skippedCount = imported.importedTaskDefinitions?.skipped.filter((item) => item.reason === 'exists').length || 0;
+      message.success(`Workflow imported. Tasks added: ${importedCount}, skipped existing: ${skippedCount}`);
     } catch (error) {
       console.error('Failed to import workflow:', error);
       message.error(error instanceof Error ? error.message : 'Failed to import workflow');
@@ -176,7 +281,7 @@ export default function Toolbar() {
     }
 
     try {
-      await api.saveWorkflow(workflowId, { nodes, edges });
+      await api.saveWorkflow(workflowId, { name: workflowName, nodes, edges });
       setIsRunning(true);
       clearRunResults();
       await api.runWorkflow(workflowId);
@@ -201,7 +306,7 @@ export default function Toolbar() {
         background: '#fff',
       }}
     >
-      <Space size="large">
+      <Space size="large" style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <ProjectOutlined style={{ fontSize: '24px', color: '#1890ff' }} />
           <Text strong style={{ fontSize: '16px' }}>
@@ -209,9 +314,31 @@ export default function Toolbar() {
           </Text>
         </div>
         
-        {workflowId && (
-          <Text type="secondary" style={{ fontSize: '14px' }}>
-            {workflowName} ({workflowId.substring(0, 8)}...)
+        {editingWorkflowName ? (
+          <Input
+            autoFocus
+            size="small"
+            value={workflowNameDraft}
+            onChange={(event) => setWorkflowNameDraft(event.target.value)}
+            onBlur={commitWorkflowName}
+            onKeyDown={handleWorkflowNameKeyDown}
+            style={{ width: '260px' }}
+          />
+        ) : (
+          <Text
+            type="secondary"
+            onClick={() => setEditingWorkflowName(true)}
+            title="Click to rename workflow"
+            style={{
+              fontSize: '14px',
+              cursor: 'text',
+              maxWidth: '360px',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {workflowName}{workflowId ? ` (${workflowId.substring(0, 8)}...)` : ''}
           </Text>
         )}
       </Space>

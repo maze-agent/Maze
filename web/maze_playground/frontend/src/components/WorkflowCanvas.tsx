@@ -9,11 +9,12 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   ReactFlowInstance,
+  Node as ReactFlowNode,
 } from 'reactflow';
 import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { BuiltinTaskMeta, WorkflowEdge, WorkflowNode } from '@/types/workflow';
+import type { BuiltinTaskMeta, WorkspaceTaskMeta, WorkflowEdge, WorkflowNode } from '@/types/workflow';
 import CustomNode from './CustomNode';
 
 const nodeTypes = {
@@ -21,7 +22,7 @@ const nodeTypes = {
 };
 
 export default function WorkflowCanvas() {
-  const { nodes, edges, setNodes, setEdges, addNode, selectNode, workflowId, setWorkflowId } = useWorkflowStore();
+  const { nodes, edges, setNodes, setEdges, addNode, deleteNode, selectNode, workflowId, setWorkflowId } = useWorkflowStore();
   
   const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodes);
   const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(edges);
@@ -107,6 +108,13 @@ export default function WorkflowCanvas() {
     [selectNode, nodes]
   );
 
+  const onNodesDelete = useCallback(
+    (deletedNodes: ReactFlowNode[]) => {
+      deletedNodes.forEach((node) => deleteNode(node.id));
+    },
+    [deleteNode]
+  );
+
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
@@ -187,6 +195,35 @@ export default function WorkflowCanvas() {
           };
 
           addNode(newNode);
+        } else if (type === 'workspace') {
+          const workspaceTask = task as WorkspaceTaskMeta;
+
+          const newNode = {
+            id: `node-${Date.now()}`,
+            type: 'taskNode' as const,
+            position,
+            data: {
+              category: 'workspace' as const,
+              nodeType: 'task' as const,
+              label: workspaceTask.displayName || workspaceTask.name,
+              customCode: workspaceTask.code,
+              workspaceDir: workspaceTask.workspaceDir,
+              taskPath: workspaceTask.relativePath,
+              functionName: workspaceTask.functionName,
+              inputs: workspaceTask.inputs.map(inp => ({
+                name: inp.name,
+                dataType: inp.dataType,
+                source: 'user' as const,
+                value: ''
+              })),
+              outputs: workspaceTask.outputs,
+              resources: workspaceTask.resources,
+              configured: true,
+            },
+          };
+
+          addNode(newNode);
+          selectNode(newNode);
         } else if (type === 'custom') {
           const newNode = {
             id: `node-${Date.now()}`,
@@ -222,9 +259,11 @@ export default function WorkflowCanvas() {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeClick={onNodeClick}
+        onNodesDelete={onNodesDelete}
         onInit={setReactFlowInstance}
         onDrop={onDrop}
         onDragOver={onDragOver}
+        deleteKeyCode={['Backspace', 'Delete']}
         nodeTypes={nodeTypes}
         fitView
       >
