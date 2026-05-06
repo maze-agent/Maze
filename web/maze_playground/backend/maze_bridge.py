@@ -38,9 +38,16 @@ def get_builtin_tasks():
             if hasattr(obj, '_maze_task_metadata'):
                 try:
                     metadata = get_task_metadata(obj)
+                    description = inspect.getdoc(obj) or ""
+                    if not description:
+                        input_names = ", ".join(metadata.inputs) or "none"
+                        output_names = ", ".join(metadata.outputs) or "none"
+                        description = f"Inputs: {input_names}. Outputs: {output_names}."
+
                     tasks.append({
                         "name": name,
                         "displayName": name.replace('_', ' ').title(),
+                        "description": description,
                         "inputs": [
                             {
                                 "name": inp,
@@ -63,6 +70,18 @@ def get_builtin_tasks():
                     print(f"Error processing {name}: {e}", file=sys.stderr)
     
     return {"tasks": tasks}
+
+
+def emit_progress(event):
+    """Emit structured progress to the Node.js process via stderr."""
+    try:
+        print(
+            "__MAZE_PROGRESS__" + json.dumps(event, ensure_ascii=False),
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[WARNING] Failed to emit progress: {e}", file=sys.stderr)
 
 
 def parse_custom_function(code):
@@ -256,7 +275,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
         
         # Step 4: 通过 run_id 获取结果
         print(f"[DEBUG] 获取运行结果 (run_id: {run_id})...", file=sys.stderr)
-        results = workflow.get_results(run_id, verbose=True)
+        results = workflow.get_results(run_id, verbose=True, progress_callback=emit_progress)
         print(f"[DEBUG] 结果: {results}", file=sys.stderr)
         
         # Step 5: 清理（当前服务器不支持 cleanup endpoint，已降级）

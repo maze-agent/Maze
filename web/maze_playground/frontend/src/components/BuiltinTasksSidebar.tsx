@@ -1,12 +1,14 @@
-import { Card, List, Tag, Empty, Button, Space, Divider, message } from 'antd';
-import { ThunderboltOutlined, ReloadOutlined, PlusOutlined, CodeOutlined } from '@ant-design/icons';
+import { Card, List, Tag, Empty, Button, Space, Divider, message, Typography } from 'antd';
+import { ThunderboltOutlined, ReloadOutlined, CodeOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type { BuiltinTaskMeta } from '@/types/workflow';
 import { api } from '@/api/client';
 import { useState } from 'react';
 
+const { Text, Paragraph } = Typography;
+
 export default function BuiltinTasksSidebar() {
-  const { builtinTasks, setBuiltinTasks, workflowId } = useWorkflowStore();
+  const { builtinTasks, setBuiltinTasks } = useWorkflowStore();
   const [loading, setLoading] = useState(false);
 
   const onDragStart = (event: React.DragEvent, task: BuiltinTaskMeta) => {
@@ -39,7 +41,7 @@ export default function BuiltinTasksSidebar() {
   };
 
   return (
-    <div style={{ width: '280px', borderRight: '1px solid #f0f0f0', background: '#fafafa', overflowY: 'auto' }}>
+    <div style={{ width: '320px', borderRight: '1px solid #f0f0f0', background: '#fafafa', overflowY: 'auto' }}>
       <div style={{ padding: '16px' }}>
         {/* Custom Task Section */}
         <h3 style={{ marginBottom: '12px' }}>Custom Task</h3>
@@ -115,7 +117,41 @@ export default function BuiltinTasksSidebar() {
                   <ThunderboltOutlined style={{ color: '#1890ff' }} />
                   <strong>{task.displayName}</strong>
                 </div>
-                <Tag color="blue">task</Tag>
+                <Paragraph
+                  type="secondary"
+                  ellipsis={{ rows: 2, tooltip: task.description }}
+                  style={{ fontSize: '12px', marginBottom: '8px' }}
+                >
+                  {task.description || 'No description provided.'}
+                </Paragraph>
+                <Space size={[4, 4]} wrap style={{ marginBottom: '8px' }}>
+                  <Tag color="blue">task</Tag>
+                  <Tag color="geekblue">Inputs {task.inputs.length}</Tag>
+                  <Tag color="cyan">Outputs {task.outputs.length}</Tag>
+                </Space>
+                <div style={{ fontSize: '12px', color: '#666' }}>
+                  <div>
+                    <Text type="secondary">In: </Text>
+                    {task.inputs.map((input) => (
+                      <Tag key={input.name} style={{ marginBottom: '4px' }}>
+                        {input.name}:{input.dataType}
+                      </Tag>
+                    ))}
+                  </div>
+                  <div>
+                    <Text type="secondary">Out: </Text>
+                    {task.outputs.map((output) => (
+                      <Tag key={output.name} style={{ marginBottom: '4px' }}>
+                        {output.name}:{output.dataType}
+                      </Tag>
+                    ))}
+                  </div>
+                  {task.resources && (
+                    <Text type="secondary" style={{ fontSize: '11px' }}>
+                      CPU {task.resources.cpu}, GPU {task.resources.gpu}, Mem {task.resources.cpu_mem}MB, VRAM {task.resources.gpu_mem}MB
+                    </Text>
+                  )}
+                </div>
               </Card>
             )}
           />

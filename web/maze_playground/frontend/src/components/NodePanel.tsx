@@ -1,20 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert } from 'antd';
 import { DeleteOutlined, CheckOutlined, CodeOutlined, EditOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import CustomTaskEditor from './CustomTaskEditor';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 export default function NodePanel() {
   const { selectedNode, selectNode, updateNode, deleteNode, nodes } = useWorkflowStore();
   const [editorOpen, setEditorOpen] = useState(false);
-
-  useEffect(() => {
-    if (selectedNode) {
-      const currentNode = nodes.find(n => n.id === selectedNode.id);
-    }
-  }, [selectedNode, nodes]);
 
   if (!selectedNode) {
     return null;

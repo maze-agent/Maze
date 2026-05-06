@@ -10,11 +10,19 @@ from maze import task
 @task(
     inputs=["task1_input"],
     outputs=["task1_output"],
-    resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123}
+    resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
 )
 def task1(params):
+    """
+    Add the current timestamp to the input text.
+
+    Input:
+        task1_input: Text provided by the user.
+
+    Output:
+        task1_output: Input text followed by the current timestamp.
+    """
     from datetime import datetime
-    import time
     
     task_input = params.get("task1_input")
     
@@ -30,20 +38,19 @@ def task1(params):
 @task(
     inputs=["task2_input"],
     outputs=["task2_output"],
-    resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324}
+    resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
 )
 def task2(params):
     """
-    Task 2: Get input and add current timestamp and suffix
+    Add the current timestamp and a suffix to the input text.
     
     Input:
-        task2_input: Input string
+        task2_input: Text from the user or an upstream task.
         
     Output:
-        task2_output: Input string + timestamp + "===="
+        task2_output: Input text followed by the current timestamp and "====".
     """
     from datetime import datetime
-    import time 
     
     task_input = params.get("task2_input")
     
@@ -54,4 +61,3 @@ def task2(params):
     return {
         "task2_output": result
     }
-

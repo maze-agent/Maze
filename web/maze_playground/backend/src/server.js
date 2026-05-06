@@ -23,7 +23,7 @@ const wsConnections = new Map(); // workflowId -> Set<WebSocket>
 
 // ========== Python 桥接函数 ==========
 
-function callPython(action, params = {}) {
+function callPython(action, params = {}, onProgress = null) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
     
@@ -38,6 +38,7 @@ function callPython(action, params = {}) {
     
     let output = '';
     let error = '';
+    let stderrLineBuffer = '';
     
     // 设置 stdout 编码为 utf8
     python.stdout.setEncoding('utf8');
@@ -49,7 +50,23 @@ function callPython(action, params = {}) {
     python.stderr.setEncoding('utf8');
     python.stderr.on('data', (data) => {
       error += data;
-      console.error('Python stderr:', data);
+      stderrLineBuffer += data;
+      const lines = stderrLineBuffer.split(/\r?\n/);
+      stderrLineBuffer = lines.pop() || '';
+
+      lines.forEach((line) => {
+        if (line.startsWith('__MAZE_PROGRESS__')) {
+          const raw = line.slice('__MAZE_PROGRESS__'.length);
+          try {
+            const progress = JSON.parse(raw);
+            if (onProgress) onProgress(progress);
+          } catch (e) {
+            console.error('解析进度消息失败:', raw);
+          }
+        } else if (line.trim()) {
+          console.error('Python stderr:', line);
+        }
+      });
     });
     
     python.on('close', (code) => {
@@ -279,11 +296,21 @@ app.post('/api/workflows/:id/run', async (req, res) => {
         console.log(`   边: ${JSON.stringify(workflow.edges.map(e => ({from: e.source, to: e.target})))}`);
         
         // 调用 Python 运行工作流
-        const result = await callPython('run_workflow', {
-          workflowId: id,
-          nodes: workflow.nodes,
-          edges: workflow.edges
-        });
+        const result = await callPython(
+          'run_workflow',
+          {
+            workflowId: id,
+            nodes: workflow.nodes,
+            edges: workflow.edges
+          },
+          (progress) => {
+            broadcastToWorkflow(id, {
+              type: 'task_update',
+              event: progress,
+              timestamp: new Date().toISOString()
+            });
+          }
+        );
         
         if (!result.success) {
           console.error('❌ 工作流执行失败:', result.error);

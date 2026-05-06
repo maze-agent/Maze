@@ -11,7 +11,7 @@ import ReactFlow, {
   ReactFlowInstance,
 } from 'reactflow';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import type { BuiltinTaskMeta } from '@/types/workflow';
+import type { BuiltinTaskMeta, WorkflowEdge, WorkflowNode } from '@/types/workflow';
 import CustomNode from './CustomNode';
 
 const nodeTypes = {
@@ -64,8 +64,14 @@ export default function WorkflowCanvas() {
           return rfNode;
         });
         
-        setNodes(updatedNodes);
-        setEdges(reactFlowEdges);
+        setNodes(updatedNodes as WorkflowNode[]);
+        setEdges(reactFlowEdges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle || undefined,
+          targetHandle: edge.targetHandle || undefined,
+        })) as WorkflowEdge[]);
         lastSyncedNodesRef.current = positionsStr;
         lastSyncedEdgesRef.current = edgesStr;
       }, 500);

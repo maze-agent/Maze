@@ -1,7 +1,7 @@
 import { Card, Typography, Tag, Space, Button } from 'antd';
 import { FileImageOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined, DownloadOutlined } from '@ant-design/icons';
 
-const { Text, Link } = Typography;
+const { Text } = Typography;
 
 interface ResultDisplayProps {
   data: any;

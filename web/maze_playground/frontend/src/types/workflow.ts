@@ -27,6 +27,7 @@ export interface TaskOutputConfig {
 export interface BuiltinTaskMeta {
   name: string;
   displayName: string;
+  description?: string;
   inputs: Array<{ name: string; dataType: string }>;
   outputs: Array<{ name: string; dataType: string }>;
   resources?: Resources;
@@ -75,4 +76,3 @@ export interface RunResult {
   error?: string;
   timestamp: string;
 }
-

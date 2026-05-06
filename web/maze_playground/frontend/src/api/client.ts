@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { BuiltinTaskMeta, Workflow, WorkflowNode, RunResult } from '@/types/workflow';
+import type { BuiltinTaskMeta, Workflow, WorkflowNode } from '@/types/workflow';
 
 const API_BASE = '/api';
 
@@ -74,11 +74,14 @@ export const api = {
       onBuilding?: (message: string) => void;
       onWorkflowCompleted?: (results: any) => void;
       onWorkflowFailed?: (error: string, traceback?: string) => void;
+      onTaskUpdate?: (event: any) => void;
       onError?: (error: Event) => void;
       onClose?: () => void;
     }
   ): WebSocket {
-    const wsUrl = `ws://localhost:3001/ws/workflows/${workflowId}/results`;
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const hostname = window.location.hostname || 'localhost';
+    const wsUrl = `${protocol}://${hostname}:3001/ws/workflows/${workflowId}/results`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
@@ -109,6 +112,10 @@ export const api = {
           
           case 'workflow_failed':
             callbacks.onWorkflowFailed?.(data.error, data.traceback);
+            break;
+
+          case 'task_update':
+            callbacks.onTaskUpdate?.(data.event);
             break;
           
           case 'workflow_running':

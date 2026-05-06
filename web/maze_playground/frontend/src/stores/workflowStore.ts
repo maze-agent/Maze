@@ -32,7 +32,7 @@ interface WorkflowStore {
   reset: () => void;
 }
 
-export const useWorkflowStore = create<WorkflowStore>((set, get) => ({
+export const useWorkflowStore = create<WorkflowStore>((set) => ({
   // Initial state
   workflowId: null,
   workflowName: 'Untitled Workflow',

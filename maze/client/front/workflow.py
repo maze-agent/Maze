@@ -357,7 +357,13 @@ class MaWorkflow:
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
     
-    def get_results(self, run_id: str, verbose: bool = False, output_dir: str = "workflow_results") -> Dict[str, Any]:
+    def get_results(
+        self,
+        run_id: str,
+        verbose: bool = False,
+        output_dir: str = "workflow_results",
+        progress_callback=None,
+    ) -> Dict[str, Any]:
         """
         Get workflow execution results and download files
         
@@ -444,6 +450,15 @@ class MaWorkflow:
                 # Extract data field (if exists)
                 msg_data = msg.get("data", msg)  # Compatible with both formats
                 
+                if progress_callback:
+                    try:
+                        progress_callback({
+                            "type": msg_type,
+                            "data": msg_data,
+                        })
+                    except Exception:
+                        pass
+
                 if verbose:
                     if msg_type == "start_task":
                         task_id = msg_data.get('task_id')
