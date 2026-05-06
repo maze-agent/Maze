@@ -10,7 +10,9 @@ import ReactFlow, {
   useEdgesState,
   ReactFlowInstance,
 } from 'reactflow';
+import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
+import { api } from '@/api/client';
 import type { BuiltinTaskMeta, WorkflowEdge, WorkflowNode } from '@/types/workflow';
 import CustomNode from './CustomNode';
 
@@ -19,31 +21,30 @@ const nodeTypes = {
 };
 
 export default function WorkflowCanvas() {
-  const { nodes, edges, setNodes, setEdges, addNode, selectNode, workflowId } = useWorkflowStore();
+  const { nodes, edges, setNodes, setEdges, addNode, selectNode, workflowId, setWorkflowId } = useWorkflowStore();
   
   const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodes);
   const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(edges);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = React.useState<ReactFlowInstance | null>(null);
+  const creatingWorkflowRef = useRef<Promise<string> | null>(null);
 
   const lastSyncedNodesRef = useRef<string>('');
   const lastSyncedEdgesRef = useRef<string>('');
   
-  const prevNodeCountRef = useRef(nodes.length);
   useEffect(() => {
-    if (nodes.length !== prevNodeCountRef.current) {
+    const nodesStr = JSON.stringify(nodes);
+    if (nodesStr !== lastSyncedNodesRef.current) {
       setReactFlowNodes(nodes);
-      prevNodeCountRef.current = nodes.length;
-      lastSyncedNodesRef.current = JSON.stringify(nodes);
+      lastSyncedNodesRef.current = nodesStr;
     }
   }, [nodes, setReactFlowNodes]);
 
-  const prevEdgeCountRef = useRef(edges.length);
   useEffect(() => {
-    if (edges.length !== prevEdgeCountRef.current) {
+    const edgesStr = JSON.stringify(edges);
+    if (edgesStr !== lastSyncedEdgesRef.current) {
       setReactFlowEdges(edges);
-      prevEdgeCountRef.current = edges.length;
-      lastSyncedEdgesRef.current = JSON.stringify(edges);
+      lastSyncedEdgesRef.current = edgesStr;
     }
   }, [edges, setReactFlowEdges]);
 
@@ -64,16 +65,26 @@ export default function WorkflowCanvas() {
           return rfNode;
         });
         
-        setNodes(updatedNodes as WorkflowNode[]);
-        setEdges(reactFlowEdges.map((edge) => ({
+        const normalizedNodes = updatedNodes as WorkflowNode[];
+        const normalizedEdges = reactFlowEdges.map((edge) => ({
           id: edge.id,
           source: edge.source,
           target: edge.target,
           sourceHandle: edge.sourceHandle || undefined,
           targetHandle: edge.targetHandle || undefined,
-        })) as WorkflowEdge[]);
-        lastSyncedNodesRef.current = positionsStr;
-        lastSyncedEdgesRef.current = edgesStr;
+        })) as WorkflowEdge[];
+        const normalizedNodesStr = JSON.stringify(normalizedNodes);
+        const normalizedEdgesStr = JSON.stringify(normalizedEdges);
+
+        if (normalizedNodesStr !== JSON.stringify(nodes)) {
+          setNodes(normalizedNodes);
+        }
+        if (normalizedEdgesStr !== JSON.stringify(edges)) {
+          setEdges(normalizedEdges);
+        }
+
+        lastSyncedNodesRef.current = normalizedNodesStr;
+        lastSyncedEdgesRef.current = normalizedEdgesStr;
       }, 500);
 
       return () => clearTimeout(timer);
@@ -101,11 +112,38 @@ export default function WorkflowCanvas() {
     event.dataTransfer.dropEffect = 'move';
   }, []);
 
+  const ensureWorkflow = useCallback(async () => {
+    if (workflowId) {
+      return workflowId;
+    }
+
+    if (!creatingWorkflowRef.current) {
+      const hideLoading = message.loading('Creating workflow...', 0);
+      creatingWorkflowRef.current = api.createWorkflow()
+        .then(({ workflowId: newWorkflowId }) => {
+          setWorkflowId(newWorkflowId);
+          message.success('Workflow created automatically');
+          return newWorkflowId;
+        })
+        .catch((error) => {
+          console.error('Failed to auto-create workflow:', error);
+          message.error('Failed to create workflow');
+          throw error;
+        })
+        .finally(() => {
+          hideLoading();
+          creatingWorkflowRef.current = null;
+        });
+    }
+
+    return creatingWorkflowRef.current;
+  }, [workflowId, setWorkflowId]);
+
   const onDrop = useCallback(
-    (event: React.DragEvent) => {
+    async (event: React.DragEvent) => {
       event.preventDefault();
 
-      if (!workflowId || !reactFlowInstance) {
+      if (!reactFlowInstance) {
         return;
       }
 
@@ -116,11 +154,13 @@ export default function WorkflowCanvas() {
 
       try {
         const { type, task } = JSON.parse(data);
-
-        const position = reactFlowInstance.screenToFlowPosition({
+        const dropPoint = {
           x: event.clientX,
           y: event.clientY,
-        });
+        };
+
+        const position = reactFlowInstance.screenToFlowPosition(dropPoint);
+        await ensureWorkflow();
 
         if (type === 'builtin') {
           const builtinTask = task as BuiltinTaskMeta;
@@ -170,7 +210,7 @@ export default function WorkflowCanvas() {
         console.error('Failed to drop node:', error);
       }
     },
-    [workflowId, reactFlowInstance, addNode, selectNode]
+    [reactFlowInstance, ensureWorkflow, addNode, selectNode]
   );
 
   return (

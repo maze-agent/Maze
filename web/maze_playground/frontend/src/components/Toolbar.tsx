@@ -1,11 +1,14 @@
+import { ChangeEvent, useRef } from 'react';
 import { Button, Space, Typography, message } from 'antd';
-import { PlayCircleOutlined, PlusOutlined, SaveOutlined, ProjectOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
+import type { WorkflowEdge, WorkflowNode } from '@/types/workflow';
 
 const { Text } = Typography;
 
 export default function Toolbar() {
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
     workflowName, 
@@ -13,6 +16,10 @@ export default function Toolbar() {
     edges, 
     isRunning,
     setWorkflowId,
+    setWorkflowName,
+    setNodes,
+    setEdges,
+    selectNode,
     setIsRunning,
     clearRunResults,
   } = useWorkflowStore();
@@ -28,18 +35,126 @@ export default function Toolbar() {
     }
   };
 
-  const handleSaveWorkflow = async () => {
-    if (!workflowId) {
-      message.warning('Please create a workflow first');
+  const getExportFileName = () => {
+    const safeName = workflowName
+      .trim()
+      .replace(/[^a-zA-Z0-9-_]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'maze-workflow';
+    const date = new Date().toISOString().slice(0, 10);
+    return `${safeName}-${date}.json`;
+  };
+
+  const handleExportWorkflow = () => {
+    if (nodes.length === 0) {
+      message.warning('Please add at least one task node before exporting');
       return;
     }
 
     try {
-      await api.saveWorkflow(workflowId, { nodes, edges });
-      message.success('Workflow saved successfully');
+      const payload = {
+        schema: 'maze-playground-workflow',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        workflow: {
+          name: workflowName,
+          sourceWorkflowId: workflowId,
+          nodes,
+          edges,
+        },
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = getExportFileName();
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      message.success('Workflow exported');
     } catch (error) {
-      console.error('Failed to save workflow:', error);
-      message.error('Failed to save workflow');
+      console.error('Failed to export workflow:', error);
+      message.error('Failed to export workflow');
+    }
+  };
+
+  const normalizeImportedWorkflow = (payload: any): {
+    name: string;
+    nodes: WorkflowNode[];
+    edges: WorkflowEdge[];
+  } => {
+    const workflow = payload?.workflow || payload;
+    const importedNodes = workflow?.nodes;
+    const importedEdges = workflow?.edges;
+
+    if (!Array.isArray(importedNodes) || !Array.isArray(importedEdges)) {
+      throw new Error('Invalid workflow file: nodes and edges are required');
+    }
+
+    const normalizedNodes = importedNodes.map((node: any) => {
+      if (!node?.id || !node?.data || !node?.position) {
+        throw new Error('Invalid workflow file: every node needs id, position, and data');
+      }
+
+      return {
+        ...node,
+        type: 'taskNode' as const,
+      };
+    });
+
+    const normalizedEdges = importedEdges.map((edge: any) => {
+      if (!edge?.id || !edge?.source || !edge?.target) {
+        throw new Error('Invalid workflow file: every edge needs id, source, and target');
+      }
+
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle || undefined,
+        targetHandle: edge.targetHandle || undefined,
+      };
+    });
+
+    return {
+      name: workflow?.name || 'Imported Workflow',
+      nodes: normalizedNodes,
+      edges: normalizedEdges,
+    };
+  };
+
+  const handleImportWorkflow = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const imported = normalizeImportedWorkflow(payload);
+      const { workflowId: newId } = await api.createWorkflow(imported.name);
+
+      await api.saveWorkflow(newId, {
+        nodes: imported.nodes,
+        edges: imported.edges,
+      });
+
+      setWorkflowId(newId);
+      setWorkflowName(imported.name);
+      setNodes(imported.nodes);
+      setEdges(imported.edges);
+      selectNode(null);
+      clearRunResults();
+      message.success('Workflow imported');
+    } catch (error) {
+      console.error('Failed to import workflow:', error);
+      message.error(error instanceof Error ? error.message : 'Failed to import workflow');
     }
   };
 
@@ -102,6 +217,14 @@ export default function Toolbar() {
       </Space>
 
       <Space>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="application/json,.json"
+          onChange={handleImportWorkflow}
+          style={{ display: 'none' }}
+        />
+
         <Button 
           type="primary" 
           icon={<PlusOutlined />}
@@ -111,11 +234,19 @@ export default function Toolbar() {
         </Button>
         
         <Button 
-          icon={<SaveOutlined />}
-          onClick={handleSaveWorkflow}
-          disabled={!workflowId}
+          icon={<UploadOutlined />}
+          onClick={() => importInputRef.current?.click()}
+          disabled={isRunning}
         >
-          Save
+          Import
+        </Button>
+
+        <Button 
+          icon={<DownloadOutlined />}
+          onClick={handleExportWorkflow}
+          disabled={isRunning || nodes.length === 0}
+        >
+          Export
         </Button>
         
         <Button 
