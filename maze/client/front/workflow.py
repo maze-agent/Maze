@@ -184,6 +184,7 @@ class MaWorkflow:
         task_input = {"input_params": {}}
         
         for idx, input_key in enumerate(metadata.inputs, start=1):
+            has_input_value = input_key in inputs
             input_value = inputs.get(input_key)
             data_type = metadata.data_types.get(input_key, "str")
             
@@ -191,11 +192,13 @@ class MaWorkflow:
             if isinstance(input_value, TaskOutput):
                 input_schema = "from_task"
                 value = input_value.to_reference_string()
+                has_value = True
             # Check if it's a FileInput object
             elif isinstance(input_value, FileInput):
                 input_schema = "from_user"
                 # Upload file and get server path
                 value = self._upload_file(input_value)
+                has_value = True
             # Check if data type is file type but input is string path
             elif is_file_type(data_type) and isinstance(input_value, str):
                 input_schema = "from_user"
@@ -206,15 +209,18 @@ class MaWorkflow:
                 except Exception as e:
                     # If not a valid file path, use original value directly
                     value = input_value
+                has_value = has_input_value
             else:
                 input_schema = "from_user"
-                value = input_value if input_value is not None else ""
+                value = input_value
+                has_value = has_input_value
             
             task_input["input_params"][str(idx)] = {
                 "key": input_key,
                 "input_schema": input_schema,
                 "data_type": data_type,
-                "value": value
+                "value": value,
+                "has_value": has_value
             }
         
         return task_input

@@ -178,21 +178,25 @@ class MaWorkflow:
         task_input = {"input_params": {}}
         
         for idx, input_key in enumerate(metadata.inputs, start=1):
+            has_input_value = input_key in inputs
             input_value = inputs.get(input_key)
             
             # Check if it's a TaskOutput reference
             if isinstance(input_value, TaskOutput):
                 input_schema = "from_task"
                 value = input_value.to_reference_string()
+                has_value = True
             else:
                 input_schema = "from_user"
-                value = input_value if input_value is not None else ""
+                value = input_value
+                has_value = has_input_value
             
             task_input["input_params"][str(idx)] = {
                 "key": input_key,
                 "input_schema": input_schema,
                 "data_type": metadata.data_types.get(input_key, "str"),
-                "value": value
+                "value": value,
+                "has_value": has_value
             }
         
         return task_input
@@ -422,7 +426,7 @@ class MaWorkflow:
             time.sleep(0.1)
         
         if exception_occurred:
-            raise Exception("工作流执行过程中发生异常")
+            raise Exception("An exception occurred during workflow execution")
         
         # Cache the results
         self._results_cache[run_id] = messages
@@ -449,7 +453,7 @@ class MaWorkflow:
             run_id = workflow.run()
             results = workflow.show_results(run_id)
         """
-        print(f"🔗 已连接到服务器，开始执行工作流...")
+        print(f"🔗 Connected to the server. Starting workflow execution...")
         
         # Get raw messages without printing
         messages = self.get_results(run_id, verbose=False)
@@ -481,32 +485,30 @@ class MaWorkflow:
             # Print formatted output
             if msg_type == "start_task":
                 task_id = msg_data.get('task_id', '')[:8]
-                print(f"▶ 任务开始: {task_id}...")
+                print(f"▶ Task started: {task_id}...")
             elif msg_type == "finish_task":
                 task_id = msg_data.get('task_id', '')[:8]
                 result = msg_data.get('result')
-                print(f"✓ 任务完成: {task_id}")
+                print(f"✓ Task completed: {task_id}")
                 if result:
-                    print(f"  结果: {result}")
+                    print(f"  Result: {result}")
             elif msg_type == "task_exception":
                 task_id = msg_data.get('task_id', '')[:8]
                 error_msg = msg_data.get('result', 'Unknown error')
-                print(f"❌ 任务异常: {task_id}")
-                # 简化显示异常信息
+                print(f"❌ Task exception: {task_id}")
+                # Keep the terminal output compact by showing only the key error line.
                 if isinstance(error_msg, str):
-                    # 只显示异常类型和简短消息，不显示完整堆栈
                     error_lines = error_msg.split('\n')
                     if len(error_lines) > 0:
-                        # 通常第一行是最重要的错误信息
-                        print(f"  错误: {error_lines[0][:200]}")  # 限制长度
+                        print(f"  Error: {error_lines[0][:200]}")
                 else:
-                    print(f"  错误: {str(error_msg)[:200]}")
+                    print(f"  Error: {str(error_msg)[:200]}")
             elif msg_type == "finish_workflow":
                 print("=" * 60)
                 if has_exception:
-                    print("⚠️  工作流执行完成（有异常）")
+                    print("⚠️  Workflow completed with exceptions")
                 else:
-                    print("🎉 工作流执行完成!")
+                    print("🎉 Workflow completed!")
                 print("=" * 60)
         
         return {

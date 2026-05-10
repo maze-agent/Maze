@@ -4,16 +4,11 @@
 from datetime import datetime
 from maze import MaClient, task
 
-
-@task(
-    inputs=["run_number"],
-    outputs=["result", "timestamp"]
-)
-def process_data(params):
+@task
+def process_data(run_number):
     """
     处理数据任务，返回运行编号和时间戳
     """
-    run_number = params.get("run_number")
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     
     result = f"运行 #{run_number} 完成"
@@ -23,16 +18,11 @@ def process_data(params):
         "timestamp": timestamp
     }
 
-
-@task(
-    inputs=["prev_result"],
-    outputs=["final_result"]
-)
-def format_output(params):
+@task
+def format_output(prev_result):
     """
     格式化输出任务
     """
-    prev_result = params.get("prev_result")
     final_result = f"[最终输出] {prev_result}"
     
     return {
@@ -147,9 +137,8 @@ def test_concurrent_workflow_runs():
     workflow = client.create_workflow()
     
     # 添加简单任务
-    @task(inputs=["value"], outputs=["result"])
-    def simple_task(params):
-        value = params.get("value")
+    @task
+    def simple_task(value):
         return {"result": f"处理了: {value}"}
     
     task1 = workflow.add_task(simple_task, inputs={"value": "test"})
@@ -182,5 +171,4 @@ def test_concurrent_workflow_runs():
 if __name__ == "__main__":
     test_multiple_runs()
     test_concurrent_workflow_runs()
-
 

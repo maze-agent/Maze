@@ -3,14 +3,9 @@ import os
 import shutil
 
 
-@task(
-    inputs=["action", "source", "destination"],
-    outputs=["result"],
-)
-def file_manager(params):
-    action = params.get("action")  # copy, move, delete, list
-    source = params.get("source")
-    destination = params.get("destination")
+
+@task
+def file_manager(action: str = "", source: str = "", destination: str = ""):
     
     if not action:
         return {"result": None, "error": "Missing required parameter: action"}

@@ -1,12 +1,9 @@
 from maze import task
 import cv2
 
-@task(
-    inputs=["file_path"],
-    outputs=["result"],
-)
-def video_reader(params):
-    file_path = params.get("file_path")
+
+@task
+def video_reader(file_path: str = ""):
     
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}

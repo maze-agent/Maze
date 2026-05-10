@@ -1,14 +1,9 @@
 from maze import task
 
 
-@task(
-    inputs=["file_path", "content", "mode"],
-    outputs=["result"],
-)
-def file_writer(params):
-    file_path = params.get("file_path")
-    content = params.get("content", "")
-    mode = params.get("mode", "w")
+
+@task
+def file_writer(file_path: str = "", content: str = "", mode: str = "w"):
     
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}

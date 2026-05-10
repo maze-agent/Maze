@@ -187,7 +187,8 @@ class WorkflowRuntimeManager():
             task_input_data = {}
             for _,input_info in task.task_input["input_params"].items():
                 if input_info["input_schema"] == "from_user":
-                    task_input_data[input_info["key"]] = input_info["value"]
+                    if input_info.get("has_value", True):
+                        task_input_data[input_info["key"]] = input_info["value"]
                 elif input_info["input_schema"] == "from_task":
                     task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
 

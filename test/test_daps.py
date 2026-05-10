@@ -40,13 +40,8 @@ class TestDAPS:
         client = MaClient()
         workflow = client.create_workflow()
         
-        @task(
-            inputs=["text"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0},
-        )
-        def task1(params):
-            text = params.get("text")
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0})
+        def task1(text):
             return {
                 "text_length": 1,
                 "token_count": 1,
@@ -54,13 +49,8 @@ class TestDAPS:
                 "reason": 12
             }
 
-        @task(
-            inputs=["text"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0},
-        )
-        def llm_process(params):
-            text = params.get("text")
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0})
+        def llm_process(text):
             return {"result": 'MazeMaze'}
  
  

@@ -1,12 +1,9 @@
 from maze import task
 import mutagen
 
-@task(
-    inputs=["file_path"],
-    outputs=["result"],
-)
-def mp3_reader(params):
-    file_path = params.get("file_path")
+
+@task
+def mp3_reader(file_path: str = ""):
     
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}

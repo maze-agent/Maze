@@ -1,7 +1,6 @@
 import axios from 'axios';
 import type {
   BuiltinTaskMeta,
-  TaskDefinition,
   WorkspaceTasksResponse,
   WorkspaceWorkflowsResponse,
   Workflow,
@@ -73,7 +72,6 @@ export const api = {
     workflowId?: string | null;
     nodes: WorkflowNode[];
     edges: WorkflowEdge[];
-    taskDefinitions?: TaskDefinition[];
   }): Promise<{
     success: boolean;
     workspaceDir: string;
@@ -82,7 +80,6 @@ export const api = {
       name: string;
       nodes: WorkflowNode[];
       edges: WorkflowEdge[];
-      taskDefinitions?: TaskDefinition[];
     };
   }> {
     const response = await axios.post(`${API_BASE}/workspace-workflows/save`, data);
@@ -101,11 +98,11 @@ export const api = {
       name: string;
       nodes: WorkflowNode[];
       edges: WorkflowEdge[];
-      taskDefinitions?: TaskDefinition[];
     };
     importedTaskDefinitions?: {
       imported: Array<{ relativePath: string }>;
       skipped: Array<{ relativePath: string; reason: string }>;
+      remapped?: Array<{ from: string; to: string; reason: string }>;
     };
   }> {
     const response = await axios.post(`${API_BASE}/workspace-workflows/load`, data);
@@ -123,11 +120,11 @@ export const api = {
       name: string;
       nodes: WorkflowNode[];
       edges: WorkflowEdge[];
-      taskDefinitions?: TaskDefinition[];
     };
     importedTaskDefinitions?: {
       imported: Array<{ relativePath: string }>;
       skipped: Array<{ relativePath: string; reason: string }>;
+      remapped?: Array<{ from: string; to: string; reason: string }>;
     };
   }> {
     const response = await axios.post(`${API_BASE}/workspace-workflows/import`, data);

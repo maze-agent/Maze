@@ -10,20 +10,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from maze import MaClient, task
 
-
-@task(inputs=["x"], outputs=["y"])
-def multiply_task(params):
+@task
+def multiply_task(x):
     """简单的乘法任务"""
-    x = params.get("x")
     result = x * 2
     return {"y": result}
 
-
-@task(inputs=["a", "b"], outputs=["sum"])
-def add_task(params):
+@task
+def add_task(a, b):
     """简单的加法任务"""
-    a = params.get("a")
-    b = params.get("b")
     return {"sum": a + b}
 
 
@@ -263,4 +258,3 @@ if __name__ == "__main__":
     print("  • 多次查询同一 run_id 不会重复连接服务器")
     print("  • 支持按 task_id 查询特定任务结果")
     print("=" * 70)
-

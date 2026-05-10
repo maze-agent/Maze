@@ -2,12 +2,10 @@ from maze import task
 from datetime import datetime
 
 
-@task(
-    inputs=["format"],
-    outputs=["result"],
-)
-def date_time(params):
-    format_str = params.get("format", "%Y-%m-%d %H:%M:%S")
+
+@task
+def date_time(format: str = "%Y-%m-%d %H:%M:%S"):
+    format_str = format
     
     try:
         current_time = datetime.now().strftime(format_str)

@@ -1,14 +1,11 @@
 from maze import task
 import requests
 
-@task(
-    inputs=["query", "google_api_key", "google_cse_id"],
-    outputs=["result"],
-)
-def google_search(params):
-    query = params.get("query")
-    api_key = params.get("google_api_key")
-    cse_id = params.get("google_cse_id")
+
+@task
+def google_search(query: str = "", google_api_key: str = "", google_cse_id: str = ""):
+    api_key = google_api_key
+    cse_id = google_cse_id
 
     if not query or not api_key or not cse_id:
         return {"result": None, "error": "Missing required parameters: query, google_api_key, or google_cse_id"}

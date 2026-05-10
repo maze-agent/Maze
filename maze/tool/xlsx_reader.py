@@ -2,12 +2,9 @@ from maze import task
 import openpyxl
 
 
-@task(
-    inputs=["file_path"],
-    outputs=["result"],
-)
-def xlsx_reader(params):
-    file_path = params.get("file_path")
+
+@task
+def xlsx_reader(file_path: str = ""):
     
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}

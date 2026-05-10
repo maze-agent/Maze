@@ -161,8 +161,8 @@ class TestHTTPAPI:
         code_str = """
 from datetime import datetime
 
-def test_task(params):
-    task_input = params.get("test_input")
+def test_task(test_input: str):
+    task_input = test_input
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str
@@ -207,8 +207,8 @@ def test_task(params):
         code_str1 = """
 from datetime import datetime
 
-def task1(params):
-    task_input = params.get("task1_input")
+def task1(task1_input: str):
+    task_input = task1_input
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str
@@ -246,8 +246,8 @@ def task1(params):
         code_str2 = """
 from datetime import datetime
 
-def task2(params):
-    task_input = params.get("task2_input")
+def task2(task2_input: str):
+    task_input = task2_input
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
     result = task_input + time_str + "===="
@@ -320,5 +320,4 @@ def task2(params):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
-
 

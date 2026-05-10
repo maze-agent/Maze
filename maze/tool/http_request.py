@@ -2,15 +2,12 @@ from maze import task
 import requests
 
 
-@task(
-    inputs=["url", "method", "headers", "data"],
-    outputs=["result"],
-)
-def http_request(params):
-    url = params.get("url")
-    method = params.get("method", "GET").upper()
-    headers = params.get("headers", {})
-    data = params.get("data", {})
+
+@task
+def http_request(url: str = "", method: str = "GET", headers: dict | None = None, data: dict | None = None):
+    method = method.upper()
+    headers = headers or {}
+    data = data or {}
     
     if not url:
         return {"result": None, "error": "Missing required parameter: url"}

@@ -1,11 +1,8 @@
 from maze import task
 
-@task(
-    inputs=["file_path"],
-    outputs=["result"],
-)
-def text_reader(params):
-    file_path = params.get("file_path")
+
+@task
+def text_reader(file_path: str = ""):
     
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}

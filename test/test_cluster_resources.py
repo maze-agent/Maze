@@ -13,47 +13,26 @@ class TestClusterResources:
         client = MaClient()
         workflow = client.create_workflow()
         
-        @task(
-            inputs=["text"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0},
-        )
-        def task1(params):
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0})
+        def task1(text):
             time.sleep(2)
-            text = params.get("text")
             return {"result": text}
 
-        @task(
-            inputs=["text"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0},
-        )
-        def task2(params):
-            text = params.get("text")
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0})
+        def task2(text):
             tensor = torch.rand(1000, 1000).cuda()
             time.sleep(8)
             return {"result": text}
 
-        @task(
-            inputs=["text"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0},
-        )
-        def task3(params):
-            text = params.get("text")
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":1,"gpu_mem":0})
+        def task3(text):
             tensor = torch.rand(1000, 1000).cuda()
             time.sleep(8)
             return {"result": text}
 
-        @task(
-            inputs=["text1","text2"],
-            outputs=["result"],
-            resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0},   
-        )
-        def task4(params):
+        @task(resources={"cpu": 1,"cpu_mem":0,"gpu":0,"gpu_mem":0})
+        def task4(text1, text2):
             time.sleep(2)
-            text1 = params.get("text1")
-            text2 = params.get("text2")
             return {"result": text1+text2}  
             
         task1 = workflow.add_task(task1, inputs={"text": "Maze"})

@@ -74,7 +74,13 @@ class Runner():
         
         func_name = func_node.name
         if func_name in namespace:
-            return namespace[func_name](self.task_input_data)
+            result = namespace[func_name](**(self.task_input_data or {}))
+            if not isinstance(result, dict):
+                raise TypeError(
+                    f"Task {func_name} must return a dict. "
+                    f"Got {type(result).__name__} instead."
+                )
+            return result
         else:
             raise NameError(f"Function {func_name} not found in namespace")
 

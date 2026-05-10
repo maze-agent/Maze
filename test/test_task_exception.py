@@ -4,73 +4,53 @@
 from maze import MaClient, task
 
 
-@task(
-    inputs=["value"],
-    outputs=["result"]
-)
-def task_division(params):
+
+def task_division(value):
     """
     执行除法操作，可能会抛出异常
     """
-    value = params.get("value")
     # 这里会抛出 ZeroDivisionError
     result = 100 / value
     return {"result": result}
 
 
-@task(
-    inputs=["text"],
-    outputs=["processed"]
-)
-def task_type_error(params):
+
+def task_type_error(text):
     """
     类型错误测试
     """
-    text = params.get("text")
     # 这里会抛出 TypeError（如果text不是字符串）
     result = text.upper()
     return {"processed": result}
 
 
-@task(
-    inputs=["index"],
-    outputs=["item"]
-)
-def task_index_error(params):
+
+def task_index_error(index):
     """
     索引错误测试
     """
-    index = params.get("index")
     items = ["a", "b", "c"]
     # 可能抛出 IndexError
     item = items[index]
     return {"item": item}
 
 
-@task(
-    inputs=["filename"],
-    outputs=["content"]
-)
-def task_file_error(params):
+
+def task_file_error(filename):
     """
     文件错误测试
     """
-    filename = params.get("filename")
     # 可能抛出 FileNotFoundError
     with open(filename, 'r') as f:
         content = f.read()
     return {"content": content}
 
 
-@task(
-    inputs=["value"],
-    outputs=["result"]
-)
-def task_normal(params):
+
+def task_normal(value):
     """
     正常任务，不会抛出异常
     """
-    value = params.get("value")
     return {"result": f"正常处理: {value}"}
 
 

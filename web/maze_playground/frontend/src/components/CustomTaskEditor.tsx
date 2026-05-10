@@ -73,28 +73,21 @@ export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEdit
 
   const defaultCode = `from maze import task
 
-@task(
-    inputs=["text"],
-    outputs=["result"],
-    resources={"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
-)
-def my_custom_task(params):
+@task(resources={"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0})
+def my_custom_task(text: str = ""):
     """
     Custom task example
     
     Args:
-        params: Dictionary containing input parameters
+        text: Input text
         
     Returns:
         Dictionary with output values
     """
-    # Get input parameters from params
-    text = params.get("text")
-    
     # Write your task logic here
     result = f"Processed: {text}"
     
-    # Return dictionary with keys matching outputs
+    # Maze infers outputs from returned dict keys
     return {"result": result}
 `;
 
@@ -252,11 +245,10 @@ def my_custom_task(params):
             <div>
               <p>Use the <code>@task</code> decorator (<code>from maze import task</code>):</p>
               <ul style={{ marginBottom: 0 }}>
-                <li><code>inputs</code>: List of input parameter names, e.g. <code>["text", "count"]</code></li>
-                <li><code>outputs</code>: List of output parameter names, e.g. <code>["result"]</code></li>
+                <li>Inputs are inferred from function parameters, e.g. <code>def my_task(text: str, count: int = 1):</code></li>
+                <li>Outputs are inferred from returned dictionary keys, e.g. <code>{`return {"result": value}`}</code></li>
                 <li><code>resources</code> (optional): Resource config, e.g. <code>{`{"cpu": 1, "gpu": 0}`}</code></li>
-                <li>Function signature: <code>def my_task(params):</code>, use <code>params.get("name")</code> to get inputs</li>
-                <li>Return: Dictionary with keys matching outputs</li>
+                <li>Return value must be a dictionary</li>
               </ul>
             </div>
           }

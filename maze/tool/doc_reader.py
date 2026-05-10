@@ -2,12 +2,9 @@ from maze import task
 from docx import Document
 
 
-@task(
-    inputs=["file_path"],
-    outputs=["result"],
-)
-def doc_reader(params):
-    file_path = params.get("file_path")
+
+@task
+def doc_reader(file_path: str = ""):
     if not file_path:
         return {"result": None, "error": "Missing required parameter: file_path"}
     try:

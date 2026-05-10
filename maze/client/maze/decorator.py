@@ -2,10 +2,13 @@
 Task decorators for defining task metadata and configuration
 """
 
+import ast
 import inspect
 import cloudpickle
 import base64
-from typing import Dict, List, Any, Callable
+import textwrap
+from functools import wraps
+from typing import Dict, List, Any, Callable, Optional, get_type_hints
 from dataclasses import dataclass
 from maze.utils.resource_infer import infer_gpu_resources_from_function
 
@@ -21,6 +24,10 @@ class TaskMetadata:
     outputs: List[str]
     resources: Dict[str, Any]
     data_types: Dict[str, str]  # Parameter data types
+
+
+class TaskOutputInferenceError(ValueError):
+    """Raised when Maze cannot infer output keys from a task return dict."""
 
 
 def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None = None) -> Dict[str, Any]:
@@ -82,57 +89,234 @@ def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None
     return normalized
 
 
-def task(inputs: List[str], 
-         outputs: List[str],
-         resources: Dict[str, Any] = None,
-         data_types: Dict[str, str] = None):
+def _annotation_to_data_type(annotation: Any) -> str:
+    if annotation is inspect.Signature.empty:
+        return "str"
+    if annotation is None:
+        return "None"
+    if isinstance(annotation, str):
+        return annotation
+
+    name = getattr(annotation, "__name__", None)
+    if name:
+        return name
+
+    return str(annotation).replace("typing.", "")
+
+
+def _safe_type_hints(func: Callable) -> Dict[str, Any]:
+    try:
+        return get_type_hints(func)
+    except Exception:
+        return dict(getattr(func, "__annotations__", {}) or {})
+
+
+def _get_function_source(func: Callable) -> str:
+    try:
+        source = inspect.getsource(func)
+    except (OSError, TypeError):
+        return ""
+
+    return textwrap.dedent(source)
+
+
+def _get_code_str(func: Callable) -> str:
+    source = _get_function_source(func)
+    if not source:
+        return ""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func.__name__:
+            lines = source.splitlines(keepends=True)
+            return "".join(lines[node.lineno - 1:node.end_lineno])
+
+    return source
+
+
+def _infer_inputs(func: Callable) -> List[str]:
+    signature = inspect.signature(func)
+    inputs = []
+
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            inputs.append(parameter.name)
+        elif parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise ValueError(
+                f"Task function {func.__name__} cannot use *args or **kwargs. "
+                "Use explicit named parameters instead."
+            )
+        else:
+            raise ValueError(
+                f"Task function {func.__name__} has positional-only parameter "
+                f"{parameter.name!r}, which Maze cannot pass by name."
+            )
+
+    return inputs
+
+
+def _literal_dict_key(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Str):  # pragma: no cover
+        return node.s
+    return None
+
+
+def _return_dict_keys(node: ast.AST) -> Optional[List[str]]:
+    if not isinstance(node, ast.Dict):
+        return None
+
+    keys = []
+    for key_node in node.keys:
+        if key_node is None:
+            return None
+        key = _literal_dict_key(key_node)
+        if key is None:
+            return None
+        keys.append(key)
+
+    return keys
+
+
+def infer_output_keys_from_source(func: Callable) -> List[str]:
+    source = _get_function_source(func)
+    if not source:
+        raise TaskOutputInferenceError(
+            f"Cannot inspect source for task {func.__name__}. Return a dict literal with string keys."
+        )
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        raise TaskOutputInferenceError(f"Cannot parse task source for {func.__name__}: {e}") from e
+
+    function_node = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func.__name__:
+            function_node = node
+            break
+
+    if function_node is None:
+        raise TaskOutputInferenceError(f"Cannot find function body for task {func.__name__}")
+
+    output_keys = []
+    nodes_to_visit = list(function_node.body)
+    while nodes_to_visit:
+        node = nodes_to_visit.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+
+        if isinstance(node, ast.Return):
+            if node.value is None:
+                continue
+            keys = _return_dict_keys(node.value)
+            if keys is None:
+                raise TaskOutputInferenceError(
+                    f"Task {func.__name__} must return a dict literal with string keys so Maze can infer outputs."
+                )
+            output_keys.extend(keys)
+            continue
+
+        nodes_to_visit.extend(ast.iter_child_nodes(node))
+
+    if not output_keys:
+        raise TaskOutputInferenceError(
+            f"Task {func.__name__} must return a dict literal with at least one output key."
+        )
+
+    deduped = []
+    for key in output_keys:
+        if key not in deduped:
+            deduped.append(key)
+
+    return deduped
+
+
+def _infer_data_types(func: Callable, inputs: List[str], outputs: List[str], data_types: Dict[str, str] | None = None) -> Dict[str, str]:
+    hints = _safe_type_hints(func)
+    types_config = {}
+
+    for input_name in inputs:
+        types_config[input_name] = _annotation_to_data_type(hints.get(input_name, inspect.Signature.empty))
+    for output_name in outputs:
+        types_config[output_name] = "any"
+
+    if data_types:
+        types_config.update(data_types)
+
+    return types_config
+
+
+def _make_serialized_task_callable(func: Callable) -> Callable:
+    @wraps(func)
+    def maze_task_callable(task_input_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        kwargs = dict(task_input_data or {})
+        result = func(**kwargs)
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"Task {func.__name__} must return a dict. "
+                f"Got {type(result).__name__} instead."
+            )
+        return result
+
+    return maze_task_callable
+
+
+def task(
+    func: Callable = None,
+    *,
+    resources: Dict[str, Any] = None,
+    data_types: Dict[str, str] = None,
+    **unsupported_options,
+):
     """
-    Task decorator for marking and configuring task functions
+    Task decorator for marking and configuring task functions.
+
+    Maze tasks are ordinary Python functions. Inputs are inferred from the
+    function signature, and outputs are inferred from the string keys in the
+    returned dict. The task must return a dict at runtime.
     
     Args:
-        inputs: List of input parameter names
-        outputs: List of output parameter names
         resources: Resource requirements configuration, defaults to {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
-        data_types: Parameter data type mapping, defaults to "str" for all
         
     Example:
-        @task(
-            inputs=["input_value"],
-            outputs=["output_value"],
-            resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
-        )
-        def my_task(params):
-            value = params.get("input_value")
-            return {"output_value": value + " processed"}
+        @task(resources={"cpu": 1, "cpu_mem": 128})
+        def my_task(input_value: str):
+            return {"output_value": input_value + " processed"}
     """
+    if unsupported_options:
+        unsupported = ", ".join(sorted(unsupported_options))
+        raise TypeError(
+            f"@task no longer accepts {unsupported}. "
+            "Define a normal Python function; Maze infers inputs from the "
+            "function signature and outputs from the returned dict keys."
+        )
+
     def decorator(func: Callable) -> Callable:
-        # Get function source code (excluding decorators)
-        source_lines = inspect.getsourcelines(func)[0]
-        
-        # Find the start of function definition (skip decorator lines)
-        func_start_idx = 0
-        for idx, line in enumerate(source_lines):
-            if line.strip().startswith('def '):
-                func_start_idx = idx
-                break
-        
-        # Extract code starting from function definition
-        func_lines = source_lines[func_start_idx:]
-        code_str = ''.join(func_lines)
-        
-        # Serialize entire function using cloudpickle (including external imports and dependencies)
-        code_ser = base64.b64encode(cloudpickle.dumps(func)).decode('utf-8')
-        
+        code_str = _get_code_str(func)
+        inputs = _infer_inputs(func)
+        outputs = infer_output_keys_from_source(func)
+
+        # Serialize a Maze wrapper so the scheduler can keep passing a dict
+        # while user functions receive normal Python keyword arguments.
+        task_callable = _make_serialized_task_callable(func)
+        code_ser = base64.b64encode(cloudpickle.dumps(task_callable)).decode('utf-8')
+
         # Normalize and validate resource configuration
         resources_config = _normalize_resources(resources, func)
-        
-        # Default data types are all str
-        if data_types is None:
-            types_config = {param: "str" for param in inputs + outputs}
-        else:
-            types_config = {param: "str" for param in inputs + outputs}
-            types_config.update(data_types)
-        
+        types_config = _infer_data_types(func, inputs, outputs, data_types=data_types)
+
         # Create metadata
         metadata = TaskMetadata(
             func=func,
@@ -150,6 +334,14 @@ def task(inputs: List[str],
         
         return func
     
+    if func is not None:
+        if not callable(func):
+            raise TypeError(
+                "@task no longer accepts inputs/outputs. "
+                "Use @task or @task(resources={...}) on a normal Python function."
+            )
+        return decorator(func)
+
     return decorator
 
 

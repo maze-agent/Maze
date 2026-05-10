@@ -4,11 +4,9 @@ import psutil
 import os
 
 
-@task(
-    inputs=[],
-    outputs=["result"],
-)
-def system_info(params):
+
+@task
+def system_info():
     try:
         info = {
             "platform": platform.platform(),

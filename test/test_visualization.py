@@ -4,50 +4,30 @@
 from maze import MaClient, task
 
 
-@task(
-    inputs=["raw_data"],
-    outputs=["cleaned_data"],
-    resources={"cpu": 2}
-)
-def data_cleaning(params):
+@task(resources={"cpu": 2})
+def data_cleaning(raw_data: str):
     """数据清洗任务"""
-    raw_data = params.get("raw_data")
     cleaned_data = raw_data.strip().lower()
     return {"cleaned_data": cleaned_data}
 
 
-@task(
-    inputs=["cleaned_data"],
-    outputs=["analyzed_result"],
-    resources={"cpu": 4, "cpu_mem": 2048}
-)
-def data_analysis(params):
+@task(resources={"cpu": 4, "cpu_mem": 2048})
+def data_analysis(cleaned_data: str):
     """数据分析任务"""
-    cleaned_data = params.get("cleaned_data")
     analyzed_result = f"分析结果: {cleaned_data}"
     return {"analyzed_result": analyzed_result}
 
 
-@task(
-    inputs=["analyzed_result"],
-    outputs=["report"],
-    resources={"cpu": 1, "gpu_mem": 1024}
-)
-def generate_report(params):
+@task(resources={"cpu": 1, "gpu_mem": 1024})
+def generate_report(analyzed_result: str):
     """生成报告任务"""
-    analyzed_result = params.get("analyzed_result")
     report = f"[报告] {analyzed_result}"
     return {"report": report}
 
 
-@task(
-    inputs=["report"],
-    outputs=["final_output"],
-    resources={"cpu": 1}
-)
-def publish_result(params):
+@task(resources={"cpu": 1})
+def publish_result(report: str):
     """发布结果任务"""
-    report = params.get("report")
     final_output = f"已发布: {report}"
     return {"final_output": final_output}
 
@@ -115,24 +95,21 @@ def test_linear_workflow_visualization():
     print("✓ 线性工作流可视化测试完成")
     print("=" * 60)
 
-
-@task(inputs=["input1"], outputs=["output1"])
-def branch_task_a(params):
+@task
+def branch_task_a(input1):
     """分支任务A"""
     return {"output1": "Branch A"}
 
-
-@task(inputs=["input2"], outputs=["output2"])
-def branch_task_b(params):
+@task
+def branch_task_b(input2):
     """分支任务B"""
     return {"output2": "Branch B"}
 
-
-@task(inputs=["merge_input1", "merge_input2"], outputs=["merged_output"])
-def merge_task(params):
+@task
+def merge_task(merge_input1, merge_input2):
     """合并任务"""
-    input1 = params.get("merge_input1")
-    input2 = params.get("merge_input2")
+    input1 = merge_input1
+    input2 = merge_input2
     return {"merged_output": f"{input1} + {input2}"}
 
 
@@ -339,4 +316,3 @@ if __name__ == "__main__":
     print("             + 系统安装 Graphviz (https://graphviz.org/download/)")
     print("  方案2: pip install matplotlib networkx")
     print("=" * 70)
-

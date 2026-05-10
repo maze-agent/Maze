@@ -257,6 +257,18 @@ def _extract_tasks_from_file(file_path, workspace_dir, relative_path):
     return tasks
 
 
+def _extract_single_task_from_file(file_path, workspace_dir, relative_path):
+    tasks = _extract_tasks_from_file(file_path, workspace_dir, relative_path)
+    if len(tasks) > 1:
+        task_names = ", ".join(task["functionName"] for task in tasks)
+        raise ValueError(
+            f"Workspace task files must define exactly one @task function. "
+            f"{relative_path} defines {len(tasks)} tasks: {task_names}"
+        )
+
+    return tasks
+
+
 def get_workspace_tasks(workspace_dir):
     """Scan <workspace>/tasks/**/*.py and return decorated Maze tasks."""
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
@@ -283,7 +295,7 @@ def get_workspace_tasks(workspace_dir):
             file_path = os.path.join(root, file_name)
             relative_path = os.path.relpath(file_path, workspace_dir).replace("\\", "/")
             try:
-                tasks.extend(_extract_tasks_from_file(file_path, workspace_dir, relative_path))
+                tasks.extend(_extract_single_task_from_file(file_path, workspace_dir, relative_path))
             except Exception as e:
                 errors.append({
                     "relativePath": relative_path,
@@ -326,7 +338,7 @@ def save_workspace_task(workspace_dir, relative_path, code, parse=True):
         }
 
         if parse:
-            tasks = _extract_tasks_from_file(file_path, workspace_dir, relative_path)
+            tasks = _extract_single_task_from_file(file_path, workspace_dir, relative_path)
             if not tasks:
                 return {
                     **response,
@@ -500,7 +512,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                 if module_name == "simpleTask":
                     task_func = getattr(simpleTask, func_name)
                 else:
-                    return {"success": False, "error": f"未知模块: {module_name}"}
+                    return {"success": False, "error": f"Unknown module: {module_name}"}
                 
                 # 构建输入字典
                 task_inputs = {}
@@ -516,7 +528,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                                 source_task = task_map[source_node_id]
                                 task_inputs[inp["name"]] = source_task.outputs[output_key]
                             else:
-                                return {"success": False, "error": f"任务依赖错误: {source_node_id} 未找到"}
+                                return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
                 
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)

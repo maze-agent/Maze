@@ -2,13 +2,9 @@ from maze import task
 import hashlib
 
 
-@task(
-    inputs=["input_data", "algorithm"],
-    outputs=["result"],
-)
-def hash_generator(params):
-    input_data = params.get("input_data", "")
-    algorithm = params.get("algorithm", "sha256")
+
+@task
+def hash_generator(input_data: str = "", algorithm: str = "sha256"):
     
     supported_algorithms = hashlib.algorithms_available
     

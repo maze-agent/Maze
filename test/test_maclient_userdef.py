@@ -10,12 +10,8 @@ from maze import MaClient, task
 
 
 # 定义用户自定义任务1
-@task(
-    inputs=["task1_input"],
-    outputs=["task1_output"],
-    resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123}
-)
-def user_task1(params):
+@task(resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123})
+def user_task1(task1_input: str):
     """
     用户自定义任务1：获取输入并添加当前时间戳
     
@@ -25,7 +21,7 @@ def user_task1(params):
     输出:
         task1_output: 输入字符串 + 时间戳
     """
-    task_input = params.get("task1_input")
+    task_input = task1_input
     
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -37,12 +33,8 @@ def user_task1(params):
 
 
 # 定义用户自定义任务2
-@task(
-    inputs=["task2_input"],
-    outputs=["task2_output"],
-    resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324}
-)
-def user_task2(params):
+@task(resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324})
+def user_task2(task2_input: str):
     """
     用户自定义任务2：获取输入并添加当前时间戳和后缀
         
@@ -52,7 +44,7 @@ def user_task2(params):
     输出:
         task2_output: 输入字符串 + 时间戳 + "===="
     """
-    task_input = params.get("task2_input")
+    task_input = task2_input
         
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -194,5 +186,4 @@ class TestUserUploadTask:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
-
 

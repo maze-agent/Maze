@@ -1,12 +1,9 @@
 from maze import task
 
 
-@task(
-    inputs=["expression"],
-    outputs=["result"],
-)
-def calculator(params):
-    expression = params.get("expression")
+
+@task
+def calculator(expression: str = ""):
     
     if not expression:
         return {"result": None, "error": "Missing required parameter: expression"}

@@ -13,6 +13,7 @@ export default function Toolbar() {
     workflowId, 
     workflowName, 
     workspaceDir,
+    workspaceTasks,
     currentWorkspaceWorkflowPath,
     nodes, 
     edges, 
@@ -142,7 +143,29 @@ export default function Toolbar() {
     return normalized;
   };
 
-  const collectWorkflowTaskDefinitions = (workflowNodes: WorkflowNode[]): TaskDefinition[] => {
+  const stripNodeTaskCode = (node: WorkflowNode): WorkflowNode => {
+    if (node.data.category !== 'workspace') {
+      return node;
+    }
+
+    const { customCode, ...data } = node.data;
+
+    return {
+      ...node,
+      data: {
+        ...data,
+        taskPath: normalizeTaskRelativePath(node.data.taskPath) || node.data.taskPath,
+      },
+    };
+  };
+
+  const getWorkspaceTaskCode = (relativePath: string) => {
+    const normalizedPath = normalizeTaskRelativePath(relativePath);
+    const task = workspaceTasks.find((item) => normalizeTaskRelativePath(item.relativePath) === normalizedPath);
+    return task?.code || '';
+  };
+
+  const collectIncludedTasks = (workflowNodes: WorkflowNode[]): TaskDefinition[] => {
     const definitions = new Map<string, TaskDefinition>();
 
     workflowNodes.forEach((node) => {
@@ -156,7 +179,7 @@ export default function Toolbar() {
       }
 
       const existing = definitions.get(relativePath);
-      const incomingCode = node.data.customCode || '';
+      const incomingCode = node.data.customCode || getWorkspaceTaskCode(relativePath);
       const code = incomingCode.trim() ? incomingCode : existing?.code || '';
 
       definitions.set(relativePath, {
@@ -182,18 +205,19 @@ export default function Toolbar() {
     }
 
     try {
-      const taskDefinitions = collectWorkflowTaskDefinitions(nodes);
+      const workflowNodes = nodes.map(stripNodeTaskCode);
+      const includedTasks = collectIncludedTasks(nodes);
       const payload = {
-        schema: 'maze-playground-workflow',
-        version: 2,
+        schema: 'maze-playground-bundle',
+        version: 3,
         exportedAt: new Date().toISOString(),
         workflow: {
           name: workflowName,
           sourceWorkflowId: workflowId,
-          nodes,
+          nodes: workflowNodes,
           edges,
-          taskDefinitions,
         },
+        includedTasks,
       };
 
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -207,7 +231,7 @@ export default function Toolbar() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      message.success(`Workflow exported with ${taskDefinitions.length} workspace task definition${taskDefinitions.length === 1 ? '' : 's'}`);
+      message.success(`Workflow bundle exported with ${includedTasks.length} included workspace task${includedTasks.length === 1 ? '' : 's'}`);
     } catch (error) {
       console.error('Failed to export workflow:', error);
       message.error('Failed to export workflow');
@@ -255,8 +279,9 @@ export default function Toolbar() {
       setWorkspaceWorkflows(workflowsResult.workflows || []);
 
       const importedCount = imported.importedTaskDefinitions?.imported.length || 0;
-      const skippedCount = imported.importedTaskDefinitions?.skipped.filter((item) => item.reason === 'exists').length || 0;
-      message.success(`Workflow imported. Tasks added: ${importedCount}, skipped existing: ${skippedCount}`);
+      const reusedCount = imported.importedTaskDefinitions?.skipped.filter((item) => item.reason === 'exists-same').length || 0;
+      const remappedCount = imported.importedTaskDefinitions?.remapped?.length || 0;
+      message.success(`Workflow imported. Tasks added: ${importedCount}, reused: ${reusedCount}, remapped: ${remappedCount}`);
     } catch (error) {
       console.error('Failed to import workflow:', error);
       message.error(error instanceof Error ? error.message : 'Failed to import workflow');

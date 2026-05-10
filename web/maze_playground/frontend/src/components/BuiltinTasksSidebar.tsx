@@ -22,14 +22,9 @@ const { Text, Paragraph } = Typography;
 
 const defaultWorkspaceTaskCode = (functionName: string) => `from maze import task
 
-@task(
-    inputs=["text"],
-    outputs=["result"],
-    resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
-)
-def ${functionName}(params):
+@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+def ${functionName}(text: str = ""):
     """Process text and return a result."""
-    text = params.get("text", "")
     return {"result": f"Processed: {text}"}
 `;
 
@@ -657,9 +652,10 @@ export default function BuiltinTasksSidebar() {
       setCurrentWorkspaceWorkflowPath(loaded.relativePath);
       await loadWorkspaceTasks(loaded.workspaceDir);
       const importedCount = loaded.importedTaskDefinitions?.imported.length || 0;
-      const skippedCount = loaded.importedTaskDefinitions?.skipped.filter((entry) => entry.reason === 'exists').length || 0;
-      const taskImportText = importedCount > 0 || skippedCount > 0
-        ? ` Tasks added: ${importedCount}, skipped existing: ${skippedCount}.`
+      const reusedCount = loaded.importedTaskDefinitions?.skipped.filter((entry) => entry.reason === 'exists-same').length || 0;
+      const remappedCount = loaded.importedTaskDefinitions?.remapped?.length || 0;
+      const taskImportText = importedCount > 0 || reusedCount > 0 || remappedCount > 0
+        ? ` Tasks added: ${importedCount}, reused: ${reusedCount}, remapped: ${remappedCount}.`
         : '';
       message.success(`Workflow loaded: ${loaded.workflow.name}.${taskImportText}`);
     } catch (error: any) {

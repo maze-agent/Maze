@@ -11,30 +11,20 @@ from maze.client.maze.decorator import task
 
 
 
-@task(
-    inputs=["task1_input"],
-    outputs=["task1_output"],
-    resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123}
-)
-def task1(params):
-    
-    task_input = params.get("task1_input")
+@task(resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123})
+def task1(task1_input: str):
     
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    result = task_input + time_str
+    result = task1_input + time_str
 
     return {
         "task1_output": result
     }
 
 
-@task(
-    inputs=["task2_input"],
-    outputs=["task2_output"],
-    resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324}
-)
-def task2(params):
+@task(resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324})
+def task2(task2_input: str):
     """
     Task 2: Get input and add current timestamp and suffix
     
@@ -44,15 +34,10 @@ def task2(params):
     Output:
         task2_output: Input string + timestamp + "===="
     """
-
-    
-    task_input = params.get("task2_input")
-    
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    result = task_input + time_str + "===="
+    result = task2_input + time_str + "===="
 
     return {
         "task2_output": result
     }
-

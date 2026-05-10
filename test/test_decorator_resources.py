@@ -3,105 +3,70 @@
 """
 import pytest
 from maze import task
-from maze.client.maze.decorator import get_task_metadata
+from maze.client.maze.decorator import TaskOutputInferenceError, get_task_metadata
 
 
 # 测试1: 不指定 resources - 应该使用默认值
-@task(
-    inputs=["input1"],
-    outputs=["output1"]
-)
-def task_default_resources(params):
+@task
+def task_default_resources(input1=None):
     """不指定resources，使用默认值"""
-    return {"output1": params.get("input1")}
+    return {"output1": input1}
 
 
 # 测试2: 只指定部分资源 - 应该补全其他
-@task(
-    inputs=["input2"],
-    outputs=["output2"],
-    resources={"cpu": 2}
-)
-def task_partial_cpu_only(params):
+@task(resources={"cpu": 2})
+def task_partial_cpu_only(input2=None):
     """只指定cpu"""
-    return {"output2": params.get("input2")}
+    return {"output2": input2}
 
 
 # 测试3: 只指定 cpu_mem
-@task(
-    inputs=["input3"],
-    outputs=["output3"],
-    resources={"cpu_mem": 1024}
-)
-def task_partial_cpu_mem_only(params):
+@task(resources={"cpu_mem": 1024})
+def task_partial_cpu_mem_only(input3=None):
     """只指定cpu_mem"""
-    return {"output3": params.get("input3")}
+    return {"output3": input3}
 
 
 # 测试4: cpu 小于 1 - 应该自动设为 1
-@task(
-    inputs=["input4"],
-    outputs=["output4"],
-    resources={"cpu": 0, "gpu": 0.5}
-)
-def task_cpu_zero(params):
+@task(resources={"cpu": 0, "gpu": 0.5})
+def task_cpu_zero(input4=None):
     """cpu设为0，应该自动修正为1"""
-    return {"output4": params.get("input4")}
+    return {"output4": input4}
 
 
 # 测试5: cpu 为负数 - 应该自动设为 1
-@task(
-    inputs=["input5"],
-    outputs=["output5"],
-    resources={"cpu": -1}
-)
-def task_cpu_negative(params):
+@task(resources={"cpu": -1})
+def task_cpu_negative(input5=None):
     """cpu为负数，应该自动修正为1"""
-    return {"output5": params.get("input5")}
+    return {"output5": input5}
 
 
 # 测试6: 指定 gpu_mem 但没有 gpu - gpu 应该自动设为 1
-@task(
-    inputs=["input6"],
-    outputs=["output6"],
-    resources={"gpu_mem": 2048}
-)
-def task_gpu_mem_only(params):
+@task(resources={"gpu_mem": 2048})
+def task_gpu_mem_only(input6=None):
     """只指定gpu_mem，gpu应该自动设为1"""
-    return {"output6": params.get("input6")}
+    return {"output6": input6}
 
 
 # 测试7: gpu_mem > 0 但 gpu = 0 - gpu 应该自动设为 1
-@task(
-    inputs=["input7"],
-    outputs=["output7"],
-    resources={"gpu": 0, "gpu_mem": 4096}
-)
-def task_gpu_zero_with_mem(params):
+@task(resources={"gpu": 0, "gpu_mem": 4096})
+def task_gpu_zero_with_mem(input7=None):
     """gpu=0但gpu_mem>0，gpu应该自动设为1"""
-    return {"output7": params.get("input7")}
+    return {"output7": input7}
 
 
 # 测试8: 完整指定所有资源
-@task(
-    inputs=["input8"],
-    outputs=["output8"],
-    resources={"cpu": 4, "cpu_mem": 8192, "gpu": 2, "gpu_mem": 16384}
-)
-def task_full_resources(params):
+@task(resources={"cpu": 4, "cpu_mem": 8192, "gpu": 2, "gpu_mem": 16384})
+def task_full_resources(input8=None):
     """完整指定所有资源"""
-    return {"output8": params.get("input8")}
+    return {"output8": input8}
 
 
 # 测试9: 混合指定
-@task(
-    inputs=["input9"],
-    outputs=["output9"],
-    resources={"cpu": 3, "gpu_mem": 1024}
-)
-def task_mixed_resources(params):
+@task(resources={"cpu": 3, "gpu_mem": 1024})
+def task_mixed_resources(input9=None):
     """混合指定cpu和gpu_mem"""
-    return {"output9": params.get("input9")}
+    return {"output9": input9}
 
 
 def test_default_resources():
@@ -222,6 +187,59 @@ def test_mixed_resources():
     print("  ✓ 通过")
 
 
+def test_task_without_parentheses_infers_inputs_outputs_and_types():
+    """@task without parentheses should infer normal-function metadata."""
+    metadata = get_task_metadata(task_default_resources)
+
+    assert metadata.inputs == ["input1"]
+    assert metadata.outputs == ["output1"]
+    assert metadata.data_types["input1"] == "str"
+    assert metadata.data_types["output1"] == "any"
+
+
+def test_multi_input_task_infers_signature_and_return_dict_keys():
+    @task(resources={"cpu": 2})
+    def combine_text(left: str, right: int = 1):
+        return {"combined": f"{left}:{right}", "count": right}
+
+    metadata = get_task_metadata(combine_text)
+
+    assert metadata.inputs == ["left", "right"]
+    assert metadata.outputs == ["combined", "count"]
+    assert metadata.data_types["left"] == "str"
+    assert metadata.data_types["right"] == "int"
+    assert metadata.resources == {"cpu": 2, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
+
+
+def test_serialized_callable_uses_keyword_arguments_and_defaults():
+    @task
+    def greet(name: str, suffix: str = "!"):
+        return {"message": f"hello {name}{suffix}"}
+
+    metadata = get_task_metadata(greet)
+    import base64
+    import cloudpickle
+
+    runner_callable = cloudpickle.loads(base64.b64decode(metadata.code_ser))
+
+    assert runner_callable({"name": "Maze"}) == {"message": "hello Maze!"}
+    assert runner_callable({"name": "Maze", "suffix": "?"}) == {"message": "hello Maze?"}
+
+
+def test_task_return_must_be_dict_literal_for_output_inference():
+    with pytest.raises(TaskOutputInferenceError, match="must return a dict literal"):
+        @task
+        def bad_return(value: str):
+            return value
+
+
+def test_old_inputs_outputs_decorator_options_are_rejected():
+    with pytest.raises(TypeError, match="no longer accepts"):
+        @task(inputs=["value"], outputs=["result"])
+        def old_style(value):
+            return {"result": value}
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("开始测试 @task 装饰器的资源规范化功能")
@@ -240,5 +258,3 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("🎉 所有测试通过！资源规范化功能正常工作。")
     print("=" * 60)
-
-

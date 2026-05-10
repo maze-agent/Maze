@@ -4,19 +4,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 
-@task(
-    inputs=["smtp_server", "port", "username", "password", "to_email", "subject", "body", "use_tls"],
-    outputs=["result"],
-)
-def email_sender(params):
-    smtp_server = params.get("smtp_server")
-    port = params.get("port", 587)
-    username = params.get("username")
-    password = params.get("password")
-    to_email = params.get("to_email")
-    subject = params.get("subject", "")
-    body = params.get("body", "")
-    use_tls = params.get("use_tls", True)
+
+@task
+def email_sender(smtp_server: str = "", port: int = 587, username: str = "", password: str = "", to_email: str = "", subject: str = "", body: str = "", use_tls: bool = True):
     
     required_params = [smtp_server, username, password, to_email]
     if not all(required_params):

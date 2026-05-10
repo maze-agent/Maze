@@ -1,14 +1,10 @@
 from maze import task
 
 
-@task(
-    inputs=["text", "operation", "options"],
-    outputs=["result"],
-)
-def string_processor(params):
-    text = params.get("text", "")
-    operation = params.get("operation")
-    options = params.get("options", {})
+
+@task
+def string_processor(text: str = "", operation: str = "", options: dict | None = None):
+    options = options or {}
     
     if not operation:
         return {"result": None, "error": "Missing required parameter: operation"}

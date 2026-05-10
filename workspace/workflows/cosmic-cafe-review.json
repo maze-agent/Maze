@@ -1,0 +1,304 @@
+{
+  "schema": "maze-playground-workflow",
+  "version": 3,
+  "savedAt": "2026-05-10T05:22:25.832Z",
+  "workflow": {
+    "name": "Cosmic Cafe Review",
+    "sourceWorkflowId": "85cdd419-b01a-4982-9651-9b4aff2023b5",
+    "nodes": [
+      {
+        "id": "node-cosmic-menu",
+        "type": "taskNode",
+        "position": {
+          "x": 80,
+          "y": 120
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Invent Cosmic Menu",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/invent_cosmic_menu.py",
+          "functionName": "invent_cosmic_menu",
+          "inputs": [
+            {
+              "name": "theme",
+              "dataType": "str",
+              "source": "user",
+              "value": "aurora ramen for time travelers"
+            },
+            {
+              "name": "spice_level",
+              "dataType": "str",
+              "source": "user",
+              "value": "comet-hot"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "menu",
+              "dataType": "any"
+            },
+            {
+              "name": "menu_text",
+              "dataType": "any"
+            },
+            {
+              "name": "seed",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-space-guests",
+        "type": "taskNode",
+        "position": {
+          "x": 430,
+          "y": 70
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Simulate Space Guests",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/simulate_space_guests.py",
+          "functionName": "simulate_space_guests",
+          "inputs": [
+            {
+              "name": "menu",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-cosmic-menu",
+                "outputKey": "menu"
+              }
+            },
+            {
+              "name": "guest_count",
+              "dataType": "str",
+              "source": "user",
+              "value": "9"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "reactions",
+              "dataType": "any"
+            },
+            {
+              "name": "average_score",
+              "dataType": "any"
+            },
+            {
+              "name": "crowd_mood",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-galactic-bill",
+        "type": "taskNode",
+        "position": {
+          "x": 430,
+          "y": 260
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Calculate Galactic Bill",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/calculate_galactic_bill.py",
+          "functionName": "calculate_galactic_bill",
+          "inputs": [
+            {
+              "name": "menu",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-cosmic-menu",
+                "outputKey": "menu"
+              }
+            },
+            {
+              "name": "crowd_mood",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-space-guests",
+                "outputKey": "crowd_mood"
+              }
+            },
+            {
+              "name": "guest_count",
+              "dataType": "str",
+              "source": "user",
+              "value": "9"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "total_credits",
+              "dataType": "any"
+            },
+            {
+              "name": "lucky_table",
+              "dataType": "any"
+            },
+            {
+              "name": "bill_note",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-cafe-review",
+        "type": "taskNode",
+        "position": {
+          "x": 790,
+          "y": 165
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Write Cafe Review",
+          "workspaceDir": "/home/gujing/code/maze/Maze/workspace",
+          "taskPath": "tasks/write_cafe_review.py",
+          "functionName": "write_cafe_review",
+          "inputs": [
+            {
+              "name": "menu_text",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-cosmic-menu",
+                "outputKey": "menu_text"
+              }
+            },
+            {
+              "name": "reactions",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-space-guests",
+                "outputKey": "reactions"
+              }
+            },
+            {
+              "name": "average_score",
+              "dataType": "float",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-space-guests",
+                "outputKey": "average_score"
+              }
+            },
+            {
+              "name": "crowd_mood",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-space-guests",
+                "outputKey": "crowd_mood"
+              }
+            },
+            {
+              "name": "total_credits",
+              "dataType": "int",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-galactic-bill",
+                "outputKey": "total_credits"
+              }
+            },
+            {
+              "name": "bill_note",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-galactic-bill",
+                "outputKey": "bill_note"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "headline",
+              "dataType": "any"
+            },
+            {
+              "name": "review",
+              "dataType": "any"
+            },
+            {
+              "name": "verdict",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-menu-guests",
+        "source": "node-cosmic-menu",
+        "target": "node-space-guests"
+      },
+      {
+        "id": "edge-menu-bill",
+        "source": "node-cosmic-menu",
+        "target": "node-galactic-bill"
+      },
+      {
+        "id": "edge-guests-bill",
+        "source": "node-space-guests",
+        "target": "node-galactic-bill"
+      },
+      {
+        "id": "edge-menu-review",
+        "source": "node-cosmic-menu",
+        "target": "node-cafe-review"
+      },
+      {
+        "id": "edge-guests-review",
+        "source": "node-space-guests",
+        "target": "node-cafe-review"
+      },
+      {
+        "id": "edge-bill-review",
+        "source": "node-galactic-bill",
+        "target": "node-cafe-review"
+      }
+    ]
+  }
+}

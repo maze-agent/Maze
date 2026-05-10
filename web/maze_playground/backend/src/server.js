@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import fs from 'fs/promises';
+import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -107,7 +108,12 @@ function normalizeWorkflowPayload(payload) {
   const workflow = payload?.workflow || payload;
   const nodes = workflow?.nodes;
   const edges = workflow?.edges;
-  const rawTaskDefinitions = workflow?.taskDefinitions || payload?.taskDefinitions || [];
+  const rawIncludedTasks =
+    payload?.includedTasks ||
+    workflow?.includedTasks ||
+    workflow?.taskDefinitions ||
+    payload?.taskDefinitions ||
+    [];
 
   if (!Array.isArray(nodes) || !Array.isArray(edges)) {
     throw new Error('Invalid workflow file: nodes and edges are required');
@@ -126,7 +132,7 @@ function normalizeWorkflowPayload(payload) {
       sourceHandle: edge.sourceHandle || undefined,
       targetHandle: edge.targetHandle || undefined,
     })),
-    taskDefinitions: Array.isArray(rawTaskDefinitions) ? rawTaskDefinitions : [],
+    includedTasks: Array.isArray(rawIncludedTasks) ? rawIncludedTasks : [],
   };
 }
 
@@ -173,11 +179,51 @@ function resolveTaskDefinitionFile(workspaceDir, relativePath) {
   return { relativePath: normalized, fullPath };
 }
 
+async function readWorkspaceTaskCode(workspaceDir, relativePath) {
+  if (!relativePath) {
+    return '';
+  }
+
+  try {
+    const { fullPath } = resolveTaskDefinitionFile(workspaceDir, relativePath);
+    return await fs.readFile(fullPath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+function hashTaskCode(code) {
+  return crypto.createHash('sha256').update(String(code || ''), 'utf8').digest('hex');
+}
+
+function taskDefinitionKey(relativePath, functionName = '') {
+  return `${normalizeTaskRelativePath(relativePath)}::${String(functionName || '')}`;
+}
+
+function stripNodeTaskCode(node, workspaceDir = null) {
+  if (node?.data?.category !== 'workspace') {
+    return node;
+  }
+
+  const relativePath = normalizeTaskRelativePath(node.data.taskPath || node.data.relativePath);
+  const { customCode, relativePath: _relativePath, ...data } = node.data;
+
+  return {
+    ...node,
+    type: 'taskNode',
+    data: {
+      ...data,
+      workspaceDir: workspaceDir || data.workspaceDir,
+      taskPath: relativePath,
+    },
+  };
+}
+
 function collectTaskDefinitions(nodes, explicitDefinitions = []) {
   const definitions = new Map();
 
   const upsert = (definition) => {
-    const relativePath = definition?.relativePath || definition?.taskPath;
+    const relativePath = definition?.relativePath || definition?.taskPath || definition?.sourcePath;
     if (!relativePath) {
       return;
     }
@@ -216,9 +262,60 @@ function collectTaskDefinitions(nodes, explicitDefinitions = []) {
   return Array.from(definitions.values());
 }
 
-async function importTaskDefinitions(workspaceDir, taskDefinitions = []) {
+async function nextImportedTaskPath(workspaceDir, workflowName, relativePath, code) {
+  const normalized = normalizeTaskRelativePath(relativePath);
+  const parsed = path.posix.parse(normalized);
+  const importDir = `tasks/imported/${safeFileName(workflowName, 'workflow')}`;
+  let suffix = 0;
+
+  while (true) {
+    const fileName = suffix === 0 ? parsed.base : `${parsed.name}-${suffix + 1}${parsed.ext}`;
+    const candidate = path.posix.join(importDir, fileName);
+    const { fullPath } = resolveTaskDefinitionFile(workspaceDir, candidate);
+
+    if (!await fileExists(fullPath)) {
+      return candidate;
+    }
+
+    const existingCode = await fs.readFile(fullPath, 'utf-8');
+    if (hashTaskCode(existingCode) === hashTaskCode(code)) {
+      return candidate;
+    }
+
+    suffix += 1;
+  }
+}
+
+async function saveImportedTaskDefinition(workspaceDir, relativePath, definition) {
+  const result = await callPython('save_workspace_task', {
+    workspaceDir,
+    relativePath,
+    code: definition.code,
+    parse: true,
+  });
+
+  if (result.error || result.success === false) {
+    throw new Error(result.error || `Failed to import task: ${relativePath}`);
+  }
+
+  const parsedTask = Array.isArray(result.tasks)
+    ? result.tasks.find((task) => !definition.functionName || task.functionName === definition.functionName)
+    : result.task;
+
+  if (definition.functionName && parsedTask?.functionName !== definition.functionName) {
+    throw new Error(
+      `Imported task ${relativePath} defines ${parsedTask?.functionName || 'no task'} instead of ${definition.functionName}`,
+    );
+  }
+
+  return result;
+}
+
+async function importTaskDefinitions(workspaceDir, taskDefinitions = [], workflowName = 'imported-workflow') {
   const imported = [];
   const skipped = [];
+  const remapped = [];
+  const taskPathMap = new Map();
 
   for (const definition of collectTaskDefinitions([], taskDefinitions)) {
     if (!definition.code || !String(definition.code).trim()) {
@@ -227,42 +324,62 @@ async function importTaskDefinitions(workspaceDir, taskDefinitions = []) {
     }
 
     const { relativePath, fullPath } = resolveTaskDefinitionFile(workspaceDir, definition.relativePath);
+    let targetRelativePath = relativePath;
+
     if (await fileExists(fullPath)) {
-      skipped.push({ relativePath, reason: 'exists' });
-      continue;
+      const existingCode = await fs.readFile(fullPath, 'utf-8');
+      if (hashTaskCode(existingCode) === hashTaskCode(definition.code)) {
+        skipped.push({ relativePath, reason: 'exists-same' });
+      } else {
+        targetRelativePath = await nextImportedTaskPath(workspaceDir, workflowName, relativePath, definition.code);
+        await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition);
+        imported.push({ relativePath: targetRelativePath, sourceRelativePath: relativePath });
+        remapped.push({ from: relativePath, to: targetRelativePath, reason: 'conflict' });
+      }
+    } else {
+      await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition);
+      imported.push({ relativePath: targetRelativePath });
     }
 
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, definition.code, 'utf-8');
-    imported.push({ relativePath });
+    const mapValue = {
+      relativePath: targetRelativePath,
+      code: definition.code,
+    };
+    taskPathMap.set(taskDefinitionKey(relativePath, definition.functionName), mapValue);
+    taskPathMap.set(relativePath, mapValue);
   }
 
-  return { imported, skipped };
+  return { imported, skipped, remapped, taskPathMap };
 }
 
-function applyWorkspaceToWorkflowNodes(nodes, workspaceDir, taskDefinitions = []) {
+async function hydrateWorkspaceWorkflowNodes(nodes, workspaceDir, taskDefinitions = [], taskPathMap = new Map()) {
   const definitionsByPath = new Map(
     collectTaskDefinitions([], taskDefinitions).map((definition) => [definition.relativePath, definition])
   );
 
-  return nodes.map((node) => {
+  return Promise.all(nodes.map(async (node) => {
     if (node?.data?.category !== 'workspace') {
       return node;
     }
 
     const relativePath = normalizeTaskRelativePath(node.data.taskPath || node.data.relativePath);
-    const definition = definitionsByPath.get(relativePath);
+    const functionName = node.data.functionName;
+    const mapped = taskPathMap.get(taskDefinitionKey(relativePath, functionName)) || taskPathMap.get(relativePath);
+    const taskPath = mapped?.relativePath || relativePath;
+    const definition = mapped || definitionsByPath.get(relativePath) || definitionsByPath.get(taskPath);
+    const code = definition?.code || node.data.customCode || await readWorkspaceTaskCode(workspaceDir, taskPath);
 
     return {
       ...node,
+      type: 'taskNode',
       data: {
         ...node.data,
         workspaceDir,
-        taskPath: relativePath,
-        customCode: definition?.code || node.data.customCode || '',
+        taskPath,
+        customCode: code,
       },
     };
-  });
+  }));
 }
 
 // ========== Python 桥接函数 ==========
@@ -413,7 +530,7 @@ app.post('/api/workspace-tasks', async (req, res) => {
     console.log(`💾 保存工作区任务: ${workspaceDir}/${relativePath}`);
 
     if ((!code || !code.trim()) && parse) {
-      return res.status(400).json({ error: '代码不能为空' });
+      return res.status(400).json({ error: 'Code cannot be empty' });
     }
 
     const result = await callPython('save_workspace_task', {
@@ -599,16 +716,16 @@ app.patch('/api/workspace-workflows/rename', async (req, res) => {
     const raw = await fs.readFile(fullPath, 'utf-8');
     const payload = JSON.parse(raw);
     const normalized = normalizeWorkflowPayload(payload);
+    const workflowNodes = normalized.nodes.map((node) => stripNodeTaskCode(node, workspaceDir));
     const nextPayload = {
       schema: payload?.schema || 'maze-playground-workflow',
-      version: Math.max(payload?.version || 1, 2),
+      version: Math.max(payload?.version || 1, 3),
       savedAt: new Date().toISOString(),
       workflow: {
         ...(payload?.workflow || {}),
         name: String(name).trim(),
-        nodes: normalized.nodes,
+        nodes: workflowNodes,
         edges: normalized.edges,
-        taskDefinitions: collectTaskDefinitions(normalized.nodes, normalized.taskDefinitions),
       },
     };
 
@@ -637,7 +754,6 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
       workflowId = null,
       nodes = [],
       edges = [],
-      taskDefinitions = [],
     } = req.body;
 
     if (!Array.isArray(nodes) || !Array.isArray(edges)) {
@@ -645,32 +761,18 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
     }
 
     const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
-    const workflowNodes = nodes.map((node) => {
-      if (node?.data?.category === 'workspace') {
-        const relativePath = normalizeTaskRelativePath(node.data.taskPath || node.data.relativePath);
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            workspaceDir,
-            taskPath: relativePath,
-          },
-        };
-      }
-      return node;
-    });
-    const workflowTaskDefinitions = collectTaskDefinitions(workflowNodes, taskDefinitions);
+    const workflowNodes = nodes.map((node) => stripNodeTaskCode(node, workspaceDir));
     const { relativePath: savedRelativePath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
+    const hydratedWorkflowNodes = await hydrateWorkspaceWorkflowNodes(workflowNodes, workspaceDir);
     const payload = {
       schema: 'maze-playground-workflow',
-      version: 2,
+      version: 3,
       savedAt: new Date().toISOString(),
       workflow: {
         name,
         sourceWorkflowId: workflowId,
         nodes: workflowNodes,
         edges,
-        taskDefinitions: workflowTaskDefinitions,
       },
     };
 
@@ -682,7 +784,10 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
       success: true,
       workspaceDir,
       relativePath: savedRelativePath,
-      workflow: payload.workflow,
+      workflow: {
+        ...payload.workflow,
+        nodes: hydratedWorkflowNodes,
+      },
     });
   } catch (error) {
     console.error('❌ 保存工作区工作流失败:', error);
@@ -707,15 +812,24 @@ app.post('/api/workspace-workflows/load', async (req, res) => {
     const raw = await fs.readFile(fullPath, 'utf-8');
     const payload = JSON.parse(raw);
     const workflow = normalizeWorkflowPayload(payload);
-    const importedTaskDefinitions = await importTaskDefinitions(workspaceDir, workflow.taskDefinitions);
-    workflow.nodes = applyWorkspaceToWorkflowNodes(workflow.nodes, workspaceDir, workflow.taskDefinitions);
+    const importResult = await importTaskDefinitions(workspaceDir, workflow.includedTasks, workflow.name);
+    workflow.nodes = await hydrateWorkspaceWorkflowNodes(
+      workflow.nodes,
+      workspaceDir,
+      workflow.includedTasks,
+      importResult.taskPathMap,
+    );
 
     res.json({
       success: true,
       workspaceDir,
       relativePath: loadedRelativePath,
       workflow,
-      importedTaskDefinitions,
+      importedTaskDefinitions: {
+        imported: importResult.imported,
+        skipped: importResult.skipped,
+        remapped: importResult.remapped,
+      },
     });
   } catch (error) {
     console.error('❌ 加载工作区工作流失败:', error);
@@ -737,14 +851,23 @@ app.post('/api/workspace-workflows/import', async (req, res) => {
 
     const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
     const workflow = normalizeWorkflowPayload(payload);
-    const importedTaskDefinitions = await importTaskDefinitions(workspaceDir, workflow.taskDefinitions);
-    workflow.nodes = applyWorkspaceToWorkflowNodes(workflow.nodes, workspaceDir, workflow.taskDefinitions);
+    const importResult = await importTaskDefinitions(workspaceDir, workflow.includedTasks, workflow.name);
+    workflow.nodes = await hydrateWorkspaceWorkflowNodes(
+      workflow.nodes,
+      workspaceDir,
+      workflow.includedTasks,
+      importResult.taskPathMap,
+    );
 
     res.json({
       success: true,
       workspaceDir,
       workflow,
-      importedTaskDefinitions,
+      importedTaskDefinitions: {
+        imported: importResult.imported,
+        skipped: importResult.skipped,
+        remapped: importResult.remapped,
+      },
     });
   } catch (error) {
     console.error('❌ 导入工作区工作流失败:', error);
@@ -759,7 +882,7 @@ app.post('/api/parse-custom-function', async (req, res) => {
     console.log('🔍 解析自定义函数...');
     
     if (!code || !code.trim()) {
-      return res.status(400).json({ error: '代码不能为空' });
+      return res.status(400).json({ error: 'Code cannot be empty' });
     }
     
     const result = await callPython('parse_custom_function', { code });
@@ -781,7 +904,7 @@ app.post('/api/parse-custom-function', async (req, res) => {
 app.post('/api/workflows', async (req, res) => {
   try {
     const workflowId = uuidv4();
-    const { name = '未命名工作流' } = req.body;
+    const { name = 'Untitled Workflow' } = req.body;
     
     console.log(`📝 创建工作流: ${workflowId}`);
     
@@ -826,7 +949,7 @@ app.get('/api/workflows/:id', async (req, res) => {
     const workflow = workflows.get(id);
     
     if (!workflow) {
-      return res.status(404).json({ error: '工作流不存在' });
+      return res.status(404).json({ error: 'Workflow not found' });
     }
     
     res.json(workflow);
@@ -844,7 +967,7 @@ app.put('/api/workflows/:id', async (req, res) => {
     
     const workflow = workflows.get(id);
     if (!workflow) {
-      return res.status(404).json({ error: '工作流不存在' });
+      return res.status(404).json({ error: 'Workflow not found' });
     }
     
     console.log(`💾 保存工作流: ${id}`);
@@ -864,7 +987,7 @@ app.put('/api/workflows/:id', async (req, res) => {
     workflows.set(id, workflow);
     
     console.log('✅ 工作流保存成功');
-    res.json({ message: '保存成功' });
+    res.json({ message: 'Saved successfully' });
   } catch (error) {
     console.error('❌ 保存工作流失败:', error);
     res.status(500).json({ error: error.message });
@@ -878,11 +1001,11 @@ app.post('/api/workflows/:id/run', async (req, res) => {
     const workflow = workflows.get(id);
     
     if (!workflow) {
-      return res.status(404).json({ error: '工作流不存在' });
+      return res.status(404).json({ error: 'Workflow not found' });
     }
     
     if (!workflow.nodes || workflow.nodes.length === 0) {
-      return res.status(400).json({ error: '工作流没有任务节点' });
+      return res.status(400).json({ error: 'Workflow has no task nodes' });
     }
     
     console.log(`\n🚀 开始运行工作流: ${id}`);
@@ -896,7 +1019,7 @@ app.post('/api/workflows/:id/run', async (req, res) => {
     
     // 立即返回，异步执行工作流
     res.json({ 
-      message: '工作流已开始运行',
+      message: 'Workflow started running',
       workflowId: id
     });
     
@@ -913,7 +1036,7 @@ app.post('/api/workflows/:id/run', async (req, res) => {
         // 通知开始构建
         broadcastToWorkflow(id, {
           type: 'building',
-          message: '正在构建工作流...',
+          message: 'Building workflow...',
           timestamp: new Date().toISOString()
         });
         
@@ -995,7 +1118,7 @@ app.get('/api/workflows/:id/results', async (req, res) => {
     const workflow = workflows.get(id);
     
     if (!workflow) {
-      return res.status(404).json({ error: '工作流不存在' });
+      return res.status(404).json({ error: 'Workflow not found' });
     }
     
     res.json({
@@ -1033,7 +1156,7 @@ server.on('upgrade', (request, socket, head) => {
       ws.send(JSON.stringify({
         type: 'connected',
         workflowId,
-        message: '已连接到工作流结果推送',
+        message: 'Connected to workflow result stream',
         timestamp: new Date().toISOString()
       }));
       
@@ -1055,7 +1178,7 @@ server.on('upgrade', (request, socket, head) => {
         } else if (workflow.status === 'running') {
           ws.send(JSON.stringify({
             type: 'workflow_running',
-            message: '工作流正在运行中...',
+            message: 'Workflow is running...',
             timestamp: new Date().toISOString()
           }));
         }

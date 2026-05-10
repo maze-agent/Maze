@@ -1,13 +1,9 @@
 from maze import task
 import requests
 
-@task(
-    inputs=["location", "api_key"],
-    outputs=["result"],
-)
-def weather(params):
-    location = params.get("location")
-    api_key = params.get("api_key")
+
+@task
+def weather(location: str = "", api_key: str = ""):
     
     if not location or not api_key:
         return {"result": None, "error": "Missing required parameters: location or api_key"}

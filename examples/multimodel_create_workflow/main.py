@@ -39,11 +39,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Task A: 文本预处理和提示词增强
 # ============================================================================
 @task(
-    inputs=["user_description"],
-    outputs=["enhanced_text_prompt", "enhanced_image_prompt", "audio_text"],
     resources={"cpu": 1, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0}
 )
-def preprocess_and_enhance(params):
+def preprocess_and_enhance(user_description: str):
     """
     预处理用户输入，为不同模态生成优化的提示词
     
@@ -53,7 +51,7 @@ def preprocess_and_enhance(params):
         - enhanced_image_prompt: 用于图像生成的优化提示
         - audio_text: 用于语音合成的文本
     """
-    description = params.get("user_description")
+    description = user_description
     
     print(f"[Task A] Processing user input: {description}")
     
@@ -82,18 +80,16 @@ def preprocess_and_enhance(params):
 # Task B: 文本故事生成 (CPU)
 # ============================================================================
 @task(
-    inputs=["text_prompt"],
-    outputs=["generated_story", "story_file_path"],
     resources={"cpu": 4, "cpu_mem": 4096, "gpu": 0, "gpu_mem": 0}
 )
-def generate_story(params):
+def generate_story(text_prompt: str):
     """
     使用 GPT-2 Large 生成创意故事
     
     模型: gpt2-large (774M parameters)
     资源: CPU only, 4 cores, 4GB RAM
     """
-    prompt = params.get("text_prompt")
+    prompt = text_prompt
     
     print(f"[Task B] Starting text story generation...")
     print(f"[Task B] Loading GPT-2 Large model...")
@@ -147,18 +143,16 @@ def generate_story(params):
 # Task C: 图像生成 (GPU)
 # ============================================================================
 @task(
-    inputs=["image_prompt"],
-    outputs=["image_file_path", "image_info"],
     resources={"cpu": 2, "cpu_mem": 2048, "gpu": 1, "gpu_mem": 8192}
 )
-def generate_image(params):
+def generate_image(image_prompt: str):
     """
     使用 Stable Diffusion 生成图像
     
     模型: stable-diffusion-v1-5
     资源: 1 GPU (4090), 8GB VRAM
     """
-    prompt = params.get("image_prompt")
+    prompt = image_prompt
     
     print(f"[Task C] Starting image generation...")
     print(f"[Task C] Prompt: {prompt}")
@@ -213,18 +207,16 @@ def generate_image(params):
 # Task D: 音频生成 (CPU)
 # ============================================================================
 @task(
-    inputs=["audio_text"],
-    outputs=["audio_file_path", "audio_duration"],
     resources={"cpu": 4, "cpu_mem": 4096, "gpu": 0, "gpu_mem": 0}
 )
-def generate_audio(params):
+def generate_audio(audio_text: str):
     """
     使用 Bark 将文本转换为语音
     
     模型: suno/bark-small
     资源: CPU only, 4 cores, 4GB RAM
     """
-    text = params.get("audio_text")
+    text = audio_text
     
     print(f"[Task D] Starting audio generation...")
     print(f"[Task D] Text: {text}")
@@ -274,21 +266,19 @@ def generate_audio(params):
 # Task E: 汇总和展示
 # ============================================================================
 @task(
-    inputs=["story_file", "image_file", "audio_file", "story_text", "image_info", "audio_duration"],
-    outputs=["summary_html_path", "summary_text"],
     resources={"cpu": 1, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0}
 )
-def summarize_results(params):
+def summarize_results(
+    story_file: str,
+    image_file: str,
+    audio_file: str,
+    story_text: str,
+    image_info: str,
+    audio_duration: str,
+):
     """
     汇总所有生成的内容，创建展示页面
     """
-    story_file = params.get("story_file")
-    image_file = params.get("image_file")
-    audio_file = params.get("audio_file")
-    story_text = params.get("story_text")
-    image_info = params.get("image_info")
-    audio_duration = params.get("audio_duration")
-    
     print(f"[Task E] Aggregating all generated content...")
     
     # 创建 HTML 展示页面
@@ -558,5 +548,4 @@ if __name__ == "__main__":
         print(f"\n\n❌ Execution error: {e}")
         import traceback
         traceback.print_exc()
-
 
