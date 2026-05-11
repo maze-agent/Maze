@@ -112,3 +112,6 @@ Here are two vedios which show the process of using builtin tasks and uploading 
 ### User Defined Task Workflow
 ![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.png)  
 [Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.mp4)
+
+## Acknowledgement
+We thank contributors from Huazhong University of Science and Technology, Huawei, and other institutions for their support and contributions to this project.
