@@ -49,7 +49,7 @@
 **From source**
 
    ```bash
-   git clone https://github.com/QinbinLi/Maze.git
+   git clone https://github.com/maze-agent/Maze.git
    cd Maze
    pip install -e .
    ```
