@@ -52,7 +52,7 @@
 **From source**
 
    ```bash
-   git clone https://github.com/QinbinLi/Maze.git
+   git clone https://github.com/maze-agent/Maze.git
    cd Maze
    pip install -e .
    ```
@@ -146,3 +146,6 @@ Here are two videos showing the process of using built-in tasks and uploading us
 ### User Defined Task Workflow
 ![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.png)  
 [Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.mp4)
+
+## Acknowledgement
+We thank contributors from Huazhong University of Science and Technology, Huawei, and other institutions for their support and contributions to this project.
