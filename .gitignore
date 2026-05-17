@@ -34,6 +34,8 @@ env/
 
 # Project specific
 log.txt
+workspace/files/
+workspace/workflow_runs/
 
 # Ignore sensitive configuration files
 secrets.py

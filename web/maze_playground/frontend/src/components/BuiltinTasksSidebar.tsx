@@ -1,9 +1,11 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Divider, Drawer, Empty, Input, List, message, Modal, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Divider, Drawer, Empty, Input, List, message, Modal, Radio, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   CodeOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
   MenuFoldOutlined,
@@ -16,7 +18,8 @@ import {
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import type { BuiltinTaskMeta, WorkflowNode, WorkspaceTaskMeta, WorkspaceWorkflowMeta } from '@/types/workflow';
+import type { BuiltinTaskMeta, WorkflowNode, WorkspaceFileMeta, WorkspaceTaskMeta, WorkspaceWorkflowMeta } from '@/types/workflow';
+import { loadLlmSettings } from '@/utils/llmSettings';
 
 const { Text, Paragraph } = Typography;
 
@@ -27,6 +30,45 @@ def ${functionName}(text: str = ""):
     """Process text and return a result."""
     return {"result": f"Processed: {text}"}
 `;
+
+function safeTaskFunctionName(name: string, fallback = 'workspace_task') {
+  const value = name
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+
+  if (!value) return fallback;
+  return /^[a-zA-Z_]/.test(value) ? value : `task_${value}`;
+}
+
+function joinWorkspacePath(base: string, name: string) {
+  return [base, name].filter(Boolean).join('/');
+}
+
+function parentWorkspacePath(path: string) {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function formatFileSize(size?: number | null) {
+  if (size === null || size === undefined) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function fileToBase64(file: File) {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+}
 
 export default function BuiltinTasksSidebar() {
   const {
@@ -56,11 +98,24 @@ export default function BuiltinTasksSidebar() {
   const [builtinLoading, setBuiltinLoading] = useState(false);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [filesLoading, setFilesLoading] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [newTaskMode, setNewTaskMode] = useState<'manual' | 'ai'>('manual');
+  const [newTaskFunctionName, setNewTaskFunctionName] = useState('');
+  const [newTaskRelativePath, setNewTaskRelativePath] = useState('');
+  const [newTaskDescription, setNewTaskDescription] = useState('');
+  const [newTaskGeneratedCode, setNewTaskGeneratedCode] = useState('');
+  const [newTaskGeneratedNotes, setNewTaskGeneratedNotes] = useState('');
+  const [newTaskError, setNewTaskError] = useState<string | null>(null);
+  const [generatingTask, setGeneratingTask] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [workspaceInput, setWorkspaceInput] = useState(workspaceDir);
   const [workspaceErrors, setWorkspaceErrors] = useState<Array<{ relativePath: string; error: string }>>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileMeta[]>([]);
+  const [workspaceFilesPath, setWorkspaceFilesPath] = useState('');
+  const [previewFile, setPreviewFile] = useState<{ path: string; content: string } | null>(null);
   const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
   const [selectedWorkspaceTaskKey, setSelectedWorkspaceTaskKey] = useState<string | null>(null);
   const [selectedWorkflowPath, setSelectedWorkflowPath] = useState<string | null>(null);
@@ -77,10 +132,13 @@ export default function BuiltinTasksSidebar() {
   const draggingWorkspaceRef = useRef(false);
   const taskImportInputRef = useRef<HTMLInputElement | null>(null);
   const taskImportTargetRef = useRef<WorkspaceTaskMeta | null>(null);
+  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const fileUploadTargetPathRef = useRef('');
 
   useEffect(() => {
     loadWorkspaceTasks();
     loadWorkspaceWorkflows();
+    loadWorkspaceFiles();
     if (builtinTasks.length === 0) {
       loadBuiltinTasks(false);
     }
@@ -185,15 +243,156 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
+  const loadWorkspaceFiles = async (dir?: string, filePath = workspaceFilesPath, showSuccess = false) => {
+    setFilesLoading(true);
+    try {
+      const normalizedDir = dir?.trim() || undefined;
+      const result = await api.getWorkspaceFiles({
+        workspaceDir: normalizedDir,
+        path: filePath,
+      });
+      setWorkspaceDir(result.workspaceDir);
+      setWorkspaceInput(result.workspaceDir);
+      setWorkspaceFiles(result.files || []);
+      setWorkspaceFilesPath(result.path || '');
+
+      if (showSuccess) {
+        message.success('Workspace files refreshed');
+      }
+
+      return result;
+    } catch (error: any) {
+      console.error('Failed to load workspace files:', error);
+      message.error(error.response?.data?.error || 'Failed to load workspace files');
+      throw error;
+    } finally {
+      setFilesLoading(false);
+    }
+  };
+
   const handleChangeWorkspace = async (dir: string) => {
     try {
       const tasksResult = await loadWorkspaceTasks(dir);
       await loadWorkspaceWorkflows(tasksResult.workspaceDir);
+      await loadWorkspaceFiles(tasksResult.workspaceDir, '');
       setCurrentWorkspaceWorkflowPath(null);
       message.success('Workspace loaded');
     } catch (error) {
       console.error('Failed to change workspace:', error);
     }
+  };
+
+  const startUploadWorkspaceFiles = (targetPath = workspaceFilesPath) => {
+    fileUploadTargetPathRef.current = targetPath;
+    if (fileUploadInputRef.current) {
+      fileUploadInputRef.current.value = '';
+      fileUploadInputRef.current.click();
+    }
+  };
+
+  const handleUploadWorkspaceFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+
+    if (files.length === 0 || !workspaceDir) {
+      return;
+    }
+
+    const targetPath = fileUploadTargetPathRef.current || workspaceFilesPath;
+
+    try {
+      for (const file of files) {
+        const contentBase64 = await fileToBase64(file);
+        await api.uploadWorkspaceFile({
+          workspaceDir,
+          relativePath: joinWorkspacePath(targetPath, file.name),
+          contentBase64,
+        });
+      }
+      await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
+      const targetLabel = targetPath ? ` to ${targetPath}` : '';
+      message.success(files.length === 1 ? `File uploaded${targetLabel}` : `${files.length} files uploaded${targetLabel}`);
+    } catch (error: any) {
+      console.error('Failed to upload workspace file:', error);
+      message.error(error.response?.data?.error || 'Failed to upload workspace file');
+    } finally {
+      fileUploadTargetPathRef.current = workspaceFilesPath;
+    }
+  };
+
+  const createWorkspaceFolder = async () => {
+    if (!workspaceDir) {
+      return;
+    }
+
+    let folderName = '';
+    Modal.confirm({
+      title: 'New folder',
+      content: (
+        <Input
+          autoFocus
+          placeholder="Folder name"
+          onChange={(event) => {
+            folderName = event.target.value;
+          }}
+        />
+      ),
+      onOk: async () => {
+        const cleanName = folderName.trim();
+        if (!cleanName) {
+          message.warning('Please enter a folder name');
+          return Promise.reject();
+        }
+        await api.createWorkspaceFolder({
+          workspaceDir,
+          relativePath: joinWorkspacePath(workspaceFilesPath, cleanName),
+        });
+        await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
+        message.success('Folder created');
+      },
+    });
+  };
+
+  const deleteWorkspaceFile = async (file: WorkspaceFileMeta) => {
+    if (!workspaceDir) {
+      return;
+    }
+
+    Modal.confirm({
+      title: `Delete ${file.type}?`,
+      content: file.relativePath,
+      okText: 'Delete',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api.deleteWorkspaceFile({
+          workspaceDir,
+          relativePath: file.relativePath,
+        });
+        await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
+        message.success('Deleted');
+      },
+    });
+  };
+
+  const previewWorkspaceFile = async (file: WorkspaceFileMeta) => {
+    if (!workspaceDir || file.type !== 'file') {
+      return;
+    }
+
+    try {
+      const result = await api.previewWorkspaceFile(workspaceDir, file.relativePath);
+      setPreviewFile({ path: file.relativePath, content: result.content });
+    } catch (error: any) {
+      console.error('Failed to preview workspace file:', error);
+      message.error(error.response?.data?.error || 'Failed to preview workspace file');
+    }
+  };
+
+  const downloadWorkspaceFile = (file: WorkspaceFileMeta) => {
+    if (!workspaceDir || file.type !== 'file') {
+      return;
+    }
+    window.open(api.getWorkspaceFileDownloadUrl(workspaceDir, file.relativePath), '_blank');
   };
 
   const createWorkspaceNode = (task: WorkspaceTaskMeta, position = getDefaultPosition()): WorkflowNode => ({
@@ -666,19 +865,41 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
-  const handleCreateWorkspaceTask = async () => {
+  const openNewWorkspaceTaskModal = () => {
+    const stamp = Date.now();
+    const functionName = `workspace_task_${stamp}`;
+    setNewTaskMode('manual');
+    setNewTaskFunctionName(functionName);
+    setNewTaskRelativePath(`tasks/${functionName}.py`);
+    setNewTaskDescription('');
+    setNewTaskGeneratedCode('');
+    setNewTaskGeneratedNotes('');
+    setNewTaskError(null);
+    setNewTaskOpen(true);
+  };
+
+  const closeNewWorkspaceTaskModal = () => {
+    if (creatingTask || generatingTask) {
+      return;
+    }
+    setNewTaskOpen(false);
+    setNewTaskError(null);
+  };
+
+  const resolveActiveWorkspace = async () => {
+    const requestedWorkspace = workspaceInput.trim() || workspaceDir;
+    return requestedWorkspace
+      ? (requestedWorkspace === workspaceDir ? workspaceDir : (await loadWorkspaceTasks(requestedWorkspace)).workspaceDir)
+      : (await loadWorkspaceTasks()).workspaceDir;
+  };
+
+  const saveNewWorkspaceTask = async (code: string, relativePath: string) => {
     setCreatingTask(true);
+    setNewTaskError(null);
     try {
-      const requestedWorkspace = workspaceInput.trim() || workspaceDir;
-      const activeWorkspace = requestedWorkspace
-        ? (requestedWorkspace === workspaceDir ? workspaceDir : (await loadWorkspaceTasks(requestedWorkspace)).workspaceDir)
-        : (await loadWorkspaceTasks()).workspaceDir;
+      const activeWorkspace = await resolveActiveWorkspace();
       await ensureWorkflow();
 
-      const stamp = Date.now();
-      const functionName = `workspace_task_${stamp}`;
-      const relativePath = `tasks/${functionName}.py`;
-      const code = defaultWorkspaceTaskCode(functionName);
       const saved = await api.saveWorkspaceTask({
         workspaceDir: activeWorkspace,
         relativePath,
@@ -691,12 +912,96 @@ export default function BuiltinTasksSidebar() {
       addNode(newNode);
       selectNode(newNode);
       message.success('Workspace task created');
+      setNewTaskOpen(false);
     } catch (error: any) {
       console.error('Failed to create workspace task:', error);
-      message.error(error.response?.data?.error || 'Failed to create workspace task');
+      const errorMessage = error.response?.data?.error || 'Failed to create workspace task';
+      setNewTaskError(errorMessage);
+      message.error(errorMessage);
     } finally {
       setCreatingTask(false);
     }
+  };
+
+  const handleCreateManualWorkspaceTask = async () => {
+    const functionName = safeTaskFunctionName(newTaskFunctionName, `workspace_task_${Date.now()}`);
+    const relativePath = newTaskRelativePath.trim() || `tasks/${functionName}.py`;
+    await saveNewWorkspaceTask(defaultWorkspaceTaskCode(functionName), relativePath);
+  };
+
+  const buildTaskGenerationContext = () => nodes.map((node) => {
+    const workspaceTask = node.data.category === 'workspace'
+      ? workspaceTasks.find((task) =>
+          task.workspaceDir === node.data.workspaceDir &&
+          task.relativePath === node.data.taskPath &&
+          task.functionName === node.data.functionName)
+      : null;
+    const builtinTask = node.data.category === 'builtin'
+      ? builtinTasks.find((task) => `${task.module}.${task.functionRef}` === node.data.taskRef)
+      : null;
+
+    return {
+      nodeId: node.id,
+      label: node.data.label,
+      category: node.data.category,
+      functionName: node.data.functionName || workspaceTask?.functionName || builtinTask?.functionRef,
+      taskRef: node.data.taskRef,
+      relativePath: node.data.taskPath || workspaceTask?.relativePath,
+      description: workspaceTask?.description || builtinTask?.description || '',
+      inputs: node.data.inputs,
+      outputs: node.data.outputs,
+      codePreview: workspaceTask?.code ? workspaceTask.code.slice(0, 1200) : undefined,
+    };
+  });
+
+  const handleGenerateWorkspaceTask = async () => {
+    const description = newTaskDescription.trim();
+    if (!description) {
+      message.warning('Please describe the task');
+      return;
+    }
+
+    const settings = loadLlmSettings();
+    if (!settings.model) {
+      message.warning('Please configure an LLM model first');
+      return;
+    }
+
+    setGeneratingTask(true);
+    setNewTaskError(null);
+    setNewTaskGeneratedNotes('');
+    try {
+      const generated = await api.generateWorkspaceTask({
+        ...settings,
+        description,
+        taskName: newTaskFunctionName,
+        relativePath: newTaskRelativePath,
+        taskContext: buildTaskGenerationContext(),
+      });
+      setNewTaskFunctionName(generated.functionName);
+      setNewTaskRelativePath(generated.relativePath);
+      setNewTaskGeneratedCode(generated.code);
+      setNewTaskGeneratedNotes(generated.notes || '');
+      if ((generated.warnings || []).length > 0) {
+        setNewTaskError(generated.warnings!.join('\n'));
+      }
+      message.success('Task code generated');
+    } catch (error: any) {
+      console.error('Failed to generate workspace task:', error);
+      const errorMessage = error.response?.data?.error || 'Failed to generate workspace task';
+      setNewTaskError(errorMessage);
+      message.error(errorMessage);
+    } finally {
+      setGeneratingTask(false);
+    }
+  };
+
+  const handleSaveGeneratedWorkspaceTask = async () => {
+    if (!newTaskGeneratedCode.trim()) {
+      message.warning('Generate or enter task code first');
+      return;
+    }
+    await saveNewWorkspaceTask(newTaskGeneratedCode, newTaskRelativePath.trim() || `tasks/${safeTaskFunctionName(newTaskFunctionName)}.py`);
   };
 
   const onDragStartBuiltin = (event: React.DragEvent, task: BuiltinTaskMeta) => {
@@ -840,6 +1145,13 @@ export default function BuiltinTasksSidebar() {
           type="file"
           accept=".py,text/x-python,text/plain"
           onChange={handleImportWorkspaceTask}
+          style={{ display: 'none' }}
+        />
+        <input
+          ref={fileUploadInputRef}
+          type="file"
+          multiple
+          onChange={handleUploadWorkspaceFile}
           style={{ display: 'none' }}
         />
       {collapsed ? (
@@ -995,6 +1307,101 @@ export default function BuiltinTasksSidebar() {
 
           <Divider />
 
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <h3 style={{ margin: 0 }}>Files</h3>
+            <Space size={4}>
+              <Button
+                type="text"
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => loadWorkspaceFiles(workspaceInput || workspaceDir, workspaceFilesPath, true)}
+                loading={filesLoading}
+              />
+              <Button
+                size="small"
+                icon={<FolderOpenOutlined />}
+                onClick={createWorkspaceFolder}
+              />
+              <Button
+                type="primary"
+                size="small"
+                icon={<UploadOutlined />}
+                onClick={() => startUploadWorkspaceFiles(workspaceFilesPath)}
+              >
+                Upload
+              </Button>
+            </Space>
+          </div>
+          <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginBottom: '8px' }}>
+            workspace/files/{workspaceFilesPath || ''}
+          </Text>
+          {workspaceFilesPath && (
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: 0, marginBottom: '6px' }}
+              onClick={() => loadWorkspaceFiles(workspaceDir, parentWorkspacePath(workspaceFilesPath))}
+            >
+              .. parent
+            </Button>
+          )}
+          <List
+            size="small"
+            loading={filesLoading}
+            dataSource={workspaceFiles}
+            locale={{ emptyText: <Empty description="No workspace files" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            renderItem={(file) => (
+              <List.Item
+                style={{ padding: '6px 0' }}
+                actions={[
+                  file.type === 'file' ? (
+                    <Tooltip key="preview" title="Preview">
+                      <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => previewWorkspaceFile(file)} />
+                    </Tooltip>
+                  ) : null,
+                  file.type === 'file' ? (
+                    <Tooltip key="download" title="Download">
+                      <Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => downloadWorkspaceFile(file)} />
+                    </Tooltip>
+                  ) : null,
+                  file.type === 'directory' ? (
+                    <Tooltip key="upload" title="Upload here">
+                      <Button type="text" size="small" icon={<UploadOutlined />} onClick={() => startUploadWorkspaceFiles(file.relativePath)} />
+                    </Tooltip>
+                  ) : null,
+                  <Tooltip key="delete" title="Delete">
+                    <Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={() => deleteWorkspaceFile(file)} />
+                  </Tooltip>,
+                ].filter(Boolean)}
+              >
+                <List.Item.Meta
+                  avatar={file.type === 'directory' ? <FolderOpenOutlined /> : <FileTextOutlined />}
+                  title={
+                    file.type === 'directory' ? (
+                      <Button
+                        type="link"
+                        size="small"
+                        style={{ padding: 0 }}
+                        onClick={() => loadWorkspaceFiles(workspaceDir, file.relativePath)}
+                      >
+                        {file.name}
+                      </Button>
+                    ) : (
+                      <Text style={{ fontSize: '13px' }}>{file.name}</Text>
+                    )
+                  }
+                  description={
+                    <Text type="secondary" style={{ fontSize: '11px' }}>
+                      {file.type === 'file' ? formatFileSize(file.size) : 'folder'}
+                    </Text>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+
+          <Divider />
+
           <div style={{ marginBottom: '12px' }}>
             <h3 style={{ margin: 0 }}>Tasks</h3>
           </div>
@@ -1013,7 +1420,7 @@ export default function BuiltinTasksSidebar() {
                 type="primary"
                 size="small"
                 icon={<PlusOutlined />}
-                onClick={handleCreateWorkspaceTask}
+                onClick={openNewWorkspaceTaskModal}
                 loading={creatingTask}
               >
                 New Task
@@ -1026,7 +1433,7 @@ export default function BuiltinTasksSidebar() {
 
           {workspaceTasks.length === 0 ? (
             <Empty description="No workspace tasks" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button size="small" icon={<PlusOutlined />} onClick={handleCreateWorkspaceTask} loading={creatingTask}>
+              <Button size="small" icon={<PlusOutlined />} onClick={openNewWorkspaceTaskModal} loading={creatingTask}>
                 New Task
               </Button>
             </Empty>
@@ -1259,6 +1666,146 @@ export default function BuiltinTasksSidebar() {
           />
         </Space>
       </Drawer>
+
+      <Modal
+        title="New Workspace Task"
+        open={newTaskOpen}
+        onCancel={closeNewWorkspaceTaskModal}
+        width={760}
+        footer={newTaskMode === 'manual' ? [
+          <Button key="cancel" onClick={closeNewWorkspaceTaskModal} disabled={creatingTask}>
+            Cancel
+          </Button>,
+          <Button key="create" type="primary" icon={<PlusOutlined />} loading={creatingTask} onClick={handleCreateManualWorkspaceTask}>
+            Create
+          </Button>,
+        ] : [
+          <Button key="cancel" onClick={closeNewWorkspaceTaskModal} disabled={creatingTask || generatingTask}>
+            Cancel
+          </Button>,
+          <Button key="generate" icon={<ThunderboltOutlined />} loading={generatingTask} onClick={handleGenerateWorkspaceTask}>
+            Generate
+          </Button>,
+          <Button key="save" type="primary" icon={<SaveOutlined />} loading={creatingTask} onClick={handleSaveGeneratedWorkspaceTask}>
+            Save Task
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Radio.Group
+            value={newTaskMode}
+            onChange={(event) => {
+              setNewTaskMode(event.target.value);
+              setNewTaskError(null);
+            }}
+            optionType="button"
+            buttonStyle="solid"
+            options={[
+              { label: 'Manual', value: 'manual' },
+              { label: 'Generate with AI', value: 'ai' },
+            ]}
+          />
+
+          {newTaskError && (
+            <Alert
+              type={newTaskError.includes('Generated code') ? 'warning' : 'error'}
+              showIcon
+              closable
+              message={newTaskError.includes('Generated code') ? 'Generation warning' : 'Task creation failed'}
+              description={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{newTaskError}</pre>}
+              onClose={() => setNewTaskError(null)}
+            />
+          )}
+
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Text strong>Function name</Text>
+            <Input
+              value={newTaskFunctionName}
+              onChange={(event) => setNewTaskFunctionName(event.target.value)}
+              placeholder="process_file"
+            />
+          </Space>
+
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Text strong>Task file</Text>
+            <Input
+              value={newTaskRelativePath}
+              onChange={(event) => setNewTaskRelativePath(event.target.value)}
+              placeholder="tasks/ai_generated/process_file.py"
+            />
+          </Space>
+
+          {newTaskMode === 'manual' ? (
+            <Alert
+              type="info"
+              showIcon
+              message="A template task will be created and added to the canvas."
+            />
+          ) : (
+            <>
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Text strong>Task description</Text>
+                <Input.TextArea
+                  value={newTaskDescription}
+                  onChange={(event) => setNewTaskDescription(event.target.value)}
+                  autoSize={{ minRows: 4, maxRows: 8 }}
+                  placeholder="Read input.csv, compute missing values per column, and write reports/missing_values.json"
+                />
+              </Space>
+
+              {newTaskGeneratedNotes && (
+                <Alert type="info" showIcon message="Notes" description={newTaskGeneratedNotes} />
+              )}
+
+              <Alert
+                type="info"
+                showIcon
+                message="Runtime file root"
+                description='Path(".") is a task sandbox containing the staged workspace files and parent artifacts. It will not print as the physical workspace/files directory; use relative paths such as input.csv or reports/output.json.'
+              />
+
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Text strong>Generated code</Text>
+                <Input.TextArea
+                  value={newTaskGeneratedCode}
+                  onChange={(event) => setNewTaskGeneratedCode(event.target.value)}
+                  autoSize={{ minRows: 14, maxRows: 24 }}
+                  style={{
+                    fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+                    fontSize: '13px',
+                  }}
+                />
+              </Space>
+            </>
+          )}
+        </Space>
+      </Modal>
+
+      <Modal
+        title={previewFile?.path || 'Preview'}
+        open={!!previewFile}
+        onCancel={() => setPreviewFile(null)}
+        footer={[
+          <Button key="close" onClick={() => setPreviewFile(null)}>
+            Close
+          </Button>,
+        ]}
+        width={720}
+      >
+        <pre
+          style={{
+            maxHeight: '520px',
+            overflow: 'auto',
+            background: '#f5f5f5',
+            padding: '12px',
+            borderRadius: '4px',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {previewFile?.content}
+        </pre>
+      </Modal>
     </>
   );
 }

@@ -93,7 +93,14 @@ async def save_task(req:Request):
             code_ser = data.get("code_ser")
             if code_ser is None and code_str is None:
                 raise HTTPException(status_code=500, detail="code_str or code_ser is required")
-            task.save_task(task_input=task_input, task_output=task_output, code_str = code_str, code_ser = code_ser, resources=resources)
+            task.save_task(
+                task_input=task_input,
+                task_output=task_output,
+                code_str=code_str,
+                code_ser=code_ser,
+                resources=resources,
+                file_context=data.get("file_context"),
+            )
         else:
             raise HTTPException(status_code=500, detail="Invalid task_type")
   
@@ -118,7 +125,14 @@ async def save_task_and_add_edge(req:Request):
             code_ser = data.get("code_ser")
             if code_ser is None and code_str is None:
                 raise HTTPException(status_code=500, detail="code_str or code_ser is required")
-            task.save_task(task_input=task_input, task_output=task_output, code_str = code_str, code_ser = code_ser, resources=resources)
+            task.save_task(
+                task_input=task_input,
+                task_output=task_output,
+                code_str=code_str,
+                code_ser=code_ser,
+                resources=resources,
+                file_context=data.get("file_context"),
+            )
 
             # 修复：正确遍历 input_params
             for _, input_param in task_input.get("input_params", {}).items():
@@ -166,7 +180,7 @@ async def run_workflow(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         
-        run_id = mapath.run_workflow(workflow_id)
+        run_id = mapath.run_workflow(workflow_id, file_context=data.get("file_context"))
         return {"status":"success","run_id": run_id}
     except Exception as e:
         print(e)
@@ -180,6 +194,160 @@ async def get_workflow_res(websocket: WebSocket, workflow_id: str, run_id: str):
         await websocket.close()
     except Exception as e:
         await mapath.stop_workflow(run_id)
+        await websocket.close()
+
+@app.post("/dynamic_runs")
+async def create_dynamic_run(req: Request):
+    try:
+        data = await req.json()
+        run_id = await mapath.create_dynamic_run(
+            max_tasks=data.get("max_tasks", 100),
+            timeout_seconds=data.get("timeout_seconds"),
+        )
+        return {"status": "success", "run_id": run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dynamic_runs")
+async def list_dynamic_runs(status: Optional[str] = None, limit: Optional[int] = None):
+    try:
+        return {
+            "status": "success",
+            "runs": await mapath.list_dynamic_runs(status=status, limit=limit),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/cleanup")
+async def cleanup_dynamic_runs(req: Request):
+    try:
+        try:
+            data = await req.json()
+        except Exception:
+            data = {}
+        return {
+            "status": "success",
+            "cleanup": await mapath.cleanup_dynamic_runs(
+                statuses=data.get("statuses"),
+                older_than_days=data.get("older_than_days"),
+                dry_run=data.get("dry_run", True),
+            ),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/task_specs")
+async def register_dynamic_task_spec(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        task_spec = await mapath.register_dynamic_task_spec(run_id, data)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "task_spec_id": task_spec.task_spec_id,
+            "task_name": task_spec.task_name,
+            "inputs": task_spec.inputs,
+            "outputs": task_spec.outputs,
+            "resources": task_spec.resources,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dynamic_runs/{run_id}")
+async def get_dynamic_run(run_id: str):
+    try:
+        return {
+            "status": "success",
+            "run": await mapath.get_dynamic_run_snapshot(run_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/dynamic_runs/{run_id}")
+async def delete_dynamic_run(run_id: str):
+    try:
+        return {
+            "status": "success",
+            **await mapath.delete_dynamic_run(run_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/append_task")
+async def append_dynamic_task(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        task, idempotent = await mapath.append_dynamic_task(
+            run_id=run_id,
+            task_spec_id=data.get("task_spec_id"),
+            task_spec_payload=data.get("task_spec"),
+            inputs=data.get("inputs", {}),
+            parents=data.get("parents", []),
+            request_id=data.get("request_id"),
+        )
+        outputs = []
+        if task.task_output:
+            outputs = [
+                {
+                    "name": output_info.get("key"),
+                    "data_type": output_info.get("data_type", "any"),
+                }
+                for output_info in task.task_output.get("output_params", {}).values()
+            ]
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "task_id": task.task_id,
+            "task_name": task.task_name,
+            "outputs": outputs,
+            "idempotent": idempotent,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/finalize")
+async def finalize_dynamic_run(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        await mapath.finalize_dynamic_run(run_id, data.get("result"))
+        return {"status": "success", "run_id": run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/cancel")
+async def cancel_dynamic_run(run_id: str, req: Request):
+    try:
+        try:
+            data = await req.json()
+        except Exception:
+            data = {}
+        dynamic_run = await mapath.cancel_dynamic_run(run_id, data.get("reason"))
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "run_status": dynamic_run.status,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dynamic_runs/{run_id}/events")
+async def get_dynamic_run_events(run_id: str, after: Optional[int] = None):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "events": await mapath.get_dynamic_run_events(run_id, after),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/dynamic_runs/{run_id}/events")
+async def get_dynamic_run_events_ws(websocket: WebSocket, run_id: str):
+    try:
+        await websocket.accept()
+        await mapath.get_dynamic_run_res(run_id, websocket)
+        await websocket.close()
+    except Exception:
         await websocket.close()
 
 @app.post("/add_langgraph_task")

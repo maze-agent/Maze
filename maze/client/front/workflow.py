@@ -335,7 +335,7 @@ class MaWorkflow:
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
     
-    def run(self) -> str:
+    def run(self, file_context: Optional[Dict[str, Any]] = None) -> str:
         """
         Run workflow
         
@@ -351,6 +351,8 @@ class MaWorkflow:
         data = {
             'workflow_id': self.workflow_id,
         }
+        if file_context:
+            data['file_context'] = file_context
         
         response = requests.post(url, json=data)
         

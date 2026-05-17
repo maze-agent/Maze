@@ -2,11 +2,17 @@ import axios from 'axios';
 import type {
   BuiltinTaskMeta,
   WorkspaceTasksResponse,
+  WorkspaceFilesResponse,
   WorkspaceWorkflowsResponse,
+  DynamicRunEvent,
+  DynamicRunSnapshot,
+  StaticWorkflowRunEvent,
+  StaticWorkflowRunSnapshot,
   Workflow,
   WorkflowEdge,
   WorkflowNode,
 } from '@/types/workflow';
+import type { LlmSettings } from '@/utils/llmSettings';
 
 const API_BASE = '/api';
 
@@ -54,6 +60,93 @@ export const api = {
   }): Promise<any> {
     const response = await axios.patch(`${API_BASE}/workspace-tasks/rename`, data);
     return response.data;
+  },
+
+  async getWorkspaceFiles(params?: {
+    workspaceDir?: string;
+    path?: string;
+  }): Promise<WorkspaceFilesResponse> {
+    const response = await axios.get(`${API_BASE}/workspace-files`, { params });
+    return response.data;
+  },
+
+  async uploadWorkspaceFile(data: {
+    workspaceDir: string;
+    relativePath: string;
+    contentBase64: string;
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE}/workspace-files/upload`, data);
+    return response.data;
+  },
+
+  async testLlmConnection(settings: LlmSettings): Promise<{
+    success: boolean;
+    model: string;
+    content?: string;
+  }> {
+    const response = await axios.post(`${API_BASE}/llm/test`, settings);
+    return response.data;
+  },
+
+  async generateWorkspaceTask(data: LlmSettings & {
+    description: string;
+    taskName?: string;
+    relativePath?: string;
+    taskContext?: Array<{
+      nodeId?: string;
+      label?: string;
+      category?: string;
+      functionName?: string;
+      taskRef?: string;
+      relativePath?: string;
+      description?: string;
+      inputs?: any[];
+      outputs?: any[];
+      codePreview?: string;
+    }>;
+  }): Promise<{
+    success: boolean;
+    model: string;
+    functionName: string;
+    relativePath: string;
+    code: string;
+    notes?: string;
+    rawContent?: string;
+    warnings?: string[];
+  }> {
+    const response = await axios.post(`${API_BASE}/llm/generate-task`, data);
+    return response.data;
+  },
+
+  async createWorkspaceFolder(data: {
+    workspaceDir: string;
+    relativePath: string;
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE}/workspace-files/mkdir`, data);
+    return response.data;
+  },
+
+  async deleteWorkspaceFile(data: {
+    workspaceDir: string;
+    relativePath: string;
+  }): Promise<any> {
+    const response = await axios.delete(`${API_BASE}/workspace-files`, { data });
+    return response.data;
+  },
+
+  async previewWorkspaceFile(
+    workspaceDir: string,
+    path: string,
+  ): Promise<{ success: boolean; workspaceDir: string; relativePath: string; content: string }> {
+    const response = await axios.get(`${API_BASE}/workspace-files/preview`, {
+      params: { workspaceDir, path },
+    });
+    return response.data;
+  },
+
+  getWorkspaceFileDownloadUrl(workspaceDir: string, path: string): string {
+    const params = new URLSearchParams({ workspaceDir, path });
+    return `${API_BASE}/workspace-files/download?${params.toString()}`;
   },
 
   // Get saved workflows from <workspaceDir>/workflows
@@ -162,8 +255,8 @@ export const api = {
   },
 
   // Create workflow
-  async createWorkflow(name?: string): Promise<{ 
-    workflowId: string; 
+  async createWorkflow(name?: string): Promise<{
+    workflowId: string;
     name: string;
     mazeWorkflowId: string;
   }> {
@@ -187,11 +280,13 @@ export const api = {
   },
 
   // Run workflow
-  async runWorkflow(workflowId: string): Promise<{ 
+  async runWorkflow(workflowId: string, workspaceDir?: string): Promise<{
     message: string;
     workflowId: string;
+    runId: string;
+    run: StaticWorkflowRunSnapshot;
   }> {
-    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`);
+    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`, { workspaceDir });
     return response.data;
   },
 
@@ -205,9 +300,103 @@ export const api = {
     return response.data;
   },
 
+  async getDynamicRuns(params?: {
+    status?: string;
+    limit?: number;
+  }): Promise<{ success: boolean; runs: DynamicRunSnapshot[] }> {
+    const response = await axios.get(`${API_BASE}/dynamic-runs`, { params });
+    return response.data;
+  },
+
+  async getDynamicRun(runId: string): Promise<{ success: boolean; run: DynamicRunSnapshot }> {
+    const response = await axios.get(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}`);
+    return response.data;
+  },
+
+  async getDynamicRunEvents(
+    runId: string,
+    after?: number,
+  ): Promise<{ success: boolean; runId: string; events: DynamicRunEvent[] }> {
+    const response = await axios.get(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}/events`, {
+      params: after !== undefined ? { after } : undefined,
+    });
+    return response.data;
+  },
+
+  async deleteDynamicRun(runId: string): Promise<{ success: boolean; runId: string; deleted: boolean }> {
+    const response = await axios.delete(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}`);
+    return response.data;
+  },
+
+  async cleanupDynamicRuns(data: {
+    statuses?: string[];
+    older_than_days?: number;
+    dry_run?: boolean;
+  }): Promise<{ success: boolean; cleanup: any }> {
+    const response = await axios.post(`${API_BASE}/dynamic-runs/cleanup`, data);
+    return response.data;
+  },
+
+  async getStaticWorkflowRuns(params?: {
+    workspaceDir?: string;
+    status?: string;
+    limit?: number;
+  }): Promise<{ success: boolean; workspaceDir: string; runs: StaticWorkflowRunSnapshot[] }> {
+    const response = await axios.get(`${API_BASE}/workflow-runs/static`, { params });
+    return response.data;
+  },
+
+  async getStaticWorkflowRun(
+    runId: string,
+    workspaceDir?: string,
+  ): Promise<{ success: boolean; workspaceDir: string; run: StaticWorkflowRunSnapshot }> {
+    const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
+      params: workspaceDir ? { workspaceDir } : undefined,
+    });
+    return response.data;
+  },
+
+  async getStaticWorkflowRunEvents(
+    runId: string,
+    workspaceDir?: string,
+    after?: number,
+  ): Promise<{ success: boolean; workspaceDir: string; runId: string; events: StaticWorkflowRunEvent[] }> {
+    const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}/events`, {
+      params: {
+        ...(workspaceDir ? { workspaceDir } : {}),
+        ...(after !== undefined ? { after } : {}),
+      },
+    });
+    return response.data;
+  },
+
+  async deleteStaticWorkflowRun(
+    runId: string,
+    workspaceDir?: string,
+  ): Promise<{ success: boolean; workspaceDir: string; runId: string; deleted: boolean }> {
+    const response = await axios.delete(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
+      data: workspaceDir ? { workspaceDir } : undefined,
+    });
+    return response.data;
+  },
+
+  getStaticRunArtifactDownloadUrl(
+    runId: string,
+    taskId: string,
+    path: string,
+    workspaceDir?: string,
+  ): string {
+    const params = new URLSearchParams({
+      taskId,
+      path,
+      ...(workspaceDir ? { workspaceDir } : {}),
+    });
+    return `${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}/artifacts/download?${params.toString()}`;
+  },
+
   // Connect WebSocket for real-time results
   connectWebSocket(
-    workflowId: string, 
+    workflowId: string,
     callbacks: {
       onConnected?: () => void;
       onMessage?: (data: any) => void;
@@ -216,6 +405,7 @@ export const api = {
       onWorkflowCompleted?: (results: any) => void;
       onWorkflowFailed?: (error: string, traceback?: string) => void;
       onTaskUpdate?: (event: any) => void;
+      onRunUpdate?: (payload: any) => void;
       onError?: (error: Event) => void;
       onClose?: () => void;
     }
@@ -232,25 +422,25 @@ export const api = {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
+
         callbacks.onMessage?.(data);
 
         switch (data.type) {
           case 'connected':
             break;
-          
+
           case 'workflow_started':
             callbacks.onWorkflowStarted?.();
             break;
-          
+
           case 'building':
             callbacks.onBuilding?.(data.message);
             break;
-          
+
           case 'workflow_completed':
             callbacks.onWorkflowCompleted?.(data.results);
             break;
-          
+
           case 'workflow_failed':
             callbacks.onWorkflowFailed?.(data.error, data.traceback);
             break;
@@ -258,10 +448,15 @@ export const api = {
           case 'task_update':
             callbacks.onTaskUpdate?.(data.event);
             break;
-          
+
+          case 'run_update':
+            callbacks.onRunUpdate?.(data);
+            callbacks.onTaskUpdate?.(data.event);
+            break;
+
           case 'workflow_running':
             break;
-          
+
           default:
             break;
         }

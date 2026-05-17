@@ -19,6 +19,7 @@ class CodeTask():
         self.task_output = None
         self.code_str = None
         self.code_ser = None
+        self.file_context = None
 
         self.completed = False
         
@@ -40,7 +41,7 @@ class CodeTask():
         if feature in self.predict_feature:
             self.predict_feature[feature] = value
 
-    def save_task(self,task_input:Dict, task_output:Dict, code_str:str,code_ser:str,resources:Dict):
+    def save_task(self,task_input:Dict, task_output:Dict, code_str:str,code_ser:str,resources:Dict,file_context:Dict|None=None):
         '''save task info'''
         
         self.task_input=task_input
@@ -48,6 +49,7 @@ class CodeTask():
         self.code_str=code_str
         self.code_ser=code_ser
         self.resources=resources
+        self.file_context=file_context
     
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -60,6 +62,7 @@ class CodeTask():
             "resources":self.resources,
             "code_str":self.code_str,
             "code_ser":self.code_ser,
+            "file_context":self.file_context,
         }
 
 class LangGraphTask():

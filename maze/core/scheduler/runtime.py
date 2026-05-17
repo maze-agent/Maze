@@ -29,7 +29,17 @@ class LanggraphTaskRuntime():
         self.status = status
 
 class TaskRuntime():
-    def __init__(self,workflow_id:str,task_id:str,task_input:Dict,task_output:Dict,resources:Dict,code_str:str=None,code_ser:str=None):
+    def __init__(
+        self,
+        workflow_id:str,
+        task_id:str,
+        task_input:Dict,
+        task_output:Dict,
+        resources:Dict,
+        code_str:str=None,
+        code_ser:str=None,
+        file_context:Dict|None=None,
+    ):
         self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
         self.task_id: str = task_id
@@ -38,9 +48,11 @@ class TaskRuntime():
         self.resources: Dict[str, Any] = resources
         self.code_str: str = code_str
         self.code_ser: str = code_ser 
+        self.file_context: Dict[str, Any] | None = file_context
 
         self.object_ref = None
         self.result: None|Dict[Any, Any] = None
+        self.file_manifest: Dict[str, Any] | None = None
         self.selected_node = None
 
         self.priority = 0
@@ -199,14 +211,26 @@ class WorkflowRuntimeManager():
                     num_gpus=task.resources["gpu"],
                     memory=task.resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(code_str=task.code_str, code_ser=task.code_ser, task_input_data=task_input_data, cuda_visible_devices=str(node.gpu_id))     
+                ).remote(
+                    code_str=task.code_str,
+                    code_ser=task.code_ser,
+                    task_input_data=task_input_data,
+                    cuda_visible_devices=str(node.gpu_id),
+                    file_context=task.file_context,
+                )
             #cpu task
             else: 
                 result_ref = remote_task_runner.options(
                     num_cpus=task.resources["cpu"],
                     memory=task.resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(code_str=task.code_str, code_ser=task.code_ser, task_input_data=task_input_data, cuda_visible_devices=None)
+                ).remote(
+                    code_str=task.code_str,
+                    code_ser=task.code_ser,
+                    task_input_data=task_input_data,
+                    cuda_visible_devices=None,
+                    file_context=task.file_context,
+                )
             
             
             self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)

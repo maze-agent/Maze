@@ -483,7 +483,7 @@ def create_maze_workflow(workflow_id, server_url="http://localhost:8000"):
     }
 
 
-def build_and_run_workflow(workflow_id, nodes, edges):
+def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, workspace_dir=None):
     """构建并运行工作流"""
     try:
         print(f"[DEBUG] 开始构建工作流: {workflow_id}", file=sys.stderr)
@@ -494,6 +494,32 @@ def build_and_run_workflow(workflow_id, nodes, edges):
         client = MaClient(server_url="http://localhost:8000")
         workflow = client.create_workflow()
         task_map = {}  # node_id -> MaTask
+        maze_task_to_node = {}
+        node_lookup = {node.get("id"): node for node in nodes}
+
+        def remember_task(node_id, ma_task):
+            task_map[node_id] = ma_task
+            maze_task_to_node[ma_task.task_id] = node_id
+
+        def emit_workflow_progress(event):
+            event_type = event.get("type")
+            data = dict(event.get("data") or {})
+            maze_task_id = data.get("task_id")
+            node_id = maze_task_to_node.get(maze_task_id)
+
+            if static_run_id:
+                data["workflow_run_id"] = static_run_id
+            if node_id:
+                node = node_lookup.get(node_id) or {}
+                node_data = node.get("data") or {}
+                data["node_id"] = node_id
+                data["node_label"] = node_data.get("label")
+                data["maze_task_id"] = maze_task_id
+
+            emit_progress({
+                "type": event_type,
+                "data": data,
+            })
         
         print(f"[DEBUG] Maze 工作流已创建: {workflow.workflow_id}", file=sys.stderr)
         
@@ -533,7 +559,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)
                 ma_task = workflow.add_task(task_func, inputs=task_inputs)
-                task_map[node_id] = ma_task
+                remember_task(node_id, ma_task)
                 print(f"[DEBUG] 任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
 
             elif category == "workspace":
@@ -562,7 +588,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                     file=sys.stderr,
                 )
                 ma_task = workflow.add_task(task_func, inputs=task_inputs)
-                task_map[node_id] = ma_task
+                remember_task(node_id, ma_task)
                 print(f"[DEBUG] 工作区任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
             
             elif category == "custom":
@@ -610,7 +636,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
                     
                     # Add task
                     ma_task = workflow.add_task(task_func, inputs=task_inputs)
-                    task_map[node_id] = ma_task
+                    remember_task(node_id, ma_task)
                 
                 finally:
                     os.unlink(temp_file.name)
@@ -631,12 +657,20 @@ def build_and_run_workflow(workflow_id, nodes, edges):
         
         # Step 3: 运行工作流并获取 run_id
         print(f"[DEBUG] 开始运行工作流...", file=sys.stderr)
-        run_id = workflow.run()
+        file_context = None
+        if static_run_id and workspace_dir:
+            file_context = {
+                "enabled": True,
+                "workspace_dir": workspace_dir,
+                "run_id": static_run_id,
+                "task_node_ids": maze_task_to_node,
+            }
+        run_id = workflow.run(file_context=file_context)
         print(f"[DEBUG] 工作流已提交，run_id: {run_id}", file=sys.stderr)
         
         # Step 4: 通过 run_id 获取结果
         print(f"[DEBUG] 获取运行结果 (run_id: {run_id})...", file=sys.stderr)
-        results = workflow.get_results(run_id, verbose=True, progress_callback=emit_progress)
+        results = workflow.get_results(run_id, verbose=True, progress_callback=emit_workflow_progress)
         print(f"[DEBUG] 结果: {results}", file=sys.stderr)
         
         # Step 5: 清理（当前服务器不支持 cleanup endpoint，已降级）
@@ -646,6 +680,7 @@ def build_and_run_workflow(workflow_id, nodes, edges):
         
         return {
             "success": True,
+            "mazeRunId": run_id,
             "results": results
         }
     
@@ -710,7 +745,9 @@ def main():
             result = build_and_run_workflow(
                 params.get('workflowId'),
                 params.get('nodes', []),
-                params.get('edges', [])
+                params.get('edges', []),
+                params.get('staticRunId'),
+                params.get('workspaceDir'),
             )
         
         else:

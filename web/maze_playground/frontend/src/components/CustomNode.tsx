@@ -1,7 +1,7 @@
 import { KeyboardEvent, useEffect, useState } from 'react';
 import { Handle, Position } from 'reactflow';
-import { Card, Input, Tag } from 'antd';
-import { ThunderboltOutlined, CodeOutlined } from '@ant-design/icons';
+import { Card, Input, Spin, Tag, Tooltip } from 'antd';
+import { CheckCircleOutlined, CloseCircleOutlined, CodeOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 
 export default function CustomNode({ id, data, selected }: any) {
@@ -12,6 +12,11 @@ export default function CustomNode({ id, data, selected }: any) {
   const isWorkspace = data.category === 'workspace';
   const isCodeTask = isCustom || isWorkspace;
   const isConfigured = data.configured;
+  const runState = data.runState;
+  const runStatus = data.runStatus === 'interrupted' && runState?.status === 'running'
+    ? 'interrupted'
+    : runState?.status;
+  const artifactCount = runState?.artifacts?.length || 0;
 
   useEffect(() => {
     if (!editingLabel) {
@@ -45,6 +50,10 @@ export default function CustomNode({ id, data, selected }: any) {
   
   const getBorderColor = () => {
     if (selected) return '#faad14';
+    if (runStatus === 'running') return '#1677ff';
+    if (runStatus === 'completed') return '#52c41a';
+    if (runStatus === 'failed') return '#ff4d4f';
+    if (runStatus === 'interrupted') return '#fa8c16';
     if (isCodeTask) {
       return isConfigured ? '#722ed1' : '#d9d9d9';
     }
@@ -52,10 +61,30 @@ export default function CustomNode({ id, data, selected }: any) {
   };
   
   const getBackgroundGradient = () => {
+    if (runStatus === 'running') {
+      return 'linear-gradient(135deg, #e6f4ff 0%, #ffffff 100%)';
+    }
+    if (runStatus === 'completed') {
+      return 'linear-gradient(135deg, #f6ffed 0%, #ffffff 100%)';
+    }
+    if (runStatus === 'failed') {
+      return 'linear-gradient(135deg, #fff2f0 0%, #ffffff 100%)';
+    }
+    if (runStatus === 'interrupted') {
+      return 'linear-gradient(135deg, #fff7e6 0%, #ffffff 100%)';
+    }
     if (isCodeTask && isConfigured) {
       return 'linear-gradient(135deg, #f5f0ff 0%, #fafafa 100%)';
     }
     return 'white';
+  };
+
+  const getRunStatusTagColor = () => {
+    if (runStatus === 'completed') return 'success';
+    if (runStatus === 'failed') return 'error';
+    if (runStatus === 'running') return 'processing';
+    if (runStatus === 'interrupted') return 'orange';
+    return 'default';
   };
   
   return (
@@ -87,6 +116,10 @@ export default function CustomNode({ id, data, selected }: any) {
           ) : (
             <ThunderboltOutlined style={{ color: '#1890ff' }} />
           )}
+          {runStatus === 'running' && <Spin size="small" />}
+          {runStatus === 'completed' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
+          {runStatus === 'failed' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
+          {runStatus === 'interrupted' && <CloseCircleOutlined style={{ color: '#fa8c16' }} />}
           {editingLabel ? (
             <Input
               autoFocus
@@ -130,12 +163,39 @@ export default function CustomNode({ id, data, selected }: any) {
           {!isConfigured && (
             <Tag color="warning" style={{ margin: 0 }}>unconfigured</Tag>
           )}
+          {runStatus && (
+            <Tag
+              color={getRunStatusTagColor()}
+              style={{ margin: 0 }}
+            >
+              {runStatus}
+            </Tag>
+          )}
         </div>
         
         {isConfigured && (
           <div style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
             <div>Inputs: {data.inputs?.length || 0}</div>
             <div>Outputs: {data.outputs?.length || 0}</div>
+            {runState?.result_summary !== undefined && runStatus === 'completed' && (
+              <Tooltip title={typeof runState.result_summary === 'string' ? runState.result_summary : JSON.stringify(runState.result_summary)}>
+                <div style={{ color: '#389e0d', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  Result ready
+                </div>
+              </Tooltip>
+            )}
+            {artifactCount > 0 && (
+              <div style={{ color: '#0958d9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                Files: {artifactCount}
+              </div>
+            )}
+            {runState?.error && (
+              <Tooltip title={String(runState.error)}>
+                <div style={{ color: '#cf1322', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  Error
+                </div>
+              </Tooltip>
+            )}
           </div>
         )}
       </div>

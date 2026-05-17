@@ -9,7 +9,7 @@ interface ResultDisplayProps {
 
 function isFilePath(value: string): boolean {
   if (typeof value !== 'string') return false;
-  
+
   const fileExtensions = [
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg',
     '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv',
@@ -18,18 +18,18 @@ function isFilePath(value: string): boolean {
     '.txt', '.md', '.csv', '.json', '.xml',
     '.zip', '.rar', '.7z', '.tar', '.gz',
   ];
-  
+
   const lowerValue = value.toLowerCase();
-  return fileExtensions.some(ext => lowerValue.endsWith(ext)) || 
-         lowerValue.includes('temp\\') || 
+  return fileExtensions.some(ext => lowerValue.endsWith(ext)) ||
+         lowerValue.includes('temp\\') ||
          lowerValue.includes('temp/') ||
-         lowerValue.includes('\\') || 
+         lowerValue.includes('\\') ||
          lowerValue.includes('/');
 }
 
 function getFileIcon(filePath: string) {
   const lowerPath = filePath.toLowerCase();
-  
+
   if (lowerPath.match(/\.(jpg|jpeg|png|gif|bmp|webp|svg)$/)) {
     return <FileImageOutlined style={{ color: '#52c41a', fontSize: '18px' }} />;
   }
@@ -52,19 +52,68 @@ function isImageFile(filePath: string): boolean {
   return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/.test(lowerPath);
 }
 
+function isMazeSummary(value: any): boolean {
+  return Boolean(value && typeof value === 'object' && value.__maze_summary__ === true);
+}
+
+function renderMazeSummary(value: any): React.ReactNode {
+  const detailEntries = Object.entries(value).filter(([key]) => (
+    !['__maze_summary__', 'type', 'repr', 'sample'].includes(key)
+  ));
+
+  return (
+    <Card size="small" style={{ marginTop: '8px', background: '#f7fbff', border: '1px solid #91caff' }}>
+      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+        <Space wrap>
+          <Tag color="geekblue">Python Object</Tag>
+          <Text code>{String(value.type || 'unknown')}</Text>
+        </Space>
+
+        {detailEntries.length > 0 && (
+          <Space wrap size={[6, 6]}>
+            {detailEntries.map(([detailKey, detailValue]) => (
+              <Tag key={detailKey} color="blue">
+                {detailKey}: {Array.isArray(detailValue) ? detailValue.join(', ') : String(detailValue)}
+              </Tag>
+            ))}
+          </Space>
+        )}
+
+        {value.sample && (
+          <div>
+            <Text strong>Sample: </Text>
+            {renderValue(value.sample, 'sample')}
+          </div>
+        )}
+
+        {value.repr && (
+          <div style={{
+            background: 'white',
+            padding: '8px',
+            borderRadius: '4px',
+            border: '1px solid #e6f4ff',
+          }}>
+            <Text style={{ whiteSpace: 'pre-wrap', fontSize: '12px' }}>{String(value.repr)}</Text>
+          </div>
+        )}
+      </Space>
+    </Card>
+  );
+}
+
 function renderValue(value: any, key: string): React.ReactNode {
   if (value === null || value === undefined) {
     return <Tag color="default">null</Tag>;
   }
-  
+
   if (typeof value === 'boolean') {
     return <Tag color={value ? 'success' : 'error'}>{String(value)}</Tag>;
   }
-  
+
   if (typeof value === 'number') {
     return <Tag color="blue">{value}</Tag>;
   }
-  
+
   if (typeof value === 'string') {
     if (isFilePath(value)) {
       return (
@@ -74,20 +123,20 @@ function renderValue(value: any, key: string): React.ReactNode {
               {getFileIcon(value)}
               <Text strong>{getFileName(value)}</Text>
             </Space>
-            
+
             {isImageFile(value) && (
-              <div style={{ 
+              <div style={{
                 marginTop: '8px',
                 padding: '8px',
                 background: 'white',
                 borderRadius: '4px',
                 textAlign: 'center'
               }}>
-                <img 
+                <img
                   src={`file:///${value.replace(/\\/g, '/')}`}
                   alt={getFileName(value)}
-                  style={{ 
-                    maxWidth: '100%', 
+                  style={{
+                    maxWidth: '100%',
                     maxHeight: '200px',
                     objectFit: 'contain',
                     borderRadius: '4px'
@@ -98,15 +147,15 @@ function renderValue(value: any, key: string): React.ReactNode {
                 />
               </div>
             )}
-            
+
             <Text type="secondary" style={{ fontSize: '12px', wordBreak: 'break-all' }}>
               📁 {value}
             </Text>
-            
+
             <Space>
-              <Button 
-                type="primary" 
-                size="small" 
+              <Button
+                type="primary"
+                size="small"
                 icon={<DownloadOutlined />}
                 onClick={() => {
                   alert(`File saved locally:\n${value}\n\nYou can open it in file explorer`);
@@ -115,8 +164,8 @@ function renderValue(value: any, key: string): React.ReactNode {
                 Open File Location
               </Button>
               {isImageFile(value) && (
-                <Button 
-                  size="small" 
+                <Button
+                  size="small"
                   onClick={() => {
                     window.open(`file:///${value.replace(/\\/g, '/')}`, '_blank');
                   }}
@@ -129,12 +178,12 @@ function renderValue(value: any, key: string): React.ReactNode {
         </Card>
       );
     }
-    
+
     if (value.length > 100) {
       return (
-        <div style={{ 
-          background: '#f5f5f5', 
-          padding: '8px', 
+        <div style={{
+          background: '#f5f5f5',
+          padding: '8px',
           borderRadius: '4px',
           maxHeight: '200px',
           overflow: 'auto',
@@ -146,7 +195,7 @@ function renderValue(value: any, key: string): React.ReactNode {
     }
     return <Text>{value}</Text>;
   }
-  
+
   if (Array.isArray(value)) {
     return (
       <div style={{ marginTop: '8px' }}>
@@ -161,8 +210,12 @@ function renderValue(value: any, key: string): React.ReactNode {
       </div>
     );
   }
-  
+
   if (typeof value === 'object') {
+    if (isMazeSummary(value)) {
+      return renderMazeSummary(value);
+    }
+
     return (
       <div style={{ marginTop: '8px' }}>
         <Tag color="cyan">Object</Tag>
@@ -176,7 +229,7 @@ function renderValue(value: any, key: string): React.ReactNode {
       </div>
     );
   }
-  
+
   return <Text>{String(value)}</Text>;
 }
 
@@ -188,7 +241,7 @@ export default function ResultDisplay({ data }: ResultDisplayProps) {
       </div>
     );
   }
-  
+
   if (typeof data !== 'object' || data === null) {
     return (
       <div style={{ padding: '16px' }}>
@@ -196,14 +249,14 @@ export default function ResultDisplay({ data }: ResultDisplayProps) {
       </div>
     );
   }
-  
+
   return (
     <div style={{ padding: '16px' }}>
       {Object.entries(data).map(([key, value]) => (
         <div key={key} style={{ marginBottom: '20px' }}>
-          <div style={{ 
-            background: '#fafafa', 
-            padding: '8px 12px', 
+          <div style={{
+            background: '#fafafa',
+            padding: '8px 12px',
             borderRadius: '4px',
             marginBottom: '8px',
             borderLeft: '3px solid #1890ff'

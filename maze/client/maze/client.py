@@ -1,5 +1,6 @@
 import requests
 from typing import Optional
+from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.workflow import MaWorkflow
 
 
@@ -44,6 +45,86 @@ class MaClient:
                 raise Exception(f"Failed to create workflow: {data.get('message', 'Unknown error')}")
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
+
+    def create_dynamic_run(
+        self,
+        max_tasks: int = 100,
+        timeout_seconds: Optional[int] = None,
+    ) -> DynamicRun:
+        """
+        Create a dynamic workflow run.
+
+        Dynamic runs grow through append_task and finish only after finalize().
+        """
+        url = f"{self.server_url}/dynamic_runs"
+        payload = {
+            "max_tasks": max_tasks,
+            "timeout_seconds": timeout_seconds,
+        }
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "success":
+                return DynamicRun(data["run_id"], self.server_url)
+            raise Exception(f"Failed to create dynamic run: {data.get('message', 'Unknown error')}")
+
+        raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
+
+    def get_dynamic_run(self, run_id: str) -> DynamicRun:
+        return DynamicRun(run_id, self.server_url)
+
+    def list_dynamic_runs(
+        self,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict]:
+        params = {}
+        if status:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+
+        response = requests.get(f"{self.server_url}/dynamic_runs", params=params or None)
+        if response.status_code != 200:
+            raise Exception(f"Failed to list dynamic runs: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to list dynamic runs: {data.get('message', 'Unknown error')}")
+        return data.get("runs", [])
+
+    def delete_dynamic_run(self, run_id: str) -> dict:
+        response = requests.delete(f"{self.server_url}/dynamic_runs/{run_id}")
+        if response.status_code != 200:
+            raise Exception(f"Failed to delete dynamic run: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to delete dynamic run: {data.get('message', 'Unknown error')}")
+        return data
+
+    def cleanup_dynamic_runs(
+        self,
+        statuses: Optional[list[str]] = None,
+        older_than_days: int | float | None = None,
+        dry_run: bool = True,
+    ) -> dict:
+        response = requests.post(
+            f"{self.server_url}/dynamic_runs/cleanup",
+            json={
+                "statuses": statuses,
+                "older_than_days": older_than_days,
+                "dry_run": dry_run,
+            },
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to cleanup dynamic runs: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to cleanup dynamic runs: {data.get('message', 'Unknown error')}")
+        return data.get("cleanup", {})
     
     def get_workflow(self, workflow_id: str) -> MaWorkflow:
         """

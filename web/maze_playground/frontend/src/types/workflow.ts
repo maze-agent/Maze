@@ -68,6 +68,22 @@ export interface WorkspaceWorkflowMeta {
   size?: number;
 }
 
+export interface WorkspaceFileMeta {
+  name: string;
+  relativePath: string;
+  type: 'file' | 'directory';
+  size?: number | null;
+  updatedAt?: string;
+}
+
+export interface WorkspaceFilesResponse {
+  success: boolean;
+  workspaceDir: string;
+  filesDir: string;
+  path: string;
+  files: WorkspaceFileMeta[];
+}
+
 export interface WorkspaceWorkflowsResponse {
   workspaceDir: string;
   workflowsDir: string;
@@ -132,4 +148,113 @@ export interface RunResult {
   result?: any;
   error?: string;
   timestamp: string;
+}
+
+export type StaticWorkflowRunStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+  | 'interrupted';
+
+export interface StaticWorkflowRunNode {
+  node_id: string;
+  task_name?: string;
+  label?: string;
+  category?: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  created_time?: number | null;
+  started_time?: number | null;
+  finished_time?: number | null;
+  result_summary?: any;
+  error?: string | null;
+  maze_task_id?: string;
+  file_manifest?: any;
+  artifacts?: Array<{
+    path: string;
+    name?: string;
+    size?: number;
+    sha256?: string;
+    mime?: string;
+    uri?: string;
+    storage_path?: string;
+  }>;
+}
+
+export interface StaticWorkflowRunSnapshot {
+  schema: 'static_workflow_run';
+  schema_version: number;
+  kind: 'static';
+  run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  workspace_dir?: string;
+  status: StaticWorkflowRunStatus;
+  created_time?: number;
+  updated_time?: number;
+  finished_time?: number | null;
+  task_counts?: Record<string, number>;
+  task_nodes?: Record<string, StaticWorkflowRunNode>;
+  graph?: {
+    nodes: string[];
+    edges: Array<{ source: string; target: string }>;
+  };
+  events?: {
+    count: number;
+    last_seq: number;
+  };
+  final_result?: any;
+  error?: string | null;
+  maze_run_id?: string | null;
+}
+
+export interface StaticWorkflowRunEvent {
+  type: string;
+  seq?: number;
+  timestamp?: string;
+  schema_version?: number;
+  data?: Record<string, any>;
+}
+
+export type DynamicRunStatus =
+  | 'created'
+  | 'running'
+  | 'finalized'
+  | 'failed'
+  | 'canceled'
+  | 'timed_out'
+  | 'interrupted';
+
+export interface DynamicRunSnapshot {
+  schema?: string;
+  schema_version?: number;
+  run_id: string;
+  status: DynamicRunStatus;
+  max_tasks?: number;
+  timeout_seconds?: number | null;
+  created_time?: number;
+  updated_time?: number;
+  finished_time?: number | null;
+  task_counts?: Record<string, number>;
+  tasks?: Record<string, string[]>;
+  task_specs?: Record<string, any>;
+  task_nodes?: Record<string, any>;
+  graph?: {
+    nodes: string[];
+    edges: Array<{ source: string; target: string }>;
+  };
+  request_ids?: Record<string, string>;
+  event_count?: number;
+  last_event_seq?: number;
+  final_result?: any;
+  cancel_reason?: string | null;
+  failure_reason?: string | null;
+}
+
+export interface DynamicRunEvent {
+  type: string;
+  seq?: number;
+  timestamp?: string;
+  schema_version?: number;
+  data?: Record<string, any>;
 }

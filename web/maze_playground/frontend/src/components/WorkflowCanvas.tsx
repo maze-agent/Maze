@@ -22,75 +22,102 @@ const nodeTypes = {
 };
 
 export default function WorkflowCanvas() {
-  const { nodes, edges, setNodes, setEdges, addNode, deleteNode, selectNode, workflowId, setWorkflowId } = useWorkflowStore();
+  const {
+    nodes,
+    edges,
+    setNodes,
+    setEdges,
+    addNode,
+    deleteNode,
+    selectNode,
+    workflowId,
+    setWorkflowId,
+    activeRunId,
+    selectedRunId,
+    staticRuns,
+  } = useWorkflowStore();
   
-  const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodes);
+  const visibleRunId = selectedRunId || activeRunId;
+  const visibleRun = visibleRunId ? staticRuns.find((run) => run.run_id === visibleRunId) : null;
+  const nodesWithRunState = React.useMemo(() => (
+    nodes.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        runState: visibleRun?.task_nodes?.[node.id] || null,
+        runStatus: visibleRun?.status || null,
+      },
+    }))
+  ), [nodes, visibleRun]);
+
+  const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodesWithRunState);
   const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(edges);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = React.useState<ReactFlowInstance | null>(null);
   const creatingWorkflowRef = useRef<Promise<string> | null>(null);
 
-  const lastSyncedNodesRef = useRef<string>('');
-  const lastSyncedEdgesRef = useRef<string>('');
+  const lastRenderedNodesRef = useRef<string>('');
+  const lastRenderedEdgesRef = useRef<string>('');
   
   useEffect(() => {
-    const nodesStr = JSON.stringify(nodes);
-    if (nodesStr !== lastSyncedNodesRef.current) {
-      setReactFlowNodes(nodes);
-      lastSyncedNodesRef.current = nodesStr;
+    const nodesStr = JSON.stringify(nodesWithRunState);
+    if (nodesStr !== lastRenderedNodesRef.current) {
+      setReactFlowNodes(nodesWithRunState);
+      lastRenderedNodesRef.current = nodesStr;
     }
-  }, [nodes, setReactFlowNodes]);
+  }, [nodesWithRunState, setReactFlowNodes]);
 
   useEffect(() => {
     const edgesStr = JSON.stringify(edges);
-    if (edgesStr !== lastSyncedEdgesRef.current) {
+    if (edgesStr !== lastRenderedEdgesRef.current) {
       setReactFlowEdges(edges);
-      lastSyncedEdgesRef.current = edgesStr;
+      lastRenderedEdgesRef.current = edgesStr;
     }
   }, [edges, setReactFlowEdges]);
 
   useEffect(() => {
-    const positionsStr = JSON.stringify(reactFlowNodes.map(n => ({ id: n.id, position: n.position })));
-    const edgesStr = JSON.stringify(reactFlowEdges);
-    
-    if (positionsStr !== lastSyncedNodesRef.current || edgesStr !== lastSyncedEdgesRef.current) {
-      const timer = setTimeout(() => {
-        const updatedNodes = reactFlowNodes.map(rfNode => {
-          const storeNode = nodes.find(n => n.id === rfNode.id);
-          if (storeNode) {
-            return {
-              ...storeNode,
-              position: rfNode.position
-            };
-          }
-          return rfNode;
-        });
-        
-        const normalizedNodes = updatedNodes as WorkflowNode[];
-        const normalizedEdges = reactFlowEdges.map((edge) => ({
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          sourceHandle: edge.sourceHandle || undefined,
-          targetHandle: edge.targetHandle || undefined,
-        })) as WorkflowEdge[];
-        const normalizedNodesStr = JSON.stringify(normalizedNodes);
-        const normalizedEdgesStr = JSON.stringify(normalizedEdges);
+    const normalizedNodes = reactFlowNodes.map(rfNode => {
+      const storeNode = nodes.find(n => n.id === rfNode.id);
+      if (storeNode) {
+        return {
+          ...storeNode,
+          position: rfNode.position
+        };
+      }
 
-        if (normalizedNodesStr !== JSON.stringify(nodes)) {
-          setNodes(normalizedNodes);
-        }
-        if (normalizedEdgesStr !== JSON.stringify(edges)) {
-          setEdges(normalizedEdges);
-        }
+      const { runState, runStatus, ...data } = rfNode.data || {};
+      return {
+        ...rfNode,
+        data,
+      } as WorkflowNode;
+    }) as WorkflowNode[];
+    const normalizedEdges = reactFlowEdges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle || undefined,
+      targetHandle: edge.targetHandle || undefined,
+    })) as WorkflowEdge[];
+    const normalizedNodesStr = JSON.stringify(normalizedNodes);
+    const normalizedEdgesStr = JSON.stringify(normalizedEdges);
 
-        lastSyncedNodesRef.current = normalizedNodesStr;
-        lastSyncedEdgesRef.current = normalizedEdgesStr;
-      }, 500);
-
-      return () => clearTimeout(timer);
+    if (normalizedNodesStr === JSON.stringify(nodes) && normalizedEdgesStr === JSON.stringify(edges)) {
+      return;
     }
-  }, [reactFlowNodes, reactFlowEdges, setNodes, setEdges, nodes]);
+
+    const timer = setTimeout(() => {
+      if (normalizedNodesStr !== JSON.stringify(nodes)) {
+        setNodes(normalizedNodes);
+        lastRenderedNodesRef.current = normalizedNodesStr;
+      }
+      if (normalizedEdgesStr !== JSON.stringify(edges)) {
+        setEdges(normalizedEdges);
+        lastRenderedEdgesRef.current = normalizedEdgesStr;
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [reactFlowNodes, reactFlowEdges, setNodes, setEdges, nodes, edges]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => {

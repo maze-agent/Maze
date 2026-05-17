@@ -25,7 +25,9 @@ from typing import Any,List,Dict
 from maze.core.scheduler.resource import ResourceManager
 from maze.core.scheduler.llm_instance import LlmInstanceManager,LlmInstanceMessage
 from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
+from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.workflow.task import TaskType
+from maze.core.files.lineage import TASK_RESULT_ENVELOPE
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ class PriorityQueue:
         self._queue = []
         self._index = 0
         self._lock = threading.Lock()
-        self._not_empty = threading.Condition(self._lock) 
+        self._not_empty = threading.Condition(self._lock)
 
     def put(self, item, priority):
         with self._not_empty:
@@ -69,7 +71,7 @@ class PriorityQueue:
 def scheduler_process(port1:int,port2:int,strategy:str,ray_head_port:int,ready_queue:mp.Queue):
     scheduler = Scheduler(port1,port2,ray_head_port,ready_queue)
     scheduler.start()
- 
+
 class Scheduler():
     def __init__(self, port1:int, port2:int, ray_head_port:int, ready_queue:mp.Queue):
         self.lock = threading.Lock()
@@ -77,27 +79,27 @@ class Scheduler():
         self.port2 = port2
         self.ray_head_port = ray_head_port
         self.ready_queue = ready_queue
- 
+
         self.workflow_manager = WorkflowRuntimeManager()
         self.resource_manager = ResourceManager()
         self.llm_instance_manager = LlmInstanceManager()
 
         self.task_queue: PriorityQueue[TaskRuntime|LanggraphTaskRuntime] = PriorityQueue()
         self.llm_instance_queue: Queue = queue.Queue()
-       
+
     def _cleanup(self):
         command = [
-            "ray", "stop", 
+            "ray", "stop",
         ]
         result = subprocess.run(
             command,
-            check=True,                   
-            text=True,                    
-            capture_output=True,      
+            check=True,
+            text=True,
+            capture_output=True,
         )
-      
+
         os._exit(1)
-    
+
     def _receive_thread(self,port1:int):
         logger.info(f"Receive start")
         assert(self.context is not None)
@@ -110,7 +112,7 @@ class Scheduler():
                 assert(len(frames)==2)
                 _, data = frames
                 message = json.loads(data.decode('utf-8'))
-              
+
                 message_type = message["type"]
                 message_data = message["data"]
                 if(message_type =="run_task"):
@@ -121,7 +123,8 @@ class Scheduler():
                                                                 task_output=message_data['task_output'],
                                                                 resources=message_data['resources'],
                                                                 code_str=message_data.get('code_str'),
-                                                                code_ser=message_data.get('code_ser')
+                                                                code_ser=message_data.get('code_ser'),
+                                                                file_context=message_data.get('file_context'),
                                                                 )
                         priority =  message_data.get('priority', 0)
                         task_runtime.set_priority(priority)
@@ -135,7 +138,7 @@ class Scheduler():
                                                                                   resources=message_data['resources']
                                                                                 )
                         priority =  message_data.get('priority', 0)
-                        task_runtime.set_priority(priority)                                                        
+                        task_runtime.set_priority(priority)
                         self.task_queue.put(task_runtime,0)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
@@ -145,7 +148,7 @@ class Scheduler():
                         canceld_tasks = self.workflow_manager.cancel_workflow(workflow_id=message_data["workflow_id"])
                         if len(canceld_tasks) > 0:
                             self.resource_manager.release_task_resource(tasks=canceld_tasks)
-                            self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"]) 
+                            self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
                 elif(message_type=="start_worker"):
                     with self.lock:
                         self.resource_manager.start_worker(node_id=message_data["node_id"], resources=message_data["resources"], node_ip=message_data["node_ip"])
@@ -153,14 +156,14 @@ class Scheduler():
                     with self.lock:
                         self.resource_manager.stop_worker(node_id=message_data["node_id"])
                 elif(message_type=="start_llm_instance" or message_type=="stop_llm_instance"):
-                    self.llm_instance_queue.put(LlmInstanceMessage(message_type, message_data)) 
+                    self.llm_instance_queue.put(LlmInstanceMessage(message_type, message_data))
                 elif(message_type=="shutdown"):
                     self._cleanup()
-                 
+
         except Exception as e:
             print(f"_receive_thread error: {e}")
             self._cleanup()
-    
+
     def _llm_instance_thread(self,port2:int):
         logger.info(f"Llm instance start")
         socket_to_main = self.context.socket(zmq.DEALER)
@@ -184,11 +187,11 @@ class Scheduler():
                                                     instance_id = message_data["instance_id"],
                                                     model=message_data["model"],
                                                     node_ip=selected_node.node_ip,
-                                                    node_id=selected_node.node_id, 
+                                                    node_id=selected_node.node_id,
                                                     gpu_id=selected_node.gpu_id,
                                                     resources=need_resources,
                                                 )
-                    
+
                     #Send message to main
                     message = {
                         "type":"finish_llm_instance_launch",
@@ -220,12 +223,12 @@ class Scheduler():
         logger.info(f"Submit start")
         socket_to_main = self.context.socket(zmq.DEALER)
         socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
-         
+
         while True:
             self.cur_ready_task =  self.task_queue.get()
             self.lock.acquire()
             self.workflow_manager.add_task(self.cur_ready_task)
-           
+
             #Get the node can run the task
             selected_node: SelectedNode | None = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
             if selected_node:
@@ -245,7 +248,7 @@ class Scheduler():
                 }
                 serialized_message = json.dumps(message).encode('utf-8')
                 socket_to_main.send(serialized_message)
-            
+
                 self.cur_ready_task = None
                 self.lock.release()
             else:
@@ -264,39 +267,49 @@ class Scheduler():
                 self.resource_manager.check_dead_node()
 
                 self.resource_manager.show_all_node_resource()
-               
+
 
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
                 if len(running_task_refs) == 0:
                     continue
-                
-                
+
+
                 finished_task_refs, _ = ray.wait(running_task_refs, num_returns=len(running_task_refs),timeout=0)
                 if len(finished_task_refs) == 0:
                     continue
-                        
+
                 for finished_task_ref in finished_task_refs:
                     finished_task = self.workflow_manager.get_task_by_ref(finished_task_ref)
                     if finished_task is None:
                         continue # The workflow of task is deleted
                     try:
-                        result = ray.get(finished_task_ref)
+                        raw_result = ray.get(finished_task_ref)
+                        file_manifest = None
+                        if isinstance(raw_result, dict) and raw_result.get(TASK_RESULT_ENVELOPE):
+                            result = raw_result.get("result") or {}
+                            file_manifest = raw_result.get("file_manifest")
+                            finished_task.file_manifest = file_manifest
+                        else:
+                            result = raw_result
 
-                        self.workflow_manager.set_task_result(finished_task,result) 
+                        self.workflow_manager.set_task_result(finished_task,result)
                         self.resource_manager.release_task_resource(tasks=[finished_task])
 
                         #Send message to main
+                        message_data = {
+                            "workflow_id": finished_task.workflow_id,
+                            "task_id": finished_task.task_id,
+                            "result": summarize_task_result(finished_task.result),
+                        }
+                        if file_manifest:
+                            message_data["file_manifest"] = file_manifest
                         message = {
                             "type":"finish_task",
-                            "data":{
-                                "workflow_id":finished_task.workflow_id,
-                                "task_id":finished_task.task_id,
-                                "result":finished_task.result,
-                            },
+                            "data": message_data,
                         }
                         serialized_message = json.dumps(message).encode('utf-8')
                         socket_to_main.send(serialized_message)
- 
+
                     except ray.exceptions.RayTaskError as e:
                         logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         #Internal exception in the code,stop the workflow
@@ -313,7 +326,7 @@ class Scheduler():
                                 "task_id":finished_task.task_id,
                                 "result":f"ray.exceptions.RayTaskError:{str(e)}"
                             }
-                            
+
                         }
                         serialized_message = json.dumps(message).encode('utf-8')
                         socket_to_main.send(serialized_message)
@@ -327,7 +340,7 @@ class Scheduler():
                     except Exception as e:
                         logger.error(f"Task {finished_task.task_id} failed with exception: {e}")
                         print(f"Exception occurred {type(e)}: {e}")
-                 
+
     def _launch_ray_head(self):
         try:
             command = [
@@ -335,40 +348,38 @@ class Scheduler():
             ]
             result = subprocess.run(
                 command,
-                check=True,                   
+                check=True,
                 text=True,
                 capture_output=True,
             )
-           
-            
+
+
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to start Ray: {result.stderr}")
 
         except Exception as e:
             print(f"Exception occurred: {e}")
 
-    def start(self): 
+    def start(self):
         self.context = zmq.Context() #zmq context
 
         self._launch_ray_head()
         self.resource_manager.init()
-        
-        self.receive_thread = threading.Thread(target=self._receive_thread,args=(self.port1,)) 
+
+        self.receive_thread = threading.Thread(target=self._receive_thread,args=(self.port1,))
         self.receive_thread.start()
 
-        self.monitor_thread = threading.Thread(target=self._supervisor_thread,args=(self.port2,)) 
+        self.monitor_thread = threading.Thread(target=self._supervisor_thread,args=(self.port2,))
         self.monitor_thread.start()
-        
-        self.submit_thread = threading.Thread(target=self._submit_thread,args=(self.port2,)) 
+
+        self.submit_thread = threading.Thread(target=self._submit_thread,args=(self.port2,))
         self.submit_thread.start()
 
-        self.llm_instance_thread = threading.Thread(target=self._llm_instance_thread,args=(self.port2,)) 
+        self.llm_instance_thread = threading.Thread(target=self._llm_instance_thread,args=(self.port2,))
         self.llm_instance_thread.start()
 
         self.ready_queue.put("ready")
         self.receive_thread.join()
         self.monitor_thread.join()
         self.submit_thread.join()
-            
-    
-   
+

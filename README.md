@@ -9,7 +9,7 @@
     </a>
 </p>
 
-## 🌟Why  Maze？
+## 🌟 Why Maze?
 - **Task-level**
 
   Maze enables fine-grained, task-level management, enhancing system flexibility and composability while supporting task parallelism to significantly improve the end-to-end performance of agent workflows.
@@ -24,7 +24,7 @@
 
 - **Multi-Agent Support**
 
-  Maze can serve as a runtime backend for other agent frameworks.For example, it allows LangGraph to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic. [**Example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
+  Maze can serve as a runtime backend for other agent frameworks. For example, it allows LangGraph to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic. [**Example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
 
 <br>
 
@@ -32,11 +32,14 @@
 ## 📰 News
 
 
+- **2026-05**: We support dynamic workflows with runtime `append_task`, lifecycle events, persisted run history, and developer inspection.
+- **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
+- **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
 - **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
 
 <br>
 
-## 🚀Quick Start
+## 🚀 Quick Start
 
 ## 1. Install
 
@@ -65,44 +68,75 @@
    ```
 ## 3. Example
 
-```python
-from typing import Any
-from maze import MaClient,task
+### Static Workflow
 
-#1.Define your task functions using the @task decorator
-@task(
-    inputs=["text"],
-    outputs=["result"],
-)
-def my_task(params):
-    text: Any = params.get("text")
+```python
+from maze import MaClient, task
+
+# 1. Define task functions using the @task decorator.
+@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+def greet(text: str = ""):
     return {"result": f"Hello {text}"}
 
-#2.Create the maze client
+
+@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+def uppercase(result: str = ""):
+    return {"upper": result.upper()}
+
+
+# 2. Create the Maze client.
 client = MaClient("http://localhost:8000")
 
-
-#3.Create the workflow
+# 3. Create a workflow and wire task outputs into downstream inputs.
 workflow = client.create_workflow()
-task1 = workflow.add_task(
-    my_task,
+greeting = workflow.add_task(
+    greet,
     inputs={"text": "Maze"}
 )
+upper = workflow.add_task(
+    uppercase,
+    inputs={"result": greeting.outputs["result"]}
+)
 
-#4.Submit the workflow and get results
+# 4. Submit the workflow and get results.
 run_id = workflow.run()
 workflow.show_results(run_id)
 ```
+
+### Dynamic Workflow
+
+```python
+from maze import MaClient, task
+
+
+@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+def summarize(topic: str = ""):
+    return {"summary": f"Maze can build workflows dynamically for {topic}."}
+
+
+client = MaClient("http://localhost:8000")
+
+run = client.create_dynamic_run(max_tasks=10)
+summary = run.append_task(
+    summarize,
+    inputs={"topic": "agent runtime"}
+)
+run.wait_for_task(summary)
+run.finalize({"status": "done"})
+print(run.status())
+```
+
+In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
 <br>
 
 
 
 ## 🖥️ Maze Playground
-We support building workflows through a drag-and-drop interface on the Maze Playground.You can start the playground with the following command option.
+Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, and generating workspace tasks from prompts. You can start the playground with the following command option.
 ```
-maze start --worker --addr HEAD_IP:HEAD_PORT --playground 
+maze start --head --port HEAD_PORT --playground
 ```
-Here are two vedios which show the process of using builtin tasks and uploading user-defined taks in maze playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
+Here are two videos showing the process of using built-in tasks and uploading user-defined tasks in Maze Playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
 
 ### Builtin Task Workflow

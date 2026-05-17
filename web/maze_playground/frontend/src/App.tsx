@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConfigProvider } from 'antd';
 import enUS from 'antd/locale/en_US';
 import { message } from 'antd';
@@ -7,11 +7,15 @@ import BuiltinTasksSidebar from './components/BuiltinTasksSidebar';
 import WorkflowCanvas from './components/WorkflowCanvas';
 import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
+import DynamicRunsInspector from './components/DynamicRunsInspector';
+import RunHistoryDrawer from './components/RunHistoryDrawer';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
 function App() {
   const saveShortcutInFlightRef = useRef(false);
+  const [dynamicRunsOpen, setDynamicRunsOpen] = useState(false);
+  const [runHistoryOpen, setRunHistoryOpen] = useState(false);
   const {
     workflowId,
     workflowName,
@@ -20,12 +24,18 @@ function App() {
     nodes,
     edges,
     isRunning,
+    activeRunId,
+    staticRuns,
     setWorkflowId,
     setWorkspaceDir,
     setWorkspaceWorkflows,
     setCurrentWorkspaceWorkflowPath,
     setNodes,
     setEdges,
+    setIsRunning,
+    upsertStaticRun,
+    setStaticRunEvents,
+    removeStaticRun,
   } = useWorkflowStore();
 
   const saveWorkflowToWorkspace = useCallback(async () => {
@@ -117,10 +127,54 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [saveWorkflowToWorkspace]);
 
+  useEffect(() => {
+    if (!activeRunId) {
+      return;
+    }
+
+    const activeRun = staticRuns.find((run) => run.run_id === activeRunId);
+    if (activeRun && activeRun.status !== 'running') {
+      setIsRunning(false);
+      return;
+    }
+
+    let canceled = false;
+    const poll = async () => {
+      try {
+        const [runResult, eventsResult] = await Promise.all([
+          api.getStaticWorkflowRun(activeRunId, workspaceDir || undefined),
+          api.getStaticWorkflowRunEvents(activeRunId, workspaceDir || undefined),
+        ]);
+        if (canceled) return;
+        upsertStaticRun(runResult.run);
+        setStaticRunEvents(activeRunId, eventsResult.events || []);
+        if (runResult.run.status !== 'running') {
+          setIsRunning(false);
+        }
+      } catch (error) {
+        if ((error as any)?.response?.status === 404) {
+          removeStaticRun(activeRunId);
+          return;
+        }
+        console.error('Failed to refresh active workflow run:', error);
+      }
+    };
+
+    const timer = window.setInterval(poll, 1500);
+    poll();
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeRunId, removeStaticRun, setIsRunning, setStaticRunEvents, staticRuns, upsertStaticRun, workspaceDir]);
+
   return (
     <ConfigProvider locale={enUS}>
       <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-        <Toolbar />
+        <Toolbar
+          onOpenDynamicRuns={() => setDynamicRunsOpen(true)}
+          onOpenRunHistory={() => setRunHistoryOpen(true)}
+        />
         
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           <BuiltinTasksSidebar />
@@ -133,6 +187,8 @@ function App() {
         </div>
         
         <ResultsModal />
+        <RunHistoryDrawer open={runHistoryOpen} onClose={() => setRunHistoryOpen(false)} />
+        <DynamicRunsInspector open={dynamicRunsOpen} onClose={() => setDynamicRunsOpen(false)} />
       </div>
     </ConfigProvider>
   );

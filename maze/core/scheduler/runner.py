@@ -3,20 +3,27 @@ import ast
 import binascii
 import base64
 import cloudpickle
+from maze.core.files.lineage import run_task_with_file_context
 
 @ray.remote(max_retries=0)
-def remote_task_runner(code_str:str=None, code_ser:str=None, task_input_data:dict=None, cuda_visible_devices:str|None=None):
+def remote_task_runner(
+    code_str:str=None,
+    code_ser:str=None,
+    task_input_data:dict=None,
+    cuda_visible_devices:str|None=None,
+    file_context:dict|None=None,
+):
     if cuda_visible_devices:
         import os
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     
     if code_ser is not None:
         func = cloudpickle.loads(base64.b64decode(code_ser))
-        output = func(task_input_data)
+        output = run_task_with_file_context(func, task_input_data, file_context)
         return output
     elif code_str is not None:
         runner = Runner(code_str, task_input_data)
-        output = runner.run()
+        output = run_task_with_file_context(lambda data: runner.run(data), task_input_data, file_context)
         return output
     else:
         raise ValueError("Missing code_str or code_ser")
@@ -57,7 +64,7 @@ class Runner():
                 break
         return func
 
-    def run(self):
+    def run(self, task_input_data=None):
         func_node = self._extract_function()
         import_nodes = self._extract_imports()
         namespace = {}
@@ -74,7 +81,7 @@ class Runner():
         
         func_name = func_node.name
         if func_name in namespace:
-            result = namespace[func_name](**(self.task_input_data or {}))
+            result = namespace[func_name](**(task_input_data if task_input_data is not None else (self.task_input_data or {})))
             if not isinstance(result, dict):
                 raise TypeError(
                     f"Task {func_name} must return a dict. "

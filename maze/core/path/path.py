@@ -14,7 +14,10 @@ from typing import Any,Dict,List
 from asyncio.queues import Queue
 from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
 from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
+from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES, dynamic_task_spec_from_payload
+from maze.core.workflow.dynamic_store import DynamicRunStore
 from maze.core.scheduler.scheduler import scheduler_process
+from maze.core.scheduler.result_summary import summarize_task_result
 from maze.utils.utils import get_available_ports
 EPSILON = 1e-3
 
@@ -24,6 +27,9 @@ class MaPath:
 
         self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
         self.submit_workflows: Dict[str, Workflow] = {}
+        self.dynamic_runs: Dict[str, DynamicRun] = {}
+        self.dynamic_run_store = DynamicRunStore()
+        self.dynamic_run_store.recover_interrupted_runs()
         self.async_que: Dict[str, asyncio.Queue] = {} 
         self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
         self.atlas_enqueue_index = 0
@@ -121,12 +127,32 @@ class MaPath:
 
         return 0
 
-    def run_workflow(self,workflow_id:str):
+    def _task_run_payload(self, workflow: Workflow, task: CodeTask, submit_id: str, file_context: Dict[str, Any] | None = None):
+        data = task.to_json()
+        data['workflow_id'] = submit_id
+
+        if file_context and file_context.get("enabled"):
+            task_node_ids = file_context.get("task_node_ids") or {}
+            data["file_context"] = {
+                **file_context,
+                "enabled": True,
+                "run_id": file_context.get("run_id") or submit_id,
+                "submit_id": submit_id,
+                "task_id": task.task_id,
+                "node_id": task_node_ids.get(task.task_id),
+                "parent_task_ids": list(workflow.graph.predecessors(task.task_id)),
+            }
+
+        return data
+
+    def run_workflow(self,workflow_id:str,file_context:Dict[str,Any]|None=None):
         """
         Start a workflow.
         """
         submit_id = str(uuid.uuid4())
         submit_workflow = copy.deepcopy(self.workflows[workflow_id])
+        if file_context:
+            submit_workflow.graph.graph["file_context"] = file_context
         submit_workflow.prepare_for_strategy(self.strategy)
         submit_workflow.graph.graph["submission_time"] = time.time()
         self.submit_workflows[submit_id] = submit_workflow
@@ -134,8 +160,7 @@ class MaPath:
         start_task:List = submit_workflow.get_start_task()
         
         for task in start_task:
-            data = task.to_json()
-            data['workflow_id'] = submit_id
+            data = self._task_run_payload(submit_workflow, task, submit_id, file_context)
             if self.strategy == "HACS":
                 data['priority'] = self._get_hacs_priority(submit_workflow, task.task_id)
             elif self.strategy == "ATLAS":
@@ -150,6 +175,254 @@ class MaPath:
             self.socket_to_scheduler.send(serialized)
 
         return submit_id
+
+    async def create_dynamic_run(self, max_tasks:int=100, timeout_seconds:int|None=None):
+        run_id = str(uuid.uuid4())
+        self.dynamic_runs[run_id] = DynamicRun(
+            run_id=run_id,
+            max_tasks=max_tasks,
+            timeout_seconds=timeout_seconds,
+        )
+        self.async_que[run_id] = asyncio.Queue()
+        await self._emit_dynamic_event(run_id, {
+            "type": "start_dynamic_run",
+            "data": {
+                "run_id": run_id,
+                "max_tasks": max_tasks,
+                "timeout_seconds": timeout_seconds,
+            },
+        })
+        return run_id
+
+    def get_dynamic_run(self, run_id:str) -> DynamicRun:
+        if run_id not in self.dynamic_runs:
+            raise ValueError(f"Dynamic run not found: {run_id}")
+        return self.dynamic_runs[run_id]
+
+    async def list_dynamic_runs(
+        self,
+        status: str | None = None,
+        limit: int | None = None,
+    ):
+        snapshots = self.dynamic_run_store.list_runs()
+        if status:
+            snapshots = [snapshot for snapshot in snapshots if snapshot.get("status") == status]
+        if limit is not None:
+            snapshots = snapshots[: max(0, limit)]
+        return snapshots
+
+    async def register_dynamic_task_spec(self, run_id:str, task_spec_payload:Dict[str,Any]):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        task_spec = dynamic_task_spec_from_payload(task_spec_payload)
+        dynamic_run.register_task_spec(task_spec)
+        await self._emit_dynamic_event(run_id, {
+            "type": "register_task_spec",
+            "data": {
+                "run_id": run_id,
+                "task_spec_id": task_spec.task_spec_id,
+                "task_name": task_spec.task_name,
+                "inputs": task_spec.inputs,
+                "outputs": task_spec.outputs,
+                "resources": task_spec.resources,
+            },
+        })
+        return task_spec
+
+    async def append_dynamic_task(
+        self,
+        run_id:str,
+        task_spec_id:str|None=None,
+        task_spec_payload:Dict[str,Any]|None=None,
+        inputs:Dict[str,Any]|None=None,
+        parents:List[str]|None=None,
+        request_id:str|None=None,
+    ):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        dynamic_run.check_can_mutate("append tasks")
+        existing_task = dynamic_run.get_task_for_request_id(request_id)
+        if existing_task is not None:
+            return existing_task, True
+
+        dynamic_run.check_can_append()
+        task_spec = dynamic_run.resolve_task_spec(task_spec_id, task_spec_payload)
+        task, idempotent = dynamic_run.append_task(
+            task_spec,
+            inputs=inputs,
+            parents=parents,
+            request_id=request_id,
+        )
+
+        if not idempotent:
+            status = "ready" if task.task_id in dynamic_run.submitted_tasks else "pending"
+            await self._emit_dynamic_event(run_id, {
+                "type": "append_task",
+                "data": {
+                    "run_id": run_id,
+                    "task_id": task.task_id,
+                    "task_spec_id": task_spec.task_spec_id,
+                    "task_name": task.task_name,
+                    "parents": sorted(dynamic_run.task_parents.get(task.task_id, set())),
+                    "request_id": request_id,
+                    "status": status,
+                },
+            })
+
+            if task.task_id in dynamic_run.submitted_tasks:
+                self._submit_dynamic_task(task)
+
+        return task, idempotent
+
+    async def finalize_dynamic_run(self, run_id:str, result:Any=None):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        dynamic_run.finalize(result)
+        await self._emit_dynamic_event(run_id, {
+            "type": "finish_workflow",
+            "data": {
+                "run_id": run_id,
+                "result": summarize_task_result(result),
+            },
+        })
+
+        message = {"type":"clear_workflow","data":{"workflow_id":run_id}}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler.send(serialized)
+
+    async def cancel_dynamic_run(self, run_id:str, reason:str|None=None):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        changed = dynamic_run.cancel(reason)
+        if changed:
+            await self._emit_dynamic_event(run_id, {
+                "type": "cancel_dynamic_run",
+                "data": {
+                    "run_id": run_id,
+                    "reason": reason,
+                },
+            })
+            self._stop_dynamic_runtime(run_id)
+        return dynamic_run
+
+    async def get_dynamic_run_snapshot(self, run_id:str):
+        if run_id in self.dynamic_runs:
+            await self._refresh_dynamic_timeout(run_id)
+            return self.get_dynamic_run(run_id).snapshot(summarize_task_result)
+        return self.dynamic_run_store.load_run(run_id)
+
+    async def get_dynamic_run_events(self, run_id:str, after:int|None=None):
+        if run_id in self.dynamic_runs:
+            await self._refresh_dynamic_timeout(run_id)
+            return self.get_dynamic_run(run_id).get_events(after)
+        self.dynamic_run_store.load_run(run_id)
+        return self.dynamic_run_store.load_events(run_id, after)
+
+    async def delete_dynamic_run(self, run_id:str):
+        snapshot = await self.get_dynamic_run_snapshot(run_id)
+        if snapshot.get("status") not in TERMINAL_DYNAMIC_RUN_STATUSES:
+            raise ValueError("Only terminal dynamic runs can be deleted")
+
+        self.dynamic_runs.pop(run_id, None)
+        self.async_que.pop(run_id, None)
+        self.dynamic_run_store.delete_run(run_id)
+        return {"run_id": run_id, "deleted": True}
+
+    async def cleanup_dynamic_runs(
+        self,
+        statuses: List[str] | None = None,
+        older_than_days: int | float | None = None,
+        dry_run: bool = True,
+    ):
+        cleanup_result = self.dynamic_run_store.cleanup(
+            statuses=statuses,
+            older_than_days=older_than_days,
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            for run_id in cleanup_result.get("deleted_run_ids", []):
+                self.dynamic_runs.pop(run_id, None)
+                self.async_que.pop(run_id, None)
+        return cleanup_result
+
+    def _stop_dynamic_runtime(self, run_id:str):
+        message = {"type":"stop_workflow","data":{"workflow_id":run_id}}
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler.send(serialized)
+
+    async def _refresh_dynamic_timeout(self, run_id:str) -> bool:
+        dynamic_run = self.get_dynamic_run(run_id)
+        if not dynamic_run.mark_timed_out_if_needed():
+            return False
+
+        await self._emit_dynamic_event(run_id, {
+            "type": "timeout_dynamic_run",
+            "data": {
+                "run_id": run_id,
+                "timeout_seconds": dynamic_run.timeout_seconds,
+            },
+        })
+        self._stop_dynamic_runtime(run_id)
+        return True
+
+    def _submit_dynamic_task(self, task: CodeTask):
+        data = task.to_json()
+        data['workflow_id'] = task.workflow_id
+        data['priority'] = 0
+        message = {
+            "type":"run_task",
+            "data": data,
+        }
+        serialized: bytes = json.dumps(message).encode('utf-8')
+        self.socket_to_scheduler.send(serialized)
+
+    async def _emit_dynamic_event(self, run_id:str, event:Dict[str,Any]):
+        dynamic_run = self.get_dynamic_run(run_id)
+        stored_event = dynamic_run.append_event(event)
+        self.dynamic_run_store.append_event(run_id, stored_event)
+        self._persist_dynamic_run(run_id)
+        que = self.async_que.get(run_id)
+        if que is not None:
+            await que.put({"type": "dynamic_event"})
+
+    def _persist_dynamic_run(self, run_id:str):
+        dynamic_run = self.get_dynamic_run(run_id)
+        self.dynamic_run_store.save_run(dynamic_run.snapshot(summarize_task_result))
+
+    async def _handle_dynamic_scheduler_event(self, message:Dict[str,Any]):
+        run_id = message["data"]["workflow_id"]
+        task_id = message["data"]["task_id"]
+        dynamic_run = self.get_dynamic_run(run_id)
+        message_type = message["type"]
+
+        if dynamic_run.is_terminal():
+            return
+
+        if message_type == "start_task":
+            dynamic_run.mark_started(task_id)
+            await self._emit_dynamic_event(run_id, message)
+            return
+
+        if message_type == "finish_task":
+            await self._emit_dynamic_event(run_id, message)
+            ready_tasks = dynamic_run.mark_finished(task_id)
+            self._persist_dynamic_run(run_id)
+            for ready_task in ready_tasks:
+                await self._emit_dynamic_event(run_id, {
+                    "type": "task_ready",
+                    "data": {
+                        "run_id": run_id,
+                        "task_id": ready_task.task_id,
+                        "task_name": ready_task.task_name,
+                    },
+                })
+                self._submit_dynamic_task(ready_task)
+            return
+
+        if message_type == "task_exception":
+            dynamic_run.mark_failed(task_id, message.get("data", {}).get("result"))
+            await self._emit_dynamic_event(run_id, message)
+            return
         
     def get_ray_head_port(self):
         '''
@@ -221,6 +494,9 @@ class MaPath:
                             await que.put(message)
                         else:
                             submit_id = message_data['workflow_id']
+                            if submit_id in self.dynamic_runs:
+                                await self._handle_dynamic_scheduler_event(message)
+                                continue
                             if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
     
@@ -230,8 +506,13 @@ class MaPath:
                             new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"],task_result=message_data["result"],strategy=self.strategy)
                             if len(new_ready_tasks) > 0:
                                 for task in new_ready_tasks:
-                                    data = task.to_json()
-                                    data['workflow_id'] = submit_id
+                                    file_context = self.submit_workflows[submit_id].graph.graph.get("file_context")
+                                    data = self._task_run_payload(
+                                        self.submit_workflows[submit_id],
+                                        task,
+                                        submit_id,
+                                        file_context,
+                                    )
                                     data['priority'] = await self._get_task_priority(
                                         self.submit_workflows[submit_id],
                                         task,
@@ -249,6 +530,9 @@ class MaPath:
                             await que.put(message)
                         else:
                             submit_id = message_data['workflow_id']
+                            if submit_id in self.dynamic_runs:
+                                await self._handle_dynamic_scheduler_event(message)
+                                continue
                             if submit_id not in self.async_que or submit_id not in self.submit_workflows:
                                 continue
 
@@ -293,6 +577,30 @@ class MaPath:
                     break
             elif data["type"]=="task_exception":
                 raise Exception("task_exception")
+
+    async def get_dynamic_run_res(self, run_id:str, websocket:WebSocket):
+        dynamic_run = self.get_dynamic_run(run_id)
+        que = self.async_que[run_id]
+        event_index = 0
+
+        while True:
+            await self._refresh_dynamic_timeout(run_id)
+            while event_index < len(dynamic_run.event_log):
+                event = dynamic_run.event_log[event_index]
+                event_index += 1
+                await websocket.send_json(event)
+                if event["type"] in ("finish_workflow", "task_exception", "cancel_dynamic_run", "timeout_dynamic_run", "interrupt_dynamic_run"):
+                    if dynamic_run.is_terminal():
+                        return
+
+            if dynamic_run.is_terminal():
+                return
+
+            timeout = dynamic_run.seconds_until_timeout()
+            try:
+                await asyncio.wait_for(que.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                await self._refresh_dynamic_timeout(run_id)
           
     async def stop_workflow(self,submit_id:str):
         '''

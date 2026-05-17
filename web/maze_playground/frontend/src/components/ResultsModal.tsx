@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Modal, Typography, Spin, Alert, Button, Tabs, List, Tag, Space } from 'antd';
-import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, FileTextOutlined, CodeOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, FileTextOutlined, CodeOutlined, DownloadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import ResultDisplay from './ResultDisplay';
@@ -10,12 +10,36 @@ const { Text, Title } = Typography;
 interface WorkflowEvent {
   type: string;
   data?: Record<string, any>;
+  seq?: number;
   timestamp?: string;
 }
 
+type RunViewerStatus = 'connecting' | 'running' | 'completed' | 'failed' | 'canceled' | 'interrupted';
+
+function toRunViewerStatus(status?: string | null): RunViewerStatus {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'canceled') return 'canceled';
+  if (status === 'interrupted') return 'interrupted';
+  return 'running';
+}
+
 export default function ResultsModal() {
-  const { workflowId, isRunning, setIsRunning, clearRunResults } = useWorkflowStore();
-  const [status, setStatus] = useState<'connecting' | 'running' | 'completed' | 'failed'>('connecting');
+  const {
+    workflowId,
+    isRunning,
+    activeRunId,
+    selectedRunId,
+    runViewerOpen,
+    staticRuns,
+    staticRunEvents,
+    workspaceDir,
+    upsertStaticRun,
+    addStaticRunEvent,
+    setStaticRunEvents,
+    closeRunViewer,
+  } = useWorkflowStore();
+  const [status, setStatus] = useState<RunViewerStatus>('connecting');
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string>('');
   const [traceback, setTraceback] = useState<string>('');
@@ -23,7 +47,7 @@ export default function ResultsModal() {
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
 
   useEffect(() => {
-    if (isRunning && workflowId) {
+    if (isRunning && workflowId && activeRunId) {
       setEvents([]);
       setResults(null);
       setError('');
@@ -44,7 +68,23 @@ export default function ResultsModal() {
         },
         onTaskUpdate: (event) => {
           setStatus('running');
-          setEvents((prev) => [...prev, { ...event, timestamp: new Date().toISOString() }]);
+          const nextEvent = { ...event, timestamp: event.timestamp || new Date().toISOString() };
+          setEvents((prev) => [...prev, nextEvent]);
+          if (activeRunId) {
+            addStaticRunEvent(activeRunId, nextEvent);
+          }
+        },
+        onRunUpdate: (payload) => {
+          if (payload.run) {
+            upsertStaticRun(payload.run);
+            setStatus(toRunViewerStatus(payload.run.status));
+            if (payload.run.final_result) {
+              setResults(payload.run.final_result);
+            }
+            if (payload.run.error) {
+              setError(payload.run.error);
+            }
+          }
         },
         onWorkflowCompleted: (res) => {
           setStatus('completed');
@@ -72,14 +112,41 @@ export default function ResultsModal() {
         }
       };
     }
-  }, [isRunning, workflowId]);
+  }, [activeRunId, addStaticRunEvent, isRunning, upsertStaticRun, workflowId]);
+
+  useEffect(() => {
+    if (!runViewerOpen || !selectedRunId) {
+      return;
+    }
+
+    const selectedRun = staticRuns.find((run) => run.run_id === selectedRunId);
+    if (selectedRun) {
+      setStatus(toRunViewerStatus(selectedRun.status));
+      setResults(selectedRun.final_result || null);
+      setError(selectedRun.error || '');
+    }
+
+    const knownEvents = staticRunEvents[selectedRunId];
+    if (knownEvents) {
+      setEvents(knownEvents);
+      return;
+    }
+
+    api.getStaticWorkflowRunEvents(selectedRunId, workspaceDir || undefined)
+      .then((result) => {
+        setStaticRunEvents(selectedRunId, result.events || []);
+        setEvents(result.events || []);
+      })
+      .catch((error) => {
+        console.error('Failed to load workflow run events:', error);
+      });
+  }, [runViewerOpen, selectedRunId, setStaticRunEvents, staticRunEvents, staticRuns, workspaceDir]);
 
   const handleClose = () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.close();
     }
-    setIsRunning(false);
-    clearRunResults();
+    closeRunViewer();
     setStatus('connecting');
     setResults(null);
     setError('');
@@ -88,12 +155,20 @@ export default function ResultsModal() {
   };
 
   const getEventTag = (type: string) => {
+    if (type === 'start_dynamic_run') return <Tag color="green">Dynamic Run</Tag>;
+    if (type === 'register_task_spec') return <Tag color="cyan">Task Spec</Tag>;
+    if (type === 'append_task') return <Tag color="blue">Task Appended</Tag>;
+    if (type === 'task_ready') return <Tag color="gold">Task Ready</Tag>;
     if (type === 'start_task') return <Tag color="processing">Task Started</Tag>;
     if (type === 'finish_task') return <Tag color="success">Task Finished</Tag>;
     if (type === 'task_exception') return <Tag color="error">Task Failed</Tag>;
     if (type === 'finish_workflow') return <Tag color="success">Workflow Done</Tag>;
+    if (type === 'cancel_dynamic_run') return <Tag color="orange">Run Canceled</Tag>;
+    if (type === 'timeout_dynamic_run') return <Tag color="volcano">Run Timed Out</Tag>;
     if (type === 'workflow_completed') return <Tag color="success">Workflow Done</Tag>;
     if (type === 'workflow_failed') return <Tag color="error">Workflow Failed</Tag>;
+    if (type === 'workflow_canceled') return <Tag color="orange">Workflow Canceled</Tag>;
+    if (type === 'workflow_interrupted') return <Tag color="magenta">Interrupted</Tag>;
     if (type === 'building') return <Tag color="blue">Building</Tag>;
     if (type === 'workflow_started') return <Tag color="green">Started</Tag>;
     return <Tag>{type}</Tag>;
@@ -102,6 +177,18 @@ export default function ResultsModal() {
   const renderEventSummary = (event: WorkflowEvent) => {
     const data = event.data || {};
     const shortTaskId = data.task_id ? `${String(data.task_id).slice(0, 8)}...` : '';
+    if (event.type === 'start_dynamic_run') {
+      return `Dynamic run ${data.run_id ? String(data.run_id).slice(0, 8) : ''} started`;
+    }
+    if (event.type === 'register_task_spec') {
+      return `Task spec registered: ${data.task_name || data.task_spec_id || 'unknown'}`;
+    }
+    if (event.type === 'append_task') {
+      return `Task ${shortTaskId} appended${data.status ? ` (${data.status})` : ''}`;
+    }
+    if (event.type === 'task_ready') {
+      return `Task ${shortTaskId} is ready to run`;
+    }
     if (event.type === 'start_task') {
       const node = data.node_id ? ` on ${String(data.node_id).slice(0, 8)}...` : '';
       return `Task ${shortTaskId} started${node}`;
@@ -115,6 +202,12 @@ export default function ResultsModal() {
     if (event.type === 'finish_workflow') {
       return 'All workflow tasks finished';
     }
+    if (event.type === 'cancel_dynamic_run') {
+      return `Dynamic run canceled${data.reason ? `: ${data.reason}` : ''}`;
+    }
+    if (event.type === 'timeout_dynamic_run') {
+      return `Dynamic run timed out${data.timeout_seconds ? ` after ${data.timeout_seconds}s` : ''}`;
+    }
     if (event.type === 'building') {
       return data.message || 'Building workflow...';
     }
@@ -126,6 +219,12 @@ export default function ResultsModal() {
     }
     if (event.type === 'workflow_failed') {
       return data.error || 'Workflow failed';
+    }
+    if (event.type === 'workflow_canceled') {
+      return data.message || data.error || 'Workflow run was canceled';
+    }
+    if (event.type === 'workflow_interrupted') {
+      return data.message || data.error || 'Workflow run was interrupted';
     }
     return 'Connected to result stream';
   };
@@ -147,9 +246,12 @@ export default function ResultsModal() {
           <Space direction="vertical" size={2} style={{ width: '100%' }}>
             <Space size={8} wrap>
               <Text type="secondary" style={{ width: '28px', fontSize: '12px' }}>
-                #{index + 1}
+                #{event.seq || index + 1}
               </Text>
               {getEventTag(event.type)}
+              {event.data?.run_status && (
+                <Tag color="default">{String(event.data.run_status)}</Tag>
+              )}
               {event.timestamp && (
                 <Text type="secondary" style={{ fontSize: '12px' }}>
                   {new Date(event.timestamp).toLocaleTimeString()}
@@ -163,7 +265,61 @@ export default function ResultsModal() {
     />
   );
 
-  const shouldShow = isRunning || status === 'completed' || status === 'failed';
+  const renderArtifacts = () => {
+    const artifactItems = Object.values(selectedRun?.task_nodes || {}).flatMap((node: any) => (
+      (node.artifacts || []).map((artifact: any) => ({
+        ...artifact,
+        taskId: node.maze_task_id || node.node_id,
+        taskLabel: node.label || node.task_name || node.node_id,
+      }))
+    ));
+
+    if (artifactItems.length === 0) {
+      return null;
+    }
+
+    return (
+      <div style={{ marginTop: '16px' }}>
+        <Title level={5}>Files</Title>
+        <List
+          size="small"
+          dataSource={artifactItems}
+          renderItem={(artifact: any) => (
+            <List.Item
+              actions={[
+                <Button
+                  key="download"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={() => {
+                    window.open(
+                      api.getStaticRunArtifactDownloadUrl(
+                        selectedRunId || '',
+                        artifact.taskId,
+                        artifact.path,
+                        workspaceDir || undefined,
+                      ),
+                      '_blank',
+                    );
+                  }}
+                >
+                  Download
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta
+                title={artifact.path}
+                description={`${artifact.taskLabel}${artifact.size ? ` · ${artifact.size} bytes` : ''}`}
+              />
+            </List.Item>
+          )}
+        />
+      </div>
+    );
+  };
+
+  const selectedRun = selectedRunId ? staticRuns.find((run) => run.run_id === selectedRunId) : null;
+  const shouldShow = runViewerOpen && !!selectedRunId;
 
   return (
     <Modal
@@ -172,7 +328,13 @@ export default function ResultsModal() {
           {status === 'running' && <LoadingOutlined style={{ color: '#1890ff' }} />}
           {status === 'completed' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
           {status === 'failed' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-          Workflow Results
+          {(status === 'canceled' || status === 'interrupted') && <CloseCircleOutlined style={{ color: '#fa8c16' }} />}
+          Workflow Run
+          {selectedRunId && (
+            <Text type="secondary" style={{ marginLeft: '8px', fontSize: '12px' }}>
+              {selectedRunId.slice(0, 8)}...
+            </Text>
+          )}
         </div>
       }
       open={shouldShow}
@@ -198,14 +360,14 @@ export default function ResultsModal() {
           <div style={{ textAlign: 'center', padding: '20px 0 8px' }}>
             <Spin size="large" />
             <div style={{ marginTop: '16px' }}>
-              <Text type="secondary">Workflow is running. Task events will appear below.</Text>
+              <Text type="secondary">Workflow run is active. You can close this viewer and reopen it from Run History.</Text>
             </div>
           </div>
           {renderEvents()}
         </div>
       )}
 
-      {status === 'completed' && results && (
+      {status === 'completed' && (
         <div>
           <Alert
             message="Workflow completed successfully"
@@ -214,60 +376,75 @@ export default function ResultsModal() {
             style={{ marginBottom: '16px' }}
           />
           {renderEvents()}
-          <Tabs
-            defaultActiveKey="formatted"
-            style={{ marginTop: '16px' }}
-            items={[
-              {
-                key: 'formatted',
-                label: (
-                  <span>
-                    <FileTextOutlined />
-                    Formatted
-                  </span>
-                ),
-                children: (
-                  <div style={{ 
-                    maxHeight: '500px',
-                    overflow: 'auto'
-                  }}>
-                    <ResultDisplay data={results} />
-                  </div>
-                ),
-              },
-              {
-                key: 'raw',
-                label: (
-                  <span>
-                    <CodeOutlined />
-                    Raw JSON
-                  </span>
-                ),
-                children: (
-                  <div style={{ 
-                    background: '#f5f5f5', 
-                    padding: '16px', 
-                    borderRadius: '4px',
-                    maxHeight: '500px',
-                    overflow: 'auto'
-                  }}>
-                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word', fontSize: '12px' }}>
-                      {JSON.stringify(results, null, 2)}
-                    </pre>
-                  </div>
-                ),
-              },
-            ]}
-          />
+          {renderArtifacts()}
+          {(results || selectedRun?.final_result) && (
+            <Tabs
+              defaultActiveKey="formatted"
+              style={{ marginTop: '16px' }}
+              items={[
+                {
+                  key: 'formatted',
+                  label: (
+                    <span>
+                      <FileTextOutlined />
+                      Formatted
+                    </span>
+                  ),
+                  children: (
+                    <div style={{
+                      maxHeight: '500px',
+                      overflow: 'auto'
+                    }}>
+                      <ResultDisplay data={results || selectedRun?.final_result} />
+                    </div>
+                  ),
+                },
+                {
+                  key: 'raw',
+                  label: (
+                    <span>
+                      <CodeOutlined />
+                      Raw JSON
+                    </span>
+                  ),
+                  children: (
+                    <div style={{
+                      background: '#f5f5f5',
+                      padding: '16px',
+                      borderRadius: '4px',
+                      maxHeight: '500px',
+                      overflow: 'auto'
+                    }}>
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word', fontSize: '12px' }}>
+                        {JSON.stringify(results || selectedRun?.final_result, null, 2)}
+                      </pre>
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          )}
         </div>
       )}
 
-      {status === 'failed' && (
+      {(status === 'failed' || status === 'canceled' || status === 'interrupted') && (
         <div>
           <Alert
-            message="Workflow execution failed"
-            description={error}
-            type="error"
+            message={
+              status === 'failed'
+                ? 'Workflow execution failed'
+                : status === 'canceled'
+                  ? 'Workflow run was canceled'
+                  : 'Workflow run was interrupted'
+            }
+            description={
+              error || (
+                status === 'interrupted'
+                  ? 'The backend stopped before this run finished.'
+                  : undefined
+              )
+            }
+            type={status === 'failed' ? 'error' : 'warning'}
             showIcon
             style={{ marginBottom: '16px' }}
           />
@@ -275,9 +452,9 @@ export default function ResultsModal() {
           {traceback && (
             <>
               <Title level={5}>Error Details</Title>
-              <div style={{ 
-                background: '#fff2f0', 
-                padding: '12px', 
+              <div style={{
+                background: '#fff2f0',
+                padding: '12px',
                 borderRadius: '4px',
                 maxHeight: '300px',
                 overflow: 'auto',

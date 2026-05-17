@@ -1,5 +1,14 @@
 import { create } from 'zustand';
-import type { WorkflowNode, WorkflowEdge, BuiltinTaskMeta, WorkspaceTaskMeta, WorkspaceWorkflowMeta, RunResult } from '@/types/workflow';
+import type {
+  WorkflowNode,
+  WorkflowEdge,
+  BuiltinTaskMeta,
+  WorkspaceTaskMeta,
+  WorkspaceWorkflowMeta,
+  RunResult,
+  StaticWorkflowRunEvent,
+  StaticWorkflowRunSnapshot,
+} from '@/types/workflow';
 
 interface WorkflowStore {
   // Workflow state
@@ -21,6 +30,11 @@ interface WorkflowStore {
   // Run state
   isRunning: boolean;
   runResults: RunResult[];
+  activeRunId: string | null;
+  selectedRunId: string | null;
+  runViewerOpen: boolean;
+  staticRuns: StaticWorkflowRunSnapshot[];
+  staticRunEvents: Record<string, StaticWorkflowRunEvent[]>;
   
   // Actions
   setWorkflowId: (id: string) => void;
@@ -39,6 +53,14 @@ interface WorkflowStore {
   setIsRunning: (isRunning: boolean) => void;
   addRunResult: (result: RunResult) => void;
   clearRunResults: () => void;
+  setActiveRun: (run: StaticWorkflowRunSnapshot | null) => void;
+  upsertStaticRun: (run: StaticWorkflowRunSnapshot) => void;
+  setStaticRuns: (runs: StaticWorkflowRunSnapshot[]) => void;
+  addStaticRunEvent: (runId: string, event: StaticWorkflowRunEvent) => void;
+  setStaticRunEvents: (runId: string, events: StaticWorkflowRunEvent[]) => void;
+  removeStaticRun: (runId: string) => void;
+  openRunViewer: (runId: string) => void;
+  closeRunViewer: () => void;
   reset: () => void;
 }
 
@@ -56,6 +78,11 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   currentWorkspaceWorkflowPath: null,
   isRunning: false,
   runResults: [],
+  activeRunId: null,
+  selectedRunId: null,
+  runViewerOpen: false,
+  staticRuns: [],
+  staticRunEvents: {},
 
   // Actions
   setWorkflowId: (id) => set({ workflowId: id }),
@@ -105,6 +132,65 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   })),
   
   clearRunResults: () => set({ runResults: [] }),
+
+  setActiveRun: (run) => set((state) => {
+    if (!run) {
+      return { activeRunId: null };
+    }
+    const existing = state.staticRuns.filter((item) => item.run_id !== run.run_id);
+    return {
+      activeRunId: run.run_id,
+      selectedRunId: run.run_id,
+      runViewerOpen: true,
+      staticRuns: [run, ...existing],
+    };
+  }),
+
+  upsertStaticRun: (run) => set((state) => ({
+    staticRuns: [
+      run,
+      ...state.staticRuns.filter((item) => item.run_id !== run.run_id),
+    ],
+    isRunning: run.run_id === state.activeRunId
+      ? run.status === 'running'
+      : state.isRunning,
+  })),
+
+  setStaticRuns: (runs) => set({ staticRuns: runs }),
+
+  addStaticRunEvent: (runId, event) => set((state) => ({
+    staticRunEvents: {
+      ...state.staticRunEvents,
+      [runId]: [...(state.staticRunEvents[runId] || []), event],
+    },
+  })),
+
+  setStaticRunEvents: (runId, events) => set((state) => ({
+    staticRunEvents: {
+      ...state.staticRunEvents,
+      [runId]: events,
+    },
+  })),
+
+  removeStaticRun: (runId) => set((state) => {
+    const remainingEvents = { ...state.staticRunEvents };
+    delete remainingEvents[runId];
+    const removingActiveRun = state.activeRunId === runId;
+    const removingSelectedRun = state.selectedRunId === runId;
+
+    return {
+      staticRuns: state.staticRuns.filter((run) => run.run_id !== runId),
+      staticRunEvents: remainingEvents,
+      activeRunId: removingActiveRun ? null : state.activeRunId,
+      selectedRunId: removingSelectedRun ? null : state.selectedRunId,
+      runViewerOpen: removingSelectedRun ? false : state.runViewerOpen,
+      isRunning: removingActiveRun ? false : state.isRunning,
+    };
+  }),
+
+  openRunViewer: (runId) => set({ selectedRunId: runId, runViewerOpen: true }),
+
+  closeRunViewer: () => set({ runViewerOpen: false }),
   
   reset: () => set({
     workflowId: null,
@@ -115,5 +201,8 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     currentWorkspaceWorkflowPath: null,
     isRunning: false,
     runResults: [],
+    activeRunId: null,
+    selectedRunId: null,
+    runViewerOpen: false,
   }),
 }));

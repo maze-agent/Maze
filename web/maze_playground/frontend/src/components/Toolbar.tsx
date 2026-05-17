@@ -1,13 +1,19 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Button, Input, Space, Typography, message } from 'antd';
-import { DownloadOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, UploadOutlined } from '@ant-design/icons';
+import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
+import { DownloadOutlined, HistoryOutlined, NodeIndexOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
+import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
 
 const { Text } = Typography;
 
-export default function Toolbar() {
+interface ToolbarProps {
+  onOpenDynamicRuns?: () => void;
+  onOpenRunHistory?: () => void;
+}
+
+export default function Toolbar({ onOpenDynamicRuns, onOpenRunHistory }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -28,10 +34,14 @@ export default function Toolbar() {
     setCurrentWorkspaceWorkflowPath,
     setWorkspaceWorkflows,
     setIsRunning,
+    setActiveRun,
     clearRunResults,
   } = useWorkflowStore();
   const [editingWorkflowName, setEditingWorkflowName] = useState(false);
   const [workflowNameDraft, setWorkflowNameDraft] = useState(workflowName);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
+  const [testingLlm, setTestingLlm] = useState(false);
 
   useEffect(() => {
     if (!editingWorkflowName) {
@@ -309,13 +319,49 @@ export default function Toolbar() {
       await api.saveWorkflow(workflowId, { name: workflowName, nodes, edges });
       setIsRunning(true);
       clearRunResults();
-      await api.runWorkflow(workflowId);
+      const started = await api.runWorkflow(workflowId, workspaceDir || undefined);
+      setActiveRun(started.run);
       message.info('Workflow started running');
       
     } catch (error) {
       console.error('Failed to run workflow:', error);
       message.error('Failed to run workflow');
       setIsRunning(false);
+    }
+  };
+
+  const openSettings = () => {
+    setLlmSettingsDraft(loadLlmSettings());
+    setSettingsOpen(true);
+  };
+
+  const saveSettings = () => {
+    saveLlmSettings(llmSettingsDraft);
+    setSettingsOpen(false);
+    message.success('LLM settings saved in this browser');
+  };
+
+  const testLlmConnection = async () => {
+    const settings = {
+      ...llmSettingsDraft,
+      baseUrl: llmSettingsDraft.baseUrl.trim(),
+      model: llmSettingsDraft.model.trim(),
+    };
+
+    if (!settings.model) {
+      message.warning('Model is required');
+      return;
+    }
+
+    setTestingLlm(true);
+    try {
+      await api.testLlmConnection(settings);
+      message.success('LLM connection works');
+    } catch (error: any) {
+      console.error('Failed to test LLM connection:', error);
+      message.error(error.response?.data?.error || 'Failed to test LLM connection');
+    } finally {
+      setTestingLlm(false);
     }
   };
 
@@ -369,6 +415,27 @@ export default function Toolbar() {
       </Space>
 
       <Space>
+        <Button
+          icon={<SettingOutlined />}
+          onClick={openSettings}
+        >
+          Settings
+        </Button>
+
+        <Button
+          icon={<NodeIndexOutlined />}
+          onClick={onOpenDynamicRuns}
+        >
+          Dynamic Runs
+        </Button>
+
+        <Button
+          icon={<HistoryOutlined />}
+          onClick={onOpenRunHistory}
+        >
+          Run History
+        </Button>
+
         <input
           ref={importInputRef}
           type="file"
@@ -412,6 +479,58 @@ export default function Toolbar() {
           {isRunning ? 'Running...' : 'Run'}
         </Button>
       </Space>
+
+      <Modal
+        title="Settings"
+        open={settingsOpen}
+        onCancel={() => setSettingsOpen(false)}
+        width={560}
+        footer={[
+          <Button key="test" loading={testingLlm} onClick={testLlmConnection}>
+            Test Connection
+          </Button>,
+          <Button key="cancel" onClick={() => setSettingsOpen(false)}>
+            Cancel
+          </Button>,
+          <Button key="save" type="primary" onClick={saveSettings}>
+            Save
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <div>
+            <Text strong>Base URL</Text>
+            <Input
+              value={llmSettingsDraft.baseUrl}
+              onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+              placeholder="https://api.siliconflow.cn/v1"
+              style={{ marginTop: '6px' }}
+            />
+          </div>
+          <div>
+            <Text strong>API Key</Text>
+            <Input.Password
+              value={llmSettingsDraft.apiKey}
+              onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, apiKey: event.target.value }))}
+              placeholder="sk-..."
+              style={{ marginTop: '6px' }}
+            />
+            <Text type="secondary" style={{ display: 'block', fontSize: '12px', marginTop: '6px' }}>
+              Stored only in this browser. Leave empty to use backend MARBLE_API_KEYS when configured.
+            </Text>
+          </div>
+          <div>
+            <Text strong>Model</Text>
+            <Select
+              showSearch
+              value={llmSettingsDraft.model}
+              onChange={(model) => setLlmSettingsDraft((current) => ({ ...current, model }))}
+              options={SILICONFLOW_MODELS.map((model) => ({ label: model, value: model }))}
+              style={{ width: '100%', marginTop: '6px' }}
+            />
+          </div>
+        </Space>
+      </Modal>
     </div>
   );
 }
