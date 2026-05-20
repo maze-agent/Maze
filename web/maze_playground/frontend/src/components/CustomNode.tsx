@@ -1,7 +1,7 @@
 import { KeyboardEvent, useEffect, useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import { Card, Input, Spin, Tag, Tooltip } from 'antd';
-import { CheckCircleOutlined, CloseCircleOutlined, CodeOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, CloseCircleOutlined, CodeOutlined, PartitionOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 
 export default function CustomNode({ id, data, selected }: any) {
@@ -10,6 +10,7 @@ export default function CustomNode({ id, data, selected }: any) {
   const [labelDraft, setLabelDraft] = useState(data.label || '');
   const isCustom = data.category === 'custom';
   const isWorkspace = data.category === 'workspace';
+  const isAgent = data.category === 'agent';
   const isCodeTask = isCustom || isWorkspace;
   const isConfigured = data.configured;
   const runState = data.runState;
@@ -54,6 +55,9 @@ export default function CustomNode({ id, data, selected }: any) {
     if (runStatus === 'completed') return '#52c41a';
     if (runStatus === 'failed') return '#ff4d4f';
     if (runStatus === 'interrupted') return '#fa8c16';
+    if (isAgent) {
+      return '#722ed1';
+    }
     if (isCodeTask) {
       return isConfigured ? '#722ed1' : '#d9d9d9';
     }
@@ -72,6 +76,9 @@ export default function CustomNode({ id, data, selected }: any) {
     }
     if (runStatus === 'interrupted') {
       return 'linear-gradient(135deg, #fff7e6 0%, #ffffff 100%)';
+    }
+    if (isAgent) {
+      return 'linear-gradient(135deg, #f9f0ff 0%, #ffffff 100%)';
     }
     if (isCodeTask && isConfigured) {
       return 'linear-gradient(135deg, #f5f0ff 0%, #fafafa 100%)';
@@ -111,7 +118,9 @@ export default function CustomNode({ id, data, selected }: any) {
       
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-          {isCodeTask ? (
+          {isAgent ? (
+            <PartitionOutlined style={{ color: '#722ed1' }} />
+          ) : isCodeTask ? (
             <CodeOutlined style={{ color: '#722ed1' }} />
           ) : (
             <ThunderboltOutlined style={{ color: '#1890ff' }} />
@@ -155,7 +164,9 @@ export default function CustomNode({ id, data, selected }: any) {
         </div>
         
         <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-          {isCodeTask ? (
+          {isAgent ? (
+            <Tag color="purple" style={{ margin: 0 }}>agent</Tag>
+          ) : isCodeTask ? (
             <Tag color="purple" style={{ margin: 0 }}>{isWorkspace ? 'workspace' : 'custom'}</Tag>
           ) : (
             <Tag color="blue" style={{ margin: 0 }}>task</Tag>
@@ -177,6 +188,9 @@ export default function CustomNode({ id, data, selected }: any) {
           <div style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
             <div>Inputs: {data.inputs?.length || 0}</div>
             <div>Outputs: {data.outputs?.length || 0}</div>
+            {isAgent && (
+              <div>{data.reactMode === 'online' ? 'Online LLM' : 'Local Demo'}</div>
+            )}
             {runState?.result_summary !== undefined && runStatus === 'completed' && (
               <Tooltip title={typeof runState.result_summary === 'string' ? runState.result_summary : JSON.stringify(runState.result_summary)}>
                 <div style={{ color: '#389e0d', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

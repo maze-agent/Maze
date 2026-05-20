@@ -32,6 +32,7 @@
 ## 📰 News
 
 
+- **2026-05**: Maze now includes a thin ReAct workflow template on top of DynamicRun, with LLM decisions, tool calls, repair observations, workspace file/code tools, and agent traces recorded as Maze events.
 - **2026-05**: We support dynamic workflows with runtime `append_task`, lifecycle events, persisted run history, and developer inspection.
 - **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
 - **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
@@ -126,16 +127,50 @@ run.finalize({"status": "done"})
 print(run.status())
 ```
 
+### ReAct Agent Workflow
+
+```python
+from maze import MaClient, task
+
+
+@task
+def decide(prompt: str, history: list, tools: dict, step: int):
+    if not history:
+        return {"action": {"tool": "multiply", "args": {"a": 18, "b": 7}}}
+    result = history[-1]["observation"]["result"]["result"]
+    return {"action": {"final": f"The answer is {result}."}}
+
+
+@task
+def multiply(a: int, b: int):
+    return {"result": a * b}
+
+
+client = MaClient("http://localhost:8000")
+react = client.create_react_workflow(
+    llm_task=decide,
+    tools=[multiply],
+    max_steps=3,
+)
+answer = react.run("Use the calculator to compute 18 * 7.")
+print(answer)
+```
+
+ReAct workflows keep both LLM decisions and tools as Maze tasks, so the distributed task graph and the agent trace stay in the same DynamicRun history. See [examples/react_workflow](./examples/react_workflow/README.md) for a local repair demo and an OpenAI-compatible LLM demo.
+
 In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
 <br>
 
 
 
 ## 🖥️ Maze Playground
-Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, and generating workspace tasks from prompts. You can start the playground with the following command option.
+Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, and inspecting static and dynamic runs in one `Runs` view. You can start the playground with the following command option.
 ```
 maze start --head --port HEAD_PORT --playground
 ```
+
+The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks.
+
 Here are two videos showing the process of using built-in tasks and uploading user-defined tasks in Maze Playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
 

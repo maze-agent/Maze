@@ -232,6 +232,23 @@ class DynamicRun:
 
         return data.get("events", [])
 
+    def emit_event(self, event_type: str, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        response = requests.post(
+            f"{self.server_url}/dynamic_runs/{self.run_id}/events",
+            json={
+                "type": event_type,
+                "data": data or {},
+            },
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to emit dynamic run event: {response.status_code}, {response.text}")
+
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise Exception(f"Failed to emit dynamic run event: {payload.get('message', 'Unknown error')}")
+
+        return payload.get("event", {})
+
     def wait_for_task(
         self,
         task: DynamicTaskInvocation | str,

@@ -337,6 +337,26 @@ export const api = {
     return response.data;
   },
 
+  async startReactRun(data: {
+    mode: 'local' | 'online';
+    prompt: string;
+    workspaceDir?: string;
+    maxSteps?: number;
+    timeoutSeconds?: number;
+    taskTimeout?: number;
+    llm?: LlmSettings;
+  }): Promise<{
+    success: boolean;
+    runId: string;
+    answer?: any;
+    status: string;
+    mode?: string;
+    eventTypes?: string[];
+  }> {
+    const response = await axios.post(`${API_BASE}/react-runs/start`, data);
+    return response.data;
+  },
+
   async getStaticWorkflowRuns(params?: {
     workspaceDir?: string;
     status?: string;

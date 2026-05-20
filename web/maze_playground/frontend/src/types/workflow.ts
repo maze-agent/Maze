@@ -1,5 +1,5 @@
 export type NodeType = 'task' | 'tool';
-export type NodeCategory = 'builtin' | 'custom' | 'workspace';
+export type NodeCategory = 'builtin' | 'custom' | 'workspace' | 'agent';
 
 export interface Resources {
   cpu: number;
@@ -118,6 +118,10 @@ export interface WorkflowNode {
     workspaceDir?: string;
     taskPath?: string;
     functionName?: string;
+    agentKind?: 'react';
+    reactMode?: 'local' | 'online';
+    prompt?: string;
+    maxSteps?: number;
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;

@@ -1,4 +1,4 @@
-import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Divider, Drawer, Empty, Input, List, message, Modal, Radio, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   CodeOutlined,
@@ -10,6 +10,7 @@ import {
   FolderOpenOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  PartitionOutlined,
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
@@ -128,6 +129,7 @@ export default function BuiltinTasksSidebar() {
   const [workspaceTaskEditorCode, setWorkspaceTaskEditorCode] = useState('');
   const [workspaceTaskEditorError, setWorkspaceTaskEditorError] = useState<string | null>(null);
   const [savingWorkspaceTaskEditor, setSavingWorkspaceTaskEditor] = useState(false);
+  const [workspaceTaskScope, setWorkspaceTaskScope] = useState<'workflow' | 'all'>('all');
   const creatingWorkflowRef = useRef<Promise<string> | null>(null);
   const draggingWorkspaceRef = useRef(false);
   const taskImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -143,6 +145,24 @@ export default function BuiltinTasksSidebar() {
       loadBuiltinTasks(false);
     }
   }, []);
+
+  useEffect(() => {
+    setWorkspaceTaskScope(currentWorkspaceWorkflowPath ? 'workflow' : 'all');
+  }, [currentWorkspaceWorkflowPath]);
+
+  const workflowWorkspaceTaskKeys = useMemo(() => new Set(
+    nodes
+      .filter((node) => node.data.category === 'workspace')
+      .map((node) => `${node.data.taskPath || ''}:${node.data.functionName || ''}`),
+  ), [nodes]);
+
+  const displayedWorkspaceTasks = useMemo(() => {
+    if (workspaceTaskScope !== 'workflow' || !currentWorkspaceWorkflowPath) {
+      return workspaceTasks;
+    }
+
+    return workspaceTasks.filter((task) => workflowWorkspaceTaskKeys.has(`${task.relativePath}:${task.functionName}`));
+  }, [currentWorkspaceWorkflowPath, workflowWorkspaceTaskKeys, workspaceTaskScope, workspaceTasks]);
 
   const ensureWorkflow = async () => {
     if (workflowId) {
@@ -1021,6 +1041,16 @@ export default function BuiltinTasksSidebar() {
     event.dataTransfer.effectAllowed = 'move';
   };
 
+  const onDragStartReAct = (event: React.DragEvent) => {
+    event.dataTransfer.setData('application/reactflow', JSON.stringify({
+      type: 'agent-react',
+      task: {
+        label: 'ReAct Workflow',
+      },
+    }));
+    event.dataTransfer.effectAllowed = 'move';
+  };
+
   const onDragEndWorkspace = () => {
     window.setTimeout(() => {
       draggingWorkspaceRef.current = false;
@@ -1402,12 +1432,10 @@ export default function BuiltinTasksSidebar() {
 
           <Divider />
 
-          <div style={{ marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>Tasks</h3>
-          </div>
-
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h4 style={{ margin: 0, fontSize: '14px' }}>Workspace Tasks</h4>
+            <h3 style={{ margin: 0 }}>
+              {workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath ? 'Workflow Tasks' : 'Workspace Tasks'}
+            </h3>
             <Space size={4}>
               <Button
                 type="text"
@@ -1427,19 +1455,37 @@ export default function BuiltinTasksSidebar() {
               </Button>
             </Space>
           </div>
+          {currentWorkspaceWorkflowPath && (
+            <Radio.Group
+              size="small"
+              value={workspaceTaskScope}
+              onChange={(event) => setWorkspaceTaskScope(event.target.value)}
+              style={{ marginBottom: '8px' }}
+            >
+              <Radio.Button value="workflow">Current Workflow</Radio.Button>
+              <Radio.Button value="all">All Workspace</Radio.Button>
+            </Radio.Group>
+          )}
           <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
-            Click to expand or drag to canvas
+            {workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath
+              ? 'Tasks referenced by the current workflow'
+              : 'Click to expand or drag to canvas'}
           </p>
 
-          {workspaceTasks.length === 0 ? (
-            <Empty description="No workspace tasks" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+          {displayedWorkspaceTasks.length === 0 ? (
+            <Empty
+              description={workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath
+                ? 'No workspace tasks in current workflow'
+                : 'No workspace tasks'}
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            >
               <Button size="small" icon={<PlusOutlined />} onClick={openNewWorkspaceTaskModal} loading={creatingTask}>
                 New Task
               </Button>
             </Empty>
           ) : (
             <List
-              dataSource={workspaceTasks}
+              dataSource={displayedWorkspaceTasks}
               renderItem={(task) => {
                 const taskKey = getWorkspaceTaskKey(task);
                 const expanded = expandedTaskKey === taskKey;
@@ -1554,8 +1600,39 @@ export default function BuiltinTasksSidebar() {
 
           <Divider />
 
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <h3 style={{ margin: 0 }}>Builtin Workflows</h3>
+              <Tag color="purple" style={{ margin: 0 }}>template</Tag>
+            </div>
+            <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
+              Drag workflow templates to canvas
+            </p>
+            <Card
+              size="small"
+              style={{ cursor: 'grab' }}
+              hoverable
+              draggable
+              onDragStart={onDragStartReAct}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <PartitionOutlined style={{ color: '#722ed1' }} />
+                <strong>ReAct Workflow</strong>
+              </div>
+              <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
+                <Tag color="purple">agent</Tag>
+                <Tag>LLM + tools</Tag>
+              </Space>
+              <Text type="secondary" style={{ display: 'block', fontSize: '12px' }}>
+                Drag to canvas, configure the prompt, then use the main Run button.
+              </Text>
+            </Card>
+          </div>
+
+          <Divider />
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h4 style={{ margin: 0, fontSize: '14px' }}>Builtin Tasks</h4>
+            <h3 style={{ margin: 0 }}>Builtin Tasks</h3>
             <Button
               type="text"
               size="small"

@@ -11,17 +11,64 @@ import ReactFlow, {
   ReactFlowInstance,
   Node as ReactFlowNode,
 } from 'reactflow';
-import { message } from 'antd';
+import { Button, message, Space, Spin, Tag, Typography } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { BuiltinTaskMeta, WorkspaceTaskMeta, WorkflowEdge, WorkflowNode } from '@/types/workflow';
+import type {
+  BuiltinTaskMeta,
+  DynamicRunEvent,
+  DynamicRunSnapshot,
+  DynamicRunStatus,
+  WorkspaceTaskMeta,
+  WorkflowEdge,
+  WorkflowNode,
+} from '@/types/workflow';
 import CustomNode from './CustomNode';
+import ReActRuntimeCanvas, { buildAgentTrace } from './ReActRuntimeCanvas';
+
+const { Text, Title } = Typography;
 
 const nodeTypes = {
   taskNode: CustomNode,
 };
 
-export default function WorkflowCanvas() {
+const dynamicTerminalStatuses = new Set<DynamicRunStatus>([
+  'finalized',
+  'failed',
+  'canceled',
+  'timed_out',
+  'interrupted',
+]);
+
+const dynamicStatusColors: Record<DynamicRunStatus, string> = {
+  created: 'default',
+  running: 'processing',
+  finalized: 'success',
+  failed: 'error',
+  canceled: 'orange',
+  timed_out: 'volcano',
+  interrupted: 'magenta',
+};
+
+interface WorkflowCanvasProps {
+  activeDynamicRunId?: string | null;
+  onOpenRuns?: () => void;
+}
+
+function toNodeRunStatus(status?: DynamicRunStatus | null) {
+  if (!status) return null;
+  if (status === 'finalized') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'interrupted' || status === 'canceled' || status === 'timed_out') return 'interrupted';
+  return 'running';
+}
+
+function formatTime(value?: number | null) {
+  if (!value) return '-';
+  return new Date(value * 1000).toLocaleString();
+}
+
+export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: WorkflowCanvasProps) {
   const {
     nodes,
     edges,
@@ -36,19 +83,28 @@ export default function WorkflowCanvas() {
     selectedRunId,
     staticRuns,
   } = useWorkflowStore();
+  const [runtimeCanvasOpen, setRuntimeCanvasOpen] = React.useState(false);
+  const [dynamicRun, setDynamicRun] = React.useState<DynamicRunSnapshot | null>(null);
+  const [dynamicEvents, setDynamicEvents] = React.useState<DynamicRunEvent[]>([]);
+  const [dynamicLoading, setDynamicLoading] = React.useState(false);
   
   const visibleRunId = selectedRunId || activeRunId;
   const visibleRun = visibleRunId ? staticRuns.find((run) => run.run_id === visibleRunId) : null;
+  const dynamicNodeStatus = toNodeRunStatus(dynamicRun?.status);
   const nodesWithRunState = React.useMemo(() => (
     nodes.map((node) => ({
       ...node,
       data: {
         ...node.data,
-        runState: visibleRun?.task_nodes?.[node.id] || null,
-        runStatus: visibleRun?.status || null,
+        runState: node.data.category === 'agent' && activeDynamicRunId && dynamicNodeStatus
+          ? { status: dynamicNodeStatus }
+          : visibleRun?.task_nodes?.[node.id] || null,
+        runStatus: node.data.category === 'agent' && activeDynamicRunId && dynamicNodeStatus
+          ? dynamicNodeStatus
+          : visibleRun?.status || null,
       },
     }))
-  ), [nodes, visibleRun]);
+  ), [activeDynamicRunId, dynamicNodeStatus, nodes, visibleRun]);
 
   const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodesWithRunState);
   const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(edges);
@@ -58,6 +114,65 @@ export default function WorkflowCanvas() {
 
   const lastRenderedNodesRef = useRef<string>('');
   const lastRenderedEdgesRef = useRef<string>('');
+  const agentTrace = React.useMemo(() => buildAgentTrace(dynamicEvents), [dynamicEvents]);
+
+  const loadActiveDynamicRun = useCallback(async (silent = false) => {
+    if (!activeDynamicRunId) {
+      return;
+    }
+
+    if (!silent) {
+      setDynamicLoading(true);
+    }
+
+    try {
+      const [runResult, eventResult] = await Promise.all([
+        api.getDynamicRun(activeDynamicRunId),
+        api.getDynamicRunEvents(activeDynamicRunId),
+      ]);
+      setDynamicRun(runResult.run);
+      setDynamicEvents(eventResult.events || []);
+    } catch (error: any) {
+      console.error('Failed to load active dynamic run:', error);
+      if (!silent) {
+        message.error(error.response?.data?.error || 'Failed to load active dynamic run');
+      }
+    } finally {
+      if (!silent) {
+        setDynamicLoading(false);
+      }
+    }
+  }, [activeDynamicRunId]);
+
+  useEffect(() => {
+    if (!activeDynamicRunId) {
+      setRuntimeCanvasOpen(false);
+      setDynamicRun(null);
+      setDynamicEvents([]);
+      return;
+    }
+
+    setRuntimeCanvasOpen(true);
+    setDynamicRun(null);
+    setDynamicEvents([]);
+    void loadActiveDynamicRun();
+  }, [activeDynamicRunId, loadActiveDynamicRun]);
+
+  useEffect(() => {
+    if (!activeDynamicRunId) {
+      return undefined;
+    }
+
+    if (dynamicRun && dynamicTerminalStatuses.has(dynamicRun.status)) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadActiveDynamicRun(true);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [activeDynamicRunId, dynamicRun?.status, loadActiveDynamicRun]);
   
   useEffect(() => {
     const nodesStr = JSON.stringify(nodesWithRunState);
@@ -269,6 +384,27 @@ export default function WorkflowCanvas() {
 
           addNode(newNode);
           selectNode(newNode);
+        } else if (type === 'agent-react') {
+          const newNode = {
+            id: `node-${Date.now()}`,
+            type: 'taskNode' as const,
+            position,
+            data: {
+              category: 'agent' as const,
+              nodeType: 'task' as const,
+              label: 'ReAct Workflow',
+              agentKind: 'react' as const,
+              reactMode: 'local' as const,
+              prompt: 'Use the calculator to compute 18 * 7, then give the final answer.',
+              maxSteps: 4,
+              inputs: [],
+              outputs: [{ name: 'answer', dataType: 'any' }],
+              configured: true,
+            },
+          };
+
+          addNode(newNode);
+          selectNode(newNode);
         }
       } catch (error) {
         console.error('Failed to drop node:', error);
@@ -298,6 +434,86 @@ export default function WorkflowCanvas() {
         <Controls />
         <MiniMap />
       </ReactFlow>
+
+      {activeDynamicRunId && runtimeCanvasOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 16,
+            zIndex: 10,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+            background: '#fff',
+            border: '1px solid #d9d9d9',
+            borderRadius: 8,
+            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.16)',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              padding: '12px 14px',
+              borderBottom: '1px solid #f0f0f0',
+              background: '#fff',
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <Space size={8} wrap>
+                <Title level={5} style={{ margin: 0 }}>
+                  Live ReAct Runtime
+                </Title>
+                {dynamicRun ? (
+                  <Tag color={dynamicStatusColors[dynamicRun.status] || 'default'}>{dynamicRun.status}</Tag>
+                ) : (
+                  <Tag>loading</Tag>
+                )}
+              </Space>
+              <Space size={8} wrap style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {activeDynamicRunId}
+                </Text>
+                {dynamicRun?.created_time && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Started {formatTime(dynamicRun.created_time)}
+                  </Text>
+                )}
+              </Space>
+            </div>
+
+            <Space>
+              <Button onClick={onOpenRuns}>
+                Open Runs
+              </Button>
+              <Button onClick={() => setRuntimeCanvasOpen(false)}>
+                Back to Editor
+              </Button>
+            </Space>
+          </div>
+
+          <div style={{ flex: 1, minHeight: 0, padding: 12, background: '#fafafa' }}>
+            {dynamicLoading && !dynamicRun ? (
+              <div style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
+                <Space direction="vertical" align="center">
+                  <Spin />
+                  <Text type="secondary">Loading runtime graph...</Text>
+                </Space>
+              </div>
+            ) : (
+              <ReActRuntimeCanvas
+                trace={agentTrace}
+                run={dynamicRun}
+                height="100%"
+                emptyDescription="Waiting for ReAct runtime events..."
+              />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -7,15 +7,17 @@ import BuiltinTasksSidebar from './components/BuiltinTasksSidebar';
 import WorkflowCanvas from './components/WorkflowCanvas';
 import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
-import DynamicRunsInspector from './components/DynamicRunsInspector';
-import RunHistoryDrawer from './components/RunHistoryDrawer';
+import RunsInspector from './components/RunsInspector';
+import ReActRunModal from './components/ReActRunModal';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
 function App() {
   const saveShortcutInFlightRef = useRef(false);
-  const [dynamicRunsOpen, setDynamicRunsOpen] = useState(false);
-  const [runHistoryOpen, setRunHistoryOpen] = useState(false);
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
+  const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
+  const [reactRunnerOpen, setReactRunnerOpen] = useState(false);
   const {
     workflowId,
     workflowName,
@@ -172,23 +174,41 @@ function App() {
     <ConfigProvider locale={enUS}>
       <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
         <Toolbar
-          onOpenDynamicRuns={() => setDynamicRunsOpen(true)}
-          onOpenRunHistory={() => setRunHistoryOpen(true)}
+          onOpenRuns={() => setRunsOpen(true)}
+          onOpenReactRunner={() => setReactRunnerOpen(true)}
+          onReactRunStarted={(runId) => {
+            setActiveDynamicRunId(runId);
+            setDynamicRunFocusId(runId);
+          }}
         />
         
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           <BuiltinTasksSidebar />
           
           <div style={{ flex: 1, position: 'relative' }}>
-            <WorkflowCanvas />
+            <WorkflowCanvas
+              activeDynamicRunId={activeDynamicRunId}
+              onOpenRuns={() => setRunsOpen(true)}
+            />
           </div>
           
           <NodePanel />
         </div>
         
         <ResultsModal />
-        <RunHistoryDrawer open={runHistoryOpen} onClose={() => setRunHistoryOpen(false)} />
-        <DynamicRunsInspector open={dynamicRunsOpen} onClose={() => setDynamicRunsOpen(false)} />
+        <RunsInspector
+          open={runsOpen}
+          onClose={() => setRunsOpen(false)}
+          focusDynamicRunId={dynamicRunFocusId}
+        />
+        <ReActRunModal
+          open={reactRunnerOpen}
+          onClose={() => setReactRunnerOpen(false)}
+          onCompleted={(runId) => {
+            setActiveDynamicRunId(runId);
+            setDynamicRunFocusId(runId);
+          }}
+        />
       </div>
     </ConfigProvider>
   );

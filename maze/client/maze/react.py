@@ -1,0 +1,403 @@
+from __future__ import annotations
+
+import inspect
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List
+
+from maze.client.maze.decorator import get_task_metadata
+from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
+
+
+@dataclass
+class ReActStep:
+    index: int
+    decision_task_id: str
+    decision: Dict[str, Any]
+    tool_name: str | None = None
+    args: Dict[str, Any] = field(default_factory=dict)
+    tool_task_id: str | None = None
+    observation: Dict[str, Any] | None = None
+
+
+class ReActWorkflow:
+    """A minimal ReAct workflow template backed by DynamicRun.
+
+    The LLM decision function is itself a Maze @task. It should return either:
+    - {"action": {"tool": "<tool-name>", "args": {...}}}
+    - {"action": {"final": ...}}
+
+    For convenience, direct {"tool": ...} and {"final": ...} payloads are also
+    accepted.
+    """
+
+    def __init__(
+        self,
+        dynamic_run: DynamicRun,
+        llm_task: Callable[..., Dict[str, Any]],
+        tools: List[Callable[..., Dict[str, Any]]],
+        max_steps: int = 10,
+        system_prompt: str | None = None,
+        task_timeout: float | None = None,
+    ):
+        if max_steps < 1:
+            raise ValueError("max_steps must be at least 1")
+
+        self.dynamic_run = dynamic_run
+        self.llm_task = llm_task
+        self.max_steps = max_steps
+        self.system_prompt = system_prompt
+        self.task_timeout = task_timeout
+        self.steps: List[ReActStep] = []
+        self.tool_specs: Dict[str, Dict[str, Any]] = {}
+        self._registered_tools: Dict[str, DynamicTaskSpec] = {}
+        self._tool_input_names: Dict[str, set[str]] = {}
+        self._tool_required_inputs: Dict[str, set[str]] = {}
+
+        llm_metadata = get_task_metadata(llm_task)
+        self._llm_input_names = set(llm_metadata.inputs)
+        self._llm_spec = self.dynamic_run.register_task_spec(
+            llm_task,
+            task_spec_id="react_llm_decision",
+            task_name=llm_metadata.func_name,
+        )
+
+        for tool in tools:
+            self._register_tool(tool)
+
+        if not self._registered_tools:
+            raise ValueError("ReActWorkflow requires at least one @task tool")
+
+    @property
+    def run_id(self) -> str:
+        return self.dynamic_run.run_id
+
+    def run(self, prompt: str) -> Any:
+        try:
+            self.dynamic_run.emit_event("agent_run_started", {
+                "mode": "react",
+                "prompt": prompt,
+                "max_steps": self.max_steps,
+                "llm_task": self._llm_spec.task_name,
+                "tools": sorted(self._registered_tools),
+            })
+
+            for step_index in range(1, self.max_steps + 1):
+                decision_event = self._run_llm_decision(step_index, prompt)
+                decision_task = decision_event["task"]
+                decision = decision_event["decision"]
+                try:
+                    action = self._parse_action(decision)
+                except Exception as exc:
+                    action = {"error": str(exc)}
+
+                self.dynamic_run.emit_event("react_llm_decision", {
+                    "step": step_index,
+                    "task_id": decision_task.task_id,
+                    "decision": decision,
+                    "action": action,
+                })
+
+                if "error" in action:
+                    self.steps.append(self._record_repair_step(
+                        step_index=step_index,
+                        decision_task=decision_task,
+                        decision=decision,
+                        action=action,
+                        error=str(action["error"]),
+                        error_type="invalid_action",
+                    ))
+                    continue
+
+                if "final" in action:
+                    answer = action["final"]
+                    self.dynamic_run.emit_event("agent_final", {
+                        "mode": "react",
+                        "answer": answer,
+                        "step_count": len(self.steps),
+                    })
+                    self.dynamic_run.finalize({
+                        "mode": "react",
+                        "answer": answer,
+                        "steps": [self._step_snapshot(step) for step in self.steps],
+                    })
+                    return answer
+
+                repair = self._validate_tool_action(action)
+                if repair is not None:
+                    self.steps.append(self._record_repair_step(
+                        step_index=step_index,
+                        decision_task=decision_task,
+                        decision=decision,
+                        action=action,
+                        error=repair["error"],
+                        error_type=repair["error_type"],
+                        details=repair,
+                    ))
+                    continue
+
+                step = self._run_tool_step(step_index, decision_task, decision, action)
+                self.steps.append(step)
+
+            raise RuntimeError(f"ReAct workflow exceeded max_steps={self.max_steps} without a final answer")
+        except Exception as exc:
+            self._emit_best_effort("agent_error", {
+                "mode": "react",
+                "error": str(exc),
+            })
+            self._cancel_if_active("ReAct workflow controller error")
+            raise
+
+    def status(self) -> Dict[str, Any]:
+        return self.dynamic_run.get_status()
+
+    def get_events(self, after: int | None = None) -> List[Dict[str, Any]]:
+        return self.dynamic_run.get_events(after=after)
+
+    def cancel(self, reason: str | None = None):
+        return self.dynamic_run.cancel(reason)
+
+    def _register_tool(self, tool: Callable[..., Dict[str, Any]]):
+        metadata = get_task_metadata(tool)
+        tool_name = metadata.func_name
+        if tool_name in self._registered_tools:
+            raise ValueError(f"Duplicate ReAct tool name: {tool_name}")
+
+        task_spec = self.dynamic_run.register_task_spec(
+            tool,
+            task_spec_id=tool_name,
+            task_name=tool_name,
+        )
+        self._registered_tools[tool_name] = task_spec
+        input_names = set(metadata.inputs)
+        required_inputs = set()
+        signature = inspect.signature(tool)
+        for parameter in signature.parameters.values():
+            if parameter.name in input_names and parameter.default is inspect.Signature.empty:
+                required_inputs.add(parameter.name)
+
+        self._tool_input_names[tool_name] = input_names
+        self._tool_required_inputs[tool_name] = required_inputs
+        self.tool_specs[tool_name] = {
+            "name": tool_name,
+            "description": (getattr(tool, "__doc__", None) or "").strip(),
+            "inputs": metadata.inputs,
+            "required_inputs": sorted(required_inputs),
+            "outputs": metadata.outputs,
+            "data_types": metadata.data_types,
+            "resources": metadata.resources,
+        }
+
+    def _run_llm_decision(self, step_index: int, prompt: str) -> Dict[str, Any]:
+        task = self.dynamic_run.append_task(
+            self._llm_spec,
+            inputs=self._build_llm_inputs(step_index, prompt),
+            request_id=f"react-step-{step_index}-llm",
+        )
+        finish_event = self.dynamic_run.wait_for_task(task, timeout=self.task_timeout)
+        result = finish_event.get("data", {}).get("result", {})
+        if not isinstance(result, dict):
+            raise TypeError("ReAct LLM task must return a dict result")
+        return {
+            "task": task,
+            "decision": result,
+            "event": finish_event,
+        }
+
+    def _build_llm_inputs(self, step_index: int, prompt: str) -> Dict[str, Any]:
+        available = {
+            "prompt": prompt,
+            "history": [self._step_snapshot(step) for step in self.steps],
+            "tools": self.tool_specs,
+            "step": step_index,
+            "system_prompt": self.system_prompt,
+        }
+        return {
+            key: value
+            for key, value in available.items()
+            if key in self._llm_input_names
+        }
+
+    def _parse_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        action = decision.get("action", decision)
+        if not isinstance(action, dict):
+            raise TypeError("ReAct decision action must be a dict")
+
+        if "final" in action:
+            return {"final": action["final"]}
+
+        action_type = action.get("type") or action.get("action")
+        if action_type == "final":
+            return {
+                "final": action.get("answer", action.get("result", action.get("content", ""))),
+            }
+
+        tool_name = action.get("tool")
+        if isinstance(action_type, str) and action_type not in {"tool", "call_tool", "final"} and not tool_name:
+            tool_name = action_type
+
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError("ReAct tool action requires a non-empty tool name")
+
+        args = action.get("args") or {}
+        if not isinstance(args, dict):
+            raise TypeError("ReAct tool action args must be a dict")
+
+        return {
+            "tool": tool_name,
+            "args": args,
+        }
+
+    def _validate_tool_action(self, action: Dict[str, Any]) -> Dict[str, Any] | None:
+        tool_name = action["tool"]
+        args = action.get("args") or {}
+
+        if tool_name not in self._registered_tools:
+            return {
+                "error_type": "tool_not_allowed",
+                "error": f"ReAct tool is not allowed: {tool_name}",
+                "tool": tool_name,
+                "available_tools": sorted(self._registered_tools),
+            }
+
+        input_names = self._tool_input_names.get(tool_name, set())
+        required_inputs = self._tool_required_inputs.get(tool_name, set())
+        missing_inputs = sorted(required_inputs - set(args))
+        unknown_inputs = sorted(set(args) - input_names)
+
+        if missing_inputs:
+            return {
+                "error_type": "missing_args",
+                "error": f"Missing required args for {tool_name}: {missing_inputs}",
+                "tool": tool_name,
+                "args": args,
+                "missing_args": missing_inputs,
+                "expected_args": sorted(input_names),
+                "required_args": sorted(required_inputs),
+            }
+
+        if unknown_inputs:
+            return {
+                "error_type": "unknown_args",
+                "error": f"Unknown args for {tool_name}: {unknown_inputs}",
+                "tool": tool_name,
+                "args": args,
+                "unknown_args": unknown_inputs,
+                "expected_args": sorted(input_names),
+                "required_args": sorted(required_inputs),
+            }
+
+        return None
+
+    def _record_repair_step(
+        self,
+        step_index: int,
+        decision_task: DynamicTaskInvocation,
+        decision: Dict[str, Any],
+        action: Dict[str, Any],
+        error: str,
+        error_type: str,
+        details: Dict[str, Any] | None = None,
+    ) -> ReActStep:
+        observation = {
+            "error": error,
+            "error_type": error_type,
+            "repairable": True,
+            "action": action,
+            "available_tools": sorted(self._registered_tools),
+        }
+        if details:
+            observation.update(details)
+
+        tool_name = action.get("tool") if isinstance(action.get("tool"), str) else None
+        args = action.get("args") if isinstance(action.get("args"), dict) else {}
+
+        self.dynamic_run.emit_event("agent_repair_observation", {
+            "mode": "react",
+            "step": step_index,
+            "tool": tool_name,
+            "decision_task_id": decision_task.task_id,
+            "result": observation,
+        })
+
+        return ReActStep(
+            index=step_index,
+            decision_task_id=decision_task.task_id,
+            decision=decision,
+            tool_name=tool_name,
+            args=dict(args),
+            observation=observation,
+        )
+
+    def _run_tool_step(
+        self,
+        step_index: int,
+        decision_task: DynamicTaskInvocation,
+        decision: Dict[str, Any],
+        action: Dict[str, Any],
+    ) -> ReActStep:
+        tool_name = action["tool"]
+        if tool_name not in self._registered_tools:
+            raise ValueError(f"ReAct tool is not allowed: {tool_name}")
+
+        args = action.get("args") or {}
+        self.dynamic_run.emit_event("agent_action", {
+            "mode": "react",
+            "step": step_index,
+            "tool": tool_name,
+            "args": args,
+            "decision_task_id": decision_task.task_id,
+        })
+        tool_task = self.dynamic_run.append_task(
+            self._registered_tools[tool_name],
+            inputs=args,
+            parents=[decision_task],
+            request_id=f"react-step-{step_index}-tool",
+        )
+        finish_event = self.dynamic_run.wait_for_task(tool_task, timeout=self.task_timeout)
+        observation = {
+            "tool": tool_name,
+            "task_id": tool_task.task_id,
+            "result": finish_event.get("data", {}).get("result", {}),
+        }
+        self.dynamic_run.emit_event("agent_observation", {
+            "mode": "react",
+            "step": step_index,
+            "tool": tool_name,
+            "task_id": tool_task.task_id,
+            "result": observation["result"],
+        })
+
+        return ReActStep(
+            index=step_index,
+            decision_task_id=decision_task.task_id,
+            decision=decision,
+            tool_name=tool_name,
+            args=dict(args),
+            tool_task_id=tool_task.task_id,
+            observation=observation,
+        )
+
+    def _step_snapshot(self, step: ReActStep) -> Dict[str, Any]:
+        return {
+            "index": step.index,
+            "decision_task_id": step.decision_task_id,
+            "decision": step.decision,
+            "tool": step.tool_name,
+            "args": step.args,
+            "tool_task_id": step.tool_task_id,
+            "observation": step.observation,
+        }
+
+    def _cancel_if_active(self, reason: str):
+        try:
+            status = self.dynamic_run.get_status().get("status")
+            if status not in {"finalized", "failed", "canceled", "timed_out", "interrupted"}:
+                self.dynamic_run.cancel(reason)
+        except Exception:
+            pass
+
+    def _emit_best_effort(self, event_type: str, data: Dict[str, Any]):
+        try:
+            self.dynamic_run.emit_event(event_type, data)
+        except Exception:
+            pass

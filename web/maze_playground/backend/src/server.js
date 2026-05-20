@@ -22,6 +22,7 @@ app.use(express.json({ limit: '50mb' }));
 const workflows = new Map();
 // 存储 WebSocket 连接
 const wsConnections = new Map(); // workflowId -> Set<WebSocket>
+const activeReactRunProcesses = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
 const DEFAULT_WORKSPACE_DIR = process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace');
 const MAZE_CORE_URL = process.env.MAZE_CORE_URL || 'http://localhost:8000';
@@ -1073,7 +1074,7 @@ async function callMazeCore(pathname, options = {}) {
 
 // ========== Python 桥接函数 ==========
 
-function callPython(action, params = {}, onProgress = null) {
+function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
     const progressPromises = [];
@@ -1082,6 +1083,7 @@ function callPython(action, params = {}, onProgress = null) {
     const python = spawn(PYTHON_BIN, [bridgePath, action, JSON.stringify(params)], {
       env: {
         ...process.env,
+        ...extraEnv,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1'
       }
@@ -1143,6 +1145,121 @@ function callPython(action, params = {}, onProgress = null) {
     python.on('error', (err) => {
       console.error('Python进程错误:', err);
       reject(err);
+    });
+  });
+}
+
+function startReactWorkflowProcess(params = {}, extraEnv = {}) {
+  return new Promise((resolve, reject) => {
+    const bridgePath = path.join(__dirname, '../maze_bridge.py');
+    const python = spawn(PYTHON_BIN, [bridgePath, 'run_react_workflow', JSON.stringify(params)], {
+      env: {
+        ...process.env,
+        ...extraEnv,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+      },
+    });
+
+    let output = '';
+    let error = '';
+    let stderrLineBuffer = '';
+    let settled = false;
+    let runId = null;
+
+    const startupTimer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        python.kill('SIGTERM');
+        reject(new Error('Timed out waiting for ReAct run id'));
+      }
+    }, 15000);
+
+    const settleStarted = (payload) => {
+      if (settled) return;
+      runId = payload?.data?.run_id;
+      if (!runId) return;
+      settled = true;
+      clearTimeout(startupTimer);
+      activeReactRunProcesses.set(runId, python);
+      resolve({
+        success: true,
+        runId,
+        status: 'running',
+        mode: payload?.data?.mode || params.mode || 'local',
+      });
+    };
+
+    python.stdout.setEncoding('utf8');
+    python.stdout.on('data', (data) => {
+      output += data;
+    });
+
+    python.stderr.setEncoding('utf8');
+    python.stderr.on('data', (data) => {
+      error += data;
+      stderrLineBuffer += data;
+      const lines = stderrLineBuffer.split(/\r?\n/);
+      stderrLineBuffer = lines.pop() || '';
+
+      lines.forEach((line) => {
+        if (line.startsWith('__MAZE_PROGRESS__')) {
+          const raw = line.slice('__MAZE_PROGRESS__'.length);
+          try {
+            const progress = JSON.parse(raw);
+            if (progress.type === 'react_run_created') {
+              settleStarted(progress);
+            }
+          } catch {
+            console.error('Failed to parse ReAct progress message');
+          }
+        } else if (line.trim()) {
+          console.error('Python stderr:', line);
+        }
+      });
+    });
+
+    python.on('close', (code) => {
+      clearTimeout(startupTimer);
+      if (runId) {
+        activeReactRunProcesses.delete(runId);
+      }
+
+      if (!settled) {
+        settled = true;
+        const message = code === 0
+          ? 'ReAct process exited before returning a run id'
+          : `ReAct process failed before returning a run id: ${error}`;
+        reject(new Error(message));
+        return;
+      }
+
+      if (code !== 0) {
+        console.error(`ReAct process failed after run start (${runId || 'unknown'}):`, error);
+        return;
+      }
+
+      try {
+        const result = JSON.parse(output || '{}');
+        if (result.error || result.success === false) {
+          console.error(`ReAct process returned an error (${runId || result.runId || 'unknown'}):`, result.error);
+        }
+      } catch {
+        console.error('Failed to parse ReAct process output:', output);
+      }
+    });
+
+    python.on('error', (err) => {
+      clearTimeout(startupTimer);
+      if (runId) {
+        activeReactRunProcesses.delete(runId);
+      }
+      if (!settled) {
+        settled = true;
+        reject(err);
+        return;
+      }
+      console.error('ReAct process error:', err);
     });
   });
 }
@@ -1852,6 +1969,23 @@ app.get('/api/dynamic-runs/:runId/events', async (req, res) => {
   }
 });
 
+app.post('/api/dynamic-runs/:runId/events', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}/events`, {
+      method: 'POST',
+      body: req.body || {},
+    });
+    res.json({
+      success: true,
+      runId: result.run_id,
+      event: result.event,
+    });
+  } catch (error) {
+    console.error('Failed to write dynamic run event:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
 app.delete('/api/dynamic-runs/:runId', async (req, res) => {
   try {
     const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}`, {
@@ -1881,6 +2015,45 @@ app.post('/api/dynamic-runs/cleanup', async (req, res) => {
   } catch (error) {
     console.error('❌ 清理 dynamic runs 失败:', error);
     res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.post('/api/react-runs/start', async (req, res) => {
+  try {
+    const {
+      mode = 'local',
+      prompt,
+      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      maxSteps,
+      timeoutSeconds,
+      taskTimeout,
+      llm,
+    } = req.body || {};
+    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+
+    const extraEnv = {};
+    if (llm?.apiKey) {
+      extraEnv.MAZE_REACT_API_KEY = String(llm.apiKey);
+    }
+
+    const started = await startReactWorkflowProcess(
+      {
+        mode,
+        prompt,
+        workspaceDir,
+        maxSteps,
+        timeoutSeconds,
+        taskTimeout,
+        baseUrl: llm?.baseUrl,
+        model: llm?.model,
+      },
+      extraEnv,
+    );
+
+    res.json(started);
+  } catch (error) {
+    console.error('Failed to start ReAct workflow:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

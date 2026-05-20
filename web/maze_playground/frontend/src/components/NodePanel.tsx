@@ -1,6 +1,6 @@
 import { KeyboardEvent, useEffect, useState } from 'react';
-import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert } from 'antd';
-import { DeleteOutlined, CheckOutlined, CodeOutlined, EditOutlined } from '@ant-design/icons';
+import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert, InputNumber } from 'antd';
+import { DeleteOutlined, CheckOutlined, CodeOutlined, EditOutlined, PartitionOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import CustomTaskEditor from './CustomTaskEditor';
 
@@ -43,6 +43,7 @@ export default function NodePanel() {
 
   const isCustomTask = currentNode.data.category === 'custom';
   const isWorkspaceTask = currentNode.data.category === 'workspace';
+  const isAgentNode = currentNode.data.category === 'agent';
   const isEditableTask = isCustomTask || isWorkspaceTask;
   const isConfigured = currentNode.data.configured;
 
@@ -107,6 +108,7 @@ export default function NodePanel() {
             )}
             {isCustomTask && <Tag color="purple">custom</Tag>}
             {isWorkspaceTask && <Tag color="purple">workspace</Tag>}
+            {isAgentNode && <Tag color="purple">agent</Tag>}
           </Space>
         }
         placement="right"
@@ -145,6 +147,46 @@ export default function NodePanel() {
             >
               {isWorkspaceTask ? 'Edit Workspace Task' : 'Edit Task Code'}
             </Button>
+          )}
+
+          {isAgentNode && (
+            <>
+              <Alert
+                message="ReAct Workflow"
+                description="This canvas node starts a DynamicRun-backed ReAct workflow. Runtime steps are visualized on the main canvas and in Runs."
+                type="info"
+                showIcon
+                icon={<PartitionOutlined />}
+                style={{ marginBottom: '16px' }}
+              />
+
+              <Title level={5}>Agent Settings</Title>
+              <Form.Item label="Mode">
+                <Select
+                  value={currentNode.data.reactMode || 'local'}
+                  onChange={(reactMode) => updateNode(currentNode.id, { reactMode })}
+                >
+                  <Select.Option value="local">Local Demo</Select.Option>
+                  <Select.Option value="online">Online LLM</Select.Option>
+                </Select>
+              </Form.Item>
+              <Form.Item label="Prompt">
+                <Input.TextArea
+                  rows={4}
+                  value={currentNode.data.prompt || ''}
+                  onChange={(event) => updateNode(currentNode.id, { prompt: event.target.value })}
+                />
+              </Form.Item>
+              <Form.Item label="Max Steps">
+                <InputNumber
+                  min={3}
+                  max={20}
+                  value={currentNode.data.maxSteps || 4}
+                  onChange={(value) => updateNode(currentNode.id, { maxSteps: Number(value || 4) })}
+                  style={{ width: 160 }}
+                />
+              </Form.Item>
+            </>
           )}
 
           {isConfigured && (

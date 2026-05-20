@@ -9,6 +9,11 @@ import os
 import traceback
 import io
 import re
+import ast
+import operator
+import tempfile
+import subprocess
+import time
 
 sys.dont_write_bytecode = True
 
@@ -24,17 +29,227 @@ sys.path.insert(0, project_root)
 
 # 使用客户端模块
 from maze.client.front.client import MaClient
+from maze.client.maze.client import MaClient as DynamicMaClient
+from maze.client.maze.react_llm import create_openai_react_llm_task
 from maze import task, get_task_metadata
-from maze.client.front.builtin import simpleTask
+from maze.client.front.builtin import agentTools
 import inspect
 import importlib
 import importlib.util
 import hashlib
 
 
+OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def evaluate_arithmetic(expression: str):
+    node = ast.parse(expression, mode="eval").body
+
+    def visit(current):
+        if isinstance(current, ast.Constant) and isinstance(current.value, (int, float)):
+            return current.value
+        if isinstance(current, ast.BinOp) and type(current.op) in OPERATORS:
+            return OPERATORS[type(current.op)](visit(current.left), visit(current.right))
+        if isinstance(current, ast.UnaryOp) and type(current.op) in OPERATORS:
+            return OPERATORS[type(current.op)](visit(current.operand))
+        raise ValueError(f"Unsupported arithmetic expression: {expression}")
+
+    return visit(node)
+
+
+@task(resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0})
+def playground_react_decide(prompt: str, history: list, tools: dict, step: int):
+    if not history:
+        return {
+            "action": {
+                "tool": "web_search",
+                "args": {
+                    "query": "18 * 7",
+                },
+            }
+        }
+
+    last_observation = history[-1]["observation"]
+    if last_observation.get("error_type") == "tool_not_allowed":
+        return {
+            "action": {
+                "tool": "calculator",
+                "args": {
+                    "expression": "18 * 7",
+                },
+            }
+        }
+
+    result = last_observation["result"]["result"]
+    return {
+        "action": {
+            "final": f"The answer is {result}.",
+        }
+    }
+
+
+@task(resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0})
+def calculator(expression: str):
+    result = evaluate_arithmetic(expression)
+    return {"result": result}
+
+
+def build_react_workspace_tools(workspace_dir):
+    resolved_workspace_dir = os.path.abspath(os.path.expanduser(workspace_dir or project_root))
+    files_dir = os.path.abspath(os.path.join(resolved_workspace_dir, "files"))
+    os.makedirs(files_dir, exist_ok=True)
+
+    def resolve_workspace_file(relative_path):
+        cleaned = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
+        normalized = os.path.normpath(cleaned).replace("\\", "/")
+        if not normalized or normalized == ".":
+            raise ValueError("path is required")
+        if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+            raise ValueError("path must stay inside workspace/files")
+
+        full_path = os.path.abspath(os.path.join(files_dir, normalized))
+        if full_path != files_dir and not full_path.startswith(files_dir + os.sep):
+            raise ValueError("path must stay inside workspace/files")
+        return full_path, normalized
+
+    @task(
+        data_types={"path": "str", "content": "str", "append": "bool"},
+        resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+    )
+    def write_file(path: str, content: str, append: bool = False):
+        try:
+            full_path, normalized = resolve_workspace_file(path)
+            append_flag = append
+            if isinstance(append_flag, str):
+                append_flag = append_flag.strip().lower() in {"1", "true", "yes", "y", "on"}
+            else:
+                append_flag = bool(append_flag)
+
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            mode = "a" if append_flag else "w"
+            text = str(content or "")
+            with open(full_path, mode, encoding="utf-8") as handle:
+                handle.write(text)
+
+            return {
+                "path": normalized,
+                "bytes": len(text.encode("utf-8")),
+                "appended": append_flag,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "path": str(path or ""),
+                "bytes": 0,
+                "appended": False,
+                "error": str(exc),
+            }
+
+    @task(
+        data_types={"path": "str", "max_bytes": "int"},
+        resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+    )
+    def read_file(path: str, max_bytes: int = 20000):
+        try:
+            full_path, normalized = resolve_workspace_file(path)
+            limit = int(max_bytes or 20000)
+            limit = min(max(limit, 1), 200000)
+            with open(full_path, "rb") as handle:
+                raw = handle.read(limit + 1)
+            truncated = len(raw) > limit
+            content = raw[:limit].decode("utf-8", errors="replace")
+            return {
+                "path": normalized,
+                "content": content,
+                "bytes": len(raw[:limit]),
+                "truncated": truncated,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "path": str(path or ""),
+                "content": "",
+                "bytes": 0,
+                "truncated": False,
+                "error": str(exc),
+            }
+
+    @task(
+        data_types={"path": "str", "code": "str", "timeout_seconds": "int"},
+        resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
+    )
+    def exec_code(path: str = "", code: str = "", timeout_seconds: int = 20):
+        try:
+            timeout_value = float(timeout_seconds or 20)
+            timeout_value = min(max(timeout_value, 1), 60)
+            code_text = str(code or "")
+            target_path = str(path or "").strip()
+
+            if code_text and not target_path:
+                target_path = f"generated/exec_{int(time.time() * 1000)}.py"
+
+            if not target_path:
+                return {
+                    "path": "",
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "path or code is required",
+                }
+
+            full_path, normalized = resolve_workspace_file(target_path)
+            if code_text:
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, "w", encoding="utf-8") as handle:
+                    handle.write(code_text)
+
+            completed = subprocess.run(
+                [sys.executable, full_path],
+                cwd=files_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_value,
+            )
+            return {
+                "path": normalized,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[-12000:],
+                "stderr": completed.stderr[-12000:],
+                "error": None,
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "path": str(path or ""),
+                "returncode": None,
+                "stdout": (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else "",
+                "stderr": (exc.stderr or "")[-12000:] if isinstance(exc.stderr, str) else "",
+                "error": f"Execution timed out after {timeout_seconds} seconds",
+            }
+        except Exception as exc:
+            return {
+                "path": str(path or ""),
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "error": str(exc),
+            }
+
+    return [write_file, read_file, exec_code]
+
+
 def get_builtin_tasks():
     """获取所有内置任务的元数据"""
-    builtin_modules = [simpleTask]
+    builtin_modules = [agentTools]
     tasks = []
     
     for module in builtin_modules:
@@ -531,12 +746,12 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
             
             if category == "builtin":
                 # 内置任务
-                task_ref = node_data["taskRef"]  # e.g., "simpleTask.task1"
+                task_ref = node_data["taskRef"]
                 module_name, func_name = task_ref.split(".")
                 
                 # 动态导入模块和函数
-                if module_name == "simpleTask":
-                    task_func = getattr(simpleTask, func_name)
+                if module_name == "agentTools":
+                    task_func = getattr(agentTools, func_name)
                 else:
                     return {"success": False, "error": f"Unknown module: {module_name}"}
                 
@@ -555,6 +770,10 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                                 task_inputs[inp["name"]] = source_task.outputs[output_key]
                             else:
                                 return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
+
+                if module_name == "agentTools" and workspace_dir:
+                    if not str(task_inputs.get("workspace_dir") or "").strip():
+                        task_inputs["workspace_dir"] = workspace_dir
                 
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)
@@ -692,6 +911,138 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
         }
 
 
+def run_react_workflow(params):
+    mode = str(params.get("mode") or "local").strip().lower()
+    prompt = str(params.get("prompt") or "").strip()
+    max_steps = int(params.get("maxSteps") or params.get("max_steps") or 4)
+    timeout_seconds = int(params.get("timeoutSeconds") or params.get("timeout_seconds") or 180)
+    task_timeout = int(params.get("taskTimeout") or params.get("task_timeout") or 120)
+    workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or project_root).strip()
+    config_path = None
+
+    if not prompt:
+        return {"success": False, "error": "Prompt is required"}
+    if max_steps < 1:
+        return {"success": False, "error": "maxSteps must be at least 1"}
+
+    react = None
+    try:
+        workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir)
+        if workspace_error:
+            return {"success": False, "error": workspace_error["error"]}
+        os.makedirs(os.path.join(workspace_dir, "files"), exist_ok=True)
+
+        client = DynamicMaClient(server_url="http://localhost:8000")
+        workspace_tools = build_react_workspace_tools(workspace_dir)
+        base_tools = [calculator, *workspace_tools]
+
+        if mode == "local":
+            llm_task = playground_react_decide
+            tools = base_tools
+            max_steps = max(max_steps, 3)
+        elif mode == "online":
+            base_url = str(params.get("baseUrl") or "").strip()
+            model = str(params.get("model") or "").strip()
+            api_key = os.environ.get("MAZE_REACT_API_KEY", "")
+            system_prompt = str(params.get("systemPrompt") or "").strip() or (
+                "You are a ReAct controller for Maze. Return strict JSON only. "
+                "Use available tools to make progress. When no direct domain tool exists, "
+                "write a Python helper under workspace/files with write_file, inspect it "
+                "with read_file when needed, and run it with exec_code. Do not answer that "
+                "a tool is unavailable before considering whether you can create and execute "
+                "a small helper script."
+            )
+
+            if not base_url:
+                return {"success": False, "error": "Base URL is required for online ReAct runs"}
+            if not model:
+                return {"success": False, "error": "Model is required for online ReAct runs"}
+            if not api_key:
+                return {"success": False, "error": "API key is required for online ReAct runs"}
+
+            config_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                delete=False,
+                encoding="utf-8",
+            )
+            config_path = config_file.name
+            try:
+                json.dump({
+                    "url": base_url,
+                    "key": api_key,
+                    "model": model,
+                }, config_file)
+            finally:
+                config_file.close()
+
+            llm_task = create_openai_react_llm_task(
+                config_path=config_path,
+                task_name="playground_openai_react_decide",
+                system_prompt=system_prompt,
+                timeout=task_timeout,
+            )
+            tools = base_tools
+        else:
+            return {"success": False, "error": f"Unsupported ReAct mode: {mode}"}
+
+        react = client.create_react_workflow(
+            llm_task=llm_task,
+            tools=tools,
+            max_steps=max_steps,
+            timeout_seconds=timeout_seconds,
+            task_timeout=task_timeout,
+        )
+        emit_progress({
+            "type": "react_run_created",
+            "data": {
+                "run_id": react.run_id,
+                "mode": mode,
+            },
+        })
+        answer = react.run(prompt)
+        status = react.status()
+        events = react.get_events()
+        emit_progress({
+            "type": "react_run_completed",
+            "data": {
+                "run_id": react.run_id,
+                "status": status.get("status"),
+            },
+        })
+
+        return {
+            "success": True,
+            "runId": react.run_id,
+            "answer": answer,
+            "status": status.get("status"),
+            "eventTypes": [
+                event.get("type")
+                for event in events
+                if str(event.get("type", "")).startswith(("agent_", "react_"))
+            ],
+        }
+    except Exception as e:
+        response = {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
+        if react is not None:
+            response["runId"] = react.run_id
+            try:
+                response["status"] = react.status().get("status")
+            except Exception:
+                pass
+        return response
+    finally:
+        if config_path:
+            try:
+                os.unlink(config_path)
+            except OSError:
+                pass
+
+
 def main():
     """主函数 - 根据命令行参数执行不同操作"""
     if len(sys.argv) < 2:
@@ -749,6 +1100,9 @@ def main():
                 params.get('staticRunId'),
                 params.get('workspaceDir'),
             )
+
+        elif action == 'run_react_workflow':
+            result = run_react_workflow(params)
         
         else:
             result = {"error": f"Unknown action: {action}"}

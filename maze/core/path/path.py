@@ -318,6 +318,43 @@ class MaPath:
         self.dynamic_run_store.load_run(run_id)
         return self.dynamic_run_store.load_events(run_id, after)
 
+    async def emit_dynamic_run_event(self, run_id:str, event:Dict[str,Any]):
+        await self._refresh_dynamic_timeout(run_id)
+        if not isinstance(event, dict):
+            raise ValueError("Dynamic run event must be a JSON object")
+
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            raise ValueError("Dynamic run event requires a non-empty string type")
+
+        if event_type in {
+            "start_dynamic_run",
+            "register_task_spec",
+            "append_task",
+            "task_ready",
+            "start_task",
+            "finish_task",
+            "task_exception",
+            "finish_workflow",
+            "cancel_dynamic_run",
+            "timeout_dynamic_run",
+            "interrupt_dynamic_run",
+        }:
+            raise ValueError(f"Dynamic run event type is reserved: {event_type}")
+
+        event_data = event.get("data") or {}
+        if not isinstance(event_data, dict):
+            raise ValueError("Dynamic run event data must be a JSON object")
+
+        await self._emit_dynamic_event(run_id, {
+            **event,
+            "data": {
+                **event_data,
+                "run_id": run_id,
+            },
+        })
+        return self.get_dynamic_run(run_id).event_log[-1]
+
     async def delete_dynamic_run(self, run_id:str):
         snapshot = await self.get_dynamic_run_snapshot(run_id)
         if snapshot.get("status") not in TERMINAL_DYNAMIC_RUN_STATUSES:

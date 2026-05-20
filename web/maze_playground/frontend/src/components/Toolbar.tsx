@@ -1,6 +1,6 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
-import { DownloadOutlined, HistoryOutlined, NodeIndexOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
+import { DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
@@ -9,11 +9,12 @@ import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSetti
 const { Text } = Typography;
 
 interface ToolbarProps {
-  onOpenDynamicRuns?: () => void;
-  onOpenRunHistory?: () => void;
+  onOpenRuns?: () => void;
+  onOpenReactRunner?: () => void;
+  onReactRunStarted?: (runId: string) => void;
 }
 
-export default function Toolbar({ onOpenDynamicRuns, onOpenRunHistory }: ToolbarProps) {
+export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStarted }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -309,6 +310,54 @@ export default function Toolbar({ onOpenDynamicRuns, onOpenRunHistory }: Toolbar
       return;
     }
 
+    const agentNodes = nodes.filter((node) => node.data.category === 'agent');
+    if (agentNodes.length > 0) {
+      if (agentNodes.length > 1 || nodes.length > 1 || edges.length > 0) {
+        message.warning('Run one ReAct workflow node at a time. Mixed static and agent workflows are not supported yet.');
+        return;
+      }
+
+      const agentNode = agentNodes[0];
+      if (agentNode.data.agentKind !== 'react') {
+        message.warning('Unsupported agent workflow');
+        return;
+      }
+
+      const prompt = (agentNode.data.prompt || '').trim();
+      if (!prompt) {
+        message.warning('Please configure a ReAct prompt');
+        return;
+      }
+
+      const mode = agentNode.data.reactMode || 'local';
+      const settings = loadLlmSettings();
+      if (mode === 'online' && (!settings.baseUrl.trim() || !settings.model.trim() || !settings.apiKey.trim())) {
+        message.warning('Please configure online LLM settings first');
+        return;
+      }
+
+      setIsRunning(true);
+      try {
+        const started = await api.startReactRun({
+          mode,
+          prompt,
+          workspaceDir: workspaceDir || undefined,
+          maxSteps: agentNode.data.maxSteps || 4,
+          timeoutSeconds: mode === 'online' ? 180 : 90,
+          taskTimeout: mode === 'online' ? 120 : 60,
+          llm: mode === 'online' ? settings : undefined,
+        });
+        message.success(`ReAct run started: ${started.runId.slice(0, 8)}...`);
+        onReactRunStarted?.(started.runId);
+      } catch (error: any) {
+        console.error('Failed to run ReAct workflow:', error);
+        message.error(error.response?.data?.error || 'Failed to run ReAct workflow');
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
+
     const unconfiguredNodes = nodes.filter(n => !n.data.configured);
     if (unconfiguredNodes.length > 0) {
       message.warning('Some nodes are not configured, please configure all nodes first');
@@ -423,17 +472,17 @@ export default function Toolbar({ onOpenDynamicRuns, onOpenRunHistory }: Toolbar
         </Button>
 
         <Button
-          icon={<NodeIndexOutlined />}
-          onClick={onOpenDynamicRuns}
+          icon={<ThunderboltOutlined />}
+          onClick={onOpenReactRunner}
         >
-          Dynamic Runs
+          ReAct
         </Button>
 
         <Button
           icon={<HistoryOutlined />}
-          onClick={onOpenRunHistory}
+          onClick={onOpenRuns}
         >
-          Run History
+          Runs
         </Button>
 
         <input

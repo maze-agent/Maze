@@ -1,6 +1,8 @@
 import requests
-from typing import Optional
+from typing import Callable, Optional
+from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.dynamic import DynamicRun
+from maze.client.maze.react import ReActWorkflow
 from maze.client.maze.workflow import MaWorkflow
 
 
@@ -70,6 +72,59 @@ class MaClient:
             raise Exception(f"Failed to create dynamic run: {data.get('message', 'Unknown error')}")
 
         raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
+
+    def create_agent_run(
+        self,
+        tools: list[Callable],
+        planner: AgentPlanner,
+        max_steps: int = 10,
+        timeout_seconds: Optional[int] = None,
+        task_timeout: Optional[float] = None,
+    ) -> AgentRun:
+        """
+        Create a minimal agent runtime backed by a DynamicRun.
+
+        The planner returns either {"tool": name, "args": {...}} to execute a
+        registered @task tool, or {"final": value} to finish the run.
+        """
+        dynamic_run = self.create_dynamic_run(
+            max_tasks=max_steps,
+            timeout_seconds=timeout_seconds,
+        )
+        return AgentRun(
+            dynamic_run=dynamic_run,
+            tools=tools,
+            planner=planner,
+            max_steps=max_steps,
+            task_timeout=task_timeout,
+        )
+
+    def create_react_workflow(
+        self,
+        llm_task: Callable,
+        tools: list[Callable],
+        max_steps: int = 10,
+        system_prompt: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        task_timeout: Optional[float] = None,
+    ) -> ReActWorkflow:
+        """
+        Create a ReAct workflow template backed by a DynamicRun.
+
+        Both the decision node and selected tools execute as Maze tasks.
+        """
+        dynamic_run = self.create_dynamic_run(
+            max_tasks=max_steps * 2,
+            timeout_seconds=timeout_seconds,
+        )
+        return ReActWorkflow(
+            dynamic_run=dynamic_run,
+            llm_task=llm_task,
+            tools=tools,
+            max_steps=max_steps,
+            system_prompt=system_prompt,
+            task_timeout=task_timeout,
+        )
 
     def get_dynamic_run(self, run_id: str) -> DynamicRun:
         return DynamicRun(run_id, self.server_url)

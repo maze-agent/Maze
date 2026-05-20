@@ -341,6 +341,19 @@ async def get_dynamic_run_events(run_id: str, after: Optional[int] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/dynamic_runs/{run_id}/events")
+async def emit_dynamic_run_event(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        event = await mapath.emit_dynamic_run_event(run_id, data)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "event": event,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.websocket("/dynamic_runs/{run_id}/events")
 async def get_dynamic_run_events_ws(websocket: WebSocket, run_id: str):
     try:

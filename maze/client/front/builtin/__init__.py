@@ -7,6 +7,6 @@ This package contains predefined task functions marked with the @task decorator
 from maze.client.front.builtin import simpleTask
 from maze.client.front.builtin import fileTask
 from maze.client.front.builtin import healthTask
+from maze.client.front.builtin import agentTools
 
-__all__ = ['simpleTask', 'fileTask', 'healthTask']
-
+__all__ = ['simpleTask', 'fileTask', 'healthTask', 'agentTools']

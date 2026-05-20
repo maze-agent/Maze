@@ -360,7 +360,7 @@ export default function ResultsModal() {
           <div style={{ textAlign: 'center', padding: '20px 0 8px' }}>
             <Spin size="large" />
             <div style={{ marginTop: '16px' }}>
-              <Text type="secondary">Workflow run is active. You can close this viewer and reopen it from Run History.</Text>
+              <Text type="secondary">Workflow run is active. You can close this viewer and reopen it from Runs.</Text>
             </div>
           </div>
           {renderEvents()}
