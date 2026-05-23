@@ -7,7 +7,11 @@ __pycache__/
 dist/
 build/
 *.pyd
-docs/
+
+# MkDocs build output (keep docs/ source tracked)
+site/
+docs/_build/
+
 # Testing
 .pytest_cache/
 .mypy_cache/
