@@ -7,6 +7,7 @@ from maze.client.maze.react import ReActStep, ReActWorkflow
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.models import MaTask, TaskOutput, TaskOutputs
 from maze.client.maze.decorator import task, get_task_metadata
+from maze.client.maze.workflow_authoring import OutputRef, TaskInvocation, WorkflowDefinition, workflow
 
 __all__ = [
     "LanggraphClient",
@@ -26,4 +27,8 @@ __all__ = [
     "TaskOutputs",
     "task",
     "get_task_metadata",
+    "workflow",
+    "WorkflowDefinition",
+    "TaskInvocation",
+    "OutputRef",
 ]

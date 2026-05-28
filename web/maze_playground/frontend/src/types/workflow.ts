@@ -234,6 +234,9 @@ export interface DynamicRunSnapshot {
   schema_version?: number;
   run_id: string;
   status: DynamicRunStatus;
+  kind?: 'dynamic';
+  summary?: boolean;
+  mode?: string;
   max_tasks?: number;
   timeout_seconds?: number | null;
   created_time?: number;

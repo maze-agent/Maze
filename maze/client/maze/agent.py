@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
@@ -20,6 +21,9 @@ class AgentStep:
     args: Dict[str, Any] = field(default_factory=dict)
     task_id: str | None = None
     observation: Dict[str, Any] | None = None
+    started_time: float | None = None
+    finished_time: float | None = None
+    duration_seconds: float | None = None
 
 
 @dataclass
@@ -77,6 +81,7 @@ class AgentRun:
         return self.dynamic_run.run_id
 
     def run(self, prompt: str) -> Any:
+        run_started = time.time()
         context = AgentContext(
             prompt=prompt,
             tool_specs=self.tool_specs,
@@ -93,12 +98,32 @@ class AgentRun:
                 action = self._next_action(context)
                 if "final" in action:
                     final_result = action["final"]
+                    total_seconds = time.time() - run_started
                     self.dynamic_run.emit_event("agent_final", {
+                        "mode": "agent",
                         "answer": final_result,
                         "step_count": len(self.steps),
+                        "stop_reason": "final",
+                        "timings": {
+                            "total_seconds": round(total_seconds, 6),
+                            "task_seconds": round(sum(
+                                step.duration_seconds or 0
+                                for step in self.steps
+                            ), 6),
+                        },
                     })
                     self.dynamic_run.finalize({
+                        "mode": "agent",
                         "answer": final_result,
+                        "stop_reason": "final",
+                        "step_count": len(self.steps),
+                        "timings": {
+                            "total_seconds": round(total_seconds, 6),
+                            "task_seconds": round(sum(
+                                step.duration_seconds or 0
+                                for step in self.steps
+                            ), 6),
+                        },
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
                     return final_result
@@ -108,7 +133,12 @@ class AgentRun:
 
             raise RuntimeError(f"Agent exceeded max_steps={self.max_steps} without a final answer")
         except Exception as exc:
-            self._emit_best_effort("agent_error", {"error": str(exc)})
+            stop_reason = "max_steps" if "max_steps" in str(exc) else "controller_error"
+            self._emit_best_effort("agent_error", {
+                "error": str(exc),
+                "stop_reason": stop_reason,
+                "elapsed_seconds": round(time.time() - run_started, 6),
+            })
             self._cancel_if_active("Agent controller error")
             raise
 
@@ -153,6 +183,7 @@ class AgentRun:
         return action
 
     def _run_tool_step(self, step_index: int, action: Dict[str, Any]) -> AgentStep:
+        started_time = time.time()
         tool_name = action.get("tool")
         if not isinstance(tool_name, str) or not tool_name:
             raise ValueError("Agent tool action requires a non-empty string 'tool'")
@@ -175,11 +206,16 @@ class AgentRun:
         )
         finish_event = self.dynamic_run.wait_for_task(task, timeout=self.task_timeout)
         observation = self._observation_from_finish_event(tool_name, task, finish_event)
+        finished_time = time.time()
+        duration_seconds = finished_time - started_time
         self.dynamic_run.emit_event("agent_observation", {
             "step": step_index,
             "tool": tool_name,
             "task_id": task.task_id,
             "result": observation["result"],
+            "timings": {
+                "duration_seconds": round(duration_seconds, 6),
+            },
         })
 
         return AgentStep(
@@ -189,6 +225,9 @@ class AgentRun:
             args=dict(args),
             task_id=task.task_id,
             observation=observation,
+            started_time=started_time,
+            finished_time=finished_time,
+            duration_seconds=duration_seconds,
         )
 
     def _observation_from_finish_event(
@@ -212,6 +251,13 @@ class AgentRun:
             "args": step.args,
             "task_id": step.task_id,
             "observation": step.observation,
+            "timings": {
+                "started_time": step.started_time,
+                "finished_time": step.finished_time,
+                "duration_seconds": round(step.duration_seconds, 6)
+                if step.duration_seconds is not None
+                else None,
+            },
         }
 
     def _cancel_if_active(self, reason: str):

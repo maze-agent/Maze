@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
@@ -17,6 +18,7 @@ class ReActStep:
     args: Dict[str, Any] = field(default_factory=dict)
     tool_task_id: str | None = None
     observation: Dict[str, Any] | None = None
+    timings: Dict[str, Any] = field(default_factory=dict)
 
 
 class ReActWorkflow:
@@ -72,6 +74,7 @@ class ReActWorkflow:
         return self.dynamic_run.run_id
 
     def run(self, prompt: str) -> Any:
+        run_started = time.time()
         try:
             self.dynamic_run.emit_event("agent_run_started", {
                 "mode": "react",
@@ -95,6 +98,7 @@ class ReActWorkflow:
                     "task_id": decision_task.task_id,
                     "decision": decision,
                     "action": action,
+                    "timings": decision_event.get("timings"),
                 })
 
                 if "error" in action:
@@ -105,19 +109,30 @@ class ReActWorkflow:
                         action=action,
                         error=str(action["error"]),
                         error_type="invalid_action",
+                        details={"timings": decision_event.get("timings")},
                     ))
                     continue
 
                 if "final" in action:
                     answer = action["final"]
+                    total_seconds = time.time() - run_started
+                    timings = self._run_timing_summary(
+                        total_seconds,
+                        extra_timings=decision_event.get("timings"),
+                    )
                     self.dynamic_run.emit_event("agent_final", {
                         "mode": "react",
                         "answer": answer,
                         "step_count": len(self.steps),
+                        "stop_reason": "final",
+                        "timings": timings,
                     })
                     self.dynamic_run.finalize({
                         "mode": "react",
                         "answer": answer,
+                        "stop_reason": "final",
+                        "step_count": len(self.steps),
+                        "timings": timings,
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
                     return answer
@@ -131,11 +146,15 @@ class ReActWorkflow:
                         action=action,
                         error=repair["error"],
                         error_type=repair["error_type"],
-                        details=repair,
+                        details={**repair, "timings": decision_event.get("timings")},
                     ))
                     continue
 
                 step = self._run_tool_step(step_index, decision_task, decision, action)
+                step.timings = {
+                    **(decision_event.get("timings") or {}),
+                    **(step.timings or {}),
+                }
                 self.steps.append(step)
 
             raise RuntimeError(f"ReAct workflow exceeded max_steps={self.max_steps} without a final answer")
@@ -143,6 +162,8 @@ class ReActWorkflow:
             self._emit_best_effort("agent_error", {
                 "mode": "react",
                 "error": str(exc),
+                "stop_reason": "max_steps" if "max_steps" in str(exc) else "controller_error",
+                "elapsed_seconds": round(time.time() - run_started, 6),
             })
             self._cancel_if_active("ReAct workflow controller error")
             raise
@@ -188,12 +209,14 @@ class ReActWorkflow:
         }
 
     def _run_llm_decision(self, step_index: int, prompt: str) -> Dict[str, Any]:
+        started_time = time.time()
         task = self.dynamic_run.append_task(
             self._llm_spec,
             inputs=self._build_llm_inputs(step_index, prompt),
             request_id=f"react-step-{step_index}-llm",
         )
         finish_event = self.dynamic_run.wait_for_task(task, timeout=self.task_timeout)
+        finished_time = time.time()
         result = finish_event.get("data", {}).get("result", {})
         if not isinstance(result, dict):
             raise TypeError("ReAct LLM task must return a dict result")
@@ -201,6 +224,11 @@ class ReActWorkflow:
             "task": task,
             "decision": result,
             "event": finish_event,
+            "timings": {
+                "llm_started_time": started_time,
+                "llm_finished_time": finished_time,
+                "llm_seconds": round(finished_time - started_time, 6),
+            },
         }
 
     def _build_llm_inputs(self, step_index: int, prompt: str) -> Dict[str, Any]:
@@ -317,6 +345,7 @@ class ReActWorkflow:
             "tool": tool_name,
             "decision_task_id": decision_task.task_id,
             "result": observation,
+            "timings": details.get("timings") if details else None,
         })
 
         return ReActStep(
@@ -326,6 +355,7 @@ class ReActWorkflow:
             tool_name=tool_name,
             args=dict(args),
             observation=observation,
+            timings=(details.get("timings") if details else {}) or {},
         )
 
     def _run_tool_step(
@@ -335,6 +365,7 @@ class ReActWorkflow:
         decision: Dict[str, Any],
         action: Dict[str, Any],
     ) -> ReActStep:
+        started_time = time.time()
         tool_name = action["tool"]
         if tool_name not in self._registered_tools:
             raise ValueError(f"ReAct tool is not allowed: {tool_name}")
@@ -354,6 +385,8 @@ class ReActWorkflow:
             request_id=f"react-step-{step_index}-tool",
         )
         finish_event = self.dynamic_run.wait_for_task(tool_task, timeout=self.task_timeout)
+        finished_time = time.time()
+        tool_seconds = finished_time - started_time
         observation = {
             "tool": tool_name,
             "task_id": tool_task.task_id,
@@ -365,6 +398,9 @@ class ReActWorkflow:
             "tool": tool_name,
             "task_id": tool_task.task_id,
             "result": observation["result"],
+            "timings": {
+                "tool_seconds": round(tool_seconds, 6),
+            },
         })
 
         return ReActStep(
@@ -375,6 +411,11 @@ class ReActWorkflow:
             args=dict(args),
             tool_task_id=tool_task.task_id,
             observation=observation,
+            timings={
+                "tool_started_time": started_time,
+                "tool_finished_time": finished_time,
+                "tool_seconds": round(tool_seconds, 6),
+            },
         )
 
     def _step_snapshot(self, step: ReActStep) -> Dict[str, Any]:
@@ -386,6 +427,30 @@ class ReActWorkflow:
             "args": step.args,
             "tool_task_id": step.tool_task_id,
             "observation": step.observation,
+            "timings": step.timings,
+        }
+
+    def _run_timing_summary(
+        self,
+        total_seconds: float,
+        extra_timings: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        llm_seconds = 0.0
+        tool_seconds = 0.0
+        for step in self.steps:
+            timings = step.timings or {}
+            llm_seconds += float(timings.get("llm_seconds") or 0)
+            tool_seconds += float(timings.get("tool_seconds") or 0)
+
+        if extra_timings:
+            llm_seconds += float(extra_timings.get("llm_seconds") or 0)
+            tool_seconds += float(extra_timings.get("tool_seconds") or 0)
+
+        return {
+            "total_seconds": round(total_seconds, 6),
+            "llm_seconds": round(llm_seconds, 6),
+            "tool_seconds": round(tool_seconds, 6),
+            "controller_seconds": round(max(0.0, total_seconds - llm_seconds - tool_seconds), 6),
         }
 
     def _cancel_if_active(self, reason: str):

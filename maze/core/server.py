@@ -209,11 +209,15 @@ async def create_dynamic_run(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dynamic_runs")
-async def list_dynamic_runs(status: Optional[str] = None, limit: Optional[int] = None):
+async def list_dynamic_runs(
+    status: Optional[str] = None,
+    limit: Optional[int] = None,
+    detail: bool = False,
+):
     try:
         return {
             "status": "success",
-            "runs": await mapath.list_dynamic_runs(status=status, limit=limit),
+            "runs": await mapath.list_dynamic_runs(status=status, limit=limit, detail=detail),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

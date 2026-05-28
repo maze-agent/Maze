@@ -203,8 +203,9 @@ class MaPath:
         self,
         status: str | None = None,
         limit: int | None = None,
+        detail: bool = False,
     ):
-        snapshots = self.dynamic_run_store.list_runs()
+        snapshots = self.dynamic_run_store.list_runs(summary=not detail)
         if status:
             snapshots = [snapshot for snapshot in snapshots if snapshot.get("status") == status]
         if limit is not None:

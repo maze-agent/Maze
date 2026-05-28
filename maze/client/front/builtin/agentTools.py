@@ -5,6 +5,25 @@ Built-in agent utility tasks for workspace file and code execution workflows.
 from maze.client.front.decorator import task
 
 
+def _env_flag(name: str, default: bool = True) -> bool:
+    import os
+
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    import os
+
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
 def _resolve_workspace_files_dir(workspace_dir: str = ""):
     import os
 
@@ -54,12 +73,16 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         mode = "a" if append_flag else "w"
         text = str(content or "")
+        max_bytes = _env_int("MAZE_AGENT_WRITE_MAX_BYTES", 200000, 1, 5_000_000)
+        text_bytes = text.encode("utf-8")
+        if len(text_bytes) > max_bytes:
+            raise ValueError(f"content is too large for write_file ({len(text_bytes)} > {max_bytes} bytes)")
         with open(full_path, mode, encoding="utf-8") as handle:
             handle.write(text)
 
         return {
             "path": normalized,
-            "bytes": len(text.encode("utf-8")),
+            "bytes": len(text_bytes),
             "appended": append_flag,
             "error": None,
         }
@@ -81,7 +104,8 @@ def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
     try:
         full_path, normalized, _ = _resolve_workspace_file(path, workspace_dir)
         limit = int(max_bytes or 20000)
-        limit = min(max(limit, 1), 200000)
+        env_limit = _env_int("MAZE_AGENT_READ_MAX_BYTES", 200000, 1, 5_000_000)
+        limit = min(max(limit, 1), env_limit)
         with open(full_path, "rb") as handle:
             raw = handle.read(limit + 1)
         truncated = len(raw) > limit
@@ -110,14 +134,29 @@ def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
 def exec_code(path: str = "", code: str = "", timeout_seconds: int = 20, workspace_dir: str = ""):
     """Run a Python file under workspace/files, optionally writing code first."""
     try:
+        if not _env_flag("MAZE_ENABLE_AGENT_EXEC_CODE", True):
+            return {
+                "path": str(path or ""),
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "exec_code is disabled by MAZE_ENABLE_AGENT_EXEC_CODE",
+            }
+
         import os
         import subprocess
         import sys
         import time
 
         timeout_value = float(timeout_seconds or 20)
-        timeout_value = min(max(timeout_value, 1), 60)
+        timeout_value = min(
+            max(timeout_value, 1),
+            _env_int("MAZE_AGENT_EXEC_TIMEOUT_SECONDS", 60, 1, 600),
+        )
         code_text = str(code or "")
+        max_code_bytes = _env_int("MAZE_AGENT_EXEC_CODE_MAX_BYTES", 200000, 1, 5_000_000)
+        if len(code_text.encode("utf-8")) > max_code_bytes:
+            raise ValueError(f"code is too large for exec_code ({len(code_text.encode('utf-8'))} > {max_code_bytes} bytes)")
         target_path = str(path or "").strip()
 
         if code_text and not target_path:

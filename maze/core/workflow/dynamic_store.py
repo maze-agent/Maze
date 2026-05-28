@@ -85,11 +85,12 @@ class DynamicRunStore:
                     events.append(event)
         return events
 
-    def list_runs(self) -> List[Dict[str, Any]]:
+    def list_runs(self, summary: bool = False) -> List[Dict[str, Any]]:
         snapshots = []
         for path in self.runs_dir.glob("*/run.json"):
             try:
-                snapshots.append(self.load_run(path.parent.name))
+                snapshot = self.load_run(path.parent.name)
+                snapshots.append(dynamic_run_summary(snapshot) if summary else snapshot)
             except Exception:
                 continue
         snapshots.sort(key=lambda item: item.get("created_time") or 0, reverse=True)
@@ -166,6 +167,81 @@ class DynamicRunStore:
             "dry_run": dry_run,
             "matched_count": len(candidates),
             "deleted_count": len(deleted_run_ids),
-            "runs": candidates,
+            "runs": [dynamic_run_summary(snapshot) for snapshot in candidates],
             "deleted_run_ids": deleted_run_ids,
         }
+
+
+def _infer_dynamic_run_mode(snapshot: Dict[str, Any]) -> str:
+    final_result = snapshot.get("final_result")
+    if isinstance(final_result, dict) and final_result.get("mode"):
+        return str(final_result["mode"])
+
+    task_specs = snapshot.get("task_specs") or {}
+    if isinstance(task_specs, dict) and "react_llm_decision" in task_specs:
+        return "react"
+
+    for event_type in ("agent_run_started", "react_llm_decision"):
+        if _event_type_seen(snapshot, event_type):
+            return "react" if event_type.startswith("react_") else "agent"
+
+    return "dynamic"
+
+
+def _event_type_seen(snapshot: Dict[str, Any], event_type: str) -> bool:
+    # Run summaries are intentionally derived from run.json only. This helper
+    # exists as a future hook for event-indexed summaries without changing the
+    # public summary shape.
+    return False
+
+
+def _final_result_summary(final_result: Any) -> Any:
+    if not isinstance(final_result, dict):
+        return to_json_safe(final_result)
+
+    summary: Dict[str, Any] = {}
+    for key in ("mode", "answer", "status", "stop_reason", "step_count", "final_task"):
+        if key in final_result:
+            summary[key] = to_json_safe(final_result[key])
+
+    if "timings" in final_result and isinstance(final_result["timings"], dict):
+        timings = final_result["timings"]
+        summary["timings"] = {
+            key: to_json_safe(timings[key])
+            for key in (
+                "total_seconds",
+                "task_seconds",
+                "llm_seconds",
+                "tool_seconds",
+                "controller_seconds",
+            )
+            if key in timings
+        }
+
+    return summary or to_json_safe(final_result)
+
+
+def dynamic_run_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a lightweight dynamic-run record for list views."""
+    mode = _infer_dynamic_run_mode(snapshot)
+    summary = {
+        "schema": snapshot.get("schema", "dynamic_run"),
+        "schema_version": snapshot.get("schema_version", SCHEMA_VERSION),
+        "kind": "dynamic",
+        "summary": True,
+        "run_id": snapshot.get("run_id"),
+        "status": snapshot.get("status"),
+        "mode": mode,
+        "max_tasks": snapshot.get("max_tasks"),
+        "timeout_seconds": snapshot.get("timeout_seconds"),
+        "created_time": snapshot.get("created_time"),
+        "updated_time": snapshot.get("updated_time"),
+        "finished_time": snapshot.get("finished_time"),
+        "task_counts": snapshot.get("task_counts") or {},
+        "event_count": snapshot.get("event_count") or 0,
+        "last_event_seq": snapshot.get("last_event_seq") or 0,
+        "cancel_reason": snapshot.get("cancel_reason"),
+        "failure_reason": snapshot.get("failure_reason"),
+        "final_result": _final_result_summary(snapshot.get("final_result")),
+    }
+    return to_json_safe(summary)

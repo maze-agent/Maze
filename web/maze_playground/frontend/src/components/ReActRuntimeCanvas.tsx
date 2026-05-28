@@ -25,6 +25,7 @@ export interface AgentTraceStep {
   toolTaskId?: string;
   observation?: any;
   repair?: boolean;
+  timings?: any;
 }
 
 export interface AgentTrace {
@@ -353,6 +354,7 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
       step.decision = data.decision;
       step.action = data.action;
       step.decisionTaskId = data.task_id;
+      step.timings = { ...(step.timings || {}), ...(data.timings || {}) };
     } else if (event.type === 'agent_action') {
       step.tool = data.tool;
       step.args = data.args;
@@ -362,12 +364,14 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
       step.tool = step.tool || data.tool;
       step.toolTaskId = data.task_id;
       step.observation = data.result;
+      step.timings = { ...(step.timings || {}), ...(data.timings || {}) };
     } else if (event.type === 'agent_repair_observation') {
       step.tool = step.tool || data.tool;
       step.decisionTaskId = step.decisionTaskId || data.decision_task_id;
       step.observation = data.result;
       step.action = step.action || data.result?.action;
       step.repair = true;
+      step.timings = { ...(step.timings || {}), ...(data.timings || data.result?.timings || {}) };
     }
   });
 

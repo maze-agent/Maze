@@ -718,6 +718,34 @@ async function loadStaticRun(workspaceDir, runId) {
   return JSON.parse(raw);
 }
 
+function staticRunSummary(snapshot) {
+  return {
+    schema: snapshot.schema || 'static_workflow_run',
+    schema_version: snapshot.schema_version || 1,
+    kind: 'static',
+    summary: true,
+    run_id: snapshot.run_id,
+    workflow_id: snapshot.workflow_id,
+    workflow_name: snapshot.workflow_name || 'Workflow Run',
+    workspace_dir: snapshot.workspace_dir,
+    status: snapshot.status,
+    created_time: snapshot.created_time,
+    updated_time: snapshot.updated_time,
+    finished_time: snapshot.finished_time,
+    task_counts: snapshot.task_counts || {},
+    events: snapshot.events || { count: 0, last_seq: 0 },
+    error: snapshot.error || null,
+    maze_run_id: snapshot.maze_run_id || null,
+    final_result: snapshot.final_result && typeof snapshot.final_result === 'object'
+      ? {
+          status: snapshot.final_result.status,
+          answer: snapshot.final_result.answer,
+          stop_reason: snapshot.final_result.stop_reason,
+        }
+      : snapshot.final_result,
+  };
+}
+
 async function appendStaticRunEvent(workspaceDir, runId, event) {
   const runDir = staticRunDir(workspaceDir, runId);
   await fs.mkdir(runDir, { recursive: true });
@@ -817,7 +845,8 @@ function applyStaticRunEvent(snapshot, event) {
   recomputeStaticRunTaskCounts(snapshot);
 }
 
-async function listStaticRunFiles(dir) {
+async function listStaticRunFiles(dir, options = {}) {
+  const summary = Boolean(options.summary);
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
   const runs = [];
   for (const entry of entries) {
@@ -825,7 +854,8 @@ async function listStaticRunFiles(dir) {
     const runPath = path.join(dir, entry.name, 'run.json');
     try {
       const raw = await fs.readFile(runPath, 'utf-8');
-      runs.push(JSON.parse(raw));
+      const snapshot = JSON.parse(raw);
+      runs.push(summary ? staticRunSummary(snapshot) : snapshot);
     } catch {
       // Ignore malformed run records in the list view.
     }
@@ -2063,7 +2093,7 @@ app.get('/api/workflow-runs/static', async (req, res) => {
     const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
     const status = req.query.status ? String(req.query.status) : null;
     const limit = req.query.limit ? Number(req.query.limit) : null;
-    let runs = await listStaticRunFiles(staticRunsDir(workspaceDir));
+    let runs = await listStaticRunFiles(staticRunsDir(workspaceDir), { summary: true });
     if (status) {
       runs = runs.filter((run) => run.status === status);
     }

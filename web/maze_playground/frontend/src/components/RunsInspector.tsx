@@ -115,6 +115,7 @@ function formatTime(value?: number | null) {
 
 function getRunMode(run?: DynamicRunSnapshot | null) {
   if (!run) return null;
+  if (run.mode) return String(run.mode);
   if (run.final_result?.mode) return String(run.final_result.mode);
   if (run.task_specs?.react_llm_decision) return 'react';
   const taskNodes = Object.values(run.task_nodes || {});
@@ -771,8 +772,14 @@ export default function RunsInspector({
           <Descriptions.Item label="Updated">{formatTime(selectedDynamicRun.updated_time)}</Descriptions.Item>
           <Descriptions.Item label="Finished">{formatTime(selectedDynamicRun.finished_time)}</Descriptions.Item>
           <Descriptions.Item label="Timeout">{selectedDynamicRun.timeout_seconds ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="Stop Reason">{selectedDynamicRun.final_result?.stop_reason || '-'}</Descriptions.Item>
           <Descriptions.Item label="Cancel Reason">{selectedDynamicRun.cancel_reason || '-'}</Descriptions.Item>
           <Descriptions.Item label="Failure Reason">{selectedDynamicRun.failure_reason || '-'}</Descriptions.Item>
+          <Descriptions.Item label="Timing" span={2}>
+            {selectedDynamicRun.final_result?.timings
+              ? formatJson(selectedDynamicRun.final_result.timings)
+              : '-'}
+          </Descriptions.Item>
         </Descriptions>
 
         <Space wrap>
@@ -828,6 +835,8 @@ export default function RunsInspector({
                         {step.tool && <Tag color="blue">{step.tool}</Tag>}
                         {step.decisionTaskId && <Tag>LLM {shortId(step.decisionTaskId)}</Tag>}
                         {step.toolTaskId && <Tag>Tool {shortId(step.toolTaskId)}</Tag>}
+                        {step.timings?.llm_seconds !== undefined && <Tag color="cyan">LLM {step.timings.llm_seconds}s</Tag>}
+                        {step.timings?.tool_seconds !== undefined && <Tag color="green">Tool {step.timings.tool_seconds}s</Tag>}
                       </Space>
                       <Text type="secondary">Action</Text>
                       <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>

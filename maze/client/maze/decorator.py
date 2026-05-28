@@ -330,9 +330,23 @@ def task(
         )
         
         # Attach metadata to function
-        func._maze_task_metadata = metadata
+        @wraps(func)
+        def maze_task_wrapper(*args, **kwargs):
+            try:
+                from maze.client.maze.workflow_authoring import active_graph_context
+
+                graph_context = active_graph_context()
+            except Exception:
+                graph_context = None
+
+            if graph_context is not None:
+                return graph_context.call_task(maze_task_wrapper, args, kwargs)
+
+            return func(*args, **kwargs)
+
+        maze_task_wrapper._maze_task_metadata = metadata
         
-        return func
+        return maze_task_wrapper
     
     if func is not None:
         if not callable(func):

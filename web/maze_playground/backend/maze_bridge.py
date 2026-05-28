@@ -109,6 +109,19 @@ def build_react_workspace_tools(workspace_dir):
     files_dir = os.path.abspath(os.path.join(resolved_workspace_dir, "files"))
     os.makedirs(files_dir, exist_ok=True)
 
+    def env_flag(name, default=True):
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def env_int(name, default, minimum, maximum):
+        try:
+            value = int(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            value = default
+        return min(max(value, minimum), maximum)
+
     def resolve_workspace_file(relative_path):
         cleaned = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
         normalized = os.path.normpath(cleaned).replace("\\", "/")
@@ -138,12 +151,16 @@ def build_react_workspace_tools(workspace_dir):
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             mode = "a" if append_flag else "w"
             text = str(content or "")
+            max_bytes = env_int("MAZE_AGENT_WRITE_MAX_BYTES", 200000, 1, 5_000_000)
+            text_bytes = text.encode("utf-8")
+            if len(text_bytes) > max_bytes:
+                raise ValueError(f"content is too large for write_file ({len(text_bytes)} > {max_bytes} bytes)")
             with open(full_path, mode, encoding="utf-8") as handle:
                 handle.write(text)
 
             return {
                 "path": normalized,
-                "bytes": len(text.encode("utf-8")),
+                "bytes": len(text_bytes),
                 "appended": append_flag,
                 "error": None,
             }
@@ -163,7 +180,8 @@ def build_react_workspace_tools(workspace_dir):
         try:
             full_path, normalized = resolve_workspace_file(path)
             limit = int(max_bytes or 20000)
-            limit = min(max(limit, 1), 200000)
+            env_limit = env_int("MAZE_AGENT_READ_MAX_BYTES", 200000, 1, 5_000_000)
+            limit = min(max(limit, 1), env_limit)
             with open(full_path, "rb") as handle:
                 raw = handle.read(limit + 1)
             truncated = len(raw) > limit
@@ -190,9 +208,25 @@ def build_react_workspace_tools(workspace_dir):
     )
     def exec_code(path: str = "", code: str = "", timeout_seconds: int = 20):
         try:
+            if not env_flag("MAZE_ENABLE_AGENT_EXEC_CODE", True):
+                return {
+                    "path": str(path or ""),
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "exec_code is disabled by MAZE_ENABLE_AGENT_EXEC_CODE",
+                }
+
             timeout_value = float(timeout_seconds or 20)
-            timeout_value = min(max(timeout_value, 1), 60)
+            timeout_value = min(
+                max(timeout_value, 1),
+                env_int("MAZE_AGENT_EXEC_TIMEOUT_SECONDS", 60, 1, 600),
+            )
             code_text = str(code or "")
+            max_code_bytes = env_int("MAZE_AGENT_EXEC_CODE_MAX_BYTES", 200000, 1, 5_000_000)
+            code_size = len(code_text.encode("utf-8"))
+            if code_size > max_code_bytes:
+                raise ValueError(f"code is too large for exec_code ({code_size} > {max_code_bytes} bytes)")
             target_path = str(path or "").strip()
 
             if code_text and not target_path:

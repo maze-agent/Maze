@@ -4,6 +4,7 @@ from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
 from maze.client.maze.workflow import MaWorkflow
+from maze.client.maze.workflow_authoring import WorkflowDefinition
 
 
 class MaClient:
@@ -47,6 +48,24 @@ class MaClient:
                 raise Exception(f"Failed to create workflow: {data.get('message', 'Unknown error')}")
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
+
+    def create_workflow_from(
+        self,
+        workflow_def: WorkflowDefinition,
+        inputs: Optional[dict] = None,
+    ) -> MaWorkflow:
+        """
+        Create a static workflow from a @workflow definition.
+
+        The decorated Python function is executed in graph-building mode, so
+        each @task call becomes a Maze task node instead of running locally.
+        """
+        if not hasattr(workflow_def, "build"):
+            raise TypeError("create_workflow_from expects a @workflow definition")
+
+        workflow = self.create_workflow()
+        workflow_def.build(workflow, inputs=inputs or {})
+        return workflow
 
     def create_dynamic_run(
         self,
@@ -133,12 +152,15 @@ class MaClient:
         self,
         status: Optional[str] = None,
         limit: Optional[int] = None,
+        detail: bool = False,
     ) -> list[dict]:
         params = {}
         if status:
             params["status"] = status
         if limit is not None:
             params["limit"] = limit
+        if detail:
+            params["detail"] = "true"
 
         response = requests.get(f"{self.server_url}/dynamic_runs", params=params or None)
         if response.status_code != 200:
