@@ -397,6 +397,7 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
               reactMode: 'local' as const,
               prompt: 'Use the calculator to compute 18 * 7, then give the final answer.',
               maxSteps: 4,
+              maxTokens: 2048,
               inputs: [],
               outputs: [{ name: 'answer', dataType: 'any' }],
               configured: true,
@@ -405,6 +406,42 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
           addNode(newNode);
           selectNode(newNode);
+        } else if (type === 'workflow-distributed-smoke') {
+          const baseId = Date.now();
+          const smokeNodes = Array.from({ length: 2 }, (_, index) => ({
+            id: `node-${baseId}-${index + 1}`,
+            type: 'taskNode' as const,
+            position: {
+              x: position.x + (index % 2) * 260,
+              y: position.y + Math.floor(index / 2) * 180,
+            },
+            data: {
+              category: 'builtin' as const,
+              nodeType: 'task' as const,
+              label: `GPU Probe ${index + 1}`,
+              taskRef: 'distributedSmoke.distributed_gpu_probe',
+              inputs: [
+                {
+                  name: 'probe_id',
+                  dataType: 'int',
+                  source: 'user' as const,
+                  value: String(index + 1),
+                },
+                {
+                  name: 'sleep_seconds',
+                  dataType: 'int',
+                  source: 'user' as const,
+                  value: '1',
+                },
+              ],
+              outputs: [{ name: 'placement', dataType: 'dict' }],
+              resources: { cpu: 1, cpu_mem: 128, gpu: 1, gpu_mem: 0 },
+              configured: true,
+            },
+          }));
+
+          smokeNodes.forEach((node) => addNode(node));
+          selectNode(smokeNodes[0]);
         }
       } catch (error) {
         console.error('Failed to drop node:', error);

@@ -18,6 +18,7 @@ from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES
 from maze.core.workflow.dynamic_store import DynamicRunStore
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.core.scheduler.result_summary import summarize_task_result
+from maze.core.files.artifact_store import LocalCASArtifactStore
 from maze.utils.utils import get_available_ports
 EPSILON = 1e-3
 
@@ -32,6 +33,7 @@ class MaPath:
         self.dynamic_run_store.recover_interrupted_runs()
         self.async_que: Dict[str, asyncio.Queue] = {} 
         self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
+        self.cluster_resource_requests: Dict[str, asyncio.Queue] = {}
         self.atlas_enqueue_index = 0
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
@@ -133,6 +135,11 @@ class MaPath:
 
         if file_context and file_context.get("enabled"):
             task_node_ids = file_context.get("task_node_ids") or {}
+            parent_file_manifests = []
+            for parent_task_id in workflow.graph.predecessors(task.task_id):
+                manifest = workflow.graph.nodes[parent_task_id].get("file_manifest")
+                if manifest:
+                    parent_file_manifests.append(manifest)
             data["file_context"] = {
                 **file_context,
                 "enabled": True,
@@ -141,15 +148,52 @@ class MaPath:
                 "task_id": task.task_id,
                 "node_id": task_node_ids.get(task.task_id),
                 "parent_task_ids": list(workflow.graph.predecessors(task.task_id)),
+                "parent_file_manifests": parent_file_manifests,
             }
 
         return data
+
+    def _prepare_initial_artifacts(self, file_context: Dict[str, Any], submit_id: str) -> Dict[str, Any]:
+        if not file_context or not file_context.get("enabled") or not file_context.get("artifact_store"):
+            return file_context
+
+        from pathlib import Path
+
+        workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
+        files_dir = workspace_dir / "files"
+        artifact_root = file_context.get("artifact_store", {}).get("root")
+        store = LocalCASArtifactStore(artifact_root)
+        initial_files = []
+
+        if files_dir.exists():
+            for file_path in sorted(files_dir.rglob("*")):
+                if not file_path.is_file() or "__pycache__" in file_path.parts or file_path.suffix == ".pyc":
+                    continue
+                relative_path = file_path.relative_to(files_dir).as_posix()
+                artifact = store.put_file(file_path)
+                initial_files.append({
+                    "path": relative_path,
+                    "name": file_path.name,
+                    "size": artifact["size"],
+                    "sha256": artifact["sha256"],
+                    "artifact_id": artifact["artifact_id"],
+                    "storage_uri": artifact["storage_uri"],
+                    "producer_task_id": "__workspace__",
+                    "uri": f"maze://runs/{submit_id}/workspace/files/{relative_path}",
+                })
+
+        prepared_context = copy.deepcopy(file_context)
+        prepared_context["workspace_dir"] = str(workspace_dir)
+        prepared_context["run_id"] = file_context.get("run_id") or submit_id
+        prepared_context["initial_files"] = initial_files
+        return prepared_context
 
     def run_workflow(self,workflow_id:str,file_context:Dict[str,Any]|None=None):
         """
         Start a workflow.
         """
         submit_id = str(uuid.uuid4())
+        file_context = self._prepare_initial_artifacts(file_context, submit_id) if file_context else None
         submit_workflow = copy.deepcopy(self.workflows[workflow_id])
         if file_context:
             submit_workflow.graph.graph["file_context"] = file_context
@@ -468,6 +512,25 @@ class MaPath:
 
         '''
         return self.ray_head_port
+
+    async def get_cluster_resources(self, timeout: float = 5.0):
+        request_id = str(uuid.uuid4())
+        response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.cluster_resource_requests[request_id] = response_queue
+
+        message = {
+            "type": "get_cluster_resources",
+            "data": {
+                "request_id": request_id,
+            },
+        }
+        serialized: bytes = json.dumps(message).encode("utf-8")
+        self.socket_to_scheduler.send(serialized)
+
+        try:
+            return await asyncio.wait_for(response_queue.get(), timeout=timeout)
+        finally:
+            self.cluster_resource_requests.pop(request_id, None)
     
     def start_worker(self,node_ip:str,node_id:str,resources:Dict):
         message = {
@@ -523,9 +586,16 @@ class MaPath:
                 message = json.loads(data.decode('utf-8'))
  
                 message_type = message["type"]
-                message_data = message["data"]
+                message_data = message.get("data", {})
               
                 async with self.lock:
+                    if message_type == "cluster_resources":
+                        request_id = message_data.get("request_id")
+                        response_queue = self.cluster_resource_requests.get(request_id)
+                        if response_queue is not None:
+                            await response_queue.put(message_data.get("resources", {}))
+                        continue
+
                     if(message_type=="finish_task"):
                         if message_data["task_id"] in self.async_que: #langgraph task
                             que: Queue[Any] = self.async_que[message_data['task_id']]
@@ -541,6 +611,9 @@ class MaPath:
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
  
+                            if message_data.get("file_manifest"):
+                                self.submit_workflows[submit_id].graph.nodes[message_data["task_id"]]["file_manifest"] = message_data["file_manifest"]
+
                             new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"],task_result=message_data["result"],strategy=self.strategy)
                             if len(new_ready_tasks) > 0:
                                 for task in new_ready_tasks:

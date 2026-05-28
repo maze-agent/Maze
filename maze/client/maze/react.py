@@ -250,6 +250,12 @@ class ReActWorkflow:
         if not isinstance(action, dict):
             raise TypeError("ReAct decision action must be a dict")
 
+        if "error" in action:
+            return {
+                "error": str(action.get("error") or "ReAct decision action is invalid"),
+                "raw": action.get("raw"),
+            }
+
         if "final" in action:
             return {"final": action["final"]}
 

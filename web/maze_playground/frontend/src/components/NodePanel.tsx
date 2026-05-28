@@ -186,6 +186,18 @@ export default function NodePanel() {
                   style={{ width: 160 }}
                 />
               </Form.Item>
+              {currentNode.data.reactMode === 'online' && (
+                <Form.Item label="Max Tokens">
+                  <InputNumber
+                    min={256}
+                    max={8192}
+                    step={256}
+                    value={currentNode.data.maxTokens || 2048}
+                    onChange={(value) => updateNode(currentNode.id, { maxTokens: Number(value || 2048) })}
+                    style={{ width: 160 }}
+                  />
+                </Form.Item>
+              )}
             </>
           )}
 

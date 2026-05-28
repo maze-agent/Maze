@@ -230,6 +230,21 @@ class MaClient:
         else:
             raise Exception(f"Failed to get Ray port, status code: {response.status_code}")
 
+    def get_cluster_resources(self) -> dict:
+        """
+        Get Maze scheduler's registered cluster resources.
+        """
+        url = f"{self.server_url}/cluster/resources"
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to get cluster resources, status code: {response.status_code}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get cluster resources: {data.get('message', 'Unknown error')}")
+        return data.get("cluster", {})
+
     def start_llm_instance(self, model: str):
         """
         Start LLM instance

@@ -32,7 +32,7 @@ from maze.client.front.client import MaClient
 from maze.client.maze.client import MaClient as DynamicMaClient
 from maze.client.maze.react_llm import create_openai_react_llm_task
 from maze import task, get_task_metadata
-from maze.client.front.builtin import agentTools
+from maze.client.front.builtin import agentTools, distributedSmoke
 import inspect
 import importlib
 import importlib.util
@@ -283,7 +283,7 @@ def build_react_workspace_tools(workspace_dir):
 
 def get_builtin_tasks():
     """获取所有内置任务的元数据"""
-    builtin_modules = [agentTools]
+    builtin_modules = [agentTools, distributedSmoke]
     tasks = []
     
     for module in builtin_modules:
@@ -786,6 +786,8 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                 # 动态导入模块和函数
                 if module_name == "agentTools":
                     task_func = getattr(agentTools, func_name)
+                elif module_name == "distributedSmoke":
+                    task_func = getattr(distributedSmoke, func_name)
                 else:
                     return {"success": False, "error": f"Unknown module: {module_name}"}
                 
@@ -912,11 +914,20 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
         print(f"[DEBUG] 开始运行工作流...", file=sys.stderr)
         file_context = None
         if static_run_id and workspace_dir:
+            import socket
+
+            core_url = os.environ.get("MAZE_CORE_URL")
+            if not core_url:
+                core_url = f"http://{socket.gethostbyname(socket.gethostname())}:8000"
             file_context = {
                 "enabled": True,
                 "workspace_dir": workspace_dir,
                 "run_id": static_run_id,
                 "task_node_ids": maze_task_to_node,
+                "artifact_store": {
+                    "type": "head_http",
+                    "base_url": core_url,
+                },
             }
         run_id = workflow.run(file_context=file_context)
         print(f"[DEBUG] 工作流已提交，run_id: {run_id}", file=sys.stderr)
@@ -1014,6 +1025,7 @@ def run_react_workflow(params):
                 config_path=config_path,
                 task_name="playground_openai_react_decide",
                 system_prompt=system_prompt,
+                max_tokens=int(params.get("maxTokens") or params.get("max_tokens") or 2048),
                 timeout=task_timeout,
             )
             tools = base_tools

@@ -6,6 +6,7 @@ import type {
   WorkspaceWorkflowsResponse,
   DynamicRunEvent,
   DynamicRunSnapshot,
+  ClusterResourcesResponse,
   StaticWorkflowRunEvent,
   StaticWorkflowRunSnapshot,
   Workflow,
@@ -337,11 +338,17 @@ export const api = {
     return response.data;
   },
 
+  async getClusterResources(): Promise<ClusterResourcesResponse> {
+    const response = await axios.get(`${API_BASE}/cluster/resources`);
+    return response.data;
+  },
+
   async startReactRun(data: {
     mode: 'local' | 'online';
     prompt: string;
     workspaceDir?: string;
     maxSteps?: number;
+    maxTokens?: number;
     timeoutSeconds?: number;
     taskTimeout?: number;
     llm?: LlmSettings;

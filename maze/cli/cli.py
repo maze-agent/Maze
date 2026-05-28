@@ -89,7 +89,7 @@ def start_playground():
       
             npm_cmd = "npm.cmd" if sys.platform == 'win32' else "npm"
             frontend_process = subprocess.Popen(
-                [npm_cmd, "run", "dev"],
+                [npm_cmd, "run", "dev", "--", "--host", "0.0.0.0"],
                 cwd=str(frontend_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

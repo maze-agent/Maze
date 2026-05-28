@@ -8,5 +8,6 @@ from maze.client.front.builtin import simpleTask
 from maze.client.front.builtin import fileTask
 from maze.client.front.builtin import healthTask
 from maze.client.front.builtin import agentTools
+from maze.client.front.builtin import distributedSmoke
 
-__all__ = ['simpleTask', 'fileTask', 'healthTask', 'agentTools']
+__all__ = ['simpleTask', 'fileTask', 'healthTask', 'agentTools', 'distributedSmoke']

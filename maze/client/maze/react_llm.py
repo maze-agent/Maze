@@ -8,6 +8,37 @@ from typing import Any, Callable, Dict
 from maze.client.maze.decorator import task
 
 
+def _compact_react_value(value: Any, max_string: int = 1200, depth: int = 0) -> Any:
+    if depth > 4:
+        return _compact_scalar(value, max_string)
+
+    if isinstance(value, dict):
+        compacted = {}
+        for key, item in value.items():
+            key_string = str(key)
+            limit = min(max_string, 700) if key_string in {"stdout", "stderr", "content", "raw", "payload"} else max_string
+            compacted[key] = _compact_react_value(item, limit, depth + 1)
+        return compacted
+
+    if isinstance(value, list):
+        max_items = 8
+        compacted = [_compact_react_value(item, max_string, depth + 1) for item in value[:max_items]]
+        if len(value) > max_items:
+            compacted.append({"__truncated_items__": len(value) - max_items})
+        return compacted
+
+    return _compact_scalar(value, max_string)
+
+
+def _compact_scalar(value: Any, max_string: int) -> Any:
+    if isinstance(value, str) and len(value) > max_string:
+        return (
+            value[:max_string]
+            + f"\n...[truncated {len(value) - max_string} chars; use read_file or a parser script if more detail is needed]"
+        )
+    return value
+
+
 def create_openai_react_llm_task(
     *,
     base_url: str | None = None,
@@ -87,7 +118,7 @@ def create_openai_react_llm_task(
                 "step": item.get("index"),
                 "tool": item.get("tool"),
                 "args": item.get("args"),
-                "observation": item.get("observation"),
+                "observation": _compact_react_value(item.get("observation")),
             }
             for item in (history or [])
         ]
@@ -102,7 +133,8 @@ def create_openai_react_llm_task(
                 "To finish, return {\"final\": \"answer\"}. "
                 "Use only available tool names. If write_file, read_file, and exec_code "
                 "are available, you may create and run a Python helper when no direct "
-                "domain tool exists."
+                "domain tool exists. Keep generated code concise. If prior stdout is long, "
+                "summarize it or write a small parser instead of copying the full output."
             ),
         }
         messages = [
@@ -126,14 +158,29 @@ def create_openai_react_llm_task(
         response.raise_for_status()
         content = response.json()["choices"][0]["message"].get("content", "").strip()
 
+        parse_error = None
         try:
             payload = json.loads(content)
-        except Exception:
+        except Exception as exc:
             match = re.search(r"\{.*\}", content, re.S)
             if not match:
                 payload = {"final": content}
+                parse_error = f"{type(exc).__name__}: {exc}"
             else:
-                payload = json.loads(match.group(0))
+                try:
+                    payload = json.loads(match.group(0))
+                    parse_error = None
+                except Exception as inner_exc:
+                    payload = {
+                        "action": {
+                            "error": (
+                                "LLM returned malformed JSON and Maze could not parse a ReAct action: "
+                                f"{type(inner_exc).__name__}: {inner_exc}"
+                            ),
+                            "raw": content[:1000],
+                        }
+                    }
+                    parse_error = f"{type(exc).__name__}: {exc}"
 
         if not isinstance(payload, dict):
             action = {"final": str(payload)}
@@ -141,6 +188,11 @@ def create_openai_react_llm_task(
             action = payload.get("action", payload)
             if not isinstance(action, dict):
                 action = {"final": str(action)}
+            elif "error" in action:
+                action = {
+                    "error": str(action.get("error") or "LLM returned an invalid ReAct action"),
+                    "raw": str(action.get("raw") or content)[:1000],
+                }
             elif "final" in action:
                 action = {"final": action["final"]}
             else:
@@ -164,6 +216,7 @@ def create_openai_react_llm_task(
         return {
             "action": action,
             "raw": content[:1000],
+            "parse_error": parse_error,
         }
 
     decorated = task(resources=task_resources)(_openai_react_decide)
@@ -228,10 +281,10 @@ def _build_react_messages(
     }
     history_summary = [
         {
-            "step": item.get("index"),
-            "tool": item.get("tool"),
-            "args": item.get("args"),
-            "observation": item.get("observation"),
+                "step": item.get("index"),
+                "tool": item.get("tool"),
+                "args": item.get("args"),
+                "observation": _compact_react_value(item.get("observation")),
         }
         for item in (history or [])
     ]
@@ -246,7 +299,8 @@ def _build_react_messages(
             "To finish, return {\"final\": \"answer\"}. "
             "Use only available tool names. If write_file, read_file, and exec_code "
             "are available, you may create and run a Python helper when no direct "
-            "domain tool exists."
+            "domain tool exists. Keep generated code concise. If prior stdout is long, "
+            "summarize it or write a small parser instead of copying the full output."
         ),
     }
     return [
@@ -258,11 +312,21 @@ def _build_react_messages(
 def _parse_react_action(content: str) -> dict[str, Any]:
     try:
         payload = json.loads(content)
-    except Exception:
+    except Exception as exc:
         match = re.search(r"\{.*\}", content, re.S)
         if not match:
             return {"final": content}
-        payload = json.loads(match.group(0))
+        try:
+            payload = json.loads(match.group(0))
+        except Exception as inner_exc:
+            return {
+                "error": (
+                    "LLM returned malformed JSON and Maze could not parse a ReAct action: "
+                    f"{type(inner_exc).__name__}: {inner_exc}"
+                ),
+                "raw": content[:1000],
+                "parse_error": f"{type(exc).__name__}: {exc}",
+            }
 
     if not isinstance(payload, dict):
         return {"final": str(payload)}
@@ -270,6 +334,12 @@ def _parse_react_action(content: str) -> dict[str, Any]:
     action = payload.get("action", payload)
     if not isinstance(action, dict):
         return {"final": str(action)}
+
+    if "error" in action:
+        return {
+            "error": str(action.get("error") or "LLM returned an invalid ReAct action"),
+            "raw": str(action.get("raw") or content)[:1000],
+        }
 
     if "final" in action:
         return {"final": action["final"]}

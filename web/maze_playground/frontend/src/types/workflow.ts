@@ -122,6 +122,7 @@ export interface WorkflowNode {
     reactMode?: 'local' | 'online';
     prompt?: string;
     maxSteps?: number;
+    maxTokens?: number;
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;
@@ -143,6 +144,48 @@ export interface Workflow {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   createdAt: string;
+}
+
+export interface ClusterGpuDevice {
+  gpu_id: number | string;
+  total_count: number;
+  available_count: number;
+  total_memory: number;
+  available_memory: number;
+}
+
+export interface ClusterResourceNode {
+  node_id: string;
+  node_ip?: string | null;
+  role: 'head' | 'worker' | string;
+  registered: boolean;
+  alive: boolean;
+  resources?: {
+    cpu?: {
+      total: number;
+      available: number;
+    };
+    cpu_mem?: {
+      total: number;
+      available: number;
+    };
+    gpu?: {
+      total_count: number;
+      available_count: number;
+      devices: ClusterGpuDevice[];
+    };
+  };
+  ray_resources?: Record<string, number>;
+}
+
+export interface ClusterResourcesResponse {
+  status: 'success' | string;
+  cluster: {
+    head_node_id?: string | null;
+    head_node_ip?: string | null;
+    nodes: ClusterResourceNode[];
+    unregistered_ray_nodes?: ClusterResourceNode[];
+  };
 }
 
 export interface RunResult {
@@ -173,6 +216,9 @@ export interface StaticWorkflowRunNode {
   result_summary?: any;
   error?: string | null;
   maze_task_id?: string;
+  node_ip?: string | null;
+  node_id_runtime?: string | null;
+  gpu_id?: string | number | null;
   file_manifest?: any;
   artifacts?: Array<{
     path: string;

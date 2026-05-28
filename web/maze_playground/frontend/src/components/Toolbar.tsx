@@ -1,6 +1,6 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
-import { DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
+import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
@@ -12,9 +12,10 @@ interface ToolbarProps {
   onOpenRuns?: () => void;
   onOpenReactRunner?: () => void;
   onReactRunStarted?: (runId: string) => void;
+  onOpenClusterResources?: () => void;
 }
 
-export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStarted }: ToolbarProps) {
+export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStarted, onOpenClusterResources }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -343,6 +344,7 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
           prompt,
           workspaceDir: workspaceDir || undefined,
           maxSteps: agentNode.data.maxSteps || 4,
+          maxTokens: agentNode.data.maxTokens || 2048,
           timeoutSeconds: mode === 'online' ? 180 : 90,
           taskTimeout: mode === 'online' ? 120 : 60,
           llm: mode === 'online' ? settings : undefined,
@@ -483,6 +485,13 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
           onClick={onOpenRuns}
         >
           Runs
+        </Button>
+
+        <Button
+          icon={<ClusterOutlined />}
+          onClick={onOpenClusterResources}
+        >
+          Cluster
         </Button>
 
         <input

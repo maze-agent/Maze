@@ -1,6 +1,7 @@
 import ray
 import time
 import logging
+import copy
 from typing import Any,List,Dict
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
@@ -13,8 +14,8 @@ class Node():
     def __init__(self,node_id:str,node_ip:str,available_resources:dict,total_resources:dict):
         self.node_id = node_id
         self.node_ip = node_ip
-        self.available_resources = available_resources
-        self.total_resources = total_resources
+        self.available_resources = copy.deepcopy(available_resources)
+        self.total_resources = copy.deepcopy(total_resources)
   
     def release_resource(self,resources:dict,gpu_id:int = None):
         cpu = resources["cpu"]
@@ -104,6 +105,90 @@ class ResourceManager():
             logger.debug("Total Node: %s", len(self.nodes))
             for node_id,node in self.nodes.items():
                 logger.debug("node_id:%s, available_resources:%s", node_id, node.available_resources)
+
+    def _ray_node_index(self):
+        try:
+            return {node["NodeID"]: node for node in ray.nodes()}
+        except Exception:
+            return {}
+
+    def _gpu_snapshot(self, node: Node):
+        gpu_ids = sorted(
+            set(node.total_resources.get("gpu_resource", {}).keys())
+            | set(node.available_resources.get("gpu_resource", {}).keys())
+        )
+        devices = []
+        total_count = 0
+        available_count = 0
+
+        for gpu_id in gpu_ids:
+            total_gpu = node.total_resources.get("gpu_resource", {}).get(gpu_id, {})
+            available_gpu = node.available_resources.get("gpu_resource", {}).get(gpu_id, {})
+            total_num = total_gpu.get("gpu_num", 0)
+            available_num = available_gpu.get("gpu_num", 0)
+            total_count += total_num
+            available_count += available_num
+            devices.append({
+                "gpu_id": gpu_id,
+                "total_count": total_num,
+                "available_count": available_num,
+                "total_memory": total_gpu.get("gpu_mem", 0),
+                "available_memory": available_gpu.get("gpu_mem", 0),
+            })
+
+        return {
+            "total_count": total_count,
+            "available_count": available_count,
+            "devices": devices,
+        }
+
+    def get_cluster_resources(self):
+        ray_nodes = self._ray_node_index()
+        registered_nodes = []
+
+        for node_id, node in self.nodes.items():
+            ray_node = ray_nodes.get(node_id)
+            registered_nodes.append({
+                "node_id": node_id,
+                "node_ip": node.node_ip,
+                "role": "head" if node_id == self.head_node_id else "worker",
+                "registered": True,
+                "alive": bool(ray_node.get("Alive", False)) if ray_node else False,
+                "resources": {
+                    "cpu": {
+                        "total": node.total_resources.get("cpu", 0),
+                        "available": node.available_resources.get("cpu", 0),
+                    },
+                    "cpu_mem": {
+                        "total": node.total_resources.get("cpu_mem", 0),
+                        "available": node.available_resources.get("cpu_mem", 0),
+                    },
+                    "gpu": self._gpu_snapshot(node),
+                },
+                "ray_resources": ray_node.get("Resources", {}) if ray_node else {},
+            })
+
+        unregistered_ray_nodes = []
+        for node_id, ray_node in ray_nodes.items():
+            if node_id in self.nodes:
+                continue
+            if not ray_node.get("Alive", False):
+                continue
+            unregistered_ray_nodes.append({
+                "node_id": node_id,
+                "node_ip": ray_node.get("NodeManagerAddress"),
+                "role": "worker",
+                "registered": False,
+                "alive": True,
+                "ray_resources": ray_node.get("Resources", {}),
+            })
+
+        return {
+            "head_node_id": self.head_node_id,
+            "head_node_ip": self.head_node_ip,
+            "nodes": sorted(registered_nodes, key=lambda item: (item["role"] != "head", item["node_ip"] or "")),
+            "unregistered_ray_nodes": sorted(unregistered_ray_nodes, key=lambda item: item["node_ip"] or ""),
+        }
             
             
     def stop_worker(self,node_id:str):

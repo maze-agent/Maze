@@ -9,6 +9,22 @@
     </a>
 </p>
 
+
+## 📰 News
+
+
+- **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.
+- **2026-05**: Maze added a content-addressed artifact store for non-shared distributed file execution. Workspace inputs and task outputs can now move through `maze://artifacts/sha256/...` references instead of relying on a shared filesystem path.
+- **2026-05**: Online ReAct runs now expose `Max Tokens`, compact long tool observations, and treat malformed LLM JSON as repairable agent observations instead of failing the DynamicRun directly.
+- **2026-05**: Maze now includes a thin ReAct workflow template on top of DynamicRun, with LLM decisions, tool calls, repair observations, workspace file/code tools, and agent traces recorded as Maze events.
+- **2026-05**: We support dynamic workflows with runtime `append_task`, lifecycle events, persisted run history, and developer inspection.
+- **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
+- **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
+- **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
+
+<br>
+
+
 ## 🌟 Why Maze?
 - **Task-level**
 
@@ -28,17 +44,6 @@
 
 <br>
 
-
-## 📰 News
-
-
-- **2026-05**: Maze now includes a thin ReAct workflow template on top of DynamicRun, with LLM decisions, tool calls, repair observations, workspace file/code tools, and agent traces recorded as Maze events.
-- **2026-05**: We support dynamic workflows with runtime `append_task`, lifecycle events, persisted run history, and developer inspection.
-- **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
-- **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
-- **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
-
-<br>
 
 ## 🚀 Quick Start
 
@@ -67,6 +72,11 @@
    ```
    maze start --worker --addr HEAD_IP:HEAD_PORT
    ```
+   You can inspect the scheduler-visible cluster state with:
+   ```
+   curl http://HEAD_IP:HEAD_PORT/cluster/resources
+   ```
+   A Ray worker that has joined Ray but has not registered with Maze will appear under `unregistered_ray_nodes`; it must still be started as a Maze worker before Maze can schedule tasks to it.
 ## 3. Example
 
 ### Static Workflow
@@ -159,6 +169,19 @@ print(answer)
 ReAct workflows keep both LLM decisions and tools as Maze tasks, so the distributed task graph and the agent trace stay in the same DynamicRun history. See [examples/react_workflow](./examples/react_workflow/README.md) for a local repair demo and an OpenAI-compatible LLM demo.
 
 In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
+
+For distributed runs without shared storage, Maze can register workspace inputs and task outputs in a content-addressed artifact store. Workers download required files before task execution and upload changed files after execution; manifests use stable artifact references such as `maze://artifacts/sha256/<hash>` instead of machine-local paths. A workflow can enable the head HTTP artifact store with:
+
+```python
+workflow.run(file_context={
+    "enabled": True,
+    "workspace_dir": "/tmp/my_workspace",
+    "artifact_store": {
+        "type": "head_http",
+        "base_url": "http://HEAD_IP:HEAD_PORT",
+    },
+})
+```
 <br>
 
 
@@ -169,7 +192,9 @@ Maze Playground supports building workflows through a drag-and-drop interface, m
 maze start --head --port HEAD_PORT --playground
 ```
 
-The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks.
+The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include a `Max Tokens` setting; long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
+
+The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, and per-node GPU memory.
 
 Here are two videos showing the process of using built-in tasks and uploading user-defined tasks in Maze Playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 

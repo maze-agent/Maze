@@ -105,6 +105,8 @@ class Scheduler():
         assert(self.context is not None)
         socket_from_main = self.context.socket(zmq.ROUTER)
         socket_from_main.bind(f"tcp://127.0.0.1:{port1}")
+        socket_to_main = self.context.socket(zmq.DEALER)
+        socket_to_main.connect(f"tcp://127.0.0.1:{self.port2}")
 
         try:
             while True:
@@ -114,7 +116,7 @@ class Scheduler():
                 message = json.loads(data.decode('utf-8'))
 
                 message_type = message["type"]
-                message_data = message["data"]
+                message_data = message.get("data", {})
                 if(message_type =="run_task"):
                     if(message_data["task_type"]==TaskType.CODE.value):
                         task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
@@ -152,6 +154,17 @@ class Scheduler():
                 elif(message_type=="start_worker"):
                     with self.lock:
                         self.resource_manager.start_worker(node_id=message_data["node_id"], resources=message_data["resources"], node_ip=message_data["node_ip"])
+                elif(message_type=="get_cluster_resources"):
+                    request_id = message_data.get("request_id")
+                    resources = self.resource_manager.get_cluster_resources()
+                    response = {
+                        "type": "cluster_resources",
+                        "data": {
+                            "request_id": request_id,
+                            "resources": resources,
+                        },
+                    }
+                    socket_to_main.send(json.dumps(response).encode("utf-8"))
                 elif(message_type=="stop_worker"):
                     with self.lock:
                         self.resource_manager.stop_worker(node_id=message_data["node_id"])
@@ -382,4 +395,3 @@ class Scheduler():
         self.receive_thread.join()
         self.monitor_thread.join()
         self.submit_thread.join()
-

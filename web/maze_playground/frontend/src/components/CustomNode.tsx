@@ -18,6 +18,9 @@ export default function CustomNode({ id, data, selected }: any) {
     ? 'interrupted'
     : runState?.status;
   const artifactCount = runState?.artifacts?.length || 0;
+  const runtimeNodeIp = runState?.node_ip || runState?.nodeIp;
+  const runtimeNodeId = runState?.node_id_runtime || runState?.node_id || runState?.nodeId;
+  const runtimeGpuId = runState?.gpu_id ?? runState?.gpuId;
 
   useEffect(() => {
     if (!editingLabel) {
@@ -190,6 +193,13 @@ export default function CustomNode({ id, data, selected }: any) {
             <div>Outputs: {data.outputs?.length || 0}</div>
             {isAgent && (
               <div>{data.reactMode === 'online' ? 'Online LLM' : 'Local Demo'}</div>
+            )}
+            {runtimeNodeIp && (
+              <Tooltip title={`node_id: ${runtimeNodeId || '-'}${runtimeGpuId !== null && runtimeGpuId !== undefined ? `, gpu: ${runtimeGpuId}` : ''}`}>
+                <div style={{ color: '#0958d9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  Host: {runtimeNodeIp}{runtimeGpuId !== null && runtimeGpuId !== undefined ? ` / GPU ${runtimeGpuId}` : ''}
+                </div>
+              </Tooltip>
             )}
             {runState?.result_summary !== undefined && runStatus === 'completed' && (
               <Tooltip title={typeof runState.result_summary === 'string' ? runState.result_summary : JSON.stringify(runState.result_summary)}>

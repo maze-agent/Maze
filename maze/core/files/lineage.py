@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from maze.core.files.artifact_store import LocalCASArtifactStore, artifact_uri
+
 
 TASK_RESULT_ENVELOPE = "__maze_task_result_envelope__"
 
@@ -64,20 +66,26 @@ def _snapshot_files(root: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    workspace_dir = Path(file_context["workspace_dir"])
-    run_id = file_context["run_id"]
-    parent_task_ids = file_context.get("parent_task_ids") or []
-    manifests_dir = workspace_dir / "workflow_runs" / "static" / run_id / "file_manifests" / "tasks"
     files_by_path: Dict[str, Dict[str, Any]] = {}
 
-    for parent_task_id in parent_task_ids:
-        manifest_path = manifests_dir / f"{parent_task_id}.json"
-        if not manifest_path.exists():
-            continue
+    parent_manifests = file_context.get("parent_file_manifests")
+    if parent_manifests is None:
+        workspace_dir = Path(file_context["workspace_dir"])
+        run_id = file_context["run_id"]
+        parent_task_ids = file_context.get("parent_task_ids") or []
+        manifests_dir = workspace_dir / "workflow_runs" / "static" / run_id / "file_manifests" / "tasks"
+        parent_manifests = []
 
-        import json
+        for parent_task_id in parent_task_ids:
+            manifest_path = manifests_dir / f"{parent_task_id}.json"
+            if not manifest_path.exists():
+                continue
 
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            import json
+
+            parent_manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+
+    for manifest in parent_manifests:
         for file_info in manifest.get("files", []):
             relative_path = file_info.get("path")
             if not relative_path:
@@ -94,8 +102,66 @@ def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]
     return files_by_path
 
 
+def _artifact_mode(file_context: Dict[str, Any]) -> bool:
+    return bool(file_context.get("artifact_store"))
+
+
+def _artifact_base_url(file_context: Dict[str, Any]) -> str:
+    artifact_store = file_context.get("artifact_store") or {}
+    base_url = artifact_store.get("base_url") or file_context.get("artifact_base_url")
+    if not base_url:
+        raise ValueError("Artifact file context requires artifact_store.base_url")
+    return str(base_url).rstrip("/")
+
+
+def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], target: Path):
+    sha256 = file_info.get("sha256")
+    if not sha256:
+        raise ValueError(f"Artifact missing sha256 for {file_info.get('path')}")
+
+    cache_dir = file_context.get("artifact_store", {}).get("cache_dir")
+    if cache_dir:
+        cache_store = LocalCASArtifactStore(cache_dir)
+        if cache_store.exists(sha256):
+            cache_store.get_file(sha256, target)
+            return
+
+    import requests
+
+    response = requests.get(f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}", timeout=60)
+    response.raise_for_status()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+    tmp_path.write_bytes(response.content)
+    actual = _file_sha256(tmp_path)
+    if actual != sha256:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Artifact checksum mismatch for {file_info.get('path')}: expected {sha256}, got {actual}")
+    os.replace(tmp_path, target)
+
+    if cache_dir:
+        cache_store.put_file(target)
+
+
+def _stage_artifact_file(file_context: Dict[str, Any], file_info: Dict[str, Any], work_dir: Path):
+    relative_path = file_info.get("path")
+    if not relative_path:
+        return
+    target = work_dir / _safe_relative_path(relative_path)
+    _download_artifact(file_context, file_info, target)
+
+
+def _stage_initial_artifacts(file_context: Dict[str, Any], work_dir: Path):
+    for file_info in file_context.get("initial_files") or []:
+        _stage_artifact_file(file_context, file_info, work_dir)
+
+
 def _stage_parent_files(file_context: Dict[str, Any], work_dir: Path):
     for relative_path, file_info in _load_parent_files(file_context).items():
+        if _artifact_mode(file_context):
+            _stage_artifact_file(file_context, file_info, work_dir)
+            continue
+
         source = Path(file_info["storage_path"])
         if not source.exists():
             raise FileNotFoundError(f"Missing parent artifact for {relative_path}: {source}")
@@ -106,6 +172,9 @@ def _stage_parent_files(file_context: Dict[str, Any], work_dir: Path):
 
 def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
     import json
+
+    if _artifact_mode(file_context) and not file_context.get("write_local_manifest", False):
+        return
 
     workspace_dir = Path(file_context["workspace_dir"])
     run_id = file_context["run_id"]
@@ -132,20 +201,36 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
             continue
 
         source = work_dir / _safe_relative_path(relative_path)
-        target = artifacts_dir / _safe_relative_path(relative_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
         mime_type, _ = mimetypes.guess_type(relative_path)
-        files.append({
+        artifact_info: Dict[str, Any] = {}
+        storage_path = None
+
+        if _artifact_mode(file_context):
+            artifact_info = _upload_artifact(file_context, source, file_info["sha256"])
+        else:
+            target = artifacts_dir / _safe_relative_path(relative_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            storage_path = str(target)
+            artifact_info = {
+                "artifact_id": f"sha256:{file_info['sha256']}",
+                "storage_uri": artifact_uri(file_info["sha256"]),
+            }
+
+        file_record = {
             "path": relative_path,
             "name": Path(relative_path).name,
             "size": file_info["size"],
             "sha256": file_info["sha256"],
             "mime": mime_type or "application/octet-stream",
             "producer_task_id": task_id,
-            "storage_path": str(target),
+            "artifact_id": artifact_info.get("artifact_id"),
+            "storage_uri": artifact_info.get("storage_uri"),
             "uri": f"maze://runs/{run_id}/artifacts/tasks/{task_id}/{relative_path}",
-        })
+        }
+        if storage_path:
+            file_record["storage_path"] = storage_path
+        files.append(file_record)
 
     deleted_files = sorted(path for path in before if path not in after)
     manifest = {
@@ -160,6 +245,24 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
     }
     _write_manifest(file_context, manifest)
     return manifest
+
+
+def _upload_artifact(file_context: Dict[str, Any], source: Path, expected_sha256: str) -> Dict[str, Any]:
+    actual = _file_sha256(source)
+    if actual != expected_sha256:
+        raise RuntimeError(f"Artifact checksum changed before upload: expected {expected_sha256}, got {actual}")
+
+    import requests
+
+    with source.open("rb") as handle:
+        response = requests.put(
+            f"{_artifact_base_url(file_context)}/artifacts/sha256/{expected_sha256}",
+            data=handle,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=120,
+        )
+    response.raise_for_status()
+    return response.json()
 
 
 def run_task_with_file_context(
@@ -179,7 +282,10 @@ def run_task_with_file_context(
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    _copy_tree_contents(workspace_dir / "files", work_dir)
+    if _artifact_mode(file_context):
+        _stage_initial_artifacts(file_context, work_dir)
+    else:
+        _copy_tree_contents(workspace_dir / "files", work_dir)
     _stage_parent_files(file_context, work_dir)
     before = _snapshot_files(work_dir)
 

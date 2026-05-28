@@ -9,6 +9,7 @@ import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
 import ReActRunModal from './components/ReActRunModal';
+import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
@@ -18,6 +19,7 @@ function App() {
   const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
   const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
   const [reactRunnerOpen, setReactRunnerOpen] = useState(false);
+  const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
   const {
     workflowId,
     workflowName,
@@ -176,6 +178,7 @@ function App() {
         <Toolbar
           onOpenRuns={() => setRunsOpen(true)}
           onOpenReactRunner={() => setReactRunnerOpen(true)}
+          onOpenClusterResources={() => setClusterResourcesOpen(true)}
           onReactRunStarted={(runId) => {
             setActiveDynamicRunId(runId);
             setDynamicRunFocusId(runId);
@@ -208,6 +211,10 @@ function App() {
             setActiveDynamicRunId(runId);
             setDynamicRunFocusId(runId);
           }}
+        />
+        <ClusterResourcesDrawer
+          open={clusterResourcesOpen}
+          onClose={() => setClusterResourcesOpen(false)}
         />
       </div>
     </ConfigProvider>

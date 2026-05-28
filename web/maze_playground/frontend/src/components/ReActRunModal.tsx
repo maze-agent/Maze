@@ -22,6 +22,7 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
   const [mode, setMode] = useState<ReActMode>('local');
   const [prompt, setPrompt] = useState('Use the calculator to compute 18 * 7, then give the final answer.');
   const [maxSteps, setMaxSteps] = useState(4);
+  const [maxTokens, setMaxTokens] = useState(2048);
   const [llmSettings, setLlmSettings] = useState<LlmSettings>(DEFAULT_LLM_SETTINGS);
   const [running, setRunning] = useState(false);
 
@@ -60,6 +61,7 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
         prompt: trimmedPrompt,
         workspaceDir: workspaceDir || undefined,
         maxSteps,
+        maxTokens,
         timeoutSeconds: mode === 'online' ? 180 : 90,
         taskTimeout: mode === 'online' ? 120 : 60,
         llm: mode === 'online'
@@ -150,6 +152,18 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
 
         {mode === 'online' && (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <div>
+              <Text strong>Max Tokens</Text>
+              <InputNumber
+                min={256}
+                max={8192}
+                step={256}
+                value={maxTokens}
+                onChange={(value) => setMaxTokens(Number(value || 2048))}
+                style={{ display: 'block', width: 160, marginTop: 6 }}
+              />
+            </div>
+
             <div>
               <Text strong>Base URL</Text>
               <Input

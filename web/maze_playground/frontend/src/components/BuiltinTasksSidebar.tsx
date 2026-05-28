@@ -1051,6 +1051,16 @@ export default function BuiltinTasksSidebar() {
     event.dataTransfer.effectAllowed = 'move';
   };
 
+  const onDragStartDistributedSmoke = (event: React.DragEvent) => {
+    event.dataTransfer.setData('application/reactflow', JSON.stringify({
+      type: 'workflow-distributed-smoke',
+      task: {
+        label: 'Distributed Smoke Workflow',
+      },
+    }));
+    event.dataTransfer.effectAllowed = 'move';
+  };
+
   const onDragEndWorkspace = () => {
     window.setTimeout(() => {
       draggingWorkspaceRef.current = false;
@@ -1625,6 +1635,25 @@ export default function BuiltinTasksSidebar() {
               </Space>
               <Text type="secondary" style={{ display: 'block', fontSize: '12px' }}>
                 Drag to canvas, configure the prompt, then use the main Run button.
+              </Text>
+            </Card>
+            <Card
+              size="small"
+              style={{ cursor: 'grab', marginTop: '8px' }}
+              hoverable
+              draggable
+              onDragStart={onDragStartDistributedSmoke}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <PartitionOutlined style={{ color: '#0958d9' }} />
+                <strong>Distributed Smoke Workflow</strong>
+              </div>
+              <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
+                <Tag color="blue">distributed</Tag>
+                <Tag>GPU probe</Tag>
+              </Space>
+              <Text type="secondary" style={{ display: 'block', fontSize: '12px' }}>
+                Creates parallel probe tasks so the canvas can show which machines ran them.
               </Text>
             </Card>
           </div>

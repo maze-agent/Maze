@@ -5,10 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from maze.core.path.path import MaPath
 from fastapi import FastAPI, WebSocket, Request, HTTPException
+from fastapi.responses import FileResponse
 import cloudpickle
 import binascii
 from pydantic import BaseModel
 from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
+from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 
 
 app = FastAPI()
@@ -23,6 +25,7 @@ app.add_middleware(
 )
 
 mapath = MaPath()
+artifact_store = LocalCASArtifactStore()
 
 def signal_handler(signum, frame):
     mapath.cleanup()
@@ -406,6 +409,49 @@ async def get_head_ray_port():
     try:
         port =  mapath.get_ray_head_port()
         return {"status": "success","port": port}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/cluster/resources")
+async def get_cluster_resources():
+    try:
+        resources = await mapath.get_cluster_resources()
+        return {"status": "success", "cluster": resources}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/artifacts/sha256/{sha256}")
+async def put_artifact(sha256: str, req: Request):
+    try:
+        data = await req.body()
+        if sha256_bytes(data) != sha256:
+            raise HTTPException(status_code=400, detail="Artifact checksum mismatch")
+        return artifact_store.put_bytes(sha256, data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.head("/artifacts/sha256/{sha256}")
+async def head_artifact(sha256: str):
+    try:
+        if not artifact_store.exists(sha256):
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return artifact_store.metadata(sha256)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/artifacts/sha256/{sha256}")
+async def get_artifact(sha256: str):
+    try:
+        path = artifact_store.blob_path(sha256)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return FileResponse(path, media_type="application/octet-stream", filename=sha256)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

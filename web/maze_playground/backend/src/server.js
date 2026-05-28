@@ -616,6 +616,9 @@ function taskNodeSnapshotFromWorkflowNode(node) {
     error: null,
     file_manifest: null,
     artifacts: [],
+    node_ip: null,
+    node_id_runtime: null,
+    gpu_id: null,
   };
 }
 
@@ -821,10 +824,28 @@ function applyStaticRunEvent(snapshot, event) {
     node.status = 'running';
     node.started_time = node.started_time || eventTime;
     node.maze_task_id = data.maze_task_id || data.task_id || node.maze_task_id;
+    if (data.node_ip) {
+      node.node_ip = data.node_ip;
+    }
+    if (data.node_id) {
+      node.node_id_runtime = data.node_id;
+    }
+    if (data.gpu_id !== undefined && data.gpu_id !== null) {
+      node.gpu_id = data.gpu_id;
+    }
   } else if (event.type === 'finish_task' && node) {
     node.status = 'completed';
     node.finished_time = eventTime;
     node.maze_task_id = data.maze_task_id || data.task_id || node.maze_task_id;
+    if (data.node_ip) {
+      node.node_ip = data.node_ip;
+    }
+    if (data.node_id) {
+      node.node_id_runtime = data.node_id;
+    }
+    if (data.gpu_id !== undefined && data.gpu_id !== null) {
+      node.gpu_id = data.gpu_id;
+    }
     node.result_summary = data.result ?? node.result_summary;
     if (data.file_manifest) {
       node.file_manifest = data.file_manifest;
@@ -1969,6 +1990,16 @@ app.get('/api/dynamic-runs', async (req, res) => {
   }
 });
 
+app.get('/api/cluster/resources', async (req, res) => {
+  try {
+    const result = await callMazeCore('/cluster/resources');
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to get cluster resources:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster resources' });
+  }
+});
+
 app.get('/api/dynamic-runs/:runId', async (req, res) => {
   try {
     const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}`);
@@ -2055,6 +2086,7 @@ app.post('/api/react-runs/start', async (req, res) => {
       prompt,
       workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
       maxSteps,
+      maxTokens,
       timeoutSeconds,
       taskTimeout,
       llm,
@@ -2072,6 +2104,7 @@ app.post('/api/react-runs/start', async (req, res) => {
         prompt,
         workspaceDir,
         maxSteps,
+        maxTokens,
         timeoutSeconds,
         taskTimeout,
         baseUrl: llm?.baseUrl,
