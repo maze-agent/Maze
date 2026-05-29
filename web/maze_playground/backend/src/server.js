@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,12 +35,24 @@ function getPythonBin() {
   if (process.env.PYTHON_BIN) {
     return process.env.PYTHON_BIN;
   }
+  if (process.env.MAZE_CONDA_PREFIX) {
+    return path.join(
+      process.env.MAZE_CONDA_PREFIX,
+      process.platform === 'win32' ? 'python.exe' : 'bin/python'
+    );
+  }
   if (process.env.CONDA_PREFIX) {
     return path.join(
       process.env.CONDA_PREFIX,
       process.platform === 'win32' ? 'python.exe' : 'bin/python'
     );
   }
+
+  const defaultMazePython = '/root/miniconda3/envs/maze/bin/python';
+  if (process.platform !== 'win32' && fsSync.existsSync(defaultMazePython)) {
+    return defaultMazePython;
+  }
+
   return 'python';
 }
 
@@ -1990,6 +2003,25 @@ app.get('/api/dynamic-runs', async (req, res) => {
   }
 });
 
+app.get('/api/runs', async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.status) params.set('status', String(req.query.status));
+    if (req.query.kind) params.set('kind', String(req.query.kind));
+    if (req.query.limit) params.set('limit', String(req.query.limit));
+    if (req.query.detail !== undefined) params.set('detail', String(req.query.detail));
+    const query = params.toString();
+    const result = await callMazeCore(`/runs${query ? `?${query}` : ''}`);
+    res.json({
+      success: true,
+      runs: result.runs || [],
+    });
+  } catch (error) {
+    console.error('Failed to get runs:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
 app.get('/api/cluster/resources', async (req, res) => {
   try {
     const result = await callMazeCore('/cluster/resources');
@@ -1997,6 +2029,194 @@ app.get('/api/cluster/resources', async (req, res) => {
   } catch (error) {
     console.error('Failed to get cluster resources:', error);
     res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster resources' });
+  }
+});
+
+app.get('/api/cluster/queues', async (req, res) => {
+  try {
+    const result = await callMazeCore('/cluster/queues');
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to get cluster queues:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster queues' });
+  }
+});
+
+app.get('/api/runs/:runId', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}`);
+    res.json({
+      success: true,
+      run: result.run,
+    });
+  } catch (error) {
+    console.error('Failed to get run:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/tasks', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/tasks`);
+    res.json({
+      success: true,
+      runId: result.run_id,
+      tasks: result.tasks || [],
+    });
+  } catch (error) {
+    console.error('Failed to get run tasks:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/tasks/:taskId', async (req, res) => {
+  try {
+    const result = await callMazeCore(
+      `/runs/${encodeURIComponent(req.params.runId)}/tasks/${encodeURIComponent(req.params.taskId)}`
+    );
+    res.json({
+      success: true,
+      runId: result.run_id,
+      task: result.task,
+    });
+  } catch (error) {
+    console.error('Failed to get run task:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/events', async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.after !== undefined) params.set('after', String(req.query.after));
+    const query = params.toString();
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/events${query ? `?${query}` : ''}`);
+    res.json({
+      success: true,
+      runId: result.run_id,
+      events: result.events || [],
+    });
+  } catch (error) {
+    console.error('Failed to get run events:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/logs', async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.tail !== undefined) params.set('tail', String(req.query.tail));
+    if (req.query.taskId !== undefined) params.set('task_id', String(req.query.taskId));
+    const query = params.toString();
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/logs${query ? `?${query}` : ''}`);
+    res.json({
+      success: true,
+      runId: result.run_id,
+      taskId: result.task_id,
+      lineCount: result.line_count || 0,
+      lines: result.lines || [],
+    });
+  } catch (error) {
+    console.error('Failed to get run logs:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/artifacts', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/artifacts`);
+    res.json({
+      success: true,
+      runId: result.run_id,
+      artifacts: result.artifacts || [],
+    });
+  } catch (error) {
+    console.error('Failed to get run artifacts:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/runs/:runId/tasks/:taskId/artifacts', async (req, res) => {
+  try {
+    const result = await callMazeCore(
+      `/runs/${encodeURIComponent(req.params.runId)}/tasks/${encodeURIComponent(req.params.taskId)}/artifacts`
+    );
+    res.json({
+      success: true,
+      runId: result.run_id,
+      taskId: result.task_id,
+      artifacts: result.artifacts || [],
+    });
+  } catch (error) {
+    console.error('Failed to get run task artifacts:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/artifacts/sha256/:sha256/metadata', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/artifacts/sha256/${encodeURIComponent(req.params.sha256)}/metadata`);
+    res.json({
+      success: true,
+      artifact: result.artifact,
+    });
+  } catch (error) {
+    console.error('Failed to get artifact metadata:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.get('/api/artifacts/sha256/:sha256', async (req, res) => {
+  try {
+    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(req.params.sha256)}`);
+    if (!response.ok) {
+      const message = await response.text();
+      return res.status(response.status).send(message || `Maze core request failed: ${response.status}`);
+    }
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${req.params.sha256}"`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.send(buffer);
+  } catch (error) {
+    console.error('Failed to download artifact:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to download artifact' });
+  }
+});
+
+app.post('/api/runs/:runId/cancel', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/cancel`, {
+      method: 'POST',
+      body: req.body || {},
+    });
+    res.json({
+      success: true,
+      runId: result.run_id,
+      status: result.run_status,
+    });
+  } catch (error) {
+    console.error('Failed to cancel run:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
+  }
+});
+
+app.post('/api/runs/:runId/retry', async (req, res) => {
+  try {
+    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/retry`, {
+      method: 'POST',
+      body: req.body || {},
+    });
+    res.json({
+      success: true,
+      runId: result.run_id,
+      workflowId: result.workflow_id,
+      retriedFromRunId: result.retried_from_run_id,
+      spec: result.spec,
+    });
+  } catch (error) {
+    console.error('Failed to retry run:', error);
+    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
   }
 });
 
@@ -2654,6 +2874,7 @@ server.listen(PORT, () => {
   console.log(`✅ API Endpoint:  http://localhost:${PORT}/api`);
   console.log(`✅ WebSocket:     ws://localhost:${PORT}/ws`);
   console.log(`✅ Health Check:  http://localhost:${PORT}/health`);
+  console.log(`✅ Python Bridge: ${PYTHON_BIN}`);
   console.log('\n📡 等待前端连接...\n');
 });
 

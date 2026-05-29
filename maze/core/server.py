@@ -1,8 +1,12 @@
 from ast import arg
+import asyncio
 import uuid
 import signal
+import copy
+import contextlib
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
+from urllib.parse import urlsplit, urlunsplit
 from maze.core.path.path import MaPath
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
@@ -11,6 +15,7 @@ import binascii
 from pydantic import BaseModel
 from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
+from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 
 
 app = FastAPI()
@@ -26,6 +31,73 @@ app.add_middleware(
 
 mapath = MaPath()
 artifact_store = LocalCASArtifactStore()
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _is_local_host(host: str | None) -> bool:
+    return (host or "").strip().lower().strip("[]") in LOCAL_HOSTS
+
+
+def _request_host(req: Request) -> str | None:
+    header_host = req.headers.get("host", "")
+    if not header_host:
+        return req.client.host if req.client else None
+    return header_host.rsplit(":", 1)[0].strip("[]")
+
+
+def _worker_reachable_head_host(req: Request, cluster_host: str | None, explicit_host: str | None = None) -> str:
+    if explicit_host:
+        return explicit_host
+
+    request_host = _request_host(req)
+    if cluster_host and not _is_local_host(cluster_host):
+        return cluster_host
+    if request_host and not _is_local_host(request_host):
+        return request_host
+    return cluster_host or request_host or "localhost"
+
+
+def _replace_url_host(base_url: str, host: str, fallback_port: int | None = None) -> str:
+    parsed = urlsplit(base_url)
+    port = parsed.port or fallback_port
+    host_for_netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    netloc = f"{host_for_netloc}:{port}" if port else host_for_netloc
+    return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
+
+
+def _request_base_url(req: Request) -> str:
+    parsed = urlsplit(str(req.base_url))
+    return urlunsplit((parsed.scheme or "http", parsed.netloc, "", "", "")).rstrip("/")
+
+
+async def _worker_reachable_file_context(req: Request, file_context: Dict[str, Any] | None):
+    if not file_context or not file_context.get("enabled"):
+        return file_context
+
+    artifact_store_context = file_context.get("artifact_store") or {}
+    base_url = artifact_store_context.get("base_url")
+    if not base_url:
+        return file_context
+
+    parsed = urlsplit(base_url)
+    if not _is_local_host(parsed.hostname):
+        return file_context
+
+    cluster_host = None
+    with contextlib.suppress(Exception):
+        cluster = await mapath.get_cluster_resources(timeout=2.0)
+        cluster_host = cluster.get("head_node_ip")
+
+    head_host = _worker_reachable_head_host(req, cluster_host)
+    if not head_host or _is_local_host(head_host):
+        return file_context
+
+    prepared_context = copy.deepcopy(file_context)
+    prepared_store = dict(prepared_context.get("artifact_store") or {})
+    prepared_store["base_url"] = _replace_url_host(base_url, head_host, req.url.port)
+    prepared_context["artifact_store"] = prepared_store
+    return prepared_context
 
 def signal_handler(signum, frame):
     mapath.cleanup()
@@ -103,6 +175,10 @@ async def save_task(req:Request):
                 code_ser=code_ser,
                 resources=resources,
                 file_context=data.get("file_context"),
+                max_retries=data.get("max_retries"),
+                retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
+                retry_on=data.get("retry_on"),
+                timeout_seconds=data.get("timeout_seconds"),
             )
         else:
             raise HTTPException(status_code=500, detail="Invalid task_type")
@@ -135,6 +211,10 @@ async def save_task_and_add_edge(req:Request):
                 code_ser=code_ser,
                 resources=resources,
                 file_context=data.get("file_context"),
+                max_retries=data.get("max_retries"),
+                retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
+                retry_on=data.get("retry_on"),
+                timeout_seconds=data.get("timeout_seconds"),
             )
 
             # 修复：正确遍历 input_params
@@ -183,10 +263,85 @@ async def run_workflow(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         
-        run_id = mapath.run_workflow(workflow_id, file_context=data.get("file_context"))
+        run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=await _worker_reachable_file_context(req, data.get("file_context")),
+            timeout_seconds=data.get("timeout_seconds"),
+            tags=data.get("tags"),
+            metadata=data.get("metadata"),
+        )
         return {"status":"success","run_id": run_id}
     except Exception as e:
         print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/apps/validate")
+async def validate_app_spec(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = app_spec_from_payload(
+            payload,
+            source_path=data.get("source_path"),
+            overrides={
+                "workspace": data.get("workspace_dir"),
+                "timeout_seconds": data.get("timeout_seconds"),
+            },
+        )
+        return {"status": "success", "spec": spec}
+    except AppSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/apps/run")
+async def run_app(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = app_spec_from_payload(
+            payload,
+            source_path=data.get("source_path"),
+            overrides={
+                "workspace": data.get("workspace_dir"),
+                "timeout_seconds": data.get("timeout_seconds"),
+            },
+        )
+        workflow_id = mapath.create_app_workflow(spec)
+        artifact_mode = data.get("artifact_mode", True)
+        file_context = data.get("file_context")
+        if file_context is None:
+            file_context = app_file_context(
+                spec,
+                artifact_base_url=_request_base_url(req),
+                artifact_mode=artifact_mode,
+            )
+        file_context = await _worker_reachable_file_context(req, file_context)
+        metadata = {
+            **dict(spec.get("metadata") or {}),
+            **dict(data.get("metadata") or {}),
+            "app_name": spec["name"],
+            "workflow_name": spec["name"],
+            "run_kind": "app",
+            "app_spec": spec,
+        }
+        tags = list(dict.fromkeys([*spec.get("tags", []), *data.get("tags", []), "app"]))
+        run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=spec.get("timeout_seconds"),
+            tags=tags,
+            metadata=metadata,
+        )
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "spec": spec,
+        }
+    except AppSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/get_workflow_res/{workflow_id}/{run_id}")
@@ -206,8 +361,187 @@ async def create_dynamic_run(req: Request):
         run_id = await mapath.create_dynamic_run(
             max_tasks=data.get("max_tasks", 100),
             timeout_seconds=data.get("timeout_seconds"),
+            file_context=await _worker_reachable_file_context(req, data.get("file_context")),
         )
         return {"status": "success", "run_id": run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs")
+async def list_runs(
+    status: Optional[str] = None,
+    kind: Optional[str] = None,
+    limit: Optional[int] = None,
+    detail: bool = False,
+):
+    try:
+        return {
+            "status": "success",
+            "runs": await mapath.list_runs(status=status, kind=kind, limit=limit, detail=detail),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}")
+async def get_run(run_id: str):
+    try:
+        return {
+            "status": "success",
+            "run": await mapath.get_run_snapshot(run_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/tasks")
+async def get_run_tasks(run_id: str):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "tasks": await mapath.get_run_tasks(run_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/tasks/{task_id}")
+async def get_run_task(run_id: str, task_id: str):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "task": await mapath.get_run_task(run_id, task_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/artifacts")
+async def get_run_artifacts(run_id: str):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "artifacts": await mapath.get_run_artifacts(run_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/tasks/{task_id}/artifacts")
+async def get_run_task_artifacts(run_id: str, task_id: str):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "task_id": task_id,
+            "artifacts": await mapath.get_run_task_artifacts(run_id, task_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/events")
+async def get_run_events(run_id: str, after: Optional[int] = None):
+    try:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "events": await mapath.get_run_events(run_id, after),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/runs/{run_id}/logs")
+async def get_run_logs(run_id: str, tail: Optional[int] = 500, task_id: Optional[str] = None):
+    try:
+        return {
+            "status": "success",
+            **await mapath.get_run_logs(run_id, tail=tail, task_id=task_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, req: Request):
+    try:
+        try:
+            data = await req.json()
+        except Exception:
+            data = {}
+
+        if run_id in mapath.dynamic_runs:
+            dynamic_run = await mapath.cancel_dynamic_run(run_id, data.get("reason"))
+            return {
+                "status": "success",
+                "run_id": run_id,
+                "run_status": dynamic_run.status,
+            }
+
+        await mapath.stop_workflow(run_id)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "run_status": "cancelled",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/runs/{run_id}/retry")
+async def retry_run(run_id: str, req: Request):
+    try:
+        try:
+            data = await req.json()
+        except Exception:
+            data = {}
+        snapshot = await mapath.get_run_snapshot(run_id)
+        metadata = snapshot.get("metadata") or {}
+        spec = metadata.get("app_spec")
+        if not spec:
+            raise HTTPException(status_code=400, detail="Only AppSpec runs can be retried through this endpoint")
+
+        spec = app_spec_from_payload(
+            spec,
+            source_path=spec.get("source_path"),
+            overrides={
+                "workspace": data.get("workspace_dir"),
+                "timeout_seconds": data.get("timeout_seconds"),
+            },
+        )
+        workflow_id = mapath.create_app_workflow(spec)
+        file_context = data.get("file_context")
+        if file_context is None:
+            file_context = app_file_context(
+                spec,
+                artifact_base_url=_request_base_url(req),
+                artifact_mode=data.get("artifact_mode", True),
+            )
+        file_context = await _worker_reachable_file_context(req, file_context)
+        retry_metadata = {
+            **metadata,
+            **dict(data.get("metadata") or {}),
+            "app_name": spec["name"],
+            "workflow_name": spec["name"],
+            "run_kind": "app",
+            "app_spec": spec,
+            "retried_from_run_id": run_id,
+        }
+        previous_tags = snapshot.get("tags") or []
+        tags = list(dict.fromkeys([*previous_tags, *data.get("tags", []), "app", "retry"]))
+        new_run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=spec.get("timeout_seconds"),
+            tags=tags,
+            metadata=retry_metadata,
+        )
+        return {
+            "status": "success",
+            "run_id": new_run_id,
+            "workflow_id": workflow_id,
+            "retried_from_run_id": run_id,
+            "spec": spec,
+        }
+    except HTTPException:
+        raise
+    except AppSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -417,6 +751,75 @@ async def get_cluster_resources():
     try:
         resources = await mapath.get_cluster_resources()
         return {"status": "success", "cluster": resources}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/cluster/queues")
+async def get_cluster_queues():
+    try:
+        queues = await mapath.get_cluster_queues()
+        return {"status": "success", "queues": queues}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler queue snapshot")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/cluster/join_command")
+async def get_cluster_join_command(req: Request, host: Optional[str] = None):
+    try:
+        cluster = await mapath.get_cluster_resources()
+        head_host = _worker_reachable_head_host(req, cluster.get("head_node_ip"), host)
+        port = req.url.port or 80
+        head_url = f"http://{head_host}:{port}"
+        command = f"maze start --worker --addr {head_host}:{port}"
+        return {
+            "status": "success",
+            "head_host": head_host,
+            "head_url": head_url,
+            "ray_head_port": mapath.get_ray_head_port(),
+            "command": command,
+            "agent_command": f"{command} --agent",
+        }
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/cluster/reconcile_workers")
+async def reconcile_workers(req: Request):
+    try:
+        try:
+            data = await req.json()
+        except Exception:
+            data = {}
+        cluster = await mapath.get_cluster_resources()
+        host = _worker_reachable_head_host(req, cluster.get("head_node_ip"), data.get("host"))
+        port = int(data.get("port") or req.url.port or 80)
+        ray_head_port = mapath.get_ray_head_port()
+        head_url = f"http://{host}:{port}"
+        commands = [
+            {
+                "node_id": node.get("node_id"),
+                "node_ip": node.get("node_ip"),
+                "command": f"maze start --worker --addr {host}:{port}",
+                "agent_command": f"maze start --worker --addr {host}:{port} --agent",
+            }
+            for node in cluster.get("unregistered_ray_nodes", [])
+        ]
+        return {
+            "status": "success",
+            "head_host": host,
+            "head_url": head_url,
+            "ray_head_port": ray_head_port,
+            "unregistered_count": len(commands),
+            "unregistered_ray_nodes": cluster.get("unregistered_ray_nodes", []),
+            "recommended_commands": commands,
+            "executed": False,
+        }
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -443,6 +846,17 @@ async def head_artifact(sha256: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/artifacts/sha256/{sha256}/metadata")
+async def get_artifact_metadata(sha256: str):
+    try:
+        if not artifact_store.exists(sha256):
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return {"status": "success", "artifact": artifact_store.metadata(sha256)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/artifacts/sha256/{sha256}")
 async def get_artifact(sha256: str):
     try:
@@ -459,8 +873,10 @@ async def get_artifact(sha256: str):
 async def start_worker(req:Request):
     try:
         data = await req.json()
-        mapath.start_worker(data["node_ip"], data["node_id"], data["resources"])
-        return {"status": "success"}
+        worker = await mapath.start_worker(data["node_ip"], data["node_id"], data["resources"])
+        return {"status": "success", "worker": worker}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler worker registration")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

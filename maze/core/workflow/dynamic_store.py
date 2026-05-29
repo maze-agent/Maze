@@ -200,7 +200,7 @@ def _final_result_summary(final_result: Any) -> Any:
         return to_json_safe(final_result)
 
     summary: Dict[str, Any] = {}
-    for key in ("mode", "answer", "status", "stop_reason", "step_count", "final_task"):
+    for key in ("mode", "answer", "status", "stop_reason", "step_count", "final_task", "artifacts"):
         if key in final_result:
             summary[key] = to_json_safe(final_result[key])
 

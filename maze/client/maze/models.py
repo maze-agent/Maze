@@ -92,7 +92,11 @@ class MaTask:
              code_str: str,
              task_input: Dict[str, Any],
              task_output: Dict[str, Any],
-             resources: Dict[str, Any]) -> None:
+             resources: Dict[str, Any],
+             max_retries: int | None = None,
+             retry_backoff_seconds: float = 0,
+             retry_on: list[str] | None = None,
+             timeout_seconds: float | None = None) -> None:
         """
         Save task configuration (inputs, outputs, code, resource requirements)
         
@@ -113,6 +117,10 @@ class MaTask:
             'task_input': task_input,
             'task_output': task_output,
             'resources': resources,
+            'max_retries': max_retries,
+            'retry_backoff_seconds': retry_backoff_seconds,
+            'retry_on': retry_on,
+            'timeout_seconds': timeout_seconds,
         }
         
         response = requests.post(url, json=data)
@@ -149,4 +157,3 @@ class MaTask:
     def __repr__(self) -> str:
         name = f", name='{self.task_name}'" if self.task_name else ""
         return f"MaTask(id='{self.task_id[:8]}...'{name})"
-

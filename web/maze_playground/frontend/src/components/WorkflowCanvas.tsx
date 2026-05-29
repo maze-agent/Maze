@@ -34,8 +34,10 @@ const nodeTypes = {
 
 const dynamicTerminalStatuses = new Set<DynamicRunStatus>([
   'finalized',
+  'succeeded',
   'failed',
   'canceled',
+  'cancelled',
   'timed_out',
   'interrupted',
 ]);
@@ -44,8 +46,10 @@ const dynamicStatusColors: Record<DynamicRunStatus, string> = {
   created: 'default',
   running: 'processing',
   finalized: 'success',
+  succeeded: 'success',
   failed: 'error',
   canceled: 'orange',
+  cancelled: 'orange',
   timed_out: 'volcano',
   interrupted: 'magenta',
 };
@@ -57,9 +61,9 @@ interface WorkflowCanvasProps {
 
 function toNodeRunStatus(status?: DynamicRunStatus | null) {
   if (!status) return null;
-  if (status === 'finalized') return 'completed';
+  if (status === 'finalized' || status === 'succeeded') return 'completed';
   if (status === 'failed') return 'failed';
-  if (status === 'interrupted' || status === 'canceled' || status === 'timed_out') return 'interrupted';
+  if (status === 'interrupted' || status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'interrupted';
   return 'running';
 }
 

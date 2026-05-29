@@ -1,5 +1,6 @@
 import requests
 import websocket
+import time
 from typing import Optional, Iterator, Dict, Any, List, Callable, Union
 from maze.client.maze.models import MaTask, TaskOutput
 from maze.client.maze.decorator import get_task_metadata
@@ -136,6 +137,10 @@ class MaWorkflow:
             'task_input': task_input,
             'task_output': task_output,
             'resources': metadata.resources,
+            'max_retries': metadata.max_retries,
+            'retry_backoff_seconds': metadata.retry_backoff_seconds,
+            'retry_on': metadata.retry_on,
+            'timeout_seconds': metadata.timeout_seconds,
         }
         
         save_response = requests.post(save_url, json=save_data)
@@ -311,7 +316,41 @@ class MaWorkflow:
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
     
-    def run(self, file_context: Optional[Dict[str, Any]] = None) -> str:
+    def _build_file_context(
+        self,
+        file_context: Optional[Dict[str, Any]] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        if file_context is not None:
+            context = dict(file_context)
+        elif workspace_dir is not None:
+            context = {
+                "enabled": True,
+                "workspace_dir": workspace_dir,
+            }
+        else:
+            return None
+
+        context["enabled"] = context.get("enabled", True)
+        if workspace_dir is not None:
+            context["workspace_dir"] = workspace_dir
+        if artifact_mode and not context.get("artifact_store"):
+            context["artifact_store"] = {
+                "type": "head_http",
+                "base_url": self.server_url,
+            }
+        return context
+
+    def run(
+        self,
+        file_context: Optional[Dict[str, Any]] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
+        timeout_seconds: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Run workflow
         
@@ -327,8 +366,19 @@ class MaWorkflow:
         data = {
             'workflow_id': self.workflow_id,
         }
-        if file_context:
-            data['file_context'] = file_context
+        if timeout_seconds is not None:
+            data['timeout_seconds'] = timeout_seconds
+        if tags is not None:
+            data['tags'] = tags
+        if metadata is not None:
+            data['metadata'] = metadata
+        prepared_file_context = self._build_file_context(
+            file_context=file_context,
+            workspace_dir=workspace_dir,
+            artifact_mode=artifact_mode,
+        )
+        if prepared_file_context:
+            data['file_context'] = prepared_file_context
         
         response = requests.post(url, json=data)
         
@@ -340,8 +390,81 @@ class MaWorkflow:
                 raise Exception(f"Failed to run workflow: {result.get('message', 'Unknown error')}")
         else:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
+
+    def wait(
+        self,
+        run_id: str,
+        timeout: Optional[float] = None,
+        poll_interval: float = 0.5,
+    ) -> Dict[str, Any]:
+        """
+        Wait for a workflow run to reach a terminal status using the unified run API.
+        """
+        terminal_statuses = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
+        deadline = None if timeout is None else time.time() + timeout
+        while True:
+            response = requests.get(f"{self.server_url}/runs/{run_id}")
+            if response.status_code != 200:
+                raise Exception(f"Failed to get run: {response.status_code}, {response.text}")
+            payload = response.json()
+            if payload.get("status") != "success":
+                raise Exception(f"Failed to get run: {payload.get('message', 'Unknown error')}")
+            run = payload.get("run", {})
+            if run.get("status") in terminal_statuses:
+                return run
+            if deadline is not None and time.time() >= deadline:
+                raise TimeoutError(f"Timed out waiting for run: {run_id}")
+            time.sleep(poll_interval)
+
+    def stream(
+        self,
+        run_id: str,
+        poll_interval: float = 0.2,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Poll and yield unified run events until the run reaches a terminal status.
+        """
+        terminal_event_types = {
+            "finish_workflow",
+            "task_exception",
+            "cancel_workflow",
+            "interrupt_workflow",
+            "cancel_dynamic_run",
+            "timeout_dynamic_run",
+            "interrupt_dynamic_run",
+        }
+        after = None
+        while True:
+            params = {"after": after} if after is not None else None
+            response = requests.get(f"{self.server_url}/runs/{run_id}/events", params=params)
+            if response.status_code != 200:
+                raise Exception(f"Failed to get run events: {response.status_code}, {response.text}")
+            payload = response.json()
+            if payload.get("status") != "success":
+                raise Exception(f"Failed to get run events: {payload.get('message', 'Unknown error')}")
+            events = payload.get("events", [])
+            for event in events:
+                after = max(after or 0, int(event.get("seq", 0)))
+                yield event
+                if event.get("type") in terminal_event_types:
+                    return
+
+            run_response = requests.get(f"{self.server_url}/runs/{run_id}")
+            if run_response.status_code != 200:
+                raise Exception(f"Failed to get run: {run_response.status_code}, {run_response.text}")
+            run_payload = run_response.json()
+            if run_payload.get("status") != "success":
+                raise Exception(f"Failed to get run: {run_payload.get('message', 'Unknown error')}")
+            if run_payload.get("run", {}).get("status") in {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
+                return
+            time.sleep(poll_interval)
     
-    def get_results(self, run_id: str, verbose: bool = True) -> List[Dict[str, Any]]:
+    def get_results(
+        self,
+        run_id: str,
+        verbose: bool = True,
+        progress_callback=None,
+    ) -> List[Dict[str, Any]]:
         """
         Get workflow execution results via WebSocket (returns raw messages)
         
@@ -381,6 +504,11 @@ class MaWorkflow:
             import json
             msg_data = json.loads(message)
             messages.append(msg_data)
+            if progress_callback:
+                try:
+                    progress_callback(msg_data)
+                except Exception:
+                    pass
             if verbose:
                 print(msg_data)
         
@@ -496,10 +624,14 @@ class MaWorkflow:
                     print(f"  Result: {result}")
             elif msg_type == "task_exception":
                 task_id = msg_data.get('task_id', '')[:8]
-                error_msg = msg_data.get('result', 'Unknown error')
+                error_msg = msg_data.get('error', msg_data.get('result', 'Unknown error'))
                 print(f"❌ Task exception: {task_id}")
                 # Keep the terminal output compact by showing only the key error line.
-                if isinstance(error_msg, str):
+                if isinstance(error_msg, dict):
+                    error_type = error_msg.get("error_type", "unknown")
+                    message = error_msg.get("message", "Unknown error")
+                    print(f"  Error: {error_type}: {str(message)[:200]}")
+                elif isinstance(error_msg, str):
                     error_lines = error_msg.split('\n')
                     if len(error_lines) > 0:
                         print(f"  Error: {error_lines[0][:200]}")
@@ -577,7 +709,7 @@ class MaWorkflow:
                         "task_id": msg_task_id,
                         "result": None,
                         "status": "exception",
-                        "error": msg_data.get("result", "Unknown error")
+                        "error": msg_data.get("error", msg_data.get("result", "Unknown error"))
                     }
         
         # Task not found

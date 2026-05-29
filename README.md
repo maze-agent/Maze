@@ -13,6 +13,7 @@
 ## 📰 News
 
 
+- **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
 - **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.
 - **2026-05**: Maze added a content-addressed artifact store for non-shared distributed file execution. Workspace inputs and task outputs can now move through `maze://artifacts/sha256/...` references instead of relying on a shared filesystem path.
 - **2026-05**: Online ReAct runs now expose `Max Tokens`, compact long tool observations, and treat malformed LLM JSON as repairable agent observations instead of failing the DynamicRun directly.
@@ -33,6 +34,10 @@
 - **Resource Management**
 
   Maze supports resource allocation for workflow tasks, effectively preventing resource contention both among parallel tasks within a single workflow and across multiple concurrently executing workflows.
+
+- **Application Operations**
+
+  Maze records durable run/task snapshots, lifecycle events, structured task errors, logs, artifacts, retries, timeouts, cancellation, and queue state so applications can query and recover runs without depending on a single live WebSocket stream.
 
 - **Distributed Deployment**
 
@@ -72,11 +77,22 @@
    ```
    maze start --worker --addr HEAD_IP:HEAD_PORT
    ```
+   For long-running worker processes that should re-register after a head/core restart, run the worker agent:
+   ```
+   maze start --worker --addr HEAD_IP:HEAD_PORT --agent --heartbeat-interval 20
+   ```
    You can inspect the scheduler-visible cluster state with:
    ```
    curl http://HEAD_IP:HEAD_PORT/cluster/resources
    ```
    A Ray worker that has joined Ray but has not registered with Maze will appear under `unregistered_ray_nodes`; it must still be started as a Maze worker before Maze can schedule tasks to it.
+   Common cluster operations are also available from the CLI:
+   ```
+   maze cluster resources --server-url http://HEAD_IP:HEAD_PORT
+   maze cluster queues --server-url http://HEAD_IP:HEAD_PORT
+   maze cluster join-command --server-url http://HEAD_IP:HEAD_PORT
+   maze cluster reconcile-workers --server-url http://HEAD_IP:HEAD_PORT
+   ```
 ## 3. Example
 
 ### Static Workflow
@@ -173,6 +189,15 @@ In Maze Playground, files uploaded under `workspace/files` are staged into each 
 For distributed runs without shared storage, Maze can register workspace inputs and task outputs in a content-addressed artifact store. Workers download required files before task execution and upload changed files after execution; manifests use stable artifact references such as `maze://artifacts/sha256/<hash>` instead of machine-local paths. A workflow can enable the head HTTP artifact store with:
 
 ```python
+run_id = workflow.run(
+    workspace_dir="/tmp/my_workspace",
+    artifact_mode=True,
+)
+```
+
+For lower-level control, pass an explicit file context:
+
+```python
 workflow.run(file_context={
     "enabled": True,
     "workspace_dir": "/tmp/my_workspace",
@@ -182,19 +207,117 @@ workflow.run(file_context={
     },
 })
 ```
+
+### Application Spec
+
+For application-style jobs, you can submit a `maze.yaml` directly:
+
+```yaml
+name: gpu-demo
+command: python train.py
+workspace: .
+resources:
+  cpu: 4
+  cpu_mem: 1024
+  gpu: 1
+  gpu_mem: 0
+env:
+  conda: maze
+  vars:
+    DATASET: sample
+artifacts:
+  - outputs/
+timeout_seconds: 1800
+retries:
+  max: 1
+  backoff_seconds: 5
+  on: [node_lost, resource_unavailable]
+```
+
+Run and inspect it with:
+
+```bash
+maze app validate maze.yaml
+maze run maze.yaml --wait
+maze runs logs <run_id>
+maze runs retry <run_id>
+```
+
+Each app run is recorded in the unified run history with lifecycle events, placement, logs, and artifacts.
+
+### Run Observability and Operations
+
+Static workflows, DynamicRuns, ReAct workflows, and application spec runs share the same operational surface. A run snapshot includes lifecycle state, timing, progress, result/error summaries, task state, placement, and artifacts. Task failures use a structured error envelope with fields such as `error_type`, `message`, `retryable`, `origin`, `node_id`, `node_ip`, `attempt`, and `traceback`.
+
+You can configure task-level reliability directly on the decorator:
+
+```python
+@task(
+    resources={"cpu": 2, "cpu_mem": 1024, "gpu": 1, "gpu_mem": 0},
+    timeout_seconds=300,
+    max_retries=2,
+    retry_backoff_seconds=5,
+    retry_on=["node_lost", "artifact_error"],
+)
+def train_one_shard(shard: str):
+    return {"status": f"finished {shard}"}
+```
+
+Python clients can query and operate on runs after submission:
+
+```python
+client = MaClient("http://localhost:8000")
+
+runs = client.list_runs(limit=20)
+run = client.get_run(run_id)
+tasks = client.get_run_tasks(run_id)
+events = client.get_run_events(run_id, after=None)
+artifacts = client.get_run_artifacts(run_id)
+logs = client.get_run_logs(run_id, tail=200)
+
+client.cancel_run(run_id, reason="no longer needed")
+client.retry_run(run_id, workspace_dir="/tmp/my_workspace")
+```
+
+The same controls are available through HTTP and CLI:
+
+```text
+GET  /runs
+GET  /runs/{run_id}
+GET  /runs/{run_id}/tasks
+GET  /runs/{run_id}/tasks/{task_id}
+GET  /runs/{run_id}/events?after=<seq>
+GET  /runs/{run_id}/logs
+GET  /runs/{run_id}/artifacts
+POST /runs/{run_id}/cancel
+POST /runs/{run_id}/retry
+GET  /cluster/resources
+GET  /cluster/queues
+```
+
+```bash
+maze runs list --server-url http://HEAD_IP:HEAD_PORT
+maze runs show <run_id> --server-url http://HEAD_IP:HEAD_PORT
+maze runs events <run_id> --server-url http://HEAD_IP:HEAD_PORT
+maze runs logs <run_id> --tail 200 --server-url http://HEAD_IP:HEAD_PORT
+maze runs retry <run_id> --server-url http://HEAD_IP:HEAD_PORT
+maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
+```
 <br>
 
 
 
 ## 🖥️ Maze Playground
-Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, and inspecting static and dynamic runs in one `Runs` view. You can start the playground with the following command option.
+Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, and inspecting static, dynamic, and app runs in one `Runs` console. You can start the playground with the following command option.
 ```
 maze start --head --port HEAD_PORT --playground
 ```
 
 The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include a `Max Tokens` setting; long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
 
-The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, and per-node GPU memory.
+The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs.
+
+The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons.
 
 Here are two videos showing the process of using built-in tasks and uploading user-defined tasks in Maze Playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 

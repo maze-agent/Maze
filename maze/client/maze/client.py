@@ -1,10 +1,13 @@
 import requests
+import time
+from pathlib import Path
 from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import WorkflowDefinition
+from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
 
 
 class MaClient:
@@ -71,6 +74,9 @@ class MaClient:
         self,
         max_tasks: int = 100,
         timeout_seconds: Optional[int] = None,
+        file_context: Optional[dict] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
     ) -> DynamicRun:
         """
         Create a dynamic workflow run.
@@ -78,10 +84,17 @@ class MaClient:
         Dynamic runs grow through append_task and finish only after finalize().
         """
         url = f"{self.server_url}/dynamic_runs"
+        prepared_file_context = self._build_file_context(
+            file_context=file_context,
+            workspace_dir=workspace_dir,
+            artifact_mode=artifact_mode,
+        )
         payload = {
             "max_tasks": max_tasks,
             "timeout_seconds": timeout_seconds,
         }
+        if prepared_file_context:
+            payload["file_context"] = prepared_file_context
         response = requests.post(url, json=payload)
 
         if response.status_code == 200:
@@ -99,6 +112,9 @@ class MaClient:
         max_steps: int = 10,
         timeout_seconds: Optional[int] = None,
         task_timeout: Optional[float] = None,
+        file_context: Optional[dict] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
     ) -> AgentRun:
         """
         Create a minimal agent runtime backed by a DynamicRun.
@@ -109,6 +125,9 @@ class MaClient:
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps,
             timeout_seconds=timeout_seconds,
+            file_context=file_context,
+            workspace_dir=workspace_dir,
+            artifact_mode=artifact_mode,
         )
         return AgentRun(
             dynamic_run=dynamic_run,
@@ -126,6 +145,9 @@ class MaClient:
         system_prompt: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         task_timeout: Optional[float] = None,
+        file_context: Optional[dict] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
     ) -> ReActWorkflow:
         """
         Create a ReAct workflow template backed by a DynamicRun.
@@ -135,6 +157,9 @@ class MaClient:
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps * 2,
             timeout_seconds=timeout_seconds,
+            file_context=file_context,
+            workspace_dir=workspace_dir,
+            artifact_mode=artifact_mode,
         )
         return ReActWorkflow(
             dynamic_run=dynamic_run,
@@ -147,6 +172,71 @@ class MaClient:
 
     def get_dynamic_run(self, run_id: str) -> DynamicRun:
         return DynamicRun(run_id, self.server_url)
+
+    def run_app(
+        self,
+        spec: dict | str | Path,
+        *,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = True,
+        timeout_seconds: Optional[float] = None,
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """
+        Submit a Maze AppSpec/RunSpec and return the created run payload.
+        """
+        source_path = None
+        if isinstance(spec, (str, Path)) and Path(spec).expanduser().exists():
+            source_path = str(Path(spec).expanduser().resolve())
+            app_spec = load_app_spec_file(source_path)
+        elif isinstance(spec, dict):
+            app_spec = app_spec_from_payload(spec)
+        else:
+            raise TypeError("spec must be a dict or an existing app spec file path")
+
+        payload = {
+            "spec": app_spec,
+            "source_path": source_path,
+            "workspace_dir": workspace_dir,
+            "artifact_mode": artifact_mode,
+            "timeout_seconds": timeout_seconds,
+            "tags": tags,
+            "metadata": metadata,
+        }
+        response = requests.post(f"{self.server_url}/apps/run", json=payload)
+        if response.status_code != 200:
+            raise Exception(f"Failed to run app: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to run app: {data.get('message', 'Unknown error')}")
+        return data
+
+    def _build_file_context(
+        self,
+        file_context: Optional[dict] = None,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = False,
+    ) -> Optional[dict]:
+        if file_context is not None:
+            context = dict(file_context)
+        elif workspace_dir is not None:
+            context = {
+                "enabled": True,
+                "workspace_dir": workspace_dir,
+            }
+        else:
+            return None
+
+        context["enabled"] = context.get("enabled", True)
+        if workspace_dir is not None:
+            context["workspace_dir"] = workspace_dir
+        if artifact_mode and not context.get("artifact_store"):
+            context["artifact_store"] = {
+                "type": "head_http",
+                "base_url": self.server_url,
+            }
+        return context
 
     def list_dynamic_runs(
         self,
@@ -202,6 +292,197 @@ class MaClient:
         if data.get("status") != "success":
             raise Exception(f"Failed to cleanup dynamic runs: {data.get('message', 'Unknown error')}")
         return data.get("cleanup", {})
+
+    def list_runs(
+        self,
+        status: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: Optional[int] = None,
+        detail: bool = False,
+    ) -> list[dict]:
+        params = {}
+        if status:
+            params["status"] = status
+        if kind:
+            params["kind"] = kind
+        if limit is not None:
+            params["limit"] = limit
+        if detail:
+            params["detail"] = "true"
+
+        response = requests.get(f"{self.server_url}/runs", params=params or None)
+        if response.status_code != 200:
+            raise Exception(f"Failed to list runs: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to list runs: {data.get('message', 'Unknown error')}")
+        return data.get("runs", [])
+
+    def get_run(self, run_id: str) -> dict:
+        response = requests.get(f"{self.server_url}/runs/{run_id}")
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run: {data.get('message', 'Unknown error')}")
+        return data.get("run", {})
+
+    def get_run_tasks(self, run_id: str) -> list[dict]:
+        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks")
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run tasks: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run tasks: {data.get('message', 'Unknown error')}")
+        return data.get("tasks", [])
+
+    def get_run_task(self, run_id: str, task_id: str) -> dict:
+        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks/{task_id}")
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run task: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run task: {data.get('message', 'Unknown error')}")
+        return data.get("task", {})
+
+    def get_run_artifacts(self, run_id: str) -> list[dict]:
+        response = requests.get(f"{self.server_url}/runs/{run_id}/artifacts")
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run artifacts: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run artifacts: {data.get('message', 'Unknown error')}")
+        return data.get("artifacts", [])
+
+    def get_run_task_artifacts(self, run_id: str, task_id: str) -> list[dict]:
+        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks/{task_id}/artifacts")
+        if response.status_code != 200:
+            raise Exception(f"Failed to get task artifacts: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get task artifacts: {data.get('message', 'Unknown error')}")
+        return data.get("artifacts", [])
+
+    def get_run_events(self, run_id: str, after: Optional[int] = None) -> list[dict]:
+        params = {"after": after} if after is not None else None
+        response = requests.get(f"{self.server_url}/runs/{run_id}/events", params=params)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run events: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run events: {data.get('message', 'Unknown error')}")
+        return data.get("events", [])
+
+    def get_run_logs(
+        self,
+        run_id: str,
+        tail: Optional[int] = 500,
+        task_id: Optional[str] = None,
+    ) -> dict:
+        params = {}
+        if tail is not None:
+            params["tail"] = tail
+        if task_id:
+            params["task_id"] = task_id
+        response = requests.get(f"{self.server_url}/runs/{run_id}/logs", params=params or None)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get run logs: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get run logs: {data.get('message', 'Unknown error')}")
+        return {
+            "run_id": data.get("run_id", run_id),
+            "task_id": data.get("task_id"),
+            "line_count": data.get("line_count", 0),
+            "lines": data.get("lines", []),
+        }
+
+    def cancel_run(self, run_id: str, reason: Optional[str] = None) -> dict:
+        response = requests.post(
+            f"{self.server_url}/runs/{run_id}/cancel",
+            json={"reason": reason},
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to cancel run: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to cancel run: {data.get('message', 'Unknown error')}")
+        return data
+
+    def retry_run(
+        self,
+        run_id: str,
+        *,
+        workspace_dir: Optional[str] = None,
+        artifact_mode: bool = True,
+        timeout_seconds: Optional[float] = None,
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        response = requests.post(
+            f"{self.server_url}/runs/{run_id}/retry",
+            json={
+                "workspace_dir": workspace_dir,
+                "artifact_mode": artifact_mode,
+                "timeout_seconds": timeout_seconds,
+                "tags": tags,
+                "metadata": metadata,
+            },
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to retry run: {response.status_code}, {response.text}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to retry run: {data.get('message', 'Unknown error')}")
+        return data
+
+    def wait_run(
+        self,
+        run_id: str,
+        timeout: Optional[float] = None,
+        poll_interval: float = 0.5,
+    ) -> dict:
+        terminal_statuses = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
+        deadline = None if timeout is None else time.time() + timeout
+        while True:
+            run = self.get_run(run_id)
+            if run.get("status") in terminal_statuses:
+                return run
+            if deadline is not None and time.time() >= deadline:
+                raise TimeoutError(f"Timed out waiting for run: {run_id}")
+            time.sleep(poll_interval)
+
+    def stream_run(self, run_id: str, poll_interval: float = 0.2):
+        after = None
+        terminal_event_types = {
+            "finish_workflow",
+            "task_exception",
+            "cancel_workflow",
+            "interrupt_workflow",
+            "cancel_dynamic_run",
+            "timeout_dynamic_run",
+            "interrupt_dynamic_run",
+        }
+        while True:
+            events = self.get_run_events(run_id, after=after)
+            for event in events:
+                after = max(after or 0, int(event.get("seq", 0)))
+                yield event
+                if event.get("type") in terminal_event_types:
+                    return
+            if self.get_run(run_id).get("status") in {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
+                return
+            time.sleep(poll_interval)
     
     def get_workflow(self, workflow_id: str) -> MaWorkflow:
         """
@@ -244,6 +525,21 @@ class MaClient:
         if data.get("status") != "success":
             raise Exception(f"Failed to get cluster resources: {data.get('message', 'Unknown error')}")
         return data.get("cluster", {})
+
+    def get_cluster_queues(self) -> dict:
+        """
+        Get scheduler queue and running task diagnostics.
+        """
+        url = f"{self.server_url}/cluster/queues"
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to get cluster queues, status code: {response.status_code}")
+
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to get cluster queues: {data.get('message', 'Unknown error')}")
+        return data.get("queues", {})
 
     def start_llm_instance(self, model: str):
         """

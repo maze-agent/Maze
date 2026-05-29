@@ -20,6 +20,10 @@ class CodeTask():
         self.code_str = None
         self.code_ser = None
         self.file_context = None
+        self.max_retries = None
+        self.retry_backoff_seconds = 0
+        self.retry_on = None
+        self.timeout_seconds = None
 
         self.completed = False
         
@@ -41,7 +45,19 @@ class CodeTask():
         if feature in self.predict_feature:
             self.predict_feature[feature] = value
 
-    def save_task(self,task_input:Dict, task_output:Dict, code_str:str,code_ser:str,resources:Dict,file_context:Dict|None=None):
+    def save_task(
+        self,
+        task_input:Dict,
+        task_output:Dict,
+        code_str:str,
+        code_ser:str,
+        resources:Dict,
+        file_context:Dict|None=None,
+        max_retries:int|None=None,
+        retry_backoff_seconds:float=0,
+        retry_on:list[str]|None=None,
+        timeout_seconds:float|None=None,
+    ):
         '''save task info'''
         
         self.task_input=task_input
@@ -50,6 +66,10 @@ class CodeTask():
         self.code_ser=code_ser
         self.resources=resources
         self.file_context=file_context
+        self.max_retries=max_retries
+        self.retry_backoff_seconds=retry_backoff_seconds or 0
+        self.retry_on=retry_on
+        self.timeout_seconds=timeout_seconds
     
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -63,6 +83,10 @@ class CodeTask():
             "code_str":self.code_str,
             "code_ser":self.code_ser,
             "file_context":self.file_context,
+            "max_retries":self.max_retries,
+            "retry_backoff_seconds":self.retry_backoff_seconds,
+            "retry_on":self.retry_on,
+            "timeout_seconds":self.timeout_seconds,
         }
 
 class LangGraphTask():

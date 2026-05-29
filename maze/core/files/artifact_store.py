@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -100,4 +101,51 @@ class LocalCASArtifactStore:
             "sha256": sha256,
             "size": path.stat().st_size,
             "storage_uri": artifact_uri(sha256),
+        }
+
+    def iter_blobs(self):
+        if not self.blobs_dir.exists():
+            return
+        for path in self.blobs_dir.rglob("*"):
+            if path.is_file() and len(path.name) == 64:
+                yield path
+
+    def cleanup(
+        self,
+        *,
+        referenced_sha256: set[str] | list[str] | None = None,
+        older_than_seconds: int | float | None = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        referenced = set(referenced_sha256 or [])
+        cutoff = None if older_than_seconds is None else time.time() - float(older_than_seconds)
+        candidates = []
+
+        for path in self.iter_blobs() or []:
+            sha = path.name
+            if sha in referenced:
+                continue
+            stat = path.stat()
+            if cutoff is not None and stat.st_mtime > cutoff:
+                continue
+            candidates.append({
+                "sha256": sha,
+                "size": stat.st_size,
+                "path": str(path),
+                "storage_uri": artifact_uri(sha),
+            })
+
+        deleted_sha256 = []
+        if not dry_run:
+            for item in candidates:
+                blob_path = Path(item["path"])
+                blob_path.unlink(missing_ok=True)
+                deleted_sha256.append(item["sha256"])
+
+        return {
+            "dry_run": dry_run,
+            "matched_count": len(candidates),
+            "deleted_count": len(deleted_sha256),
+            "artifacts": candidates,
+            "deleted_sha256": deleted_sha256,
         }

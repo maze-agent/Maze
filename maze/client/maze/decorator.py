@@ -24,6 +24,10 @@ class TaskMetadata:
     outputs: List[str]
     resources: Dict[str, Any]
     data_types: Dict[str, str]  # Parameter data types
+    max_retries: int | None = None
+    retry_backoff_seconds: float = 0
+    retry_on: List[str] | None = None
+    timeout_seconds: float | None = None
 
 
 class TaskOutputInferenceError(ValueError):
@@ -278,6 +282,10 @@ def task(
     *,
     resources: Dict[str, Any] = None,
     data_types: Dict[str, str] = None,
+    max_retries: int | None = None,
+    retry_backoff_seconds: float = 0,
+    retry_on: List[str] | None = None,
+    timeout_seconds: float | None = None,
     **unsupported_options,
 ):
     """
@@ -326,7 +334,11 @@ def task(
             inputs=inputs,
             outputs=outputs,
             resources=resources_config,
-            data_types=types_config
+            data_types=types_config,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            retry_on=list(retry_on) if retry_on is not None else None,
+            timeout_seconds=timeout_seconds,
         )
         
         # Attach metadata to function

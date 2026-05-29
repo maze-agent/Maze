@@ -14,6 +14,10 @@ from maze.core.files.artifact_store import LocalCASArtifactStore, artifact_uri
 TASK_RESULT_ENVELOPE = "__maze_task_result_envelope__"
 
 
+class ArtifactError(RuntimeError):
+    """Raised when Maze cannot stage, upload, or reconcile task files."""
+
+
 def _safe_relative_path(path: str) -> Path:
     normalized = Path(str(path).replace("\\", "/"))
     if normalized.is_absolute() or ".." in normalized.parts:
@@ -93,7 +97,7 @@ def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             _safe_relative_path(relative_path)
             existing = files_by_path.get(relative_path)
             if existing and existing.get("sha256") != file_info.get("sha256"):
-                raise RuntimeError(
+                raise ArtifactError(
                     f"File lineage conflict for {relative_path}: "
                     f"{existing.get('producer_task_id')} and {file_info.get('producer_task_id')} produced different content."
                 )
@@ -110,7 +114,7 @@ def _artifact_base_url(file_context: Dict[str, Any]) -> str:
     artifact_store = file_context.get("artifact_store") or {}
     base_url = artifact_store.get("base_url") or file_context.get("artifact_base_url")
     if not base_url:
-        raise ValueError("Artifact file context requires artifact_store.base_url")
+        raise ArtifactError("Artifact file context requires artifact_store.base_url")
     return str(base_url).rstrip("/")
 
 
@@ -128,15 +132,18 @@ def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], 
 
     import requests
 
-    response = requests.get(f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}", timeout=60)
-    response.raise_for_status()
+    try:
+        response = requests.get(f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}", timeout=60)
+        response.raise_for_status()
+    except Exception as exc:
+        raise ArtifactError(f"Failed to download artifact {sha256} for {file_info.get('path')}: {exc}") from exc
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
     tmp_path.write_bytes(response.content)
     actual = _file_sha256(tmp_path)
     if actual != sha256:
         tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(f"Artifact checksum mismatch for {file_info.get('path')}: expected {sha256}, got {actual}")
+        raise ArtifactError(f"Artifact checksum mismatch for {file_info.get('path')}: expected {sha256}, got {actual}")
     os.replace(tmp_path, target)
 
     if cache_dir:
@@ -164,7 +171,7 @@ def _stage_parent_files(file_context: Dict[str, Any], work_dir: Path):
 
         source = Path(file_info["storage_path"])
         if not source.exists():
-            raise FileNotFoundError(f"Missing parent artifact for {relative_path}: {source}")
+            raise ArtifactError(f"Missing parent artifact for {relative_path}: {source}")
         target = work_dir / _safe_relative_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
@@ -250,19 +257,22 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
 def _upload_artifact(file_context: Dict[str, Any], source: Path, expected_sha256: str) -> Dict[str, Any]:
     actual = _file_sha256(source)
     if actual != expected_sha256:
-        raise RuntimeError(f"Artifact checksum changed before upload: expected {expected_sha256}, got {actual}")
+        raise ArtifactError(f"Artifact checksum changed before upload: expected {expected_sha256}, got {actual}")
 
     import requests
 
-    with source.open("rb") as handle:
-        response = requests.put(
-            f"{_artifact_base_url(file_context)}/artifacts/sha256/{expected_sha256}",
-            data=handle,
-            headers={"Content-Type": "application/octet-stream"},
-            timeout=120,
-        )
-    response.raise_for_status()
-    return response.json()
+    try:
+        with source.open("rb") as handle:
+            response = requests.put(
+                f"{_artifact_base_url(file_context)}/artifacts/sha256/{expected_sha256}",
+                data=handle,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=120,
+            )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise ArtifactError(f"Failed to upload artifact {expected_sha256}: {exc}") from exc
 
 
 def run_task_with_file_context(
@@ -282,11 +292,16 @@ def run_task_with_file_context(
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    if _artifact_mode(file_context):
-        _stage_initial_artifacts(file_context, work_dir)
-    else:
-        _copy_tree_contents(workspace_dir / "files", work_dir)
-    _stage_parent_files(file_context, work_dir)
+    try:
+        if _artifact_mode(file_context):
+            _stage_initial_artifacts(file_context, work_dir)
+        else:
+            _copy_tree_contents(workspace_dir / "files", work_dir)
+        _stage_parent_files(file_context, work_dir)
+    except ArtifactError:
+        raise
+    except Exception as exc:
+        raise ArtifactError(f"Failed to stage task files: {exc}") from exc
     before = _snapshot_files(work_dir)
 
     previous_cwd = Path.cwd()
@@ -301,9 +316,14 @@ def run_task_with_file_context(
     os.environ["MAZE_RUN_ID"] = run_id
     os.environ["MAZE_TASK_ID"] = task_id
 
+    task_exception: BaseException | None = None
+    result: Dict[str, Any] | None = None
     try:
         os.chdir(work_dir)
-        result = task_callable(task_input_data)
+        try:
+            result = task_callable(task_input_data)
+        except Exception as exc:
+            task_exception = exc
     finally:
         os.chdir(previous_cwd)
         for key, value in previous_env.items():
@@ -312,7 +332,26 @@ def run_task_with_file_context(
             else:
                 os.environ[key] = value
 
-    manifest = _collect_output_manifest(file_context, work_dir, before)
+    try:
+        manifest = _collect_output_manifest(file_context, work_dir, before)
+    except ArtifactError:
+        raise
+    except Exception as exc:
+        raise ArtifactError(f"Failed to collect task output artifacts: {exc}") from exc
+
+    if task_exception is not None:
+        from maze.core.scheduler.error import exception_to_error_envelope, task_error_result
+
+        error_result = task_error_result(
+            exception_to_error_envelope(
+                "user_code",
+                task_exception,
+                origin="runner",
+            )
+        )
+        error_result["file_manifest"] = manifest
+        return error_result
+
     return {
         TASK_RESULT_ENVELOPE: True,
         "result": result,

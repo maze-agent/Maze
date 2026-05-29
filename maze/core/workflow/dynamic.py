@@ -26,6 +26,10 @@ class DynamicTaskSpec:
         task_path: str | None = None,
         code_hash: str | None = None,
         code_preview: str | None = None,
+        max_retries: int | None = None,
+        retry_backoff_seconds: float = 0,
+        retry_on: List[str] | None = None,
+        timeout_seconds: float | None = None,
     ):
         if code_ser is None and code_str is None:
             raise ValueError("Dynamic task spec requires code_str or code_ser")
@@ -41,6 +45,10 @@ class DynamicTaskSpec:
         self.task_path = task_path
         self.code_hash = code_hash or _hash_code(code_str, code_ser)
         self.code_preview = code_preview or _code_preview(code_str)
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds or 0
+        self.retry_on = list(retry_on) if retry_on is not None else None
+        self.timeout_seconds = timeout_seconds
 
     def metadata_snapshot(self) -> Dict[str, Any]:
         payload = {
@@ -54,6 +62,10 @@ class DynamicTaskSpec:
             "code_preview": self.code_preview,
             "has_code_str": self.code_str is not None,
             "has_code_ser": self.code_ser is not None,
+            "max_retries": self.max_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
+            "retry_on": self.retry_on,
+            "timeout_seconds": self.timeout_seconds,
         }
         if self.task_path:
             payload["task_path"] = self.task_path
@@ -66,10 +78,12 @@ class DynamicRun:
         run_id: str,
         max_tasks: int = 100,
         timeout_seconds: int | None = None,
+        file_context: Dict[str, Any] | None = None,
     ):
         self.run_id = run_id
         self.max_tasks = max_tasks
         self.timeout_seconds = timeout_seconds
+        self.file_context = file_context
         self.created_time = time.time()
         self.updated_time = self.created_time
 
@@ -81,6 +95,8 @@ class DynamicRun:
         self.running_tasks: set[str] = set()
         self.completed_tasks: set[str] = set()
         self.failed_tasks: set[str] = set()
+        self.task_errors: Dict[str, Any] = {}
+        self.task_file_manifests: Dict[str, Dict[str, Any]] = {}
         self.request_ids: Dict[str, str] = {}
         self.event_log: List[Dict[str, Any]] = []
         self.event_seq = 0
@@ -190,6 +206,10 @@ class DynamicRun:
             code_str=spec.code_str,
             code_ser=spec.code_ser,
             resources=spec.resources,
+            max_retries=spec.max_retries,
+            retry_backoff_seconds=spec.retry_backoff_seconds,
+            retry_on=spec.retry_on,
+            timeout_seconds=spec.timeout_seconds,
         )
 
         explicit_parents = set(parents or [])
@@ -245,13 +265,27 @@ class DynamicRun:
         self._touch()
         return ready_tasks
 
+    def set_task_file_manifest(self, task_id: str, file_manifest: Dict[str, Any] | None):
+        if file_manifest:
+            self.task_file_manifests[task_id] = to_json_safe(file_manifest)
+            self._touch()
+
+    def mark_retrying(self, task_id: str, error: Any | None = None):
+        if self.is_terminal():
+            return
+        self.running_tasks.discard(task_id)
+        if error is not None:
+            self.task_errors[task_id] = to_json_safe(error)
+        self._touch()
+
     def mark_failed(self, task_id: str, reason: str | None = None):
         if self.is_terminal():
             return
         self.running_tasks.discard(task_id)
         self.failed_tasks.add(task_id)
+        self.task_errors[task_id] = to_json_safe(reason)
         self.failed = True
-        self.status = "failed"
+        self.status = "timed_out" if isinstance(reason, dict) and reason.get("error_type") == "timeout" else "failed"
         self.failure_reason = reason
         self.finished_time = time.time()
         self._touch()
@@ -328,6 +362,7 @@ class DynamicRun:
             "status": self.status,
             "max_tasks": self.max_tasks,
             "timeout_seconds": self.timeout_seconds,
+            "file_context": to_json_safe(self.file_context),
             "created_time": self.created_time,
             "updated_time": self.updated_time,
             "finished_time": self.finished_time,
@@ -363,6 +398,8 @@ class DynamicRun:
                 ],
             },
             "request_ids": dict(self.request_ids),
+            "task_errors": to_json_safe(self.task_errors),
+            "task_file_manifests": to_json_safe(self.task_file_manifests),
             "event_count": len(self.event_log),
             "last_event_seq": self.event_seq,
             "final_result": final_result,
@@ -400,6 +437,8 @@ class DynamicRun:
             "inputs": _task_io_snapshot(task.task_input),
             "outputs": _task_io_snapshot(task.task_output),
             "resources": to_json_safe(task.resources),
+            "error": to_json_safe(self.task_errors.get(task_id)),
+            "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
         }
 
 
@@ -418,6 +457,10 @@ def dynamic_task_spec_from_payload(payload: Dict[str, Any]) -> DynamicTaskSpec:
         task_path=payload.get("task_path") or payload.get("relative_path"),
         code_hash=payload.get("code_hash"),
         code_preview=payload.get("code_preview"),
+        max_retries=payload.get("max_retries"),
+        retry_backoff_seconds=payload.get("retry_backoff_seconds", 0),
+        retry_on=payload.get("retry_on"),
+        timeout_seconds=payload.get("timeout_seconds"),
     )
 
 

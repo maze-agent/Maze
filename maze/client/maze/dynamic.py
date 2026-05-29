@@ -34,6 +34,10 @@ def task_spec_payload_from_func(
         "inputs": _metadata_param_payload(metadata.inputs, metadata.data_types),
         "outputs": _metadata_param_payload(metadata.outputs, metadata.data_types),
         "resources": metadata.resources,
+        "max_retries": metadata.max_retries,
+        "retry_backoff_seconds": metadata.retry_backoff_seconds,
+        "retry_on": metadata.retry_on,
+        "timeout_seconds": metadata.timeout_seconds,
     }
 
 
@@ -268,7 +272,10 @@ class DynamicRun:
                 if data.get("task_id") == task_id and event_type == "finish_task":
                     return event
                 if data.get("task_id") == task_id and event_type == "task_exception":
-                    raise RuntimeError(f"Dynamic task failed: {data.get('result', 'Unknown error')}")
+                    error = data.get("error", data.get("result", "Unknown error"))
+                    if isinstance(error, dict):
+                        error = f"{error.get('error_type', 'unknown')}: {error.get('message', 'Unknown error')}"
+                    raise RuntimeError(f"Dynamic task failed: {error}")
                 if event_type in ("finish_workflow", "cancel_dynamic_run", "timeout_dynamic_run", "interrupt_dynamic_run"):
                     raise RuntimeError(f"Dynamic run ended before task finished: {event_type}")
 

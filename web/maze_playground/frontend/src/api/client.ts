@@ -6,9 +6,14 @@ import type {
   WorkspaceWorkflowsResponse,
   DynamicRunEvent,
   DynamicRunSnapshot,
+  ClusterQueuesResponse,
   ClusterResourcesResponse,
   StaticWorkflowRunEvent,
   StaticWorkflowRunSnapshot,
+  RunLogLine,
+  UnifiedRunEvent,
+  UnifiedRunSnapshot,
+  UnifiedRunTaskSnapshot,
   Workflow,
   WorkflowEdge,
   WorkflowNode,
@@ -338,8 +343,121 @@ export const api = {
     return response.data;
   },
 
+  async getRuns(params?: {
+    status?: string;
+    kind?: string;
+    limit?: number;
+    detail?: boolean;
+  }): Promise<{ success: boolean; runs: UnifiedRunSnapshot[] }> {
+    const response = await axios.get(`${API_BASE}/runs`, { params });
+    return response.data;
+  },
+
+  async getRun(runId: string): Promise<{ success: boolean; run: UnifiedRunSnapshot }> {
+    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}`);
+    return response.data;
+  },
+
+  async getRunTasks(runId: string): Promise<{
+    success: boolean;
+    runId: string;
+    tasks: UnifiedRunTaskSnapshot[];
+  }> {
+    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/tasks`);
+    return response.data;
+  },
+
+  async getRunTask(runId: string, taskId: string): Promise<{
+    success: boolean;
+    runId: string;
+    task: UnifiedRunTaskSnapshot;
+  }> {
+    const response = await axios.get(
+      `${API_BASE}/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}`
+    );
+    return response.data;
+  },
+
+  async getRunEvents(
+    runId: string,
+    after?: number,
+  ): Promise<{ success: boolean; runId: string; events: UnifiedRunEvent[] }> {
+    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/events`, {
+      params: after !== undefined ? { after } : undefined,
+    });
+    return response.data;
+  },
+
+  async getRunLogs(
+    runId: string,
+    params?: { tail?: number; taskId?: string },
+  ): Promise<{ success: boolean; runId: string; taskId?: string | null; lineCount: number; lines: RunLogLine[] }> {
+    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/logs`, { params });
+    return response.data;
+  },
+
+  async getRunArtifacts(runId: string): Promise<{
+    success: boolean;
+    runId: string;
+    artifacts: any[];
+  }> {
+    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/artifacts`);
+    return response.data;
+  },
+
+  async getRunTaskArtifacts(runId: string, taskId: string): Promise<{
+    success: boolean;
+    runId: string;
+    taskId: string;
+    artifacts: any[];
+  }> {
+    const response = await axios.get(
+      `${API_BASE}/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/artifacts`
+    );
+    return response.data;
+  },
+
+  getArtifactDownloadUrl(sha256: string): string {
+    return `${API_BASE}/artifacts/sha256/${encodeURIComponent(sha256)}`;
+  },
+
+  async cancelRun(runId: string, reason?: string): Promise<{
+    success: boolean;
+    runId: string;
+    status: string;
+  }> {
+    const response = await axios.post(`${API_BASE}/runs/${encodeURIComponent(runId)}/cancel`, { reason });
+    return response.data;
+  },
+
+  async retryRun(runId: string, data?: {
+    workspaceDir?: string;
+    artifactMode?: boolean;
+    timeoutSeconds?: number;
+    tags?: string[];
+  }): Promise<{
+    success: boolean;
+    runId: string;
+    workflowId: string;
+    retriedFromRunId: string;
+    spec?: any;
+  }> {
+    const response = await axios.post(`${API_BASE}/runs/${encodeURIComponent(runId)}/retry`, {
+      workspace_dir: data?.workspaceDir,
+      artifact_mode: data?.artifactMode,
+      timeout_seconds: data?.timeoutSeconds,
+      tags: data?.tags,
+    });
+    return response.data;
+  },
+
   async getClusterResources(): Promise<ClusterResourcesResponse> {
     const response = await axios.get(`${API_BASE}/cluster/resources`);
+    return response.data;
+  },
+
+  async getClusterQueues(): Promise<ClusterQueuesResponse> {
+    const response = await axios.get(`${API_BASE}/cluster/queues`);
     return response.data;
   },
 

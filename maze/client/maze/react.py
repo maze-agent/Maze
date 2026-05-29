@@ -120,12 +120,14 @@ class ReActWorkflow:
                         total_seconds,
                         extra_timings=decision_event.get("timings"),
                     )
+                    artifacts = self._artifact_summary()
                     self.dynamic_run.emit_event("agent_final", {
                         "mode": "react",
                         "answer": answer,
                         "step_count": len(self.steps),
                         "stop_reason": "final",
                         "timings": timings,
+                        "artifacts": artifacts,
                     })
                     self.dynamic_run.finalize({
                         "mode": "react",
@@ -133,6 +135,7 @@ class ReActWorkflow:
                         "stop_reason": "final",
                         "step_count": len(self.steps),
                         "timings": timings,
+                        "artifacts": artifacts,
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
                     return answer
@@ -457,6 +460,27 @@ class ReActWorkflow:
             "llm_seconds": round(llm_seconds, 6),
             "tool_seconds": round(tool_seconds, 6),
             "controller_seconds": round(max(0.0, total_seconds - llm_seconds - tool_seconds), 6),
+        }
+
+    def _artifact_summary(self) -> Dict[str, Any]:
+        try:
+            snapshot = self.dynamic_run.get_status()
+        except Exception:
+            return {"count": 0, "files": []}
+
+        files = []
+        for task_id, task_node in (snapshot.get("task_nodes") or {}).items():
+            manifest = task_node.get("file_manifest") or {}
+            for file_info in manifest.get("files") or []:
+                record = dict(file_info)
+                record.setdefault("task_id", task_id)
+                record.setdefault("producer_task_id", record.get("task_id"))
+                files.append(record)
+
+        files.sort(key=lambda item: (str(item.get("task_id") or ""), str(item.get("path") or "")))
+        return {
+            "count": len(files),
+            "files": files,
         }
 
     def _cancel_if_active(self, reason: str):
