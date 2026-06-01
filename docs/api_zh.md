@@ -24,6 +24,7 @@ from maze import (
     DynamicRun, DynamicTaskSpec, DynamicTaskInvocation,
     AgentRun, AgentContext, AgentStep,
     ReActWorkflow, ReActStep,
+    SkillSpec, load_skill, load_skills_from_dir,
     LanggraphClient,
     create_openai_react_llm_task,
     task, get_task_metadata,
@@ -94,7 +95,7 @@ class MaClient:
 | `delete_dynamic_run(run_id)` | `dict` | 删除动态 run 及其历史 |
 | `cleanup_dynamic_runs(statuses=None, older_than_days=None, dry_run=True)` | `dict` | 批量清理；`dry_run=True` 时只返回会被清理的列表 |
 | `create_agent_run(tools, planner, max_steps=10, timeout_seconds=None, task_timeout=None)` | `AgentRun` | 通用 Agent loop（自定义 planner） |
-| `create_react_workflow(llm_task, tools, max_steps=10, system_prompt=None, timeout_seconds=None, task_timeout=None)` | `ReActWorkflow` | ReAct 模板 |
+| `create_react_workflow(llm_task, tools, max_steps=10, system_prompt=None, skills=None, progressive_skills=True, timeout_seconds=None, task_timeout=None)` | `ReActWorkflow` | ReAct 模板；`skills` 为 Claude/Cursor 风格 instruction package |
 | `get_ray_head_port()` | `dict` | 拿到 Ray Head 端口（外部 worker 接入用） |
 | `start_llm_instance(model: str)` | `instance_id (str)` | 在集群里拉起一个 LLM 推理实例 |
 | `stop_llm_instance(instance_id)` | `dict` | 关闭推理实例 |
@@ -341,6 +342,9 @@ class ReActWorkflow:
                  tools: list[Callable],
                  max_steps: int = 10,
                  system_prompt: str | None = None,
+                 skills: list[SkillSpec | str] | None = None,
+                 progressive_skills: bool = True,
+                 skill_reader_max_chars: int = 12000,
                  task_timeout: float | None = None)
 
     @property
@@ -360,6 +364,7 @@ class ReActWorkflow:
 | `prompt` | `str` | 用户原始问题 |
 | `history` | `list[dict]` | 历史步骤（含 `tool`, `args`, `observation`） |
 | `tools` | `dict[str, dict]` | 可用工具元信息（描述、入参、必填、出参等） |
+| `skills` | `dict` | 可用 skill catalog；当 `progressive_skills=True` 时只包含名称、描述和文件列表 |
 | `step` | `int` | 当前步序号（从 1 起） |
 | `system_prompt` | `str \| None` | 调用方注入的 system prompt |
 
@@ -430,7 +435,70 @@ llm_task = create_openai_react_llm_task(
 
 ---
 
-### 1.8 `LanggraphClient`（LangGraph 桥）
+### 1.8 Skills（ReAct 渐进式披露）
+
+Maze 支持读取 Claude/Cursor 风格的 skill 目录，用于教 ReAct Agent 如何组合已经注册好的 tools。Skill 本身不提供可执行工具；工具仍通过 `tools=[...]` 显式注册。
+
+标准目录结构：
+
+```text
+data-analysis/
+├── SKILL.md
+├── reference.md
+└── examples.md
+```
+
+`SKILL.md` 保持通用格式：
+
+```markdown
+---
+name: data-analysis
+description: Analyze CSV or spreadsheet-like data. Use when the user asks for statistics, summaries, trends, charts, or data cleaning.
+---
+
+# Data Analysis
+
+## Quick Start
+
+Use `read_file` to inspect data, `exec_code` for pandas analysis, and `write_file` to save reports.
+
+## Additional Resources
+
+- For detailed workflow, see [reference.md](reference.md)
+- For examples, see [examples.md](examples.md)
+```
+
+Python API：
+
+```python
+from maze import load_skill, load_skills_from_dir
+
+skill = load_skill("./skills/data-analysis")
+skills = load_skills_from_dir("./skills")
+```
+
+ReAct 使用方式：
+
+```python
+react = client.create_react_workflow(
+    llm_task=decide,
+    tools=[read_file, write_file, exec_code],
+    skills=[load_skill("./skills/data-analysis")],
+    progressive_skills=True,
+)
+```
+
+当 `progressive_skills=True`（默认）时，Maze 初始只向 `llm_task` 暴露 skill catalog（`name`、`description`、文件列表）。如需详细内容，ReAct 可以调用自动注册的工具：
+
+```json
+{"tool": "read_skill_file", "args": {"skill_name": "data-analysis", "file_name": "reference.md"}}
+```
+
+`read_skill_file` 只允许读取对应 skill 目录内的相对路径，防止 `..` 或绝对路径逃逸。
+
+---
+
+### 1.9 `LanggraphClient`（LangGraph 桥）
 
 ```python
 from maze import LanggraphClient

@@ -5,6 +5,7 @@ from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
+from maze.client.maze.skills import SkillSpec
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import WorkflowDefinition
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -143,6 +144,9 @@ class MaClient:
         tools: list[Callable],
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
+        skills: Optional[list[SkillSpec | str]] = None,
+        progressive_skills: bool = True,
+        skill_reader_max_chars: int = 12000,
         timeout_seconds: Optional[int] = None,
         task_timeout: Optional[float] = None,
         file_context: Optional[dict] = None,
@@ -153,6 +157,10 @@ class MaClient:
         Create a ReAct workflow template backed by a DynamicRun.
 
         Both the decision node and selected tools execute as Maze tasks.
+        Skills are Claude/Cursor-style instruction packages. They teach the
+        ReAct controller how to use already-registered tools; they do not add
+        executable tools except for the optional read_skill_file helper used
+        for progressive disclosure.
         """
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps * 2,
@@ -167,6 +175,9 @@ class MaClient:
             tools=tools,
             max_steps=max_steps,
             system_prompt=system_prompt,
+            skills=skills,
+            progressive_skills=progressive_skills,
+            skill_reader_max_chars=skill_reader_max_chars,
             task_timeout=task_timeout,
         )
 
