@@ -1,5 +1,6 @@
+from datetime import datetime, timezone
 from networkx.classes.digraph import DiGraph
-from typing import Any,List
+from typing import Any,List,Optional
 from maze.core.workflow.task import CodeTask,LangGraphTask
 from typing import Dict
 import networkx as nx
@@ -47,6 +48,25 @@ class Workflow:
         self.graph.graph["total_gpu_tasks"] = 0
         self.graph.graph["remaining_gpu_tasks"] = 0
 
+        # --- Run-level observability state (used after submit) ---
+        # `id` is the template id; the run id (== submit_id in MaPath) is set on submit.
+        self.run_id: Optional[str] = None
+        self.status: str = "created"  # created|submitted|running|succeeded|failed|canceled
+        self.created_time: float = time.time()
+        self.submitted_time: Optional[float] = None
+        self.started_time: Optional[float] = None
+        self.finished_time: Optional[float] = None
+        self.updated_time: float = self.created_time
+        self.failure_reason: Optional[str] = None
+        self.cancel_reason: Optional[str] = None
+
+        # task_id -> {status, started_at, finished_at, duration_ms, node_id, metrics, retry_count, error}
+        self.task_states: Dict[str, Dict[str, Any]] = {}
+
+        # Event log (in-memory, persisted via StaticRunStore).
+        self.event_log: List[Dict[str, Any]] = []
+        self.event_seq: int = 0
+
     def add_task(self, task_id: str, task: CodeTask) -> None:
         """
         Add a task to workflow
@@ -56,6 +76,18 @@ class Workflow:
         self.tasks[task_id] = task
         self.graph.add_node(task_id)
         self.remaining_task_num += 1
+        self.task_states[task_id] = {
+            "task_id": task_id,
+            "task_name": task.task_name,
+            "status": "pending",
+            "started_at": None,
+            "finished_at": None,
+            "duration_ms": None,
+            "node_id": None,
+            "metrics": {},
+            "retry_count": 0,
+            "error": None,
+        }
 
     def del_task(self, task_id: str) -> None:
         """
@@ -111,10 +143,148 @@ class Workflow:
             return "gpu"
         return "cpu"
 
-    def mark_task_started(self, task_id: str) -> None:
+    def mark_task_started(
+        self,
+        task_id: str,
+        node_id: Optional[str] = None,
+        started_at: Optional[float] = None,
+    ) -> None:
         if task_id not in self.tasks:
             return
         self.tasks[task_id].mark_started()
+        ts = started_at or self.tasks[task_id].start_time or time.time()
+        state = self.task_states.setdefault(task_id, {
+            "task_id": task_id,
+            "task_name": self.tasks[task_id].task_name,
+            "status": "pending",
+            "started_at": None,
+            "finished_at": None,
+            "duration_ms": None,
+            "node_id": None,
+            "metrics": {},
+            "retry_count": 0,
+            "error": None,
+        })
+        state["status"] = "running"
+        state["started_at"] = ts
+        if node_id:
+            state["node_id"] = node_id
+        self.updated_time = ts
+
+    def mark_task_finished(
+        self,
+        task_id: str,
+        *,
+        status: str = "succeeded",
+        finished_at: Optional[float] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        if task_id not in self.task_states:
+            return
+        state = self.task_states[task_id]
+        ts = finished_at or time.time()
+        state["status"] = status
+        state["finished_at"] = ts
+        if state.get("started_at"):
+            state["duration_ms"] = int((ts - state["started_at"]) * 1000)
+        if metrics:
+            existing = state.get("metrics") or {}
+            for k, v in metrics.items():
+                if k == "by_model" and isinstance(v, dict):
+                    bucket = existing.setdefault("by_model", {})
+                    for model_name, model_metrics in v.items():
+                        if not isinstance(model_metrics, dict):
+                            continue
+                        target = bucket.setdefault(model_name, {})
+                        for sub_k, sub_v in model_metrics.items():
+                            if isinstance(sub_v, (int, float)):
+                                target[sub_k] = target.get(sub_k, 0) + sub_v
+                            else:
+                                target[sub_k] = sub_v
+                    continue
+                if isinstance(v, (int, float)) and isinstance(existing.get(k), (int, float)):
+                    existing[k] = existing[k] + v
+                else:
+                    existing[k] = v
+            state["metrics"] = existing
+        if error:
+            state["error"] = error
+        self.updated_time = ts
+
+    # --- Run-level observability helpers ---
+
+    def append_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Append a structured event to the in-memory event log.
+
+        Returns the stored copy (with seq/ts/timestamp filled in).
+        """
+        self.event_seq += 1
+        now = time.time()
+        stored = {
+            "seq": self.event_seq,
+            "ts": now,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": event.get("type"),
+            "data": event.get("data") or {},
+        }
+        self.event_log.append(stored)
+        self.updated_time = now
+        return stored
+
+    def get_running_task_views(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        now = now or time.time()
+        out: List[Dict[str, Any]] = []
+        for state in self.task_states.values():
+            if state.get("status") != "running":
+                continue
+            duration_so_far = None
+            if state.get("started_at"):
+                duration_so_far = int((now - state["started_at"]) * 1000)
+            out.append({
+                "task_id": state["task_id"],
+                "task_name": state.get("task_name"),
+                "started_at": state.get("started_at"),
+                "node_id": state.get("node_id"),
+                "duration_so_far_ms": duration_so_far,
+            })
+        return out
+
+    def task_count_done(self) -> int:
+        return sum(1 for s in self.task_states.values() if s.get("status") in ("succeeded", "failed", "canceled"))
+
+    def task_count_running(self) -> int:
+        return sum(1 for s in self.task_states.values() if s.get("status") == "running")
+
+    def task_count_pending(self) -> int:
+        return sum(1 for s in self.task_states.values() if s.get("status") in ("pending", "ready"))
+
+    def to_snapshot_dict(self) -> Dict[str, Any]:
+        """Build a snapshot payload (consumed by StaticRunSnapshot.from_json)."""
+        from maze.core.runs.static_snapshot import RunMetrics
+
+        run_metrics = RunMetrics()
+        for state in self.task_states.values():
+            run_metrics.absorb(state.get("metrics") or {})
+
+        return {
+            "run_id": self.run_id or self.id,
+            "workflow_id": self.id,
+            "kind": "static",
+            "status": self.status,
+            "created_time": self.created_time,
+            "submitted_time": self.submitted_time,
+            "started_time": self.started_time,
+            "finished_time": self.finished_time,
+            "updated_time": self.updated_time,
+            "task_total": self.get_total_task_num(),
+            "tasks": dict(self.task_states),
+            "metrics": run_metrics.to_json(),
+            "failure_reason": self.failure_reason,
+            "cancel_reason": self.cancel_reason,
+            "event_count": len(self.event_log),
+            "last_event_seq": self.event_seq,
+        }
 
     def prepare_for_strategy(self, strategy: str) -> None:
         if strategy not in ("HACS", "ATLAS"):

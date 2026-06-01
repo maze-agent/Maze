@@ -1188,6 +1188,210 @@ curl -s -X POST http://localhost:8000/dynamic_runs/<run_id>/finalize \
   - LangGraph 桥：`maze/client/langgraph/client.py`
   - Head 服务：`maze/core/server.py`
   - 调度器：`maze/core/scheduler/`
+  - 静态 run 持久化与事件：`maze/core/runs/`
   - 动态运行模型与事件：`maze/core/workflow/dynamic.py`、`maze/core/workflow/dynamic_store.py`
+  - 指标上报：`maze/metrics/`
   - CLI：`maze/cli/cli.py`、`maze/cli/sandbox_cli.py`
   - Playground 后端：`web/maze_playground/backend/src/server.js`
+
+---
+
+## 16. 运行状态查询与指标上报（Phase 1：仅静态 workflow）
+
+> 这一组接口和约定让你能从外部观察整个集群的运行情况：当前有多少 DAG 在跑、跑到哪一步、累计消耗了多少 token。**当前覆盖范围仅限静态 workflow**（即 `MaWorkflow`/`@task` 经 `client.create_workflow().run()` 提交的那种）。动态 run / ReAct workflow 不在本期范围。
+
+### 16.1 状态机
+
+**Run 状态**（一次 `wf.run()` 提交后产生一个 run，run_id = submit_id）：
+
+```
+created (workflow 模板)  →  submitted  →  running  →  succeeded
+                                              ↘  failed
+                                              ↘  canceled
+                                              ↘  interrupted (Head 重启时)
+```
+
+- `created`：调过 `client.create_workflow()` 但还没调 `wf.run()`。**不持久化**，只在 Head 内存里。
+- `submitted`：调了 `wf.run()`，所有 task 已进入调度队列但还没有任何一个开始执行。
+- `running`：至少一个 task 收到了 `start_task` 事件。
+- 终态：`succeeded` / `failed` / `canceled` / `interrupted`。
+
+**Task 状态**：`pending` → `running` → `succeeded` / `failed` / `canceled`。
+
+### 16.2 持久化
+
+每个 run 在 workspace 下有自己的目录：
+
+```
+workspace/workflow_runs/static/{run_id}/
+  ├── run.json          # 最新快照
+  └── events.jsonl      # 事件流（append-only）
+workspace/workflow_runs/_index.jsonl   # 全集群事件索引
+```
+
+环境变量 `MAZE_WORKSPACE_DIR` 可覆盖默认 workspace 路径。
+
+### 16.3 HTTP 接口
+
+#### `GET /v1/metrics`
+
+集群级聚合指标。
+
+```bash
+curl http://localhost:8000/v1/metrics
+```
+
+返回示例：
+
+```json
+{
+  "uptime_sec": 3600,
+  "started_at": 1716543000.0,
+  "workflows": {
+    "created_total": 12,
+    "in_memory_not_submitted": 2
+  },
+  "static_runs": {
+    "total": 10,
+    "in_memory": 1,
+    "by_status": {"submitted": 0, "running": 1, "succeeded": 8, "failed": 1, "canceled": 0, "interrupted": 0}
+  },
+  "tasks": {
+    "total_finished": 47,
+    "by_status": {"running": 2, "succeeded": 44, "failed": 1, "canceled": 0}
+  },
+  "tokens": {
+    "in": 12345,
+    "out": 6789,
+    "cost_usd": 0.054321,
+    "by_model": {"qwen3-30b": {"tokens_in": 12345, "tokens_out": 6789, "calls": 8}}
+  }
+}
+```
+
+#### `GET /v1/runs?status=running&limit=20&offset=0`
+
+列出 run（按创建时间倒序）。`status` 可省略，可选值见状态机。
+
+#### `GET /v1/runs/{run_id}/snapshot`
+
+单个 run 的完整快照（含所有 task 的 metrics）。
+
+#### `GET /v1/runs/{run_id}/current-task`
+
+最常用接口——快速回答"这个 DAG 现在跑到哪一步了"。
+
+```json
+{
+  "run_id": "abc-123",
+  "status": "running",
+  "running": [
+    {"task_id": "t1", "task_name": "summarize", "started_at": 1716543210.0,
+     "node_id": "node-01", "duration_so_far_ms": 1234}
+  ],
+  "pending_count": 3,
+  "done_count": 5,
+  "task_total": 9
+}
+```
+
+#### `GET /v1/runs/{run_id}/tasks`
+
+所有 task 的状态 + metrics 字典。
+
+#### `GET /v1/runs/{run_id}/timeline?after=10`
+
+按 `seq` 排序的事件流。`after` 可选，用于增量拉取。事件类型：`run_submitted` / `run_started` / `start_task` / `finish_task` / `task_exception` / `run_succeeded` / `run_failed` / `run_canceled` / `run_interrupted`。
+
+### 16.4 CLI
+
+```bash
+# 一次性查看
+maze status
+
+# 持续刷新
+maze status --watch
+
+# 只看运行中的 run
+maze status --status running
+
+# 查看某个具体 run 的细节
+maze status --run-id <run_id>
+
+# 指向远程 head
+maze status --addr http://10.0.0.1:8000
+```
+
+### 16.5 Token / 指标上报（用户视角）
+
+Maze 自身**不调用** LLM，因此 token 消耗只能由 task 函数主动上报。提供两条上报通道，二选一或并用：
+
+#### 通道 A：`maze.metrics.report()` 函数
+
+```python
+from maze import task, metrics
+
+@task
+def call_llm(prompt: str = ""):
+    response = openai_client.chat.completions.create(...)
+    metrics.report(
+        tokens_in=response.usage.prompt_tokens,
+        tokens_out=response.usage.completion_tokens,
+        model=response.model,
+        cost_usd=0.012,         # 可选
+    )
+    return {"answer": response.choices[0].message.content}
+```
+
+同一 task 内可以多次调用，数值字段会累加；同一 `model` 还会在 `by_model` 桶里独立累加 `calls`。
+
+#### 通道 B：`return` 字段塞 `__maze_metrics__`
+
+```python
+@task
+def call_llm(prompt: str = ""):
+    response = openai_client.chat.completions.create(...)
+    return {
+        "answer": response.choices[0].message.content,
+        "__maze_metrics__": {
+            "tokens_in": response.usage.prompt_tokens,
+            "tokens_out": response.usage.completion_tokens,
+            "model": response.model,
+        }
+    }
+```
+
+框架会把 `__maze_metrics__` 字段自动剥离（不会污染下游 task 的输入），并合并到 task 的 `metrics` 里。
+
+#### 上报字段约定
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `tokens_in` | int | 累加 |
+| `tokens_out` | int | 累加 |
+| `cost_usd` | float | 累加 |
+| `model` | str | 触发 `by_model` 分桶 |
+| 其它任意键 | any | 数值累加，非数值后写覆盖 |
+
+### 16.6 结构化日志
+
+设置 `MAZE_LOG_FORMAT=json`，日志将以 JSON 行格式输出，方便接 Loki / ELK：
+
+```bash
+MAZE_LOG_FORMAT=json maze start --head --port 8000
+```
+
+每行示例：
+
+```json
+{"ts":"2026-05-23T10:00:00Z","level":"INFO","logger":"maze.core.path.path","msg":"..."}
+```
+
+未设置时仍是默认人类可读格式。
+
+### 16.7 兼容性与边界
+
+- 动态 run / ReAct workflow 的状态查询仍走原有 `DynamicRun` 接口（`maze/client/maze/dynamic.py`），与 Phase 1 的 `/v1/*` 路径**互不影响**。
+- Phase 1 接口的 schema 字段名是稳定的，未来扩展会向后兼容。
+- Token 数据可信度依赖用户上报；框架不做 LLM 流量拦截。
+- Head 进程崩溃 / 重启时，正在跑的 run 会在下次启动时被标记为 `interrupted` 并写入 `events.jsonl`。

@@ -899,3 +899,85 @@ async def stop_llm_instance(req:Request):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Phase 1 observability API (static workflows) ===
+
+@app.get("/v1/metrics")
+async def get_global_metrics():
+    """Cluster-wide aggregate metrics for static workflows."""
+    try:
+        return mapath.get_global_metrics_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs")
+async def list_runs(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List static workflow runs (newest first)."""
+    try:
+        runs = mapath.list_static_runs(status=status, limit=limit + offset)
+        offset = max(0, int(offset))
+        limit = max(0, int(limit))
+        return {
+            "runs": runs[offset:offset + limit] if limit else runs[offset:],
+            "total": len(runs),
+            "offset": offset,
+            "limit": limit,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/snapshot")
+async def get_run_snapshot(run_id: str):
+    """Full snapshot of a static run (in-memory if active, else from store)."""
+    try:
+        return mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/current-task")
+async def get_run_current_task(run_id: str):
+    """What is the run currently doing?"""
+    try:
+        return mapath.get_static_current_task(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/tasks")
+async def list_run_tasks(run_id: str):
+    """All tasks of a static run with their states and metrics."""
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+        return {
+            "run_id": run_id,
+            "task_total": snapshot.get("task_total"),
+            "tasks": snapshot.get("tasks") or {},
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/timeline")
+async def get_run_timeline(run_id: str, after: Optional[int] = None):
+    """Event log of a static run (one event per scheduling moment)."""
+    try:
+        events = mapath._get_static_run_events(run_id, after=after)
+        return {"run_id": run_id, "events": events}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

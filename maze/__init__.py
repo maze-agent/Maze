@@ -8,6 +8,7 @@ from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.models import MaTask, TaskOutput, TaskOutputs
 from maze.client.maze.decorator import task, get_task_metadata
 from maze.client.maze.workflow_authoring import OutputRef, TaskInvocation, WorkflowDefinition, workflow
+from maze import metrics
 
 __all__ = [
     "LanggraphClient",
@@ -31,4 +32,5 @@ __all__ = [
     "WorkflowDefinition",
     "TaskInvocation",
     "OutputRef",
+    "metrics",
 ]

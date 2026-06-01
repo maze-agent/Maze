@@ -522,6 +522,103 @@ def _validate_app(args):
         raise SystemExit(f"Invalid app spec: {exc}") from exc
     _print_payload({"status": "success", "spec": spec}, args.json)
 
+
+def _format_status(metrics: dict, runs: list) -> str:
+    lines = []
+    uptime = metrics.get("uptime_sec", 0)
+    h, rem = divmod(uptime, 3600)
+    m, s = divmod(rem, 60)
+    lines.append("=== Maze Cluster Status ===")
+    lines.append(f"Uptime: {int(h)}h {int(m)}m {int(s)}s")
+    lines.append("")
+
+    wf = metrics.get("workflows") or {}
+    lines.append(
+        f"Workflows: {wf.get('created_total', 0)} ever created"
+        f" | {wf.get('in_memory_not_submitted', 0)} created-not-submitted"
+    )
+
+    sr = metrics.get("static_runs") or {}
+    by = sr.get("by_status") or {}
+    lines.append(f"Static Runs: {sr.get('total', 0)} total | {sr.get('in_memory', 0)} in-memory")
+    for status in ("submitted", "running", "succeeded", "failed", "canceled", "interrupted"):
+        if by.get(status, 0):
+            lines.append(f"  - {status}: {by.get(status, 0)}")
+    lines.append("")
+
+    tasks = metrics.get("tasks") or {}
+    tby = tasks.get("by_status") or {}
+    lines.append(
+        f"Tasks: {tasks.get('total_finished', 0)} finished | "
+        f"{tby.get('running', 0)} running | "
+        f"{tby.get('succeeded', 0)} succeeded | "
+        f"{tby.get('failed', 0)} failed"
+    )
+
+    tokens = metrics.get("tokens") or {}
+    if tokens.get("in") or tokens.get("out"):
+        lines.append("")
+        lines.append(
+            f"Tokens: {tokens.get('in', 0)} in / {tokens.get('out', 0)} out"
+            f" (cost ${tokens.get('cost_usd', 0):.4f})"
+        )
+        for model, m in (tokens.get("by_model") or {}).items():
+            lines.append(
+                f"  - {model}: {m.get('tokens_in', 0)} in / "
+                f"{m.get('tokens_out', 0)} out / {m.get('calls', 0)} calls"
+            )
+
+    if runs:
+        lines.append("")
+        lines.append("=== Active Runs ===")
+        lines.append(f"{'run_id':<38} {'status':<10} {'progress':<10} {'updated':<12}")
+        for r in runs:
+            counts = r.get("task_counts") or {}
+            done = counts.get("done", 0)
+            total = counts.get("total", 0) or r.get("task_total", 0)
+            updated = r.get("updated_time")
+            ago = ""
+            if updated:
+                ago = f"{int(time.time() - float(updated))}s ago"
+            lines.append(
+                f"{r.get('run_id', ''):<38} {r.get('status', ''):<10} {done}/{total:<8} {ago:<12}"
+            )
+
+    return "\n".join(lines)
+
+
+def cmd_status(addr: str, watch: bool, status_filter: str | None, run_id: str | None):
+    """Print cluster status by querying the head's HTTP API."""
+    while True:
+        try:
+            metrics = requests.get(f"{addr}/v1/metrics", timeout=5).json()
+            if run_id:
+                snap = requests.get(f"{addr}/v1/runs/{run_id}/snapshot", timeout=5).json()
+                cur = requests.get(f"{addr}/v1/runs/{run_id}/current-task", timeout=5).json()
+                print(f"=== Run {run_id} ===")
+                print(f"Status: {snap.get('status')}")
+                print(f"Tasks: {snap.get('task_counts')}")
+                print(f"Metrics: {snap.get('metrics')}")
+                print(f"Currently running: {cur.get('running')}")
+            else:
+                params = {"limit": 20}
+                if status_filter:
+                    params["status"] = status_filter
+                runs_payload = requests.get(f"{addr}/v1/runs", params=params, timeout=5).json()
+                runs = runs_payload.get("runs") if isinstance(runs_payload, dict) else runs_payload
+                active_runs = [r for r in (runs or []) if r.get("status") in ("submitted", "running")]
+                print(_format_status(metrics, active_runs if not status_filter else (runs or [])))
+            if not watch:
+                return
+            time.sleep(2)
+            print("\n" * 2)
+        except Exception as e:
+            print(f"Failed to fetch status from {addr}: {e}")
+            if not watch:
+                sys.exit(1)
+            time.sleep(2)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="maze", description="Maze distributed task runner")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
@@ -615,6 +712,30 @@ def main():
     app_validate.add_argument("--workspace-dir", default=None)
     app_validate.add_argument("--json", action="store_true")
 
+    status_parser = subparsers.add_parser("status", help="Show cluster status (/v1/metrics)")
+    status_parser.add_argument(
+        "--addr",
+        metavar="ADDR",
+        default=os.environ.get("MAZE_CORE_URL", "http://localhost:8000"),
+        help="Head HTTP address (default: MAZE_CORE_URL or http://localhost:8000)",
+    )
+    status_parser.add_argument("--watch", action="store_true", help="Refresh every 2s")
+    status_parser.add_argument(
+        "--status",
+        dest="status_filter",
+        metavar="STATUS",
+        choices=["submitted", "running", "succeeded", "failed", "canceled", "interrupted"],
+        help="Filter runs by status",
+    )
+    status_parser.add_argument("--run-id", metavar="RUN_ID", help="Show details of a specific run")
+    status_parser.add_argument(
+        "--log-level",
+        metavar="LOG LEVEL",
+        default="WARNING",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    )
+    status_parser.add_argument("--log-file", metavar="LOG FILE", default=None)
+
     # Parse args
     args = parser.parse_args()
     
@@ -667,6 +788,8 @@ def main():
     elif args.command == "app":
         if args.app_command == "validate":
             _validate_app(args)
+    elif args.command == "status":
+        cmd_status(args.addr, args.watch, args.status_filter, args.run_id)
     else:
         parser.print_help()
         sys.exit(1)
