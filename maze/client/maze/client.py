@@ -223,6 +223,45 @@ class MaClient:
             raise Exception(f"Failed to run app: {data.get('message', 'Unknown error')}")
         return data
 
+    def validate_workflow_spec(self, spec: dict) -> dict:
+        """
+        Validate an external DAG workflow submit spec without running it.
+        """
+        response = requests.post(f"{self.server_url}/workflows/validate", json={"spec": spec})
+        if response.status_code != 200:
+            raise Exception(f"Failed to validate workflow spec: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to validate workflow spec: {data.get('message', 'Unknown error')}")
+        return data.get("spec", {})
+
+    def submit_workflow(
+        self,
+        spec: dict,
+        *,
+        artifact_mode: bool = True,
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """
+        Submit an external DAG workflow spec and return workflow_id/run_id.
+
+        This is the stable API intended for decoupled visual DAG builders.
+        """
+        payload = {
+            "spec": spec,
+            "artifact_mode": artifact_mode,
+            "tags": tags,
+            "metadata": metadata,
+        }
+        response = requests.post(f"{self.server_url}/workflows/submit", json=payload)
+        if response.status_code != 200:
+            raise Exception(f"Failed to submit workflow spec: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to submit workflow spec: {data.get('message', 'Unknown error')}")
+        return data
+
     def _build_file_context(
         self,
         file_context: Optional[dict] = None,

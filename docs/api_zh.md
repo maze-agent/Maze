@@ -629,6 +629,65 @@ def node(state):
 
 ---
 
+#### `POST /workflows/validate`
+校验外部可视化平台提交的完整 DAG spec，不执行。
+
+```json
+{
+  "spec": {
+    "schema": "maze.workflow/v1",
+    "name": "hello-dag",
+    "nodes": [
+      {
+        "id": "greet",
+        "task_name": "greet",
+        "code": "def greet(name='Maze'):\n    return {'message': f'Hello {name}'}",
+        "inputs": {"name": "Maze"},
+        "outputs": ["message"],
+        "resources": {"cpu": 1, "cpu_mem": 128}
+      },
+      {
+        "id": "upper",
+        "task_name": "upper",
+        "code": "def upper(message):\n    return {'upper': message.upper()}",
+        "inputs": {"message": {"from": "greet.message"}},
+        "outputs": ["upper"]
+      }
+    ],
+    "edges": [{"from": "greet.message", "to": "upper.message"}],
+    "run": {"artifact_mode": true}
+  }
+}
+```
+
+响应：
+
+```json
+{"status": "success", "spec": { "...": "normalized spec" }}
+```
+
+---
+
+#### `POST /workflows/submit`
+外部 DAG 平台推荐使用的稳定提交接口。Maze 会一次性校验、构建静态 workflow 并提交执行。
+
+请求体同 `/workflows/validate`，也可额外传 `tags`、`metadata`、`artifact_mode`。
+
+响应：
+
+```json
+{
+  "status": "success",
+  "workflow_id": "<uuid>",
+  "run_id": "<uuid>",
+  "spec": { "...": "normalized spec" }
+}
+```
+
+提交后使用统一 run API 查询状态：`GET /runs/{run_id}`、`GET /runs/{run_id}/tasks`、`GET /runs/{run_id}/events?after=<seq>`、`GET /runs/{run_id}/artifacts`。
+
+---
+
 ### 2.2 Dynamic Run
 
 #### `POST /dynamic_runs`

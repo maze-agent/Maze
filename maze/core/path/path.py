@@ -19,6 +19,7 @@ from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
 from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES, dynamic_task_spec_from_payload
 from maze.core.workflow.dynamic_store import DynamicRunStore
+from maze.core.workflow.dag_spec import build_dag_workflow
 from maze.core.workflow.static_run import StaticRun, StaticRunStore, static_run_summary
 from maze.core.application.spec import build_app_workflow
 from maze.core.runs import GlobalMetrics
@@ -111,6 +112,15 @@ class MaPath:
         '''
         workflow_id = str(uuid.uuid4())
         self.workflows[workflow_id] = build_app_workflow(workflow_id, spec)
+        return workflow_id
+
+    def create_dag_workflow(self, spec:Dict[str,Any]) -> str:
+        '''
+        Create a static workflow from an external DAG submit spec.
+        '''
+        workflow_id = str(uuid.uuid4())
+        self.workflows[workflow_id] = build_dag_workflow(workflow_id, spec)
+        self.global_metrics.on_workflow_created(workflow_id)
         return workflow_id
 
     def get_workflow(self,workflow_id:str) -> Workflow|LangGraphWorkflow:

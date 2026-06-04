@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
+from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
 
 
 app = FastAPI()
@@ -340,6 +341,69 @@ async def run_app(req: Request):
             "spec": spec,
         }
     except AppSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflows/validate")
+async def validate_dag_workflow(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = dag_spec_from_payload(payload)
+        return {"status": "success", "spec": spec}
+    except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflows/submit")
+async def submit_dag_workflow(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = dag_spec_from_payload(payload)
+        workflow_id = mapath.create_dag_workflow(spec)
+
+        run_config = spec.get("run") or {}
+        artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
+        file_context = data.get("file_context")
+        if file_context is None:
+            file_context = dag_file_context(
+                spec,
+                artifact_base_url=_request_base_url(req),
+                artifact_mode=artifact_mode,
+            )
+        file_context = await _worker_reachable_file_context(req, file_context)
+
+        metadata = {
+            **dict(spec.get("metadata") or {}),
+            **dict(run_config.get("metadata") or {}),
+            **dict(data.get("metadata") or {}),
+            "workflow_name": spec["name"],
+            "run_kind": "dag",
+            "dag_spec": spec,
+        }
+        tags = list(dict.fromkeys([
+            *spec.get("tags", []),
+            *run_config.get("tags", []),
+            *data.get("tags", []),
+            "dag",
+        ]))
+        run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=run_config.get("timeout_seconds"),
+            tags=tags,
+            metadata=metadata,
+        )
+        return {
+            "status": "success",
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "spec": spec,
+        }
+    except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
