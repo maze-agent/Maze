@@ -170,13 +170,27 @@ class StaticRun:
         task_id: str,
         result: Any = None,
         file_manifest: Dict[str, Any] | None = None,
+        metrics: Dict[str, Any] | None = None,
+        started_at: float | None = None,
+        finished_at: float | None = None,
+        duration_ms: int | None = None,
+        node_id: str | None = None,
     ):
         task = self.task_nodes.get(task_id)
         if not task:
             return
         task["status"] = "succeeded"
-        task["finished_time"] = time.time()
+        if started_at is not None:
+            task["started_time"] = started_at
+        task["finished_time"] = finished_at or time.time()
         task["duration_seconds"] = _duration_seconds(task.get("started_time"), task.get("finished_time"))
+        if duration_ms is not None:
+            task["duration_ms"] = duration_ms
+        if node_id:
+            selected_node = task.get("selected_node") or {}
+            selected_node["node_id"] = node_id
+            task["selected_node"] = selected_node
+        task["metrics"] = to_json_safe(metrics or {})
         task["result_summary"] = to_json_safe(result)
         task["file_manifest"] = to_json_safe(file_manifest)
         task["pending_reason"] = None

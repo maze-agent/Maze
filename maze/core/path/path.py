@@ -1094,15 +1094,20 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            task_metrics = message_data.get("metrics") or {}
                             if static_run is not None:
                                 static_run.mark_task_finished(
                                     message_data["task_id"],
                                     result=message_data.get("result"),
                                     file_manifest=message_data.get("file_manifest"),
+                                    metrics=task_metrics,
+                                    started_at=message_data.get("started_at"),
+                                    finished_at=message_data.get("finished_at"),
+                                    duration_ms=message_data.get("duration_ms"),
+                                    node_id=message_data.get("node_id"),
                                 )
                                 message = self._record_static_event(submit_id, message)
 
-                            task_metrics = message_data.get("metrics") or {}
                             self.global_metrics.on_task_finished(
                                 submit_id,
                                 message_data["task_id"],

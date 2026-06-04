@@ -1323,9 +1323,9 @@ curl -s -X POST http://localhost:8000/dynamic_runs/<run_id>/finalize \
 
 ---
 
-## 16. 运行状态查询与指标上报（Phase 1：仅静态 workflow）
+## 16. 运行状态查询与指标上报（静态 workflow）
 
-> 这一组接口和约定让你能从外部观察整个集群的运行情况：当前有多少 DAG 在跑、跑到哪一步、累计消耗了多少 token。**当前覆盖范围仅限静态 workflow**（即 `MaWorkflow`/`@task` 经 `client.create_workflow().run()` 提交的那种）。动态 run / ReAct workflow 不在本期范围。
+> 这一组接口和约定让你能从外部观察静态 DAG 的运行情况：当前有多少 DAG 在跑、每个 run 跑到哪一步、每个 task 的状态/耗时/节点/metrics、累计消耗了多少 token。当前覆盖范围是 **静态 workflow**，包括 `MaWorkflow`/`@task` 提交的 workflow，以及外部平台通过 `/workflows/submit` 提交的 `maze.workflow/v1` DAG。动态 run / ReAct workflow 仍走 `DynamicRun` 自己的状态和事件接口，暂未接入本节的全局静态监控聚合。
 
 ### 16.1 状态机
 
@@ -1402,7 +1402,13 @@ curl http://localhost:8000/v1/metrics
 
 #### `GET /v1/runs/{run_id}/snapshot`
 
-单个 run 的完整快照（含所有 task 的 metrics）。
+单个 run 的完整快照。快照包含 run 状态、时间、进度、task 节点、task 结果摘要、task metrics、错误摘要等。
+
+统一 run API 也提供同类数据：
+
+```bash
+curl http://localhost:8000/runs/<run_id>
+```
 
 #### `GET /v1/runs/{run_id}/current-task`
 
@@ -1424,11 +1430,43 @@ curl http://localhost:8000/v1/metrics
 
 #### `GET /v1/runs/{run_id}/tasks`
 
-所有 task 的状态 + metrics 字典。
+所有 task 的状态 + metrics 字典。统一 run API 也支持：
+
+```bash
+curl http://localhost:8000/runs/<run_id>/tasks
+```
+
+单个 task 示例字段：
+
+```json
+{
+  "task_id": "produce",
+  "task_name": "produce",
+  "status": "succeeded",
+  "started_time": 1780547600.0,
+  "finished_time": 1780547600.5,
+  "duration_seconds": 0.5,
+  "duration_ms": 500,
+  "selected_node": {"node_id": "node-a", "node_ip": "127.0.0.1", "gpu_id": null},
+  "result_summary": {"message": "Hello Maze"},
+  "metrics": {
+    "tokens_in": 11,
+    "tokens_out": 7,
+    "cost_usd": 0.123,
+    "model": "test-model"
+  }
+}
+```
 
 #### `GET /v1/runs/{run_id}/timeline?after=10`
 
-按 `seq` 排序的事件流。`after` 可选，用于增量拉取。事件类型：`run_submitted` / `run_started` / `start_task` / `finish_task` / `task_exception` / `run_succeeded` / `run_failed` / `run_canceled` / `run_interrupted`。
+按 `seq` 排序的事件流。`after` 可选，用于增量拉取。统一 run API 也支持：
+
+```bash
+curl "http://localhost:8000/runs/<run_id>/events?after=10"
+```
+
+常见事件类型：`start_workflow` / `start_task` / `finish_task` / `task_exception` / `finish_workflow` / `cancel_workflow` / `run_interrupted`。
 
 ### 16.4 CLI
 
@@ -1516,9 +1554,93 @@ MAZE_LOG_FORMAT=json maze start --head --port 8000
 
 未设置时仍是默认人类可读格式。
 
-### 16.7 兼容性与边界
+### 16.7 端到端验证命令
 
-- 动态 run / ReAct workflow 的状态查询仍走原有 `DynamicRun` 接口（`maze/client/maze/dynamic.py`），与 Phase 1 的 `/v1/*` 路径**互不影响**。
-- Phase 1 接口的 schema 字段名是稳定的，未来扩展会向后兼容。
+下面命令可以完整验证静态 DAG 监控链路：DAG 提交、run 状态、task metrics、events、global metrics、CLI status。
+
+终端 A 启动 Head：
+
+```bash
+conda activate maze_clean
+python -m maze.cli.cli start --head --port 8000 --ray-head-port 6379
+```
+
+终端 B 创建测试 DAG：
+
+```bash
+cat > /tmp/observability_dag.json <<'JSON'
+{
+  "spec": {
+    "schema": "maze.workflow/v1",
+    "name": "observability-dag",
+    "nodes": [
+      {
+        "id": "produce",
+        "task_name": "produce",
+        "code": "def produce(name='Maze'):\n    return {'message': f'Hello {name}', '__maze_metrics__': {'tokens_in': 11, 'tokens_out': 7, 'cost_usd': 0.123, 'model': 'test-model'}}",
+        "inputs": {"name": "Maze"},
+        "outputs": ["message"],
+        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+      },
+      {
+        "id": "consume",
+        "task_name": "consume",
+        "code": "def consume(message):\n    return {'upper': message.upper(), '__maze_metrics__': {'tokens_in': 3, 'tokens_out': 2, 'cost_usd': 0.01, 'model': 'test-model'}}",
+        "inputs": {"message": {"from": "produce.message"}},
+        "outputs": ["upper"],
+        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+      }
+    ],
+    "edges": [{"from": "produce.message", "to": "consume.message"}],
+    "run": {"artifact_mode": true, "timeout_seconds": 60},
+    "tags": ["observability-test"],
+    "metadata": {"purpose": "manual-observability-test"}
+  }
+}
+JSON
+```
+
+校验并提交：
+
+```bash
+curl -sS -X POST http://localhost:8000/workflows/validate \
+  -H 'Content-Type: application/json' \
+  --data-binary @/tmp/observability_dag.json | python -m json.tool
+
+curl -sS -X POST http://localhost:8000/workflows/submit \
+  -H 'Content-Type: application/json' \
+  --data-binary @/tmp/observability_dag.json \
+  | tee /tmp/maze_submit.json | python -m json.tool
+
+RUN_ID=$(python - <<'PY'
+import json
+print(json.load(open("/tmp/maze_submit.json"))["run_id"])
+PY
+)
+echo "$RUN_ID"
+```
+
+查询 run、tasks、events、global metrics：
+
+```bash
+curl -sS "http://localhost:8000/runs/$RUN_ID" | python -m json.tool
+curl -sS "http://localhost:8000/runs/$RUN_ID/tasks" | python -m json.tool
+curl -sS "http://localhost:8000/runs/$RUN_ID/events" | python -m json.tool
+curl -sS "http://localhost:8000/v1/metrics" | python -m json.tool
+conda run -n maze_clean python -m maze.cli.cli status --addr http://localhost:8000
+```
+
+预期结果：
+
+- run 最终 `status=succeeded`
+- `task_counts.total=2`，`task_counts.succeeded=2`
+- `produce.metrics.tokens_in=11`，`consume.metrics.tokens_in=3`
+- 全局 `tokens.in=14`，`tokens.out=9`，`test-model.calls=2`
+
+### 16.8 兼容性与边界
+
+- 动态 run / ReAct workflow 的状态查询仍走原有 `DynamicRun` 接口（`maze/client/maze/dynamic.py`）和 `/dynamic_runs/*`，与本节静态监控接口互不影响。
+- ReAct skill 是动态/ReAct Agent loop 的能力增强，用于教 agent 如何使用已注册 tools；它不是静态 workflow 监控的一部分。
+- 本节接口的 schema 字段名是稳定的，未来扩展会向后兼容。
 - Token 数据可信度依赖用户上报；框架不做 LLM 流量拦截。
 - Head 进程崩溃 / 重启时，正在跑的 run 会在下次启动时被标记为 `interrupted` 并写入 `events.jsonl`。
