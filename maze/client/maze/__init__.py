@@ -3,6 +3,7 @@ from maze.client.maze.client import MaClient
 from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
 from maze.client.maze.react_llm import create_openai_react_llm_task
 from maze.client.maze.react import ReActStep, ReActWorkflow
+from maze.client.maze.skills import SkillSpec, load_skill, load_skills_from_dir
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.models import MaTask, TaskOutput, TaskOutputs
 from maze.client.maze.decorator import task, get_task_metadata
@@ -18,6 +19,9 @@ __all__ = [
     'DynamicTaskSpec',
     'ReActStep',
     'ReActWorkflow',
+    'SkillSpec',
+    'load_skill',
+    'load_skills_from_dir',
     'create_openai_react_llm_task',
     'MaWorkflow',
     'MaTask',

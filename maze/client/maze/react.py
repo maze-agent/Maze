@@ -7,6 +7,12 @@ from typing import Any, Callable, Dict, List
 
 from maze.client.maze.decorator import get_task_metadata
 from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
+from maze.client.maze.skills import (
+    SkillSpec,
+    build_skill_catalog,
+    build_skill_reader_tool,
+    normalize_skills,
+)
 
 
 @dataclass
@@ -39,6 +45,9 @@ class ReActWorkflow:
         tools: List[Callable[..., Dict[str, Any]]],
         max_steps: int = 10,
         system_prompt: str | None = None,
+        skills: List[SkillSpec | str] | None = None,
+        progressive_skills: bool = True,
+        skill_reader_max_chars: int = 12000,
         task_timeout: float | None = None,
     ):
         if max_steps < 1:
@@ -49,6 +58,8 @@ class ReActWorkflow:
         self.max_steps = max_steps
         self.system_prompt = system_prompt
         self.task_timeout = task_timeout
+        self.skills = normalize_skills(skills)
+        self.progressive_skills = progressive_skills
         self.steps: List[ReActStep] = []
         self.tool_specs: Dict[str, Dict[str, Any]] = {}
         self._registered_tools: Dict[str, DynamicTaskSpec] = {}
@@ -63,11 +74,17 @@ class ReActWorkflow:
             task_name=llm_metadata.func_name,
         )
 
-        for tool in tools:
+        all_tools = list(tools)
+        if self.skills and self.progressive_skills:
+            all_tools.append(build_skill_reader_tool(self.skills, max_chars=skill_reader_max_chars))
+
+        for tool in all_tools:
             self._register_tool(tool)
 
         if not self._registered_tools:
             raise ValueError("ReActWorkflow requires at least one @task tool")
+
+        self.skill_catalog = build_skill_catalog(self.skills)
 
     @property
     def run_id(self) -> str:
@@ -82,6 +99,8 @@ class ReActWorkflow:
                 "max_steps": self.max_steps,
                 "llm_task": self._llm_spec.task_name,
                 "tools": sorted(self._registered_tools),
+                "skills": sorted(self.skill_catalog),
+                "progressive_skills": self.progressive_skills,
             })
 
             for step_index in range(1, self.max_steps + 1):
@@ -239,6 +258,7 @@ class ReActWorkflow:
             "prompt": prompt,
             "history": [self._step_snapshot(step) for step in self.steps],
             "tools": self.tool_specs,
+            "skills": self._build_skill_context(),
             "step": step_index,
             "system_prompt": self.system_prompt,
         }
@@ -247,6 +267,33 @@ class ReActWorkflow:
             for key, value in available.items()
             if key in self._llm_input_names
         }
+
+    def _build_skill_context(self) -> Dict[str, Any]:
+        if not self.skills:
+            return {}
+
+        context = {
+            "catalog": self.skill_catalog,
+            "progressive_disclosure": self.progressive_skills,
+        }
+        if self.progressive_skills:
+            context["instructions"] = (
+                "Use the skill catalog to decide whether a skill is relevant. "
+                "Do not assume details that are not in the catalog. When more "
+                "skill instructions are needed, call read_skill_file with "
+                "skill_name and file_name such as SKILL.md, reference.md, or examples.md."
+            )
+        else:
+            context["instructions"] = "Full SKILL.md bodies are provided below."
+            context["details"] = {
+                skill.name: {
+                    "description": skill.description,
+                    "body": skill.body,
+                    "files": skill.list_files(),
+                }
+                for skill in self.skills
+            }
+        return context
 
     def _parse_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         action = decision.get("action", decision)

@@ -184,6 +184,22 @@ print(answer)
 
 ReAct workflows keep both LLM decisions and tools as Maze tasks, so the distributed task graph and the agent trace stay in the same DynamicRun history. See [examples/react_workflow](./examples/react_workflow/README.md) for a local repair demo and an OpenAI-compatible LLM demo.
 
+ReAct also supports Claude/Cursor-style skills as progressive instruction packages. Skills keep their standard `SKILL.md` format and teach the agent how to use tools that are already registered:
+
+```python
+from maze import MaClient, load_skill
+
+skills = [load_skill("./skills/data-analysis")]
+
+react = client.create_react_workflow(
+    llm_task=decide,
+    tools=[read_file, write_file, exec_code],
+    skills=skills,
+)
+```
+
+Maze initially exposes only a compact skill catalog to the decision task. When more detail is needed, the ReAct controller can call the automatically registered `read_skill_file(skill_name, file_name)` tool to read `SKILL.md`, `reference.md`, `examples.md`, or other files inside that skill directory.
+
 In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
 
 For distributed runs without shared storage, Maze can register workspace inputs and task outputs in a content-addressed artifact store. Workers download required files before task execution and upload changed files after execution; manifests use stable artifact references such as `maze://artifacts/sha256/<hash>` instead of machine-local paths. A workflow can enable the head HTTP artifact store with:

@@ -77,6 +77,7 @@ def create_openai_react_llm_task(
         history: list,
         tools: dict,
         step: int,
+        skills: dict | None = None,
         system_prompt: str | None = None,
     ):
         import json
@@ -126,6 +127,7 @@ def create_openai_react_llm_task(
             "task": prompt,
             "step": step,
             "available_tools": tool_summary,
+            "available_skills": skills or {},
             "history": history_summary,
             "instructions": (
                 "Return JSON only. To call a tool, return "
@@ -134,7 +136,11 @@ def create_openai_react_llm_task(
                 "Use only available tool names. If write_file, read_file, and exec_code "
                 "are available, you may create and run a Python helper when no direct "
                 "domain tool exists. Keep generated code concise. If prior stdout is long, "
-                "summarize it or write a small parser instead of copying the full output."
+                "summarize it or write a small parser instead of copying the full output. "
+                "If available_skills contains relevant skills, follow their catalog guidance. "
+                "When progressive_disclosure is true and more detail is needed, call "
+                "read_skill_file with skill_name and file_name before using undocumented "
+                "skill-specific procedures."
             ),
         }
         messages = [
@@ -267,6 +273,7 @@ def _build_react_messages(
     history: list,
     tools: dict,
     step: int,
+    skills: dict | None = None,
     system_prompt: str,
 ) -> list[dict[str, str]]:
     tool_summary = {
@@ -292,6 +299,7 @@ def _build_react_messages(
         "task": prompt,
         "step": step,
         "available_tools": tool_summary,
+        "available_skills": skills or {},
         "history": history_summary,
         "instructions": (
             "Return JSON only. To call a tool, return "
@@ -300,7 +308,11 @@ def _build_react_messages(
             "Use only available tool names. If write_file, read_file, and exec_code "
             "are available, you may create and run a Python helper when no direct "
             "domain tool exists. Keep generated code concise. If prior stdout is long, "
-            "summarize it or write a small parser instead of copying the full output."
+            "summarize it or write a small parser instead of copying the full output. "
+            "If available_skills contains relevant skills, follow their catalog guidance. "
+            "When progressive_disclosure is true and more detail is needed, call "
+            "read_skill_file with skill_name and file_name before using undocumented "
+            "skill-specific procedures."
         ),
     }
     return [

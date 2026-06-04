@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
+from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
 
 
 app = FastAPI()
@@ -340,6 +341,69 @@ async def run_app(req: Request):
             "spec": spec,
         }
     except AppSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflows/validate")
+async def validate_dag_workflow(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = dag_spec_from_payload(payload)
+        return {"status": "success", "spec": spec}
+    except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflows/submit")
+async def submit_dag_workflow(req: Request):
+    try:
+        data = await req.json()
+        payload = data.get("spec", data)
+        spec = dag_spec_from_payload(payload)
+        workflow_id = mapath.create_dag_workflow(spec)
+
+        run_config = spec.get("run") or {}
+        artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
+        file_context = data.get("file_context")
+        if file_context is None:
+            file_context = dag_file_context(
+                spec,
+                artifact_base_url=_request_base_url(req),
+                artifact_mode=artifact_mode,
+            )
+        file_context = await _worker_reachable_file_context(req, file_context)
+
+        metadata = {
+            **dict(spec.get("metadata") or {}),
+            **dict(run_config.get("metadata") or {}),
+            **dict(data.get("metadata") or {}),
+            "workflow_name": spec["name"],
+            "run_kind": "dag",
+            "dag_spec": spec,
+        }
+        tags = list(dict.fromkeys([
+            *spec.get("tags", []),
+            *run_config.get("tags", []),
+            *data.get("tags", []),
+            "dag",
+        ]))
+        run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=run_config.get("timeout_seconds"),
+            tags=tags,
+            metadata=metadata,
+        )
+        return {
+            "status": "success",
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "spec": spec,
+        }
+    except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -897,5 +961,87 @@ async def stop_llm_instance(req:Request):
         data = await req.json()
         await mapath.stop_llm_instance(data["instance_id"])
         return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Phase 1 observability API (static workflows) ===
+
+@app.get("/v1/metrics")
+async def get_global_metrics():
+    """Cluster-wide aggregate metrics for static workflows."""
+    try:
+        return mapath.get_global_metrics_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs")
+async def list_runs(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List static workflow runs (newest first)."""
+    try:
+        runs = mapath.list_static_runs(status=status, limit=limit + offset)
+        offset = max(0, int(offset))
+        limit = max(0, int(limit))
+        return {
+            "runs": runs[offset:offset + limit] if limit else runs[offset:],
+            "total": len(runs),
+            "offset": offset,
+            "limit": limit,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/snapshot")
+async def get_run_snapshot(run_id: str):
+    """Full snapshot of a static run (in-memory if active, else from store)."""
+    try:
+        return mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/current-task")
+async def get_run_current_task(run_id: str):
+    """What is the run currently doing?"""
+    try:
+        return mapath.get_static_current_task(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/tasks")
+async def list_run_tasks(run_id: str):
+    """All tasks of a static run with their states and metrics."""
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+        return {
+            "run_id": run_id,
+            "task_total": snapshot.get("task_total"),
+            "tasks": snapshot.get("tasks") or {},
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/runs/{run_id}/timeline")
+async def get_run_timeline(run_id: str, after: Optional[int] = None):
+    """Event log of a static run (one event per scheduling moment)."""
+    try:
+        events = mapath._get_static_run_events(run_id, after=after)
+        return {"run_id": run_id, "events": events}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

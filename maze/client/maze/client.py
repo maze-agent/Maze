@@ -5,6 +5,7 @@ from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
+from maze.client.maze.skills import SkillSpec
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import WorkflowDefinition
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -143,6 +144,9 @@ class MaClient:
         tools: list[Callable],
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
+        skills: Optional[list[SkillSpec | str]] = None,
+        progressive_skills: bool = True,
+        skill_reader_max_chars: int = 12000,
         timeout_seconds: Optional[int] = None,
         task_timeout: Optional[float] = None,
         file_context: Optional[dict] = None,
@@ -153,6 +157,10 @@ class MaClient:
         Create a ReAct workflow template backed by a DynamicRun.
 
         Both the decision node and selected tools execute as Maze tasks.
+        Skills are Claude/Cursor-style instruction packages. They teach the
+        ReAct controller how to use already-registered tools; they do not add
+        executable tools except for the optional read_skill_file helper used
+        for progressive disclosure.
         """
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps * 2,
@@ -167,6 +175,9 @@ class MaClient:
             tools=tools,
             max_steps=max_steps,
             system_prompt=system_prompt,
+            skills=skills,
+            progressive_skills=progressive_skills,
+            skill_reader_max_chars=skill_reader_max_chars,
             task_timeout=task_timeout,
         )
 
@@ -210,6 +221,45 @@ class MaClient:
         data = response.json()
         if data.get("status") != "success":
             raise Exception(f"Failed to run app: {data.get('message', 'Unknown error')}")
+        return data
+
+    def validate_workflow_spec(self, spec: dict) -> dict:
+        """
+        Validate an external DAG workflow submit spec without running it.
+        """
+        response = requests.post(f"{self.server_url}/workflows/validate", json={"spec": spec})
+        if response.status_code != 200:
+            raise Exception(f"Failed to validate workflow spec: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to validate workflow spec: {data.get('message', 'Unknown error')}")
+        return data.get("spec", {})
+
+    def submit_workflow(
+        self,
+        spec: dict,
+        *,
+        artifact_mode: bool = True,
+        tags: Optional[list[str]] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """
+        Submit an external DAG workflow spec and return workflow_id/run_id.
+
+        This is the stable API intended for decoupled visual DAG builders.
+        """
+        payload = {
+            "spec": spec,
+            "artifact_mode": artifact_mode,
+            "tags": tags,
+            "metadata": metadata,
+        }
+        response = requests.post(f"{self.server_url}/workflows/submit", json=payload)
+        if response.status_code != 200:
+            raise Exception(f"Failed to submit workflow spec: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to submit workflow spec: {data.get('message', 'Unknown error')}")
         return data
 
     def _build_file_context(

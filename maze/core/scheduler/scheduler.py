@@ -500,6 +500,7 @@ class Scheduler():
                         "gpu_id":selected_node.gpu_id,
                         "attempt":self.cur_ready_task.attempt,
                         "schedule_decision":selection.decision,
+                        "started_at": time.time(),
                     }
                 }
                 serialized_message = json.dumps(message).encode('utf-8')
@@ -557,9 +558,17 @@ class Scheduler():
                             continue
 
                         file_manifest = None
+                        metrics = None
+                        started_at = None
+                        finished_at = None
+                        duration_ms = None
                         if isinstance(raw_result, dict) and raw_result.get(TASK_RESULT_ENVELOPE):
                             result = raw_result.get("result") or {}
                             file_manifest = raw_result.get("file_manifest")
+                            metrics = raw_result.get("metrics")
+                            started_at = raw_result.get("started_at")
+                            finished_at = raw_result.get("finished_at")
+                            duration_ms = raw_result.get("duration_ms")
                             finished_task.file_manifest = file_manifest
                         else:
                             result = raw_result
@@ -569,14 +578,28 @@ class Scheduler():
                         self.workflow_manager.clear_task_ref(finished_task)
 
                         #Send message to main
+                        node_id = None
+                        try:
+                            node_id = finished_task.selected_node.node_id if finished_task.selected_node else None
+                        except Exception:
+                            node_id = None
                         message_data = {
                             "workflow_id": finished_task.workflow_id,
                             "task_id": finished_task.task_id,
                             "result": summarize_task_result(finished_task.result),
                             "attempt": finished_task.attempt,
+                            "node_id": node_id,
                         }
+                        if started_at is not None:
+                            message_data["started_at"] = started_at
+                        if finished_at is not None:
+                            message_data["finished_at"] = finished_at
+                        if duration_ms is not None:
+                            message_data["duration_ms"] = duration_ms
                         if file_manifest:
                             message_data["file_manifest"] = file_manifest
+                        if metrics:
+                            message_data["metrics"] = metrics
                         message = {
                             "type":"finish_task",
                             "data": message_data,

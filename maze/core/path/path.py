@@ -6,6 +6,7 @@ import uuid
 import httpx
 import json
 import copy
+import logging
 import zmq
 import zmq.asyncio
 import asyncio
@@ -18,12 +19,16 @@ from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
 from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES, dynamic_task_spec_from_payload
 from maze.core.workflow.dynamic_store import DynamicRunStore
-from maze.core.workflow.static_run import StaticRun, StaticRunStore
+from maze.core.workflow.dag_spec import build_dag_workflow
+from maze.core.workflow.static_run import StaticRun, StaticRunStore, static_run_summary
 from maze.core.application.spec import build_app_workflow
+from maze.core.runs import GlobalMetrics
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.files.artifact_store import LocalCASArtifactStore
 from maze.utils.utils import get_available_ports
+
+logger = logging.getLogger(__name__)
 EPSILON = 1e-3
 
 class MaPath:
@@ -46,6 +51,15 @@ class MaPath:
         self.atlas_enqueue_index = 0
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
+        self.global_metrics = GlobalMetrics()
+        for snapshot in self.static_run_store.list_runs():
+            status = snapshot.get("status")
+            if status in ("submitted", "running"):
+                self.global_metrics.on_run_status_change(
+                    snapshot["run_id"],
+                    status,
+                    "interrupted",
+                )
          
     def cleanup(self):
         '''
@@ -90,6 +104,7 @@ class MaPath:
         Create a workflow.
         '''
         self.workflows[workflow_id] = Workflow(workflow_id)
+        self.global_metrics.on_workflow_created(workflow_id)
 
     def create_app_workflow(self, spec:Dict[str,Any]) -> str:
         '''
@@ -97,6 +112,15 @@ class MaPath:
         '''
         workflow_id = str(uuid.uuid4())
         self.workflows[workflow_id] = build_app_workflow(workflow_id, spec)
+        return workflow_id
+
+    def create_dag_workflow(self, spec:Dict[str,Any]) -> str:
+        '''
+        Create a static workflow from an external DAG submit spec.
+        '''
+        workflow_id = str(uuid.uuid4())
+        self.workflows[workflow_id] = build_dag_workflow(workflow_id, spec)
+        self.global_metrics.on_workflow_created(workflow_id)
         return workflow_id
 
     def get_workflow(self,workflow_id:str) -> Workflow|LangGraphWorkflow:
@@ -262,6 +286,7 @@ class MaPath:
         )
         self.static_runs[submit_id] = static_run
         self._persist_static_run(submit_id)
+        self.global_metrics.on_run_submitted(submit_id)
         self._record_static_event(submit_id, {
             "type": "start_workflow",
             "data": {
@@ -604,6 +629,66 @@ class MaPath:
         if task_id not in task_nodes:
             raise ValueError(f"Task not found in run {run_id}: {task_id}")
         return task_nodes[task_id]
+
+    def get_global_metrics_snapshot(self) -> Dict[str, Any]:
+        return self.global_metrics.snapshot(
+            workflows_in_memory=max(0, len(self.workflows) - len(self.submit_workflows)),
+            runs_in_memory=len(self.submit_workflows),
+        )
+
+    def list_static_runs(
+        self,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        store_ids = set()
+        result: List[Dict[str, Any]] = []
+        for snapshot in self.static_run_store.list_runs(summary=True):
+            if status and snapshot.get("status") != status:
+                continue
+            store_ids.add(snapshot.get("run_id"))
+            result.append(snapshot)
+        for run_id, static_run in self.static_runs.items():
+            if run_id in store_ids:
+                continue
+            snapshot = static_run_summary(static_run.snapshot())
+            if status and snapshot.get("status") != status:
+                continue
+            result.append(snapshot)
+        result.sort(key=lambda item: item.get("created_time") or 0, reverse=True)
+        if limit is not None:
+            result = result[: max(0, int(limit))]
+        return result
+
+    def get_static_run_snapshot(self, run_id: str) -> Dict[str, Any]:
+        return self._get_static_run_snapshot(run_id)
+
+    def get_static_current_task(self, run_id: str) -> Dict[str, Any]:
+        snapshot = self._get_static_run_snapshot(run_id)
+        task_nodes = snapshot.get("task_nodes") or {}
+        running = [
+            {
+                "task_id": task.get("task_id"),
+                "task_name": task.get("task_name"),
+                "started_time": task.get("started_time"),
+                "node_id": (task.get("selected_node") or {}).get("node_id"),
+            }
+            for task in task_nodes.values()
+            if task.get("status") == "running"
+        ]
+        task_counts = snapshot.get("task_counts") or {}
+        return {
+            "run_id": run_id,
+            "status": snapshot.get("status"),
+            "running": running,
+            "pending_count": task_counts.get("queued", 0) + task_counts.get("pending", 0),
+            "done_count": (
+                task_counts.get("succeeded", 0)
+                + task_counts.get("failed", 0)
+                + task_counts.get("cancelled", 0)
+            ),
+            "task_total": task_counts.get("total", 0),
+        }
 
     def _normalize_dynamic_run_snapshot(self, snapshot:Dict[str,Any]):
         status_map = {
@@ -1009,13 +1094,26 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            task_metrics = message_data.get("metrics") or {}
                             if static_run is not None:
                                 static_run.mark_task_finished(
                                     message_data["task_id"],
                                     result=message_data.get("result"),
                                     file_manifest=message_data.get("file_manifest"),
+                                    metrics=task_metrics,
+                                    started_at=message_data.get("started_at"),
+                                    finished_at=message_data.get("finished_at"),
+                                    duration_ms=message_data.get("duration_ms"),
+                                    node_id=message_data.get("node_id"),
                                 )
                                 message = self._record_static_event(submit_id, message)
+
+                            self.global_metrics.on_task_finished(
+                                submit_id,
+                                message_data["task_id"],
+                                "succeeded",
+                                task_metrics,
+                            )
 
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
@@ -1047,6 +1145,11 @@ class MaPath:
                                     self._send_scheduler_message(message)
 
                             if static_run is not None and static_run.status == "succeeded":
+                                self.global_metrics.on_run_status_change(
+                                    submit_id,
+                                    "running",
+                                    "succeeded",
+                                )
                                 finish_message = self._record_static_event(submit_id, {
                                     "type": "finish_workflow",
                                     "data": {
@@ -1074,8 +1177,18 @@ class MaPath:
                             if message_type == "start_task":
                                 self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
                                 if static_run is not None:
+                                    if static_run.status == "created":
+                                        self.global_metrics.on_run_status_change(
+                                            submit_id,
+                                            "submitted",
+                                            "running",
+                                        )
                                     static_run.mark_task_started(message_data["task_id"], message_data)
                                     message = self._record_static_event(submit_id, message)
+                                self.global_metrics.on_task_started(
+                                    submit_id,
+                                    message_data["task_id"],
+                                )
                             elif message_type == "task_pending":
                                 if static_run is not None:
                                     static_run.mark_task_pending(
@@ -1101,6 +1214,18 @@ class MaPath:
                                         message_data.get("file_manifest"),
                                     )
                                     message = self._record_static_event(submit_id, message)
+                                    if static_run.status == "failed":
+                                        self.global_metrics.on_run_status_change(
+                                            submit_id,
+                                            "running",
+                                            "failed",
+                                        )
+                                self.global_metrics.on_task_finished(
+                                    submit_id,
+                                    message_data["task_id"],
+                                    "failed",
+                                    None,
+                                )
     
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
@@ -1163,6 +1288,7 @@ class MaPath:
             static_run = self.static_runs.get(submit_id)
             if static_run is not None:
                 static_run.mark_cancelled("Workflow stopped")
+                self.global_metrics.on_run_status_change(submit_id, "running", "canceled")
                 self._record_static_event(submit_id, {
                     "type": "cancel_workflow",
                     "data": {
