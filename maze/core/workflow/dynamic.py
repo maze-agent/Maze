@@ -40,7 +40,7 @@ class DynamicTaskSpec:
         self.code_ser = code_ser
         self.inputs = _normalize_params(inputs)
         self.outputs = _normalize_params(outputs)
-        self.resources = {**DEFAULT_DYNAMIC_RESOURCES, **(resources or {})}
+        self.resources = merge_dynamic_resources(DEFAULT_DYNAMIC_RESOURCES, resources)
         self.task_ref_type = task_ref_type or "inline"
         self.task_path = task_path
         self.code_hash = code_hash or _hash_code(code_str, code_ser)
@@ -186,6 +186,7 @@ class DynamicRun:
         inputs: Dict[str, Any] | None = None,
         parents: List[str] | None = None,
         request_id: str | None = None,
+        resources: Dict[str, Any] | None = None,
     ) -> tuple[CodeTask, bool]:
         self.check_can_mutate("append tasks")
         existing_task = self.get_task_for_request_id(request_id)
@@ -200,12 +201,13 @@ class DynamicRun:
         task.dynamic_request_id = request_id
         task_input, input_parents = build_dynamic_task_input(spec, inputs or {})
         task_output = build_dynamic_task_output(spec)
+        task_resources = merge_dynamic_resources(spec.resources, resources)
         task.save_task(
             task_input=task_input,
             task_output=task_output,
             code_str=spec.code_str,
             code_ser=spec.code_ser,
-            resources=spec.resources,
+            resources=task_resources,
             max_retries=spec.max_retries,
             retry_backoff_seconds=spec.retry_backoff_seconds,
             retry_on=spec.retry_on,
@@ -440,6 +442,57 @@ class DynamicRun:
             "error": to_json_safe(self.task_errors.get(task_id)),
             "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
         }
+
+
+
+def merge_dynamic_resources(
+    base_resources: Dict[str, Any] | None,
+    override_resources: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    resources = {**DEFAULT_DYNAMIC_RESOURCES, **(base_resources or {})}
+    override_resources = override_resources or {}
+
+    for key in ("cpu", "cpu_mem", "gpu", "gpu_mem"):
+        if key in override_resources and override_resources.get(key) not in (None, ""):
+            resources[key] = _resource_number(override_resources.get(key), resources.get(key, 0))
+
+    if resources["cpu"] < 1:
+        resources["cpu"] = 1
+    if resources["cpu_mem"] < 0:
+        resources["cpu_mem"] = 0
+    if resources["gpu"] < 0:
+        resources["gpu"] = 0
+    if resources["gpu"] > 1:
+        raise ValueError("Maze dynamic tasks currently support gpu <= 1")
+    if resources["gpu_mem"] < 0:
+        resources["gpu_mem"] = 0
+    if resources["gpu_mem"] > 0 and resources["gpu"] < 1:
+        resources["gpu"] = 1
+
+    target_node_id = (
+        override_resources.get("target_node_id")
+        or override_resources.get("node_id")
+        or resources.get("target_node_id")
+        or resources.get("node_id")
+    )
+    if target_node_id:
+        resources["target_node_id"] = str(target_node_id)
+
+    required_capability = override_resources.get("required_capability") or resources.get("required_capability")
+    if required_capability:
+        resources["required_capability"] = str(required_capability)
+
+    return resources
+
+
+def _resource_number(value: Any, default: Any = 0) -> int | float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed.is_integer():
+        return int(parsed)
+    return parsed
 
 
 def dynamic_task_spec_from_payload(payload: Dict[str, Any]) -> DynamicTaskSpec:

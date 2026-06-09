@@ -2,8 +2,11 @@ import axios from 'axios';
 import type {
   BuiltinTaskMeta,
   WorkspaceTasksResponse,
+  WorkspaceSkillsResponse,
+  WorkspaceContextResponse,
   WorkspaceFilesResponse,
   WorkspaceWorkflowsResponse,
+  SystemCatalogResponse,
   DynamicRunEvent,
   DynamicRunSnapshot,
   ClusterQueuesResponse,
@@ -23,6 +26,46 @@ import type { LlmSettings } from '@/utils/llmSettings';
 const API_BASE = '/api';
 
 export const api = {
+  async createWorkspace(data?: {
+    workspaceId?: string;
+    name?: string;
+    mode?: string;
+  }): Promise<WorkspaceContextResponse> {
+    const response = await axios.post(`${API_BASE}/workspaces`, data || {});
+    return response.data;
+  },
+
+  async getCurrentWorkspace(params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<WorkspaceContextResponse> {
+    const response = await axios.get(`${API_BASE}/workspaces/current`, { params });
+    return response.data;
+  },
+
+  async getWorkspace(workspaceId: string): Promise<WorkspaceContextResponse> {
+    const response = await axios.get(`${API_BASE}/workspaces/${encodeURIComponent(workspaceId)}`);
+    return response.data;
+  },
+
+  async getSystemCatalog(type?: 'workflows' | 'tasks' | 'skills'): Promise<SystemCatalogResponse> {
+    const response = await axios.get(`${API_BASE}/system-catalog`, {
+      params: type ? { type } : undefined,
+    });
+    return response.data;
+  },
+
+  async importSystemCatalogItem(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    type: 'workflows' | 'tasks' | 'skills';
+    sourceId: string;
+    targetPath?: string;
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE}/system-catalog/import`, data);
+    return response.data;
+  },
+
   // Get builtin tasks list
   async getBuiltinTasks(): Promise<BuiltinTaskMeta[]> {
     const response = await axios.get(`${API_BASE}/builtin-tasks`);
@@ -37,8 +80,16 @@ export const api = {
     return response.data;
   },
 
+  async getWorkspaceSkills(workspaceDir?: string): Promise<WorkspaceSkillsResponse> {
+    const response = await axios.get(`${API_BASE}/workspace-skills`, {
+      params: workspaceDir ? { workspaceDir } : undefined,
+    });
+    return response.data;
+  },
+
   // Save a workspace task file
   async saveWorkspaceTask(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
     code: string;
@@ -50,6 +101,7 @@ export const api = {
 
   // Delete a workspace task file
   async deleteWorkspaceTask(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
   }): Promise<any> {
@@ -59,6 +111,7 @@ export const api = {
 
   // Rename a workspace task function
   async renameWorkspaceTask(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
     oldFunctionName: string;
@@ -77,11 +130,44 @@ export const api = {
   },
 
   async uploadWorkspaceFile(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
     contentBase64: string;
   }): Promise<any> {
     const response = await axios.post(`${API_BASE}/workspace-files/upload`, data);
+    return response.data;
+  },
+
+  async getMissingWorkspaceFiles(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    paths: string[];
+  }): Promise<{
+    success: boolean;
+    workspaceDir: string;
+    present: string[];
+    missing: string[];
+  }> {
+    const response = await axios.post(`${API_BASE}/workspace-files/missing`, data);
+    return response.data;
+  },
+
+  async updateLocalWorkspaceManifest(
+    workspaceId: string,
+    data: {
+      displayName?: string;
+      version?: string;
+      files: Array<{
+        relativePath: string;
+        name?: string;
+        type: 'file' | 'directory';
+        size?: number | null;
+        updatedAt?: string | null;
+      }>;
+    },
+  ): Promise<any> {
+    const response = await axios.put(`${API_BASE}/local-workspaces/${encodeURIComponent(workspaceId)}/manifest`, data);
     return response.data;
   },
 
@@ -125,6 +211,7 @@ export const api = {
   },
 
   async createWorkspaceFolder(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
   }): Promise<any> {
@@ -133,6 +220,7 @@ export const api = {
   },
 
   async deleteWorkspaceFile(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
   }): Promise<any> {
@@ -155,6 +243,19 @@ export const api = {
     return `${API_BASE}/workspace-files/download?${params.toString()}`;
   },
 
+  async promoteArtifactToWorkspaceFile(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    artifact: any;
+    targetPath?: string;
+    runId?: string;
+    taskId?: string;
+    overwrite?: boolean;
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE}/artifacts/promote`, data);
+    return response.data;
+  },
+
   // Get saved workflows from <workspaceDir>/workflows
   async getWorkspaceWorkflows(workspaceDir?: string): Promise<WorkspaceWorkflowsResponse> {
     const response = await axios.get(`${API_BASE}/workspace-workflows`, {
@@ -165,6 +266,7 @@ export const api = {
 
   // Save current workflow into <workspaceDir>/workflows
   async saveWorkspaceWorkflow(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath?: string | null;
     name: string;
@@ -187,6 +289,7 @@ export const api = {
 
   // Load a saved workspace workflow file
   async loadWorkspaceWorkflow(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
   }): Promise<{
@@ -210,6 +313,7 @@ export const api = {
 
   // Import an external workflow payload and materialize its task definitions into workspace tasks
   async importWorkspaceWorkflow(data: {
+    workspaceId?: string;
     workspaceDir?: string;
     payload: any;
   }): Promise<{
@@ -232,6 +336,7 @@ export const api = {
 
   // Delete a saved workspace workflow file
   async deleteWorkspaceWorkflow(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
   }): Promise<any> {
@@ -241,6 +346,7 @@ export const api = {
 
   // Rename a saved workspace workflow
   async renameWorkspaceWorkflow(data: {
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
     name: string;
@@ -286,13 +392,13 @@ export const api = {
   },
 
   // Run workflow
-  async runWorkflow(workflowId: string, workspaceDir?: string): Promise<{
+  async runWorkflow(workflowId: string, workspaceDir?: string, workspaceId?: string): Promise<{
     message: string;
     workflowId: string;
     runId: string;
     run: StaticWorkflowRunSnapshot;
   }> {
-    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`, { workspaceDir });
+    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`, { workspaceDir, workspaceId });
     return response.data;
   },
 
@@ -340,6 +446,37 @@ export const api = {
     dry_run?: boolean;
   }): Promise<{ success: boolean; cleanup: any }> {
     const response = await axios.post(`${API_BASE}/dynamic-runs/cleanup`, data);
+    return response.data;
+  },
+
+  async cleanupStaticWorkflowRuns(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    statuses?: string[];
+    older_than_days?: number | null;
+    keep_latest?: number;
+    dry_run?: boolean;
+  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; cleanup: any }> {
+    const response = await axios.post(`${API_BASE}/workflow-runs/static/cleanup`, data);
+    return response.data;
+  },
+
+  async cleanupArtifacts(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    older_than_days?: number | null;
+    dry_run?: boolean;
+  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; cleanup: any }> {
+    const response = await axios.post(`${API_BASE}/artifacts/cleanup`, data);
+    return response.data;
+  },
+
+  async migrateStaticWorkflowRuns(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    dry_run?: boolean;
+  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; migration: any }> {
+    const response = await axios.post(`${API_BASE}/workflow-runs/static/migrate`, data);
     return response.data;
   },
 
@@ -464,11 +601,17 @@ export const api = {
   async startReactRun(data: {
     mode: 'local' | 'online';
     prompt: string;
+    workspaceId?: string;
     workspaceDir?: string;
     maxSteps?: number;
     maxTokens?: number;
     timeoutSeconds?: number;
     taskTimeout?: number;
+    skills?: string[];
+    skillDirs?: string[];
+    maxSkillChars?: number;
+    execBackend?: 'workspace_sandbox' | 'docker';
+    permissionPolicy?: Record<string, any>;
     llm?: LlmSettings;
   }): Promise<{
     success: boolean;
@@ -476,6 +619,8 @@ export const api = {
     answer?: any;
     status: string;
     mode?: string;
+    skills?: string[];
+    execBackend?: string;
     eventTypes?: string[];
   }> {
     const response = await axios.post(`${API_BASE}/react-runs/start`, data);
@@ -483,6 +628,7 @@ export const api = {
   },
 
   async getStaticWorkflowRuns(params?: {
+    workspaceId?: string;
     workspaceDir?: string;
     status?: string;
     limit?: number;
@@ -494,9 +640,13 @@ export const api = {
   async getStaticWorkflowRun(
     runId: string,
     workspaceDir?: string,
+    workspaceId?: string,
   ): Promise<{ success: boolean; workspaceDir: string; run: StaticWorkflowRunSnapshot }> {
     const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
-      params: workspaceDir ? { workspaceDir } : undefined,
+      params: {
+        ...(workspaceDir ? { workspaceDir } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+      },
     });
     return response.data;
   },
@@ -504,11 +654,13 @@ export const api = {
   async getStaticWorkflowRunEvents(
     runId: string,
     workspaceDir?: string,
+    workspaceId?: string,
     after?: number,
   ): Promise<{ success: boolean; workspaceDir: string; runId: string; events: StaticWorkflowRunEvent[] }> {
     const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}/events`, {
       params: {
         ...(workspaceDir ? { workspaceDir } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
         ...(after !== undefined ? { after } : {}),
       },
     });
@@ -518,9 +670,13 @@ export const api = {
   async deleteStaticWorkflowRun(
     runId: string,
     workspaceDir?: string,
+    workspaceId?: string,
   ): Promise<{ success: boolean; workspaceDir: string; runId: string; deleted: boolean }> {
     const response = await axios.delete(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
-      data: workspaceDir ? { workspaceDir } : undefined,
+      data: {
+        ...(workspaceDir ? { workspaceDir } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+      },
     });
     return response.data;
   },
@@ -551,13 +707,12 @@ export const api = {
       onWorkflowFailed?: (error: string, traceback?: string) => void;
       onTaskUpdate?: (event: any) => void;
       onRunUpdate?: (payload: any) => void;
-      onError?: (error: Event) => void;
-      onClose?: () => void;
+      onError?: (error: Event, websocket: WebSocket) => void;
+      onClose?: (event: CloseEvent) => void;
     }
   ): WebSocket {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const hostname = window.location.hostname || 'localhost';
-    const wsUrl = `${protocol}://${hostname}:3001/ws/workflows/${workflowId}/results`;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/workflows/${encodeURIComponent(workflowId)}/results`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
@@ -612,11 +767,11 @@ export const api = {
 
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
-      callbacks.onError?.(error);
+      callbacks.onError?.(error, ws);
     };
 
-    ws.onclose = () => {
-      callbacks.onClose?.();
+    ws.onclose = (event) => {
+      callbacks.onClose?.(event);
     };
 
     return ws;

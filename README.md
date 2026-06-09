@@ -14,6 +14,7 @@
 
 
 - **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
+- **2026-06**: Maze Playground ReAct workflows now expose a single `Task Timeout` control. Maze uses it for ReAct task waits, `exec_code` subprocess defaults, and an automatically derived run-level timeout, so users do not need to tune several timeout knobs.
 - **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.
 - **2026-05**: Maze added a content-addressed artifact store for non-shared distributed file execution. Workspace inputs and task outputs can now move through `maze://artifacts/sha256/...` references instead of relying on a shared filesystem path.
 - **2026-05**: Online ReAct runs now expose `Max Tokens`, compact long tool observations, and treat malformed LLM JSON as repairable agent observations instead of failing the DynamicRun directly.
@@ -329,7 +330,7 @@ Maze Playground supports building workflows through a drag-and-drop interface, m
 maze start --head --port HEAD_PORT --playground
 ```
 
-The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include a `Max Tokens` setting; long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
+The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include `Max Tokens`; ReAct nodes and the ReAct run modal include `Task Timeout`, which controls both per-task waits and the default `Exec Code` subprocess timeout while Maze derives the run-level safety timeout automatically. Long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
 
 The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs.
 

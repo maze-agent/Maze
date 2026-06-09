@@ -3,6 +3,9 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
+from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
+from maze.client.maze.agent_permissions import AgentPermissionPolicy
+from maze.client.maze.agent_skills import create_skill_registry
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
 from maze.client.maze.skills import SkillSpec
@@ -116,6 +119,12 @@ class MaClient:
         file_context: Optional[dict] = None,
         workspace_dir: Optional[str] = None,
         artifact_mode: bool = False,
+        mcp_clients: Optional[list] = None,
+        mcp_servers: Optional[list[dict]] = None,
+        skills: Optional[list[str]] = None,
+        skill_dirs: Optional[list[str]] = None,
+        max_skill_chars: int = 12000,
+        permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> AgentRun:
         """
         Create a minimal agent runtime backed by a DynamicRun.
@@ -130,13 +139,52 @@ class MaClient:
             workspace_dir=workspace_dir,
             artifact_mode=artifact_mode,
         )
-        return AgentRun(
-            dynamic_run=dynamic_run,
-            tools=tools,
-            planner=planner,
-            max_steps=max_steps,
-            task_timeout=task_timeout,
-        )
+        mcp_manager = None
+        skill_registry = None
+        cancel_reason = "Agent creation failed"
+        try:
+            try:
+                skill_registry = create_skill_registry(
+                    skills=skills,
+                    skill_dirs=skill_dirs,
+                    max_instruction_chars=max_skill_chars,
+                )
+            except Exception as exc:
+                cancel_reason = "Skill loading failed"
+                self._emit_dynamic_run_event_best_effort(
+                    dynamic_run,
+                    "agent_skill_load_failed",
+                    self._error_event_payload(exc),
+                )
+                raise
+            try:
+                mcp_manager, mcp_tools = discover_mcp_tools_blocking(
+                    clients=mcp_clients,
+                    configs=mcp_servers,
+                )
+            except Exception as exc:
+                cancel_reason = "MCP discovery failed"
+                self._emit_dynamic_run_event_best_effort(
+                    dynamic_run,
+                    "agent_mcp_discovery_failed",
+                    self._error_event_payload(exc),
+                )
+                raise
+            return AgentRun(
+                dynamic_run=dynamic_run,
+                tools=tools,
+                planner=planner,
+                max_steps=max_steps,
+                task_timeout=task_timeout,
+                mcp_manager=mcp_manager,
+                mcp_tools=mcp_tools,
+                skill_registry=skill_registry,
+                permission_policy=permission_policy,
+            )
+        except Exception:
+            close_mcp_manager_blocking(mcp_manager)
+            self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
+            raise
 
     def create_react_workflow(
         self,
@@ -152,6 +200,12 @@ class MaClient:
         file_context: Optional[dict] = None,
         workspace_dir: Optional[str] = None,
         artifact_mode: bool = False,
+        mcp_clients: Optional[list] = None,
+        mcp_servers: Optional[list[dict]] = None,
+        agent_skills: Optional[list[str]] = None,
+        skill_dirs: Optional[list[str]] = None,
+        max_skill_chars: int = 12000,
+        permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> ReActWorkflow:
         """
         Create a ReAct workflow template backed by a DynamicRun.
@@ -169,17 +223,63 @@ class MaClient:
             workspace_dir=workspace_dir,
             artifact_mode=artifact_mode,
         )
-        return ReActWorkflow(
-            dynamic_run=dynamic_run,
-            llm_task=llm_task,
-            tools=tools,
-            max_steps=max_steps,
-            system_prompt=system_prompt,
-            skills=skills,
-            progressive_skills=progressive_skills,
-            skill_reader_max_chars=skill_reader_max_chars,
-            task_timeout=task_timeout,
-        )
+        react_skills = skills
+        registry_skill_names = agent_skills
+        if registry_skill_names is None and skill_dirs and skills:
+            string_skills = [item for item in skills if isinstance(item, str)]
+            if len(string_skills) == len(skills) and not any(Path(item).expanduser().exists() for item in string_skills):
+                registry_skill_names = [str(item) for item in string_skills]
+                react_skills = None
+        mcp_manager = None
+        skill_registry = None
+        cancel_reason = "ReAct workflow creation failed"
+        try:
+            try:
+                skill_registry = create_skill_registry(
+                    skills=registry_skill_names,
+                    skill_dirs=skill_dirs,
+                    max_instruction_chars=max_skill_chars,
+                )
+            except Exception as exc:
+                cancel_reason = "Skill loading failed"
+                self._emit_dynamic_run_event_best_effort(
+                    dynamic_run,
+                    "agent_skill_load_failed",
+                    self._error_event_payload(exc),
+                )
+                raise
+            try:
+                mcp_manager, mcp_tools = discover_mcp_tools_blocking(
+                    clients=mcp_clients,
+                    configs=mcp_servers,
+                )
+            except Exception as exc:
+                cancel_reason = "MCP discovery failed"
+                self._emit_dynamic_run_event_best_effort(
+                    dynamic_run,
+                    "agent_mcp_discovery_failed",
+                    self._error_event_payload(exc),
+                )
+                raise
+            return ReActWorkflow(
+                dynamic_run=dynamic_run,
+                llm_task=llm_task,
+                tools=tools,
+                max_steps=max_steps,
+                system_prompt=system_prompt,
+                skills=react_skills,
+                progressive_skills=progressive_skills,
+                skill_reader_max_chars=skill_reader_max_chars,
+                task_timeout=task_timeout,
+                mcp_manager=mcp_manager,
+                mcp_tools=mcp_tools,
+                skill_registry=skill_registry,
+                permission_policy=permission_policy,
+            )
+        except Exception:
+            close_mcp_manager_blocking(mcp_manager)
+            self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
+            raise
 
     def get_dynamic_run(self, run_id: str) -> DynamicRun:
         return DynamicRun(run_id, self.server_url)
@@ -287,6 +387,29 @@ class MaClient:
                 "base_url": self.server_url,
             }
         return context
+
+    def _error_event_payload(self, exc: Exception) -> dict:
+        return {
+            "error": {
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "repairable": False,
+            }
+        }
+
+    def _emit_dynamic_run_event_best_effort(self, dynamic_run: DynamicRun, event_type: str, data: dict) -> None:
+        try:
+            dynamic_run.emit_event(event_type, data)
+        except Exception:
+            pass
+
+    def _cancel_dynamic_run_best_effort(self, dynamic_run: DynamicRun, reason: str) -> None:
+        try:
+            status = dynamic_run.get_status().get("status")
+            if status not in {"finalized", "failed", "canceled", "timed_out", "interrupted"}:
+                dynamic_run.cancel(reason)
+        except Exception:
+            pass
 
     def list_dynamic_runs(
         self,

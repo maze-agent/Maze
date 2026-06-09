@@ -49,11 +49,37 @@ export interface WorkspaceTaskMeta {
 }
 
 export interface WorkspaceTasksResponse {
+  workspaceId?: string;
   workspaceDir: string;
+  workspaceManifestVersion?: number;
   tasksDir: string;
   tasks: WorkspaceTaskMeta[];
   errors?: Array<{
     relativePath: string;
+    error: string;
+    traceback?: string;
+  }>;
+}
+
+export interface WorkspaceSkillMeta {
+  name: string;
+  path: string;
+  description?: string;
+  metadata?: Record<string, any>;
+  resources?: Array<Record<string, any>>;
+  truncated?: boolean;
+  original_chars?: number;
+  returned_chars?: number;
+}
+
+export interface WorkspaceSkillsResponse {
+  success: boolean;
+  workspaceId?: string;
+  workspaceDir: string;
+  workspaceManifestVersion?: number;
+  skillsDir: string;
+  skills: WorkspaceSkillMeta[];
+  errors?: Array<{
     error: string;
     traceback?: string;
   }>;
@@ -76,22 +102,82 @@ export interface WorkspaceFileMeta {
   updatedAt?: string;
 }
 
+export interface LocalWorkspaceFileMeta {
+  name: string;
+  relativePath: string;
+  type: 'file' | 'directory';
+  size?: number | null;
+  updatedAt?: string | null;
+}
+
 export interface WorkspaceFilesResponse {
   success: boolean;
+  workspaceId?: string;
   workspaceDir: string;
+  workspaceManifestVersion?: number;
   filesDir: string;
   path: string;
   files: WorkspaceFileMeta[];
 }
 
 export interface WorkspaceWorkflowsResponse {
+  workspaceId?: string;
   workspaceDir: string;
+  workspaceManifestVersion?: number;
   workflowsDir: string;
   workflows: WorkspaceWorkflowMeta[];
   errors?: Array<{
     relativePath: string;
     error: string;
   }>;
+}
+
+export interface WorkspaceManifest {
+  schema?: string;
+  schema_version?: number;
+  manifest_version?: number;
+  workspace_id: string;
+  name: string;
+  created_at?: string;
+  updated_at?: string;
+  mode?: string;
+  default_sandbox?: 'workspace_sandbox' | 'docker' | string;
+  files_dir?: string;
+  workflows_dir?: string;
+  tasks_dir?: string;
+  skills_dir?: string;
+  runs_dir?: string;
+  policy_path?: string;
+  imports?: Array<Record<string, any>>;
+  local_mounts?: Array<Record<string, any>>;
+  last_change?: Record<string, any>;
+}
+
+export interface WorkspaceContextResponse {
+  success: boolean;
+  workspaceId: string;
+  workspaceDir: string;
+  workspaceManifestVersion?: number;
+  manifest: WorkspaceManifest;
+}
+
+export interface SystemCatalogItem {
+  type: 'workflows' | 'tasks' | 'skills' | string;
+  id: string;
+  name: string;
+  path: string;
+  kind: 'file' | 'directory';
+  size?: number | null;
+  updatedAt?: string;
+  description?: string;
+  tags?: string[];
+  recommendedSkills?: string[];
+}
+
+export interface SystemCatalogResponse {
+  success: boolean;
+  catalogDir: string;
+  catalog: Record<'workflows' | 'tasks' | 'skills', SystemCatalogItem[]>;
 }
 
 export interface TaskDefinition {
@@ -123,6 +209,10 @@ export interface WorkflowNode {
     prompt?: string;
     maxSteps?: number;
     maxTokens?: number;
+    taskTimeout?: number;
+    skills?: string[];
+    recommendedSkills?: string[];
+    execBackend?: 'workspace_sandbox' | 'docker';
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;
@@ -178,6 +268,12 @@ export interface ClusterResourceNode {
       available_count: number;
       devices: ClusterGpuDevice[];
     };
+  };
+  capabilities?: {
+    workspace_sandbox?: boolean;
+    docker_sandbox?: boolean;
+    docker_reason?: string;
+    [key: string]: any;
   };
   ray_resources?: Record<string, number>;
 }
@@ -323,6 +419,8 @@ export interface StaticWorkflowRunSnapshot {
   workflow_id: string;
   workflow_name: string;
   workspace_dir?: string;
+  workspace_id?: string;
+  workspace_manifest_version?: number | null;
   status: StaticWorkflowRunStatus;
   created_time?: number;
   updated_time?: number;

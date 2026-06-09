@@ -386,6 +386,7 @@ class MaPath:
         inputs:Dict[str,Any]|None=None,
         parents:List[str]|None=None,
         request_id:str|None=None,
+        resources:Dict[str,Any]|None=None,
     ):
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
@@ -401,6 +402,7 @@ class MaPath:
             inputs=inputs,
             parents=parents,
             request_id=request_id,
+            resources=resources,
         )
 
         if not idempotent:
@@ -415,6 +417,7 @@ class MaPath:
                     "parents": sorted(dynamic_run.task_parents.get(task.task_id, set())),
                     "request_id": request_id,
                     "status": status,
+                    "resources": task.resources,
                 },
             })
 
@@ -431,7 +434,7 @@ class MaPath:
             "type": "finish_workflow",
             "data": {
                 "run_id": run_id,
-                "result": summarize_task_result(result),
+                "result": summarize_task_result(result, run_id=run_id),
             },
         })
 
@@ -456,7 +459,9 @@ class MaPath:
     async def get_dynamic_run_snapshot(self, run_id:str):
         if run_id in self.dynamic_runs:
             await self._refresh_dynamic_timeout(run_id)
-            return self.get_dynamic_run(run_id).snapshot(summarize_task_result)
+            return self.get_dynamic_run(run_id).snapshot(
+                lambda result: summarize_task_result(result, run_id=run_id)
+            )
         return self.dynamic_run_store.load_run(run_id)
 
     async def get_dynamic_run_events(self, run_id:str, after:int|None=None):
@@ -584,15 +589,18 @@ class MaPath:
     async def _emit_dynamic_event(self, run_id:str, event:Dict[str,Any]):
         dynamic_run = self.get_dynamic_run(run_id)
         stored_event = dynamic_run.append_event(event)
-        self.dynamic_run_store.append_event(run_id, stored_event)
-        self._persist_dynamic_run(run_id)
+        snapshot = dynamic_run.snapshot(lambda result: summarize_task_result(result, run_id=run_id))
+        self.dynamic_run_store.append_event(run_id, stored_event, snapshot=snapshot)
+        self.dynamic_run_store.save_run(snapshot)
         que = self.async_que.get(run_id)
         if que is not None:
             await que.put({"type": "dynamic_event"})
 
     def _persist_dynamic_run(self, run_id:str):
         dynamic_run = self.get_dynamic_run(run_id)
-        self.dynamic_run_store.save_run(dynamic_run.snapshot(summarize_task_result))
+        self.dynamic_run_store.save_run(
+            dynamic_run.snapshot(lambda result: summarize_task_result(result, run_id=run_id))
+        )
 
     def _persist_static_run(self, run_id:str):
         static_run = self.static_runs.get(run_id)
@@ -758,7 +766,9 @@ class MaPath:
 
         if run_id in self.dynamic_runs:
             return self._normalize_dynamic_run_snapshot(
-                self.get_dynamic_run(run_id).snapshot(summarize_task_result)
+                self.get_dynamic_run(run_id).snapshot(
+                    lambda result: summarize_task_result(result, run_id=run_id)
+                )
             )
         return self._normalize_dynamic_run_snapshot(self.dynamic_run_store.load_run(run_id))
 
@@ -807,18 +817,72 @@ class MaPath:
             artifacts.append(artifact)
         return artifacts
 
+    def _artifacts_from_run_events(self, run_id: str, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        artifacts = []
+        seen = set()
+
+        def add_artifact(artifact: Dict[str, Any], data: Dict[str, Any] | None = None):
+            artifact = copy.deepcopy(artifact)
+            if not artifact:
+                return
+            if not artifact.get("sha256") or not artifact.get("path"):
+                return
+            data = data or {}
+            artifact.setdefault("run_id", run_id)
+            artifact.setdefault("task_id", data.get("task_id"))
+            artifact.setdefault("producer_task_id", artifact.get("task_id"))
+            dedupe_key = (
+                artifact.get("sha256"),
+                artifact.get("task_id"),
+                artifact.get("path"),
+            )
+            if dedupe_key in seen:
+                return
+            seen.add(dedupe_key)
+            artifacts.append(artifact)
+
+        def walk_result_summary(value: Any, data: Dict[str, Any] | None = None):
+            if isinstance(value, dict):
+                artifact = value.get("artifact")
+                if isinstance(artifact, dict):
+                    add_artifact(artifact, data)
+                for item in value.values():
+                    walk_result_summary(item, data)
+            elif isinstance(value, list):
+                for item in value:
+                    walk_result_summary(item, data)
+
+        for event in events:
+            data = event.get("data") or {}
+            if event.get("type") == "agent_tool_output_artifact":
+                add_artifact(data.get("artifact") or {}, data)
+                continue
+            if event.get("type") in {"finish_task", "finish_workflow"}:
+                walk_result_summary(data.get("result"), data)
+        return artifacts
+
     async def get_run_artifacts(self, run_id:str):
         snapshot = await self.get_run_snapshot(run_id)
         task_nodes = snapshot.get("task_nodes") or {}
+        events = await self.get_run_events(run_id)
         artifacts = []
         for task in task_nodes.values():
             artifacts.extend(self._artifacts_from_task_snapshot(run_id, task))
+        artifacts.extend(self._artifacts_from_run_events(run_id, events))
         artifacts.sort(key=lambda item: (item.get("task_id") or "", item.get("path") or ""))
         return artifacts
 
     async def get_run_task_artifacts(self, run_id:str, task_id:str):
         task = await self.get_run_task(run_id, task_id)
-        return self._artifacts_from_task_snapshot(run_id, task)
+        artifacts = self._artifacts_from_task_snapshot(run_id, task)
+        events = await self.get_run_events(run_id)
+        artifacts.extend([
+            artifact
+            for artifact in self._artifacts_from_run_events(run_id, events)
+            if artifact.get("task_id") == task_id or artifact.get("producer_task_id") == task_id
+        ])
+        artifacts.sort(key=lambda item: item.get("path") or "")
+        return artifacts
 
     def _event_log_line(self, event:Dict[str,Any]) -> Dict[str,Any]:
         data = event.get("data") or {}
@@ -996,7 +1060,7 @@ class MaPath:
         finally:
             self.cluster_queue_requests.pop(request_id, None)
     
-    async def start_worker(self,node_ip:str,node_id:str,resources:Dict, timeout: float = 5.0):
+    async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.worker_registration_requests[request_id] = response_queue
@@ -1006,7 +1070,8 @@ class MaPath:
                 "request_id":request_id,
                 "node_ip":node_ip,
                 "node_id":node_id,
-                "resources":resources
+                "resources":resources,
+                "capabilities":capabilities or {"workspace_sandbox": True, "docker_sandbox": False},
             }
         }
         self._send_scheduler_message(message)

@@ -689,6 +689,7 @@ async def append_dynamic_task(run_id: str, req: Request):
             inputs=data.get("inputs", {}),
             parents=data.get("parents", []),
             request_id=data.get("request_id"),
+            resources=data.get("resources") or data.get("resource_override"),
         )
         outputs = []
         if task.task_output:
@@ -937,7 +938,12 @@ async def get_artifact(sha256: str):
 async def start_worker(req:Request):
     try:
         data = await req.json()
-        worker = await mapath.start_worker(data["node_ip"], data["node_id"], data["resources"])
+        worker = await mapath.start_worker(
+            data["node_ip"],
+            data["node_id"],
+            data["resources"],
+            data.get("capabilities"),
+        )
         return {"status": "success", "worker": worker}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler worker registration")

@@ -4,12 +4,15 @@ import { ThunderboltOutlined } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings } from '@/utils/llmSettings';
+import { computeReactRunTimeout, defaultReactTaskTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
+import type { WorkspaceSkillMeta } from '@/types/workflow';
 import type { LlmSettings } from '@/utils/llmSettings';
 
 const { Text } = Typography;
 const { TextArea } = Input;
 
 type ReActMode = 'local' | 'online';
+type ExecBackend = 'workspace_sandbox' | 'docker';
 
 interface ReActRunModalProps {
   open: boolean;
@@ -18,18 +21,86 @@ interface ReActRunModalProps {
 }
 
 export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunModalProps) {
-  const { workspaceDir } = useWorkflowStore();
+  const { workspaceId, workspaceDir } = useWorkflowStore();
   const [mode, setMode] = useState<ReActMode>('local');
   const [prompt, setPrompt] = useState('Use the calculator to compute 18 * 7, then give the final answer.');
   const [maxSteps, setMaxSteps] = useState(4);
   const [maxTokens, setMaxTokens] = useState(2048);
+  const [taskTimeout, setTaskTimeout] = useState<number>(defaultReactTaskTimeout('local'));
   const [llmSettings, setLlmSettings] = useState<LlmSettings>(DEFAULT_LLM_SETTINGS);
+  const [availableSkills, setAvailableSkills] = useState<WorkspaceSkillMeta[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [execBackend, setExecBackend] = useState<ExecBackend>('workspace_sandbox');
+  const [dockerAvailable, setDockerAvailable] = useState(false);
+  const [dockerReason, setDockerReason] = useState('');
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
     if (open) {
       setLlmSettings(loadLlmSettings());
     }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    let canceled = false;
+    setSkillsLoading(true);
+    api.getWorkspaceSkills(workspaceDir || undefined)
+      .then((result) => {
+        if (canceled) return;
+        const skills = result.skills || [];
+        const skillNames = new Set(skills.map((skill) => skill.name));
+        setAvailableSkills(skills);
+        setSelectedSkills((current) => current.filter((name) => skillNames.has(name)));
+      })
+      .catch((error) => {
+        if (canceled) return;
+        console.error('Failed to load workspace skills:', error);
+        setAvailableSkills([]);
+        setSelectedSkills([]);
+        message.warning(error.response?.data?.error || 'Failed to load workspace skills');
+      })
+      .finally(() => {
+        if (!canceled) {
+          setSkillsLoading(false);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [open, workspaceDir]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    let canceled = false;
+    api.getClusterResources()
+      .then((result) => {
+        if (canceled) return;
+        const nodes = result.cluster?.nodes || [];
+        const dockerNode = nodes.find((node) => node.alive && node.capabilities?.docker_sandbox);
+        setDockerAvailable(Boolean(dockerNode));
+        const reason = nodes
+          .map((node) => node.capabilities?.docker_reason)
+          .find((value) => typeof value === 'string' && value.length > 0);
+        setDockerReason(reason || '');
+        if (!dockerNode) {
+          setExecBackend('workspace_sandbox');
+        }
+      })
+      .catch(() => {
+        if (canceled) return;
+        setDockerAvailable(false);
+        setDockerReason('Cluster capability unavailable');
+        setExecBackend('workspace_sandbox');
+      });
+
+    return () => {
+      canceled = true;
+    };
   }, [open]);
 
   const runReactWorkflow = async () => {
@@ -59,11 +130,14 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
       const result = await api.startReactRun({
         mode,
         prompt: trimmedPrompt,
+        workspaceId: workspaceId || undefined,
         workspaceDir: workspaceDir || undefined,
         maxSteps,
         maxTokens,
-        timeoutSeconds: mode === 'online' ? 180 : 90,
-        taskTimeout: mode === 'online' ? 120 : 60,
+        timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
+        taskTimeout,
+        skills: selectedSkills,
+        execBackend,
         llm: mode === 'online'
           ? {
               ...llmSettings,
@@ -98,7 +172,7 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
       }
       open={open}
       onCancel={onClose}
-      width={640}
+      width={720}
       footer={[
         <Button key="cancel" onClick={onClose} disabled={running}>
           Cancel
@@ -111,7 +185,11 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Segmented
           value={mode}
-          onChange={(value) => setMode(value as ReActMode)}
+          onChange={(value) => {
+            const nextMode = value as ReActMode;
+            setMode(nextMode);
+            setTaskTimeout(defaultReactTaskTimeout(nextMode));
+          }}
           options={[
             { label: 'Local Demo', value: 'local' },
             { label: 'Online LLM', value: 'online' },
@@ -140,6 +218,42 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
         </div>
 
         <div>
+          <Text strong>Skills</Text>
+          <Select
+            mode="multiple"
+            allowClear
+            loading={skillsLoading}
+            value={selectedSkills}
+            onChange={setSelectedSkills}
+            optionLabelProp="value"
+            placeholder="No skills selected"
+            notFoundContent={skillsLoading ? 'Loading...' : 'No workspace skills'}
+            options={availableSkills.map((skill) => ({
+              label: skill.description ? `${skill.name} - ${skill.description}` : skill.name,
+              value: skill.name,
+            }))}
+            style={{ width: '100%', marginTop: 6 }}
+          />
+        </div>
+
+        <div>
+          <Text strong>Sandbox</Text>
+          <Select
+            value={execBackend}
+            onChange={(value) => setExecBackend(value as ExecBackend)}
+            options={[
+              { label: 'Workspace Sandbox', value: 'workspace_sandbox' },
+              {
+                label: dockerAvailable ? 'Docker Sandbox' : `Docker Sandbox${dockerReason ? ` - ${dockerReason}` : ''}`,
+                value: 'docker',
+                disabled: !dockerAvailable,
+              },
+            ]}
+            style={{ width: '100%', display: 'block', marginTop: 6 }}
+          />
+        </div>
+
+        <div>
           <Text strong>Max Steps</Text>
           <InputNumber
             min={3}
@@ -147,6 +261,19 @@ export default function ReActRunModal({ open, onClose, onCompleted }: ReActRunMo
             value={maxSteps}
             onChange={(value) => setMaxSteps(Number(value || 4))}
             style={{ display: 'block', width: 160, marginTop: 6 }}
+          />
+        </div>
+
+        <div>
+          <Text strong>Task Timeout</Text>
+          <InputNumber
+            min={10}
+            max={600}
+            step={10}
+            addonAfter="s"
+            value={taskTimeout}
+            onChange={(value) => setTaskTimeout(normalizeReactTaskTimeout(value, mode))}
+            style={{ display: 'block', width: 180, marginTop: 6 }}
           />
         </div>
 

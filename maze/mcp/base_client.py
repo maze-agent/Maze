@@ -9,6 +9,7 @@ class BaseClient():
     is_connected: bool
 
     def __init__(self, name: str) -> None:
+        self.name = name
         self.client = None
         self.stack = None
         self.session = None

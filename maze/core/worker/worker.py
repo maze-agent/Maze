@@ -6,6 +6,7 @@ import logging
 import requests
 import socket
 from maze.utils.utils import collect_gpu_info
+from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -187,12 +188,14 @@ class Worker():
     @staticmethod
     def _register_worker(addr: str):
         current_node_id, current_node_ip, resources = Worker._current_node_resources()
+        capabilities = detect_agent_sandbox_capabilities()
         response = Worker._send_post_request(
             url=f"http://{addr}/start_worker",
             data={
                 "node_ip":current_node_ip,
                 "node_id":current_node_id,
                 "resources":resources,
+                "capabilities":capabilities,
             },
             retries=5,
             retry_delay=1,
@@ -218,7 +221,9 @@ class Worker():
         print(
             "===Success to register worker=== "
             f"{Worker._registration_summary(response)} "
-            f"cpu={resources['cpu']} gpu={len(resources['gpu_resource'])}"
+            f"cpu={resources['cpu']} gpu={len(resources['gpu_resource'])} "
+            f"workspace_sandbox={capabilities.get('workspace_sandbox')} "
+            f"docker_sandbox={capabilities.get('docker_sandbox')}"
         )
         return response
 

@@ -1,5 +1,8 @@
 from maze.client.langgraph.client import LanggraphClient
 from maze.client.maze.agent import AgentContext, AgentRun, AgentStep
+from maze.client.maze.agent_permissions import AgentPermissionAction, AgentPermissionPolicy, AgentPermissionRule
+from maze.client.maze.agent_sandbox import WorkspaceSandbox
+from maze.client.maze.agent_skills import AgentLoadedSkill, AgentSkillError, AgentSkillRegistry, AgentSkillSpec
 from maze.client.maze.client import MaClient
 from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
 from maze.client.maze.react_llm import create_openai_react_llm_task
@@ -16,6 +19,14 @@ __all__ = [
     "AgentContext",
     "AgentRun",
     "AgentStep",
+    "AgentPermissionAction",
+    "AgentPermissionPolicy",
+    "AgentPermissionRule",
+    "WorkspaceSandbox",
+    "AgentLoadedSkill",
+    "AgentSkillError",
+    "AgentSkillRegistry",
+    "AgentSkillSpec",
     "MaClient",
     "DynamicRun",
     "DynamicTaskInvocation",

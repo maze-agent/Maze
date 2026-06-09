@@ -29,6 +29,7 @@ htmlcov/
 # Logs and databases
 *.sqlite
 *.db
+logs/
 
 # Environment files
 .env
@@ -38,8 +39,20 @@ env/
 
 # Project specific
 log.txt
+model_cache/
+workspace/workspace.json
+workspace/policies/
 workspace/files/
+workspace/workspaces/
+workspace/workspaces/*/files/
+workspace/workspaces/*/runs/
 workspace/workflow_runs/
+/files/
+/skills/
+/tasks/
+/workflows/
+/workflow_runs/
+web/maze_playground/backend/D*/
 
 # Ignore sensitive configuration files
 secrets.py

@@ -1,16 +1,21 @@
 import { KeyboardEvent, useEffect, useState } from 'react';
-import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert, InputNumber } from 'antd';
+import { Drawer, Form, Input, Select, Button, Typography, Popconfirm, Space, Divider, Tag, Alert, InputNumber, message } from 'antd';
 import { DeleteOutlined, CheckOutlined, CodeOutlined, EditOutlined, PartitionOutlined } from '@ant-design/icons';
+import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
+import { defaultReactTaskTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
+import type { WorkspaceSkillMeta } from '@/types/workflow';
 import CustomTaskEditor from './CustomTaskEditor';
 
 const { Title } = Typography;
 
 export default function NodePanel() {
-  const { selectedNode, selectNode, updateNode, deleteNode, nodes } = useWorkflowStore();
+  const { selectedNode, selectNode, updateNode, deleteNode, nodes, workspaceDir } = useWorkflowStore();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState('');
+  const [availableSkills, setAvailableSkills] = useState<WorkspaceSkillMeta[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
 
   const currentNode = selectedNode ? (nodes.find(n => n.id === selectedNode.id) || selectedNode) : null;
 
@@ -19,6 +24,35 @@ export default function NodePanel() {
       setLabelDraft(currentNode?.data.label || '');
     }
   }, [currentNode?.id, currentNode?.data.label, editingLabel]);
+
+  useEffect(() => {
+    if (!currentNode || currentNode.data.category !== 'agent') {
+      return undefined;
+    }
+
+    let canceled = false;
+    setSkillsLoading(true);
+    api.getWorkspaceSkills(workspaceDir || undefined)
+      .then((result) => {
+        if (canceled) return;
+        setAvailableSkills(result.skills || []);
+      })
+      .catch((error) => {
+        if (canceled) return;
+        console.error('Failed to load workspace skills:', error);
+        setAvailableSkills([]);
+        message.warning(error.response?.data?.error || 'Failed to load workspace skills');
+      })
+      .finally(() => {
+        if (!canceled) {
+          setSkillsLoading(false);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [currentNode?.id, currentNode?.data.category, workspaceDir]);
 
   if (!currentNode) {
     return null;
@@ -46,6 +80,20 @@ export default function NodePanel() {
   const isAgentNode = currentNode.data.category === 'agent';
   const isEditableTask = isCustomTask || isWorkspaceTask;
   const isConfigured = currentNode.data.configured;
+  const selectedSkills = currentNode.data.skills || [];
+  const availableSkillNames = new Set(availableSkills.map((skill) => skill.name));
+  const skillOptions = [
+    ...availableSkills.map((skill) => ({
+      label: skill.description ? `${skill.name} - ${skill.description}` : skill.name,
+      value: skill.name,
+    })),
+    ...selectedSkills
+      .filter((skill) => !availableSkillNames.has(skill))
+      .map((skill) => ({
+        label: `${skill} (missing)`,
+        value: skill,
+      })),
+  ];
 
   const commitLabel = () => {
     const nextLabel = labelDraft.trim() || currentNode.data.label;
@@ -164,7 +212,10 @@ export default function NodePanel() {
               <Form.Item label="Mode">
                 <Select
                   value={currentNode.data.reactMode || 'local'}
-                  onChange={(reactMode) => updateNode(currentNode.id, { reactMode })}
+                  onChange={(reactMode) => updateNode(currentNode.id, {
+                    reactMode,
+                    taskTimeout: normalizeReactTaskTimeout(currentNode.data.taskTimeout, reactMode),
+                  })}
                 >
                   <Select.Option value="local">Local Demo</Select.Option>
                   <Select.Option value="online">Online LLM</Select.Option>
@@ -177,6 +228,20 @@ export default function NodePanel() {
                   onChange={(event) => updateNode(currentNode.id, { prompt: event.target.value })}
                 />
               </Form.Item>
+              <Form.Item label="Skills">
+                <Select
+                  mode="multiple"
+                  allowClear
+                  loading={skillsLoading}
+                  value={selectedSkills}
+                  onChange={(skills) => updateNode(currentNode.id, { skills })}
+                  optionLabelProp="value"
+                  placeholder="No skills selected"
+                  notFoundContent={skillsLoading ? 'Loading...' : 'No workspace skills'}
+                  options={skillOptions}
+                  maxTagCount="responsive"
+                />
+              </Form.Item>
               <Form.Item label="Max Steps">
                 <InputNumber
                   min={3}
@@ -184,6 +249,19 @@ export default function NodePanel() {
                   value={currentNode.data.maxSteps || 4}
                   onChange={(value) => updateNode(currentNode.id, { maxSteps: Number(value || 4) })}
                   style={{ width: 160 }}
+                />
+              </Form.Item>
+              <Form.Item label="Task Timeout">
+                <InputNumber
+                  min={10}
+                  max={600}
+                  step={10}
+                  addonAfter="s"
+                  value={currentNode.data.taskTimeout || defaultReactTaskTimeout(currentNode.data.reactMode || 'local')}
+                  onChange={(value) => updateNode(currentNode.id, {
+                    taskTimeout: normalizeReactTaskTimeout(value, currentNode.data.reactMode || 'local'),
+                  })}
+                  style={{ width: 180 }}
                 />
               </Form.Item>
               {currentNode.data.reactMode === 'online' && (

@@ -6,6 +6,7 @@ from typing import Any,List,Dict
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.scheduler.runtime import SelectedNode
+from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 from maze.utils.utils import collect_gpu_info
 
 logger = logging.getLogger(__name__)
@@ -55,24 +56,26 @@ class ResourceSelection:
 
 
 class Node():
-    def __init__(self,node_id:str,node_ip:str,available_resources:dict,total_resources:dict):
+    def __init__(self,node_id:str,node_ip:str,available_resources:dict,total_resources:dict,capabilities:dict | None = None):
         self.node_id = node_id
         self.node_ip = node_ip
         self.available_resources = copy.deepcopy(available_resources)
         self.total_resources = copy.deepcopy(total_resources)
+        self.capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True, "docker_sandbox": False})
         now = time.time()
         self.registered_time = now
         self.last_seen_time = now
         self.last_ray_seen_time = now
         self.last_resource_update_time = now
 
-    def update_registration(self, node_ip: str, resources: dict) -> str:
+    def update_registration(self, node_ip: str, resources: dict, capabilities: dict | None = None) -> str:
         normalized_resources = copy.deepcopy(resources)
         normalized_resources["gpu_resource"] = {
             int(k): v for k, v in normalized_resources.get("gpu_resource", {}).items()
         }
         self.last_seen_time = time.time()
         self.node_ip = node_ip
+        self.capabilities = copy.deepcopy(capabilities or self.capabilities)
 
         if normalized_resources == self.total_resources:
             return "already_registered"
@@ -184,7 +187,13 @@ class ResourceManager():
         while True:
             for node in ray.nodes():
                 if node["NodeID"] == self.head_node_id and node["Alive"]:     
-                    self.nodes[self.head_node_id] = Node(self.head_node_id,self.head_node_ip,head_node_resource,head_node_resource)
+                    self.nodes[self.head_node_id] = Node(
+                        self.head_node_id,
+                        self.head_node_ip,
+                        head_node_resource,
+                        head_node_resource,
+                        detect_agent_sandbox_capabilities(),
+                    )
                     self.running_task_counts.setdefault(self.head_node_id, 0)
                     return
                     
@@ -287,6 +296,7 @@ class ResourceManager():
                     },
                     "gpu": self._gpu_snapshot(node),
                 },
+                "capabilities": copy.deepcopy(node.capabilities),
                 "ray_resources": ray_node.get("Resources", {}) if ray_node else {},
             })
 
@@ -302,6 +312,7 @@ class ResourceManager():
                 "role": "worker",
                 "registered": False,
                 "alive": True,
+                "capabilities": {"workspace_sandbox": True, "docker_sandbox": False},
                 "ray_resources": ray_node.get("Resources", {}),
             })
 
@@ -340,6 +351,7 @@ class ResourceManager():
 
         reason_priority = [
             "specified_node_unavailable",
+            "missing_capability",
             "insufficient_cpu",
             "insufficient_cpu_mem",
             "insufficient_gpu",
@@ -384,6 +396,7 @@ class ResourceManager():
         assert(gpu_need <= 1)
 
         target_node_id = task_need_resources.get("node_id") or task_need_resources.get("target_node_id")
+        required_capability = task_need_resources.get("required_capability")
         ray_nodes = self._ray_node_index()
         candidates = []
 
@@ -403,6 +416,8 @@ class ResourceManager():
                 reject_reasons.append("insufficient_cpu")
             if node.available_resources.get('cpu_mem', 0) < cpu_mem_need:
                 reject_reasons.append("insufficient_cpu_mem")
+            if required_capability and not node.capabilities.get(required_capability):
+                reject_reasons.append("missing_capability")
 
             if gpu_need > 0:
                 gpu_options = []
@@ -430,6 +445,7 @@ class ResourceManager():
                 "running_task_count": self.running_task_counts.get(node_id, 0),
                 "available_cpu": node.available_resources.get("cpu", 0),
                 "available_resources": self._node_resource_snapshot(node),
+                "capabilities": copy.deepcopy(node.capabilities),
                 "reject_reasons": reject_reasons,
                 "can_run": len(reject_reasons) == 0,
             }
@@ -477,6 +493,7 @@ class ResourceManager():
             "node_id": selected_node.node_id,
             "node_ip": selected_node.node_ip,
             "gpu_id": selected_node.gpu_id,
+            "capabilities": copy.deepcopy(node.capabilities),
         }
         return ResourceSelection(selected_node, decision)
 
@@ -504,17 +521,18 @@ class ResourceManager():
         self.nodes[node_id].release_resource(resources,gpu_id)
         
 
-    def start_worker(self,node_id:str,node_ip:str,resources:dict,):
+    def start_worker(self,node_id:str,node_ip:str,resources:dict,capabilities:dict | None = None):
         '''
         Start worker node
         '''
         logger.info("New worker node join: node_id:%s,node_ip:%s", node_id,node_ip)
         gpu_resource = {int(k): v for k, v in resources['gpu_resource'].items()}
         resources["gpu_resource"] = gpu_resource
+        capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True, "docker_sandbox": False})
         if node_id in self.nodes:
-            registration_status = self.nodes[node_id].update_registration(node_ip, resources)
+            registration_status = self.nodes[node_id].update_registration(node_ip, resources, capabilities)
         else:
-            self.nodes[node_id] = Node(node_id,node_ip,resources,resources)
+            self.nodes[node_id] = Node(node_id,node_ip,resources,resources,capabilities)
             registration_status = "created"
         self.running_task_counts.setdefault(node_id, 0)
         return {
@@ -522,6 +540,7 @@ class ResourceManager():
             "node_id": node_id,
             "node_ip": node_ip,
             "resources": copy.deepcopy(self.nodes[node_id].total_resources),
+            "capabilities": copy.deepcopy(self.nodes[node_id].capabilities),
             "registered_time": self.nodes[node_id].registered_time,
             "last_seen_time": self.nodes[node_id].last_seen_time,
         }

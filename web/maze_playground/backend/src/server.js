@@ -9,6 +9,7 @@ import http from 'http';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import crypto from 'crypto';
+import os from 'os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -24,8 +25,14 @@ const workflows = new Map();
 // 存储 WebSocket 连接
 const wsConnections = new Map(); // workflowId -> Set<WebSocket>
 const activeReactRunProcesses = new Map();
+const localWorkspaceManifests = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
-const DEFAULT_WORKSPACE_DIR = process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace');
+const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace'));
+const WORKSPACES_DIR = path.resolve(process.env.MAZE_WORKSPACES_DIR || path.join(WORKSPACE_ROOT_DIR, 'workspaces'));
+const DEFAULT_WORKSPACE_ID = process.env.MAZE_DEFAULT_WORKSPACE_ID || 'default';
+const DEFAULT_WORKSPACE_DIR = path.join(WORKSPACES_DIR, DEFAULT_WORKSPACE_ID);
+const LEGACY_WORKSPACE_DIR = WORKSPACE_ROOT_DIR;
+const SYSTEM_CATALOG_DIR = path.resolve(process.env.MAZE_SYSTEM_CATALOG_DIR || path.join(PROJECT_ROOT, 'system_catalog'));
 const MAZE_CORE_URL = process.env.MAZE_CORE_URL || 'http://localhost:8000';
 const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled', 'interrupted']);
 const staticRunWriteQueues = new Map();
@@ -79,15 +86,255 @@ function safeFileName(name, fallbackPrefix = 'workflow') {
   return `${fallbackPrefix}-${stamp}`;
 }
 
+function safeWorkspaceId(value, fallbackPrefix = 'ws') {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return safe || `${fallbackPrefix}-${Date.now().toString(36)}`;
+}
+
+function isWindowsDrivePath(value) {
+  return /^[a-zA-Z]:[\\/]/.test(String(value || '').trim());
+}
+
+function rejectUnsafeWorkspaceInput(value) {
+  const text = String(value || '').trim();
+  if (!text) return;
+  if (isWindowsDrivePath(text)) {
+    throw new Error('Windows drive paths cannot be used as service-side workspace paths');
+  }
+  if (text.includes('\\')) {
+    throw new Error('Workspace paths must use POSIX-style separators on this service');
+  }
+}
+
+function workspaceIdFromDir(workspaceDir) {
+  const resolved = path.resolve(workspaceDir);
+  const relative = path.relative(WORKSPACES_DIR, resolved);
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    return safeWorkspaceId(relative.split(path.sep)[0], DEFAULT_WORKSPACE_ID);
+  }
+  if (resolved === LEGACY_WORKSPACE_DIR) {
+    return 'legacy';
+  }
+  return safeWorkspaceId(path.basename(resolved), DEFAULT_WORKSPACE_ID);
+}
+
+function resolveWorkspaceDirInput(input = '') {
+  const raw = String(input || '').trim();
+  rejectUnsafeWorkspaceInput(raw);
+  if (!raw) {
+    return DEFAULT_WORKSPACE_DIR;
+  }
+
+  if (!raw.includes('/') && !path.isAbsolute(raw)) {
+    return path.join(WORKSPACES_DIR, safeWorkspaceId(raw, DEFAULT_WORKSPACE_ID));
+  }
+
+  const resolved = path.resolve(raw);
+  if (resolved === PROJECT_ROOT) {
+    throw new Error('Project root cannot be used as a workspace directory');
+  }
+  return resolved;
+}
+
+async function readJsonFile(filePath, fallback = null) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf-8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+function workspaceManifestPath(workspaceDir) {
+  return path.join(workspaceDir, 'workspace.json');
+}
+
+async function writeWorkspaceManifest(workspaceDir, manifest) {
+  const now = new Date().toISOString();
+  const next = {
+    ...manifest,
+    updated_at: now,
+    manifest_version: Number(manifest.manifest_version || 0) + 1,
+  };
+  await writeJsonAtomic(workspaceManifestPath(workspaceDir), next);
+  return next;
+}
+
+async function ensureWorkspaceManifest(workspaceDir, options = {}) {
+  const workspaceId = safeWorkspaceId(options.workspaceId || workspaceIdFromDir(workspaceDir), DEFAULT_WORKSPACE_ID);
+  const manifestPath = workspaceManifestPath(workspaceDir);
+  const existing = await readJsonFile(manifestPath, null);
+  if (existing) {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const manifest = {
+    schema: 'maze_workspace',
+    schema_version: 1,
+    manifest_version: 1,
+    workspace_id: workspaceId,
+    name: String(options.name || (workspaceId === DEFAULT_WORKSPACE_ID ? 'Default workspace' : 'Untitled workspace')),
+    created_at: now,
+    updated_at: now,
+    mode: String(options.mode || 'session'),
+    default_sandbox: 'workspace_sandbox',
+    files_dir: 'files',
+    workflows_dir: 'workflows',
+    tasks_dir: 'tasks',
+    skills_dir: 'skills',
+    runs_dir: 'runs',
+    policy_path: 'policies/sandbox_policy.json',
+    imports: [],
+    local_mounts: [],
+  };
+  await writeJsonAtomic(manifestPath, manifest);
+  return manifest;
+}
+
+async function updateWorkspaceManifest(workspaceDir, updater) {
+  const current = await ensureWorkspaceManifest(workspaceDir);
+  const draft = {
+    ...current,
+    imports: Array.isArray(current.imports) ? [...current.imports] : [],
+    local_mounts: Array.isArray(current.local_mounts) ? [...current.local_mounts] : [],
+  };
+  const updated = await updater(draft) || draft;
+  return writeWorkspaceManifest(workspaceDir, updated);
+}
+
+async function recordWorkspaceImport(workspaceDir, entry) {
+  return updateWorkspaceManifest(workspaceDir, (manifest) => {
+    manifest.imports.push({
+      ...entry,
+      imported_at: new Date().toISOString(),
+    });
+    return manifest;
+  });
+}
+
+async function touchWorkspace(workspaceDir) {
+  return updateWorkspaceManifest(workspaceDir, (manifest) => manifest);
+}
+
+async function ensureWorkspacePolicy(workspaceDir) {
+  const policyPath = path.join(workspaceDir, 'policies', 'sandbox_policy.json');
+  if (!await fileExists(policyPath)) {
+    await writeJsonAtomic(policyPath, {
+      schema: 'maze_sandbox_policy',
+      schema_version: 1,
+      permission: {
+        read: {
+          '*': 'allow',
+          '.env': 'deny',
+          '.env.*': 'deny',
+          '*secret*': 'deny',
+          '*credential*': 'deny',
+          '*token*': 'deny',
+          'api_key*': 'deny',
+        },
+        write: {
+          '*': 'ask',
+          '.env': 'deny',
+          '.env.*': 'deny',
+          '*secret*': 'deny',
+          '*credential*': 'deny',
+          '*token*': 'deny',
+          'api_key*': 'deny',
+        },
+        exec_code: { '*': 'ask', 'python *': 'allow', 'rm *': 'deny' },
+        mcp: { '*': 'ask' },
+        skill: { '*': 'allow' },
+      },
+    });
+  }
+}
+
+function workspacePolicyPath(workspaceDir) {
+  return path.join(workspaceDir, 'policies', 'sandbox_policy.json');
+}
+
 async function ensureWorkspaceDirs(workspaceDir) {
-  const resolved = path.resolve(String(workspaceDir || DEFAULT_WORKSPACE_DIR));
+  const resolved = resolveWorkspaceDirInput(workspaceDir);
   await fs.mkdir(resolved, { recursive: true });
   await fs.mkdir(path.join(resolved, 'tasks'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
-  await fs.mkdir(path.join(resolved, 'workflow_runs'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'skills'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'policies'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'runs'), { recursive: true });
+  await ensureWorkspacePolicy(resolved);
+  await ensureWorkspaceManifest(resolved);
   await recoverInterruptedStaticRuns(resolved);
   return resolved;
+}
+
+async function resolveWorkspaceContext(input = {}) {
+  const requestedWorkspaceId = input.workspaceId || input.workspace_id || '';
+  const requestedWorkspaceDir = input.workspaceDir || input.workspace_dir || '';
+  const workspaceInput = requestedWorkspaceId
+    ? safeWorkspaceId(requestedWorkspaceId, DEFAULT_WORKSPACE_ID)
+    : (requestedWorkspaceDir || DEFAULT_WORKSPACE_DIR);
+  const workspaceDir = await ensureWorkspaceDirs(workspaceInput);
+  const manifest = await ensureWorkspaceManifest(workspaceDir, requestedWorkspaceId
+    ? { workspaceId: safeWorkspaceId(requestedWorkspaceId, DEFAULT_WORKSPACE_ID) }
+    : {});
+
+  return {
+    workspaceId: manifest.workspace_id,
+    workspaceDir,
+    manifest,
+    workspaceManifestVersion: Number(manifest.manifest_version || 1),
+  };
+}
+
+function workspaceResponseFields(context) {
+  return {
+    workspaceId: context.workspaceId,
+    workspaceDir: context.workspaceDir,
+    workspaceManifestVersion: context.workspaceManifestVersion,
+  };
+}
+
+async function recordWorkspaceMutation(workspaceDir, type, detail = {}) {
+  return updateWorkspaceManifest(workspaceDir, (manifest) => {
+    manifest.last_change = {
+      type,
+      ...detail,
+      at: new Date().toISOString(),
+    };
+    return manifest;
+  });
+}
+
+async function createWorkspace({ workspaceId, name, mode } = {}) {
+  const finalWorkspaceId = safeWorkspaceId(workspaceId || `ws-${Date.now().toString(36)}`, 'ws');
+  const workspaceDir = await ensureWorkspaceDirs(path.join(WORKSPACES_DIR, finalWorkspaceId));
+  let manifest = await ensureWorkspaceManifest(workspaceDir, {
+    workspaceId: finalWorkspaceId,
+    name,
+    mode,
+  });
+  if (name || mode) {
+    manifest = await updateWorkspaceManifest(workspaceDir, (draft) => {
+      if (name) draft.name = String(name);
+      if (mode) draft.mode = String(mode);
+      return draft;
+    });
+  }
+  return { workspaceId: manifest.workspace_id, workspaceDir, manifest };
+}
+
+async function ensureSystemCatalogDirs() {
+  for (const name of ['workflows', 'tasks', 'skills']) {
+    await fs.mkdir(path.join(SYSTEM_CATALOG_DIR, name), { recursive: true });
+  }
 }
 
 function normalizeWorkflowRelativePath(relativePath, workflowName) {
@@ -129,6 +376,9 @@ async function listWorkflowFiles(dir) {
   const files = [];
 
   for (const entry of entries) {
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
     const entryPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files.push(...await listWorkflowFiles(entryPath));
@@ -138,6 +388,68 @@ async function listWorkflowFiles(dir) {
   }
 
   return files;
+}
+
+function parseMarkdownFrontmatter(raw) {
+  const text = String(raw || '');
+  if (!text.startsWith('---\n')) {
+    return {};
+  }
+  const end = text.indexOf('\n---', 4);
+  if (end < 0) {
+    return {};
+  }
+  const metadata = {};
+  const frontmatter = text.slice(4, end).split(/\r?\n/);
+  for (const line of frontmatter) {
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const key = match[1];
+    const value = match[2].trim();
+    if (!value) {
+      metadata[key] = '';
+    } else if (value.startsWith('[') && value.endsWith(']')) {
+      metadata[key] = value
+        .slice(1, -1)
+        .split(',')
+        .map((item) => item.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean);
+    } else {
+      metadata[key] = value.replace(/^['"]|['"]$/g, '');
+    }
+  }
+  return metadata;
+}
+
+async function catalogItemMetadata(type, fullPath, entry) {
+  if (type === 'skills' && entry.isDirectory()) {
+    const skillPath = path.join(fullPath, 'SKILL.md');
+    const raw = await fs.readFile(skillPath, 'utf-8').catch(() => '');
+    const frontmatter = parseMarkdownFrontmatter(raw);
+    return {
+      description: frontmatter.description || '',
+      tags: Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
+    };
+  }
+
+  if (type === 'workflows' && entry.isFile() && entry.name.endsWith('.json')) {
+    try {
+      const payload = JSON.parse(await fs.readFile(fullPath, 'utf-8'));
+      const workflow = payload?.workflow || payload || {};
+      const recommendedSkills = workflow.recommendedSkills || payload.recommendedSkills || workflow.skills || [];
+      return {
+        description: workflow.description || payload.description || '',
+        tags: Array.isArray(workflow.tags || payload.tags) ? (workflow.tags || payload.tags) : [],
+        recommendedSkills: Array.isArray(recommendedSkills) ? recommendedSkills.map(String) : [],
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  return {};
 }
 
 function normalizeWorkflowPayload(payload) {
@@ -229,6 +541,14 @@ function normalizeWorkspaceFileRelativePath(relativePath = '') {
     throw new Error('Workspace file path must stay inside workspace/files');
   }
   return normalized;
+}
+
+function normalizeLocalWorkspaceId(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120) || 'default';
 }
 
 function resolveWorkspaceFilePath(workspaceDir, relativePath = '') {
@@ -596,22 +916,42 @@ function nowEpochSeconds() {
 }
 
 function staticRunsDir(workspaceDir) {
-  return path.join(workspaceDir, 'workflow_runs', 'static');
+  return path.join(workspaceDir, 'runs');
 }
 
-function staticRunDir(workspaceDir, runId) {
+function legacyStaticRunsDirs(workspaceDir) {
+  return [
+    path.join(workspaceDir, 'workflow_runs', 'static'),
+    path.join(workspaceDir, 'workflow_runs', 'static_runs'),
+  ];
+}
+
+function staticRunSearchDirs(workspaceDir) {
+  return [staticRunsDir(workspaceDir), ...legacyStaticRunsDirs(workspaceDir)];
+}
+
+function staticRunDir(workspaceDir, runId, options = {}) {
   if (!runId || String(runId).includes('/') || String(runId).includes('\\')) {
     throw new Error(`Invalid workflow run id: ${runId}`);
+  }
+  if (options.write) {
+    return path.join(staticRunsDir(workspaceDir), runId);
+  }
+  for (const runsDir of staticRunSearchDirs(workspaceDir)) {
+    const candidate = path.join(runsDir, runId);
+    if (fsSync.existsSync(path.join(candidate, 'run.json'))) {
+      return candidate;
+    }
   }
   return path.join(staticRunsDir(workspaceDir), runId);
 }
 
-function staticRunPath(workspaceDir, runId) {
-  return path.join(staticRunDir(workspaceDir, runId), 'run.json');
+function staticRunPath(workspaceDir, runId, options = {}) {
+  return path.join(staticRunDir(workspaceDir, runId, options), 'run.json');
 }
 
-function staticRunEventsPath(workspaceDir, runId) {
-  return path.join(staticRunDir(workspaceDir, runId), 'events.jsonl');
+function staticRunEventsPath(workspaceDir, runId, options = {}) {
+  return path.join(staticRunDir(workspaceDir, runId, options), 'events.jsonl');
 }
 
 function taskNodeSnapshotFromWorkflowNode(node) {
@@ -635,7 +975,7 @@ function taskNodeSnapshotFromWorkflowNode(node) {
   };
 }
 
-function createStaticRunSnapshot({ runId, workflow, workspaceDir }) {
+function createStaticRunSnapshot({ runId, workflow, workspaceDir, workspaceContext = null }) {
   const now = nowEpochSeconds();
   const nodes = workflow.nodes || [];
   const edges = workflow.edges || [];
@@ -651,6 +991,8 @@ function createStaticRunSnapshot({ runId, workflow, workspaceDir }) {
     workflow_id: workflow.id,
     workflow_name: workflow.name || 'Untitled Workflow',
     workspace_dir: workspaceDir,
+    workspace_id: workspaceContext?.workspaceId || workspaceIdFromDir(workspaceDir),
+    workspace_manifest_version: workspaceContext?.workspaceManifestVersion || null,
     status: 'running',
     created_time: now,
     updated_time: now,
@@ -677,6 +1019,11 @@ function createStaticRunSnapshot({ runId, workflow, workspaceDir }) {
     final_result: null,
     error: null,
     maze_run_id: null,
+    metadata: {
+      workspace_id: workspaceContext?.workspaceId || workspaceIdFromDir(workspaceDir),
+      workspace_dir: workspaceDir,
+      workspace_manifest_version: workspaceContext?.workspaceManifestVersion || null,
+    },
   };
 }
 
@@ -726,7 +1073,10 @@ function withStaticRunWriteQueue(workspaceDir, runId, operation) {
 }
 
 async function saveStaticRun(workspaceDir, snapshot) {
-  await writeJsonAtomic(staticRunPath(workspaceDir, snapshot.run_id), snapshot);
+  await writeJsonAtomic(staticRunPath(workspaceDir, snapshot.run_id, { write: true }), {
+    ...snapshot,
+    workspace_id: snapshot.workspace_id || workspaceIdFromDir(workspaceDir),
+  });
 }
 
 async function loadStaticRun(workspaceDir, runId) {
@@ -744,6 +1094,8 @@ function staticRunSummary(snapshot) {
     workflow_id: snapshot.workflow_id,
     workflow_name: snapshot.workflow_name || 'Workflow Run',
     workspace_dir: snapshot.workspace_dir,
+    workspace_id: snapshot.workspace_id,
+    workspace_manifest_version: snapshot.workspace_manifest_version,
     status: snapshot.status,
     created_time: snapshot.created_time,
     updated_time: snapshot.updated_time,
@@ -752,6 +1104,7 @@ function staticRunSummary(snapshot) {
     events: snapshot.events || { count: 0, last_seq: 0 },
     error: snapshot.error || null,
     maze_run_id: snapshot.maze_run_id || null,
+    metadata: snapshot.metadata || {},
     final_result: snapshot.final_result && typeof snapshot.final_result === 'object'
       ? {
           status: snapshot.final_result.status,
@@ -897,13 +1250,166 @@ async function listStaticRunFiles(dir, options = {}) {
   return runs;
 }
 
+async function listStaticRunFilesForWorkspace(workspaceDir, options = {}) {
+  const seen = new Set();
+  const runs = [];
+  for (const dir of staticRunSearchDirs(workspaceDir)) {
+    const items = await listStaticRunFiles(dir, options);
+    for (const item of items) {
+      if (!item.run_id || seen.has(item.run_id)) {
+        continue;
+      }
+      seen.add(item.run_id);
+      runs.push(item);
+    }
+  }
+  return runs;
+}
+
+function defaultArtifactStoreRoot() {
+  return path.resolve(process.env.MAZE_ARTIFACT_STORE_DIR || path.join(os.homedir(), '.maze', 'artifacts'));
+}
+
+function artifactBlobPath(sha256) {
+  const sha = String(sha256 || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha)) {
+    throw new Error(`Invalid sha256: ${sha256}`);
+  }
+  return path.join(defaultArtifactStoreRoot(), 'blobs', sha.slice(0, 2), sha.slice(2, 4), sha);
+}
+
+function collectRunReferencedSha256(run) {
+  const referenced = new Set();
+  for (const node of Object.values(run?.task_nodes || {})) {
+    for (const artifact of node?.file_manifest?.files || []) {
+      if (artifact?.sha256) {
+        referenced.add(String(artifact.sha256).toLowerCase());
+      }
+    }
+    for (const artifact of node?.artifacts || []) {
+      if (artifact?.sha256) {
+        referenced.add(String(artifact.sha256).toLowerCase());
+      }
+    }
+  }
+  return referenced;
+}
+
+async function collectWorkspaceReferencedSha256(workspaceDir) {
+  const referenced = new Set();
+  for (const run of await listStaticRunFilesForWorkspace(workspaceDir)) {
+    for (const sha of collectRunReferencedSha256(run)) {
+      referenced.add(sha);
+    }
+  }
+  return referenced;
+}
+
+async function listServiceWorkspaceDirs() {
+  const dirs = new Set([DEFAULT_WORKSPACE_DIR, LEGACY_WORKSPACE_DIR]);
+  const entries = await fs.readdir(WORKSPACES_DIR, { withFileTypes: true }).catch((error) => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      dirs.add(path.join(WORKSPACES_DIR, entry.name));
+    }
+  }
+  return Array.from(dirs);
+}
+
+async function collectAllReferencedSha256() {
+  const referenced = new Set();
+  for (const workspaceDir of await listServiceWorkspaceDirs()) {
+    for (const sha of await collectWorkspaceReferencedSha256(workspaceDir)) {
+      referenced.add(sha);
+    }
+  }
+  return referenced;
+}
+
+async function listArtifactBlobFiles() {
+  const blobsDir = path.join(defaultArtifactStoreRoot(), 'blobs');
+  const files = [];
+
+  async function visit(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(fullPath);
+      } else if (entry.isFile() && /^[0-9a-f]{64}$/.test(entry.name)) {
+        files.push(fullPath);
+      }
+    }
+  }
+
+  await visit(blobsDir);
+  return files;
+}
+
+async function cleanupWorkspaceArtifacts(workspaceDir, options = {}) {
+  const dryRun = options.dryRun !== false;
+  const olderThanDays = options.olderThanDays === null || options.olderThanDays === undefined
+    ? 7
+    : Number(options.olderThanDays);
+  const cutoffMs = Number.isFinite(olderThanDays) && olderThanDays >= 0
+    ? Date.now() - olderThanDays * 86400 * 1000
+    : null;
+  const referenced = await collectAllReferencedSha256();
+  const candidates = [];
+
+  for (const fullPath of await listArtifactBlobFiles()) {
+    const sha = path.basename(fullPath).toLowerCase();
+    if (referenced.has(sha)) {
+      continue;
+    }
+    const stat = await fs.stat(fullPath);
+    if (cutoffMs !== null && stat.mtimeMs > cutoffMs) {
+      continue;
+    }
+    candidates.push({
+      sha256: sha,
+      size: stat.size,
+      path: fullPath,
+      storage_uri: `maze://artifacts/sha256/${sha}`,
+      updatedAt: stat.mtime.toISOString(),
+    });
+  }
+
+  const deletedSha256 = [];
+  if (!dryRun) {
+    for (const item of candidates) {
+      await fs.unlink(artifactBlobPath(item.sha256)).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      deletedSha256.push(item.sha256);
+    }
+  }
+
+  return {
+    dry_run: dryRun,
+    older_than_days: olderThanDays,
+    scope: 'global-orphan-cas',
+    referenced_count: referenced.size,
+    matched_count: candidates.length,
+    deleted_count: deletedSha256.length,
+    artifacts: candidates,
+    deleted_sha256: deletedSha256,
+  };
+}
+
 async function recoverInterruptedStaticRuns(workspaceDir) {
   if (recoveredStaticRunWorkspaces.has(workspaceDir)) {
     return;
   }
   recoveredStaticRunWorkspaces.add(workspaceDir);
 
-  const runs = await listStaticRunFiles(staticRunsDir(workspaceDir));
+  const runs = await listStaticRunFilesForWorkspace(workspaceDir);
   const staleRuns = runs.filter((run) => run.status === 'running');
   for (const run of staleRuns) {
     try {
@@ -920,6 +1426,49 @@ async function recoverInterruptedStaticRuns(workspaceDir) {
       console.error(`❌ 恢复 static workflow run 失败: ${run.run_id}`, error);
     }
   }
+}
+
+async function migrateLegacyStaticRuns(workspaceDir, { dryRun = true } = {}) {
+  const migrated = [];
+  const skipped = [];
+  for (const legacyDir of legacyStaticRunsDirs(workspaceDir)) {
+    const entries = await fs.readdir(legacyDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const sourceDir = path.join(legacyDir, entry.name);
+      const sourceRunJson = path.join(sourceDir, 'run.json');
+      if (!await fileExists(sourceRunJson)) {
+        continue;
+      }
+      const targetDir = path.join(staticRunsDir(workspaceDir), entry.name);
+      if (await fileExists(path.join(targetDir, 'run.json'))) {
+        skipped.push({
+          run_id: entry.name,
+          source: sourceDir,
+          target: targetDir,
+          reason: 'target-exists',
+        });
+        continue;
+      }
+      migrated.push({
+        run_id: entry.name,
+        source: sourceDir,
+        target: targetDir,
+      });
+      if (!dryRun) {
+        await fs.mkdir(path.dirname(targetDir), { recursive: true });
+        await fs.rename(sourceDir, targetDir);
+      }
+    }
+  }
+  return {
+    dry_run: dryRun,
+    migrated_count: dryRun ? 0 : migrated.length,
+    matched_count: migrated.length,
+    skipped_count: skipped.length,
+    migrated,
+    skipped,
+  };
 }
 
 function stripNodeTaskCode(node, workspaceDir = null) {
@@ -1148,6 +1697,10 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
       env: {
         ...process.env,
         ...extraEnv,
+        MAZE_WORKSPACE_ROOT_DIR: WORKSPACE_ROOT_DIR,
+        MAZE_WORKSPACES_DIR: WORKSPACES_DIR,
+        MAZE_DEFAULT_WORKSPACE_DIR: DEFAULT_WORKSPACE_DIR,
+        MAZE_SYSTEM_CATALOG_DIR: SYSTEM_CATALOG_DIR,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1'
       }
@@ -1220,6 +1773,10 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
       env: {
         ...process.env,
         ...extraEnv,
+        MAZE_WORKSPACE_ROOT_DIR: WORKSPACE_ROOT_DIR,
+        MAZE_WORKSPACES_DIR: WORKSPACES_DIR,
+        MAZE_DEFAULT_WORKSPACE_DIR: DEFAULT_WORKSPACE_DIR,
+        MAZE_SYSTEM_CATALOG_DIR: SYSTEM_CATALOG_DIR,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
       },
@@ -1363,7 +1920,240 @@ async function recordAndBroadcastStaticRun(workflow, workspaceDir, runId, event)
   return { snapshot, event: storedEvent };
 }
 
+function catalogTypeDir(type) {
+  const normalized = String(type || '').trim().toLowerCase();
+  if (!['workflows', 'tasks', 'skills'].includes(normalized)) {
+    throw new Error(`Unsupported system catalog type: ${type}`);
+  }
+  return { type: normalized, dir: path.join(SYSTEM_CATALOG_DIR, normalized) };
+}
+
+async function listCatalogItems(type) {
+  await ensureSystemCatalogDirs();
+  const { type: normalizedType, dir } = catalogTypeDir(type);
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const items = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    const fullPath = path.join(dir, entry.name);
+    const stat = await fs.stat(fullPath);
+    const metadata = await catalogItemMetadata(normalizedType, fullPath, entry);
+    items.push({
+      type: normalizedType,
+      id: entry.name,
+      name: entry.name,
+      path: entry.name,
+      kind: entry.isDirectory() ? 'directory' : 'file',
+      size: entry.isFile() ? stat.size : null,
+      updatedAt: stat.mtime.toISOString(),
+      ...metadata,
+    });
+  }
+  items.sort((a, b) => a.name.localeCompare(b.name));
+  return items;
+}
+
+function resolveCatalogSource(type, sourceId) {
+  const { type: normalizedType, dir } = catalogTypeDir(type);
+  const normalizedSource = normalizeWorkspaceFileRelativePath(sourceId);
+  if (!normalizedSource) {
+    throw new Error('sourceId is required');
+  }
+  const sourcePath = path.resolve(dir, normalizedSource);
+  if (sourcePath !== dir && !sourcePath.startsWith(dir + path.sep)) {
+    throw new Error('System catalog source must stay inside the catalog directory');
+  }
+  return { type: normalizedType, sourceId: normalizedSource, sourcePath };
+}
+
+async function copyCatalogItemToWorkspace({ workspaceDir, type, sourceId, targetPath }) {
+  await ensureSystemCatalogDirs();
+  const { type: normalizedType, sourceId: normalizedSourceId, sourcePath } = resolveCatalogSource(type, sourceId);
+  const stat = await fs.stat(sourcePath);
+  let resolvedTargetPath;
+  let targetRelativePath;
+
+  if (normalizedType === 'workflows') {
+    const target = resolveWorkflowFile(workspaceDir, targetPath || path.basename(normalizedSourceId), path.basename(normalizedSourceId, '.json'));
+    resolvedTargetPath = target.fullPath;
+    targetRelativePath = target.relativePath;
+  } else if (normalizedType === 'tasks') {
+    const target = resolveTaskDefinitionFile(workspaceDir, targetPath || path.basename(normalizedSourceId));
+    resolvedTargetPath = target.fullPath;
+    targetRelativePath = target.relativePath;
+  } else {
+    const skillName = safeWorkspaceId(targetPath || path.basename(normalizedSourceId), path.basename(normalizedSourceId));
+    targetRelativePath = path.posix.join('skills', skillName);
+    resolvedTargetPath = path.resolve(workspaceDir, targetRelativePath);
+    const skillsDir = path.resolve(workspaceDir, 'skills');
+    if (!resolvedTargetPath.startsWith(skillsDir + path.sep)) {
+      throw new Error('Skill import target must stay inside workspace skills directory');
+    }
+  }
+
+  await fs.mkdir(path.dirname(resolvedTargetPath), { recursive: true });
+  if (stat.isDirectory()) {
+    await fs.cp(sourcePath, resolvedTargetPath, { recursive: true, force: false, errorOnExist: false });
+  } else {
+    await fs.copyFile(sourcePath, resolvedTargetPath);
+  }
+
+  const manifest = await recordWorkspaceImport(workspaceDir, {
+    type: normalizedType.slice(0, -1),
+    source: 'system_catalog',
+    source_id: normalizedSourceId,
+    workspace_path: targetRelativePath,
+  });
+
+  return {
+    workspaceDir,
+    workspaceId: manifest.workspace_id,
+    manifest,
+    import: {
+      type: normalizedType,
+      sourceId: normalizedSourceId,
+      targetPath: targetRelativePath,
+    },
+  };
+}
+
 // ========== API 路由 ==========
+
+app.post('/api/workspaces', async (req, res) => {
+  try {
+    const workspace = await createWorkspace({
+      workspaceId: req.body?.workspaceId,
+      name: req.body?.name,
+      mode: req.body?.mode || 'session',
+    });
+    res.json({ success: true, ...workspace });
+  } catch (error) {
+    console.error('❌ 创建 workspace 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspaces/current', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      workspaceManifestVersion: context.workspaceManifestVersion,
+      manifest: context.manifest,
+    });
+  } catch (error) {
+    console.error('❌ 获取当前 workspace 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspaces/:workspaceId', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext({ workspaceId: req.params.workspaceId });
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      workspaceManifestVersion: context.workspaceManifestVersion,
+      manifest: context.manifest,
+    });
+  } catch (error) {
+    console.error('❌ 获取 workspace 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/system-catalog', async (req, res) => {
+  try {
+    await ensureSystemCatalogDirs();
+    const requestedType = req.query.type ? String(req.query.type) : '';
+    const types = requestedType ? [requestedType] : ['workflows', 'tasks', 'skills'];
+    const catalog = {};
+    for (const type of types) {
+      const { type: normalizedType } = catalogTypeDir(type);
+      catalog[normalizedType] = await listCatalogItems(normalizedType);
+    }
+    res.json({ success: true, catalogDir: SYSTEM_CATALOG_DIR, catalog });
+  } catch (error) {
+    console.error('❌ 获取 system catalog 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/system-catalog/import', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir,
+      type,
+      sourceId,
+      targetPath,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir });
+    const result = await copyCatalogItemToWorkspace({
+      workspaceDir: context.workspaceDir,
+      type,
+      sourceId,
+      targetPath,
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('❌ 导入 system catalog 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspace-policy', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const policyPath = workspacePolicyPath(context.workspaceDir);
+    const policy = await readJsonFile(policyPath, null);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      policyPath: path.relative(context.workspaceDir, policyPath).split(path.sep).join('/'),
+      policy: policy || {},
+    });
+  } catch (error) {
+    console.error('❌ 获取 workspace policy 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/workspace-policy', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir,
+      policy,
+    } = req.body || {};
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+      return res.status(400).json({ error: 'policy must be a JSON object' });
+    }
+
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir });
+    const policyPath = workspacePolicyPath(context.workspaceDir);
+    await writeJsonAtomic(policyPath, policy);
+    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'policy_updated', {
+      path: 'policies/sandbox_policy.json',
+    });
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir: context.workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      policyPath: 'policies/sandbox_policy.json',
+      policy,
+    });
+  } catch (error) {
+    console.error('❌ 更新 workspace policy 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // 1. 获取内置任务列表
 app.get('/api/builtin-tasks', async (req, res) => {
@@ -1387,7 +2177,8 @@ app.get('/api/builtin-tasks', async (req, res) => {
 // 1.1 获取工作目录任务列表
 app.get('/api/workspace-tasks', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     console.log(`📁 扫描工作目录任务: ${workspaceDir}`);
 
     const result = await callPython('get_workspace_tasks', { workspaceDir });
@@ -1398,9 +2189,31 @@ app.get('/api/workspace-tasks', async (req, res) => {
     }
 
     console.log(`✅ 成功获取 ${result.tasks.length} 个工作区任务`);
-    res.json(result);
+    res.json({ ...result, ...workspaceResponseFields(context) });
   } catch (error) {
     console.error('❌ 获取工作区任务失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 1.1b 获取工作目录 skills 列表
+app.get('/api/workspace-skills', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
+    console.log(`📚 扫描工作目录 Skills: ${workspaceDir}`);
+
+    const result = await callPython('list_workspace_skills', { workspaceDir });
+
+    if (result.error) {
+      console.error('❌ 扫描工作目录 Skills 失败:', result.error);
+      return res.status(400).json({ error: result.error, traceback: result.traceback, errors: result.errors || [] });
+    }
+
+    console.log(`✅ 成功获取 ${(result.skills || []).length} 个工作区 Skill`);
+    res.json({ ...result, ...workspaceResponseFields(context) });
+  } catch (error) {
+    console.error('❌ 获取工作区 Skills 失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1409,12 +2222,14 @@ app.get('/api/workspace-tasks', async (req, res) => {
 app.post('/api/workspace-tasks', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath = 'tasks/custom_task.py',
       code,
       parse = true,
     } = req.body;
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
 
     console.log(`💾 保存工作区任务: ${workspaceDir}/${relativePath}`);
 
@@ -1435,7 +2250,14 @@ app.post('/api/workspace-tasks', async (req, res) => {
     }
 
     console.log('✅ 工作区任务保存成功');
-    res.json(result);
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'task_saved', {
+      path: result.relativePath || relativePath,
+    });
+    res.json({
+      ...result,
+      workspaceId: manifest.workspace_id,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    });
   } catch (error) {
     console.error('❌ 保存工作区任务失败:', error);
     res.status(500).json({ error: error.message });
@@ -1446,7 +2268,8 @@ app.post('/api/workspace-tasks', async (req, res) => {
 app.delete('/api/workspace-tasks', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
     } = req.body;
 
@@ -1454,7 +2277,8 @@ app.delete('/api/workspace-tasks', async (req, res) => {
       return res.status(400).json({ error: 'relativePath is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     console.log(`🗑️ 删除工作区任务: ${workspaceDir}/${relativePath}`);
 
     const result = await callPython('delete_workspace_task', {
@@ -1468,7 +2292,14 @@ app.delete('/api/workspace-tasks', async (req, res) => {
     }
 
     console.log('✅ 工作区任务删除成功');
-    res.json(result);
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'task_deleted', {
+      path: result.relativePath || relativePath,
+    });
+    res.json({
+      ...result,
+      workspaceId: manifest.workspace_id,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    });
   } catch (error) {
     console.error('❌ 删除工作区任务失败:', error);
     res.status(500).json({ error: error.message });
@@ -1479,7 +2310,8 @@ app.delete('/api/workspace-tasks', async (req, res) => {
 app.patch('/api/workspace-tasks/rename', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
       oldFunctionName,
       newName,
@@ -1489,7 +2321,8 @@ app.patch('/api/workspace-tasks/rename', async (req, res) => {
       return res.status(400).json({ error: 'relativePath, oldFunctionName, and newName are required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     console.log(`✏️ 重命名工作区任务: ${relativePath} ${oldFunctionName} -> ${newName}`);
 
     const result = await callPython('rename_workspace_task', {
@@ -1505,7 +2338,16 @@ app.patch('/api/workspace-tasks/rename', async (req, res) => {
     }
 
     console.log('✅ 工作区任务重命名成功');
-    res.json(result);
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'task_renamed', {
+      path: result.relativePath || relativePath,
+      oldFunctionName,
+      newFunctionName: result.newFunctionName,
+    });
+    res.json({
+      ...result,
+      workspaceId: manifest.workspace_id,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    });
   } catch (error) {
     console.error('❌ 重命名工作区任务失败:', error);
     res.status(500).json({ error: error.message });
@@ -1515,7 +2357,8 @@ app.patch('/api/workspace-tasks/rename', async (req, res) => {
 // 1.3 Workspace files
 app.get('/api/workspace-files', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const { fullPath, filesDir, relativePath } = resolveWorkspaceFilePath(workspaceDir, req.query.path || '');
     const stat = await fs.stat(fullPath).catch((error) => {
       if (error.code === 'ENOENT') return null;
@@ -1536,9 +2379,104 @@ app.get('/api/workspace-files', async (req, res) => {
       return a.name.localeCompare(b.name);
     });
 
-    res.json({ success: true, workspaceDir, filesDir, path: relativePath, files });
+    res.json({ success: true, ...workspaceResponseFields(context), filesDir, path: relativePath, files });
   } catch (error) {
     console.error('❌ 获取 workspace files 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/local-workspaces/:workspaceId/manifest', async (req, res) => {
+  try {
+    const workspaceId = normalizeLocalWorkspaceId(req.params.workspaceId);
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+    const normalizedFiles = [];
+    const seen = new Set();
+
+    for (const item of files) {
+      const relativePath = normalizeWorkspaceFileRelativePath(item?.relativePath || item?.path || '');
+      if (!relativePath || seen.has(relativePath)) {
+        continue;
+      }
+      seen.add(relativePath);
+      normalizedFiles.push({
+        relativePath,
+        name: path.posix.basename(relativePath),
+        type: item?.type === 'directory' ? 'directory' : 'file',
+        size: Number.isFinite(Number(item?.size)) ? Number(item.size) : null,
+        updatedAt: item?.updatedAt ? String(item.updatedAt) : null,
+        source: 'local',
+      });
+    }
+
+    const manifest = {
+      workspaceId,
+      displayName: String(req.body?.displayName || workspaceId),
+      version: String(req.body?.version || Date.now()),
+      updatedAt: new Date().toISOString(),
+      files: normalizedFiles,
+    };
+    localWorkspaceManifests.set(workspaceId, manifest);
+    res.json({ success: true, manifest });
+  } catch (error) {
+    console.error('❌ 更新 local workspace manifest 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/local-workspaces/:workspaceId/manifest', (req, res) => {
+  const workspaceId = normalizeLocalWorkspaceId(req.params.workspaceId);
+  res.json({
+    success: true,
+    manifest: localWorkspaceManifests.get(workspaceId) || {
+      workspaceId,
+      displayName: workspaceId,
+      version: null,
+      updatedAt: null,
+      files: [],
+    },
+  });
+});
+
+app.post('/api/workspace-files/missing', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      paths = [],
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
+    const normalizedPaths = [];
+    const seen = new Set();
+
+    for (const rawPath of Array.isArray(paths) ? paths : []) {
+      const relativePath = normalizeWorkspaceFileRelativePath(rawPath);
+      if (!relativePath || seen.has(relativePath)) {
+        continue;
+      }
+      seen.add(relativePath);
+      normalizedPaths.push(relativePath);
+    }
+
+    const missing = [];
+    const present = [];
+    for (const relativePath of normalizedPaths) {
+      const { fullPath } = resolveWorkspaceFilePath(workspaceDir, relativePath);
+      const stat = await fs.stat(fullPath).catch((error) => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (stat && stat.isFile()) {
+        present.push(relativePath);
+      } else {
+        missing.push(relativePath);
+      }
+    }
+
+    res.json({ success: true, ...workspaceResponseFields(context), present, missing });
+  } catch (error) {
+    console.error('❌ 检查 workspace file 缺失失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1546,7 +2484,8 @@ app.get('/api/workspace-files', async (req, res) => {
 app.post('/api/workspace-files/upload', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
       contentBase64,
     } = req.body || {};
@@ -1558,14 +2497,126 @@ app.post('/api/workspace-files/upload', async (req, res) => {
       return res.status(400).json({ error: 'contentBase64 is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { fullPath, filesDir } = resolveWorkspaceFilePath(workspaceDir, relativePath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, Buffer.from(contentBase64, 'base64'));
     const file = await describeWorkspaceFile(filesDir, fullPath);
-    res.json({ success: true, workspaceDir, file });
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'file_uploaded', {
+      path: file.relativePath,
+    });
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      file,
+    });
   } catch (error) {
     console.error('❌ 上传 workspace file 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/artifacts/promote', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      targetPath,
+      artifact = {},
+      runId,
+      taskId,
+      path: artifactPath,
+      sha256,
+      storagePath,
+      overwrite = true,
+    } = req.body || {};
+
+    const sourceSha = String(sha256 || artifact.sha256 || '').trim();
+    const sourceStoragePath = String(storagePath || artifact.storage_path || '').trim();
+    const sourceArtifactPath = String(artifactPath || artifact.path || artifact.name || sourceSha || '').trim();
+    const destinationPath = targetPath || sourceArtifactPath;
+
+    if (!destinationPath) {
+      return res.status(400).json({ error: 'targetPath is required' });
+    }
+    if (!sourceSha && !sourceStoragePath) {
+      return res.status(400).json({ error: 'artifact sha256 or storagePath is required' });
+    }
+
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
+    const { fullPath, filesDir, relativePath } = resolveWorkspaceFilePath(workspaceDir, destinationPath);
+    if (!overwrite && await fileExists(fullPath)) {
+      return res.status(409).json({ error: `Workspace file already exists: ${relativePath}` });
+    }
+
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    if (sourceStoragePath) {
+      const resolvedStoragePath = path.resolve(sourceStoragePath);
+      const allowedRunRoots = [
+        path.resolve(workspaceDir, 'runs'),
+        path.resolve(workspaceDir, 'workflow_runs'),
+      ];
+      const allowed = allowedRunRoots.some((root) => (
+        resolvedStoragePath === root || resolvedStoragePath.startsWith(root + path.sep)
+      ));
+      if (!allowed) {
+        return res.status(400).json({ error: 'Static artifact storage path is outside this workspace run directory' });
+      }
+      await fs.copyFile(resolvedStoragePath, fullPath);
+    } else {
+      const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(sourceSha)}`);
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `Failed to download artifact: HTTP ${response.status}` });
+      }
+      const data = Buffer.from(await response.arrayBuffer());
+      await fs.writeFile(fullPath, data);
+    }
+
+    const file = await describeWorkspaceFile(filesDir, fullPath);
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'artifact_promoted', {
+      path: file.relativePath,
+      runId: runId || artifact.run_id || null,
+      taskId: taskId || artifact.task_id || artifact.producer_task_id || null,
+      sha256: sourceSha || artifact.sha256 || null,
+    });
+
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      file,
+    });
+  } catch (error) {
+    console.error('❌ Promote artifact 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/artifacts/cleanup', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      older_than_days: olderThanDays,
+      dry_run: dryRun = true,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const cleanup = await cleanupWorkspaceArtifacts(context.workspaceDir, {
+      olderThanDays,
+      dryRun,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      cleanup,
+    });
+  } catch (error) {
+    console.error('❌ 清理 artifacts 失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1573,7 +2624,8 @@ app.post('/api/workspace-files/upload', async (req, res) => {
 app.post('/api/workspace-files/mkdir', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
     } = req.body || {};
 
@@ -1581,11 +2633,21 @@ app.post('/api/workspace-files/mkdir', async (req, res) => {
       return res.status(400).json({ error: 'relativePath is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { fullPath, filesDir } = resolveWorkspaceFilePath(workspaceDir, relativePath);
     await fs.mkdir(fullPath, { recursive: true });
     const file = await describeWorkspaceFile(filesDir, fullPath);
-    res.json({ success: true, workspaceDir, file });
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'folder_created', {
+      path: file.relativePath,
+    });
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      file,
+    });
   } catch (error) {
     console.error('❌ 创建 workspace folder 失败:', error);
     res.status(500).json({ error: error.message });
@@ -1595,7 +2657,8 @@ app.post('/api/workspace-files/mkdir', async (req, res) => {
 app.delete('/api/workspace-files', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
     } = req.body || {};
 
@@ -1603,10 +2666,21 @@ app.delete('/api/workspace-files', async (req, res) => {
       return res.status(400).json({ error: 'relativePath is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { fullPath } = resolveWorkspaceFilePath(workspaceDir, relativePath);
     await fs.rm(fullPath, { recursive: true, force: true });
-    res.json({ success: true, workspaceDir, relativePath, deleted: true });
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'file_deleted', {
+      path: relativePath,
+    });
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      relativePath,
+      deleted: true,
+    });
   } catch (error) {
     console.error('❌ 删除 workspace file 失败:', error);
     res.status(500).json({ error: error.message });
@@ -1615,7 +2689,8 @@ app.delete('/api/workspace-files', async (req, res) => {
 
 app.get('/api/workspace-files/preview', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const { fullPath, relativePath } = resolveWorkspaceFilePath(workspaceDir, req.query.path || '');
     const stat = await fs.stat(fullPath);
 
@@ -1627,7 +2702,7 @@ app.get('/api/workspace-files/preview', async (req, res) => {
     }
 
     const content = await fs.readFile(fullPath, 'utf-8');
-    res.json({ success: true, workspaceDir, relativePath, content });
+    res.json({ success: true, ...workspaceResponseFields(context), relativePath, content });
   } catch (error) {
     console.error('❌ 预览 workspace file 失败:', error);
     res.status(statusForFileError(error)).json({ error: error.message });
@@ -1636,7 +2711,8 @@ app.get('/api/workspace-files/preview', async (req, res) => {
 
 app.get('/api/workspace-files/download', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const { fullPath } = resolveWorkspaceFilePath(workspaceDir, req.query.path || '');
     const stat = await fs.stat(fullPath);
 
@@ -1736,7 +2812,8 @@ app.post('/api/llm/generate-task', async (req, res) => {
 // 1.4 获取工作目录工作流列表
 app.get('/api/workspace-workflows', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const workflowsDir = path.join(workspaceDir, 'workflows');
     const files = await listWorkflowFiles(workflowsDir);
     const workflowItems = [];
@@ -1769,7 +2846,7 @@ app.get('/api/workspace-workflows', async (req, res) => {
     workflowItems.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 
     res.json({
-      workspaceDir,
+      ...workspaceResponseFields(context),
       workflowsDir,
       workflows: workflowItems,
       errors,
@@ -1784,7 +2861,8 @@ app.get('/api/workspace-workflows', async (req, res) => {
 app.delete('/api/workspace-workflows', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
     } = req.body;
 
@@ -1792,14 +2870,20 @@ app.delete('/api/workspace-workflows', async (req, res) => {
       return res.status(400).json({ error: 'relativePath is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, 'workflow');
     await fs.unlink(fullPath);
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_deleted', {
+      path: workflowPath,
+    });
 
     console.log(`🗑️ 工作流已删除: ${workflowPath}`);
     res.json({
       success: true,
+      workspaceId: manifest.workspace_id,
       workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
       relativePath: workflowPath,
     });
   } catch (error) {
@@ -1812,7 +2896,8 @@ app.delete('/api/workspace-workflows', async (req, res) => {
 app.patch('/api/workspace-workflows/rename', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
       name,
     } = req.body;
@@ -1821,7 +2906,8 @@ app.patch('/api/workspace-workflows/rename', async (req, res) => {
       return res.status(400).json({ error: 'relativePath and name are required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
     const raw = await fs.readFile(fullPath, 'utf-8');
     const payload = JSON.parse(raw);
@@ -1840,11 +2926,17 @@ app.patch('/api/workspace-workflows/rename', async (req, res) => {
     };
 
     await fs.writeFile(fullPath, JSON.stringify(nextPayload, null, 2), 'utf-8');
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_renamed', {
+      path: workflowPath,
+      name: String(name).trim(),
+    });
 
     console.log(`✏️ 工作流已重命名: ${workflowPath}`);
     res.json({
       success: true,
+      workspaceId: manifest.workspace_id,
       workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
       relativePath: workflowPath,
       workflow: nextPayload.workflow,
     });
@@ -1858,7 +2950,8 @@ app.patch('/api/workspace-workflows/rename', async (req, res) => {
 app.post('/api/workspace-workflows/save', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
       name = 'Untitled Workflow',
       workflowId = null,
@@ -1870,7 +2963,8 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
       return res.status(400).json({ error: 'nodes and edges must be arrays' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const workflowNodes = nodes.map((node) => stripNodeTaskCode(node, workspaceDir));
     const { relativePath: savedRelativePath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
     const hydratedWorkflowNodes = await hydrateWorkspaceWorkflowNodes(workflowNodes, workspaceDir);
@@ -1888,11 +2982,17 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
 
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, JSON.stringify(payload, null, 2), 'utf-8');
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_saved', {
+      path: savedRelativePath,
+      name,
+    });
 
     console.log(`💾 工作流已保存到工作区: ${savedRelativePath}`);
     res.json({
       success: true,
+      workspaceId: manifest.workspace_id,
       workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
       relativePath: savedRelativePath,
       workflow: {
         ...payload.workflow,
@@ -1909,7 +3009,8 @@ app.post('/api/workspace-workflows/save', async (req, res) => {
 app.post('/api/workspace-workflows/load', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       relativePath,
     } = req.body;
 
@@ -1917,7 +3018,8 @@ app.post('/api/workspace-workflows/load', async (req, res) => {
       return res.status(400).json({ error: 'relativePath is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const { relativePath: loadedRelativePath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, 'workflow');
     const raw = await fs.readFile(fullPath, 'utf-8');
     const payload = JSON.parse(raw);
@@ -1929,10 +3031,20 @@ app.post('/api/workspace-workflows/load', async (req, res) => {
       workflow.includedTasks,
       importResult.taskPathMap,
     );
+    let manifest = context.manifest;
+    if (importResult.imported.length > 0 || importResult.remapped.length > 0) {
+      manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_task_definitions_imported', {
+        workflow_path: loadedRelativePath,
+        imported_count: importResult.imported.length,
+        remapped_count: importResult.remapped.length,
+      });
+    }
 
     res.json({
       success: true,
+      workspaceId: manifest.workspace_id,
       workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
       relativePath: loadedRelativePath,
       workflow,
       importedTaskDefinitions: {
@@ -1951,7 +3063,8 @@ app.post('/api/workspace-workflows/load', async (req, res) => {
 app.post('/api/workspace-workflows/import', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       payload,
     } = req.body;
 
@@ -1959,7 +3072,8 @@ app.post('/api/workspace-workflows/import', async (req, res) => {
       return res.status(400).json({ error: 'payload is required' });
     }
 
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const workflow = normalizeWorkflowPayload(payload);
     const importResult = await importTaskDefinitions(workspaceDir, workflow.includedTasks, workflow.name);
     workflow.nodes = await hydrateWorkspaceWorkflowNodes(
@@ -1968,10 +3082,17 @@ app.post('/api/workspace-workflows/import', async (req, res) => {
       workflow.includedTasks,
       importResult.taskPathMap,
     );
+    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_payload_imported', {
+      workflow_name: workflow.name,
+      imported_task_count: importResult.imported.length,
+      remapped_task_count: importResult.remapped.length,
+    });
 
     res.json({
       success: true,
+      workspaceId: manifest.workspace_id,
       workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
       workflow,
       importedTaskDefinitions: {
         imported: importResult.imported,
@@ -2304,14 +3425,21 @@ app.post('/api/react-runs/start', async (req, res) => {
     const {
       mode = 'local',
       prompt,
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       maxSteps,
       maxTokens,
       timeoutSeconds,
       taskTimeout,
       llm,
+      skills = [],
+      skillDirs,
+      maxSkillChars,
+      execBackend,
+      permissionPolicy,
     } = req.body || {};
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
 
     const extraEnv = {};
     if (llm?.apiKey) {
@@ -2322,18 +3450,25 @@ app.post('/api/react-runs/start', async (req, res) => {
       {
         mode,
         prompt,
+        workspaceId: context.workspaceId,
         workspaceDir,
+        workspaceManifestVersion: context.workspaceManifestVersion,
         maxSteps,
         maxTokens,
         timeoutSeconds,
         taskTimeout,
         baseUrl: llm?.baseUrl,
         model: llm?.model,
+        skills,
+        skillDirs,
+        maxSkillChars,
+        execBackend,
+        permissionPolicy,
       },
       extraEnv,
     );
 
-    res.json(started);
+    res.json({ ...started, ...workspaceResponseFields(context) });
   } catch (error) {
     console.error('Failed to start ReAct workflow:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -2343,10 +3478,11 @@ app.post('/api/react-runs/start', async (req, res) => {
 // 1.8 Static workflow run history
 app.get('/api/workflow-runs/static', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const status = req.query.status ? String(req.query.status) : null;
     const limit = req.query.limit ? Number(req.query.limit) : null;
-    let runs = await listStaticRunFiles(staticRunsDir(workspaceDir), { summary: true });
+    let runs = await listStaticRunFilesForWorkspace(workspaceDir, { summary: true });
     if (status) {
       runs = runs.filter((run) => run.status === status);
     }
@@ -2354,7 +3490,7 @@ app.get('/api/workflow-runs/static', async (req, res) => {
     if (Number.isFinite(limit)) {
       runs = runs.slice(0, Math.max(0, limit));
     }
-    res.json({ success: true, workspaceDir, runs });
+    res.json({ success: true, ...workspaceResponseFields(context), runs });
   } catch (error) {
     console.error('❌ 获取 static workflow runs 失败:', error);
     res.status(500).json({ error: error.message });
@@ -2363,9 +3499,10 @@ app.get('/api/workflow-runs/static', async (req, res) => {
 
 app.get('/api/workflow-runs/static/:runId', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const run = await loadStaticRun(workspaceDir, req.params.runId);
-    res.json({ success: true, workspaceDir, run });
+    res.json({ success: true, ...workspaceResponseFields(context), run });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -2379,11 +3516,12 @@ app.get('/api/workflow-runs/static/:runId', async (req, res) => {
 
 app.get('/api/workflow-runs/static/:runId/events', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const after = req.query.after !== undefined ? Number(req.query.after) : null;
     await loadStaticRun(workspaceDir, req.params.runId);
     const events = await loadStaticRunEvents(workspaceDir, req.params.runId, after);
-    res.json({ success: true, workspaceDir, runId: req.params.runId, events });
+    res.json({ success: true, ...workspaceResponseFields(context), runId: req.params.runId, events });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -2397,7 +3535,8 @@ app.get('/api/workflow-runs/static/:runId/events', async (req, res) => {
 
 app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.query);
+    const workspaceDir = context.workspaceDir;
     const run = await loadStaticRun(workspaceDir, req.params.runId);
     const taskId = String(req.query.taskId || '');
     const artifactPath = String(req.query.path || '');
@@ -2427,13 +3566,17 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
 
 app.delete('/api/workflow-runs/static/:runId', async (req, res) => {
   try {
-    const workspaceDir = await ensureWorkspaceDirs(req.body?.workspaceDir || req.query.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext({
+      workspaceId: req.body?.workspaceId || req.query.workspaceId,
+      workspaceDir: req.body?.workspaceDir || req.query.workspaceDir,
+    });
+    const workspaceDir = context.workspaceDir;
     const run = await loadStaticRun(workspaceDir, req.params.runId);
     if (!TERMINAL_STATIC_RUN_STATUSES.has(run.status)) {
       return res.status(400).json({ error: 'Only terminal workflow runs can be deleted' });
     }
     await fs.rm(staticRunDir(workspaceDir, req.params.runId), { recursive: true, force: true });
-    res.json({ success: true, workspaceDir, runId: req.params.runId, deleted: true });
+    res.json({ success: true, ...workspaceResponseFields(context), runId: req.params.runId, deleted: true });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -2448,19 +3591,31 @@ app.delete('/api/workflow-runs/static/:runId', async (req, res) => {
 app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
   try {
     const {
-      workspaceDir: requestedWorkspaceDir = DEFAULT_WORKSPACE_DIR,
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
       statuses = ['completed', 'failed', 'canceled', 'interrupted'],
       older_than_days: olderThanDays = 7,
+      keep_latest: keepLatestRaw,
+      keepLatest,
       dry_run: dryRun = true,
     } = req.body || {};
-    const workspaceDir = await ensureWorkspaceDirs(requestedWorkspaceDir);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
     const statusSet = new Set(statuses);
-    const cutoff = nowEpochSeconds() - Number(olderThanDays) * 86400;
-    const runs = (await listStaticRunFiles(staticRunsDir(workspaceDir))).filter((run) => (
+    const cutoff = olderThanDays === null || olderThanDays === undefined
+      ? null
+      : nowEpochSeconds() - Number(olderThanDays) * 86400;
+    let runs = (await listStaticRunFilesForWorkspace(workspaceDir)).filter((run) => (
       statusSet.has(run.status)
       && TERMINAL_STATIC_RUN_STATUSES.has(run.status)
-      && Number(run.finished_time || run.updated_time || 0) <= cutoff
+      && (cutoff === null || Number(run.finished_time || run.updated_time || 0) <= cutoff)
     ));
+    const keepLatestCount = Number(keepLatestRaw ?? keepLatest);
+    if (Number.isFinite(keepLatestCount) && keepLatestCount > 0) {
+      runs = runs
+        .sort((a, b) => Number(b.finished_time || b.updated_time || b.created_time || 0) - Number(a.finished_time || a.updated_time || a.created_time || 0))
+        .slice(Math.max(0, keepLatestCount));
+    }
 
     const deletedRunIds = [];
     if (!dryRun) {
@@ -2472,8 +3627,11 @@ app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
 
     res.json({
       success: true,
+      ...workspaceResponseFields(context),
       cleanup: {
         dry_run: dryRun,
+        keep_latest: Number.isFinite(keepLatestCount) && keepLatestCount > 0 ? keepLatestCount : null,
+        older_than_days: olderThanDays,
         matched_count: runs.length,
         deleted_count: deletedRunIds.length,
         runs,
@@ -2482,6 +3640,26 @@ app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 清理 static workflow runs 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/workflow-runs/static/migrate', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      dry_run: dryRun = true,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const migration = await migrateLegacyStaticRuns(context.workspaceDir, { dryRun });
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      migration,
+    });
+  } catch (error) {
+    console.error('❌ 迁移 static workflow runs 失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2623,12 +3801,14 @@ app.post('/api/workflows/:id/run', async (req, res) => {
     console.log(`   名称: ${workflow.name}`);
     console.log(`   节点数: ${workflow.nodes.length}`);
     console.log(`   边数: ${workflow.edges.length}`);
-    const workspaceDir = await ensureWorkspaceDirs(req.body?.workspaceDir || DEFAULT_WORKSPACE_DIR);
+    const context = await resolveWorkspaceContext(req.body || {});
+    const workspaceDir = context.workspaceDir;
     const workflowRunId = uuidv4();
     const runSnapshot = createStaticRunSnapshot({
       runId: workflowRunId,
       workflow,
       workspaceDir,
+      workspaceContext: context,
     });
     await saveStaticRun(workspaceDir, runSnapshot);
     
@@ -2643,6 +3823,7 @@ app.post('/api/workflows/:id/run', async (req, res) => {
       workflowId: id,
       runId: workflowRunId,
       run: runSnapshot,
+      ...workspaceResponseFields(context),
     });
     
     // 通知 WebSocket 客户端开始运行
@@ -2651,6 +3832,8 @@ app.post('/api/workflows/:id/run', async (req, res) => {
       data: {
         workflow_id: id,
         workflow_run_id: workflowRunId,
+        workspace_id: context.workspaceId,
+        workspace_manifest_version: context.workspaceManifestVersion,
       },
       timestamp: new Date().toISOString()
     });
@@ -2677,7 +3860,9 @@ app.post('/api/workflows/:id/run', async (req, res) => {
           {
             workflowId: id,
             staticRunId: workflowRunId,
+            workspaceId: context.workspaceId,
             workspaceDir,
+            workspaceManifestVersion: context.workspaceManifestVersion,
             nodes: workflow.nodes,
             edges: workflow.edges
           },

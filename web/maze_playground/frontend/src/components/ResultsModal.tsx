@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, Typography, Spin, Alert, Button, Tabs, List, Tag, Space } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, FileTextOutlined, CodeOutlined, DownloadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
@@ -17,11 +17,23 @@ interface WorkflowEvent {
 type RunViewerStatus = 'connecting' | 'running' | 'completed' | 'failed' | 'canceled' | 'interrupted';
 
 function toRunViewerStatus(status?: string | null): RunViewerStatus {
-  if (status === 'completed') return 'completed';
+  if (status === 'completed' || status === 'succeeded') return 'completed';
   if (status === 'failed') return 'failed';
-  if (status === 'canceled') return 'canceled';
+  if (status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'canceled';
   if (status === 'interrupted') return 'interrupted';
   return 'running';
+}
+
+function statusFromEvent(eventType?: string | null): RunViewerStatus | null {
+  if (eventType === 'workflow_completed') return 'completed';
+  if (eventType === 'workflow_failed' || eventType === 'task_exception') return 'failed';
+  if (eventType === 'workflow_canceled' || eventType === 'timeout_dynamic_run') return 'canceled';
+  if (eventType === 'workflow_interrupted') return 'interrupted';
+  return null;
+}
+
+function isTerminalRunStatus(status?: string | null): boolean {
+  return ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted'].includes(status || '');
 }
 
 export default function ResultsModal() {
@@ -45,9 +57,13 @@ export default function ResultsModal() {
   const [traceback, setTraceback] = useState<string>('');
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
+  const manualSocketCloseRef = useRef(false);
+  const terminalRunSeenRef = useRef(false);
 
   useEffect(() => {
     if (isRunning && workflowId && activeRunId) {
+      manualSocketCloseRef.current = false;
+      terminalRunSeenRef.current = false;
       setEvents([]);
       setResults(null);
       setError('');
@@ -67,7 +83,13 @@ export default function ResultsModal() {
           setEvents((prev) => [...prev, { type: 'building', data: { message }, timestamp: new Date().toISOString() }]);
         },
         onTaskUpdate: (event) => {
-          setStatus('running');
+          const eventStatus = statusFromEvent(event?.type);
+          if (eventStatus) {
+            terminalRunSeenRef.current = true;
+            setStatus(eventStatus);
+          } else {
+            setStatus((prev) => (isTerminalRunStatus(prev) ? prev : 'running'));
+          }
           const nextEvent = { ...event, timestamp: event.timestamp || new Date().toISOString() };
           setEvents((prev) => [...prev, nextEvent]);
           if (activeRunId) {
@@ -77,7 +99,11 @@ export default function ResultsModal() {
         onRunUpdate: (payload) => {
           if (payload.run) {
             upsertStaticRun(payload.run);
-            setStatus(toRunViewerStatus(payload.run.status));
+            const nextStatus = toRunViewerStatus(payload.run.status);
+            if (isTerminalRunStatus(payload.run.status)) {
+              terminalRunSeenRef.current = true;
+            }
+            setStatus(nextStatus);
             if (payload.run.final_result) {
               setResults(payload.run.final_result);
             }
@@ -87,28 +113,59 @@ export default function ResultsModal() {
           }
         },
         onWorkflowCompleted: (res) => {
+          terminalRunSeenRef.current = true;
           setStatus('completed');
           setResults(res);
           setEvents((prev) => [...prev, { type: 'workflow_completed', timestamp: new Date().toISOString() }]);
         },
         onWorkflowFailed: (err, trace) => {
+          terminalRunSeenRef.current = true;
           setStatus('failed');
           setError(err);
           setTraceback(trace || '');
           setEvents((prev) => [...prev, { type: 'workflow_failed', data: { error: err }, timestamp: new Date().toISOString() }]);
         },
-        onError: (error) => {
-          console.error('WebSocket error:', error);
-          setStatus('failed');
-          setError('WebSocket connection failed');
+        onError: (event, websocket) => {
+          console.warn('Workflow result stream unavailable; polling will continue.', event);
+          if (
+            manualSocketCloseRef.current ||
+            terminalRunSeenRef.current ||
+            websocket.readyState === WebSocket.CLOSING ||
+            websocket.readyState === WebSocket.CLOSED
+          ) {
+            return;
+          }
+          setStatus((prev) => (prev === 'connecting' ? 'running' : prev));
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: 'stream_warning',
+              data: { message: 'Live result stream disconnected; polling will continue.' },
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+        },
+        onClose: (event) => {
+          if (event.wasClean || manualSocketCloseRef.current || terminalRunSeenRef.current) {
+            return;
+          }
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: 'stream_warning',
+              data: { message: 'Live result stream closed; polling will continue.' },
+              timestamp: new Date().toISOString(),
+            },
+          ]);
         },
       });
 
       setWs(websocket);
 
       return () => {
+        manualSocketCloseRef.current = true;
         if (websocket.readyState === WebSocket.OPEN) {
-          websocket.close();
+          websocket.close(1000, 'viewer cleanup');
         }
       };
     }
@@ -143,8 +200,9 @@ export default function ResultsModal() {
   }, [runViewerOpen, selectedRunId, setStaticRunEvents, staticRunEvents, staticRuns, workspaceDir]);
 
   const handleClose = () => {
+    manualSocketCloseRef.current = true;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
+      ws.close(1000, 'viewer closed');
     }
     closeRunViewer();
     setStatus('connecting');
@@ -169,6 +227,7 @@ export default function ResultsModal() {
     if (type === 'workflow_failed') return <Tag color="error">Workflow Failed</Tag>;
     if (type === 'workflow_canceled') return <Tag color="orange">Workflow Canceled</Tag>;
     if (type === 'workflow_interrupted') return <Tag color="magenta">Interrupted</Tag>;
+    if (type === 'stream_warning') return <Tag color="gold">Stream</Tag>;
     if (type === 'building') return <Tag color="blue">Building</Tag>;
     if (type === 'workflow_started') return <Tag color="green">Started</Tag>;
     return <Tag>{type}</Tag>;
@@ -225,6 +284,9 @@ export default function ResultsModal() {
     }
     if (event.type === 'workflow_interrupted') {
       return data.message || data.error || 'Workflow run was interrupted';
+    }
+    if (event.type === 'stream_warning') {
+      return data.message || 'Live result stream disconnected; polling will continue.';
     }
     return 'Connected to result stream';
   };

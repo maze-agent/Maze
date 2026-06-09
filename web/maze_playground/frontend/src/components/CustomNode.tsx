@@ -194,6 +194,9 @@ export default function CustomNode({ id, data, selected }: any) {
             {isAgent && (
               <div>{data.reactMode === 'online' ? 'Online LLM' : 'Local Demo'}</div>
             )}
+            {isAgent && data.skills && data.skills.length > 0 && (
+              <div>Skills: {data.skills.length}</div>
+            )}
             {runtimeNodeIp && (
               <Tooltip title={`node_id: ${runtimeNodeId || '-'}${runtimeGpuId !== null && runtimeGpuId !== undefined ? `, gpu: ${runtimeGpuId}` : ''}`}>
                 <div style={{ color: '#0958d9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

@@ -12,8 +12,6 @@ import re
 import ast
 import operator
 import tempfile
-import subprocess
-import time
 
 sys.dont_write_bytecode = True
 
@@ -27,10 +25,29 @@ if sys.platform == 'win32':
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.insert(0, project_root)
 
+workspace_root = os.path.abspath(os.path.expanduser(
+    os.environ.get("MAZE_WORKSPACE_ROOT_DIR")
+    or os.environ.get("MAZE_WORKSPACE_DIR")
+    or os.path.join(project_root, "workspace")
+))
+workspaces_dir = os.path.abspath(os.path.expanduser(
+    os.environ.get("MAZE_WORKSPACES_DIR")
+    or os.path.join(workspace_root, "workspaces")
+))
+default_workspace_dir = os.path.abspath(os.path.expanduser(
+    os.environ.get("MAZE_DEFAULT_WORKSPACE_DIR")
+    or os.path.join(workspaces_dir, os.environ.get("MAZE_DEFAULT_WORKSPACE_ID", "default"))
+))
+
 # 使用客户端模块
 from maze.client.front.client import MaClient
 from maze.client.maze.client import MaClient as DynamicMaClient
+from maze.client.maze.agent_exec import run_agent_exec_code
+from maze.client.maze.agent_permissions import permission_error_payload
+from maze.client.maze.agent_sandbox import build_workspace_sandbox
+from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
 from maze.client.maze.react_llm import create_openai_react_llm_task
+from maze.client.maze.agent_skills import AgentSkillRegistry
 from maze import task, get_task_metadata
 from maze.client.front.builtin import agentTools, distributedSmoke
 import inspect
@@ -104,10 +121,21 @@ def calculator(expression: str):
     return {"result": result}
 
 
-def build_react_workspace_tools(workspace_dir):
-    resolved_workspace_dir = os.path.abspath(os.path.expanduser(workspace_dir or project_root))
-    files_dir = os.path.abspath(os.path.join(resolved_workspace_dir, "files"))
-    os.makedirs(files_dir, exist_ok=True)
+def build_react_workspace_tools(
+    workspace_dir,
+    default_exec_backend="workspace_sandbox",
+    default_exec_timeout=20,
+):
+    resolved_workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir)
+    if workspace_error:
+        raise ValueError(workspace_error["error"])
+    sandbox = build_workspace_sandbox(resolved_workspace_dir)
+    files_dir = str(sandbox.files_dir)
+    try:
+        default_exec_timeout = int(default_exec_timeout or 20)
+    except (TypeError, ValueError):
+        default_exec_timeout = 20
+    default_exec_timeout = min(max(default_exec_timeout, 1), 3600)
 
     def env_flag(name, default=True):
         value = os.environ.get(name)
@@ -122,18 +150,15 @@ def build_react_workspace_tools(workspace_dir):
             value = default
         return min(max(value, minimum), maximum)
 
-    def resolve_workspace_file(relative_path):
-        cleaned = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
-        normalized = os.path.normpath(cleaned).replace("\\", "/")
-        if not normalized or normalized == ".":
-            raise ValueError("path is required")
-        if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
-            raise ValueError("path must stay inside workspace/files")
-
-        full_path = os.path.abspath(os.path.join(files_dir, normalized))
-        if full_path != files_dir and not full_path.startswith(files_dir + os.sep):
-            raise ValueError("path must stay inside workspace/files")
-        return full_path, normalized
+    def resolve_workspace_file(relative_path, permission):
+        current_sandbox = build_workspace_sandbox(resolved_workspace_dir)
+        full_path, normalized, decision = sandbox_resolve_workspace_file(
+            relative_path,
+            current_sandbox.files_dir,
+            policy=current_sandbox.policy,
+            permission=permission,
+        )
+        return str(full_path), normalized, decision
 
     @task(
         data_types={"path": "str", "content": "str", "append": "bool"},
@@ -141,7 +166,7 @@ def build_react_workspace_tools(workspace_dir):
     )
     def write_file(path: str, content: str, append: bool = False):
         try:
-            full_path, normalized = resolve_workspace_file(path)
+            full_path, normalized, decision = resolve_workspace_file(path, "write")
             append_flag = append
             if isinstance(append_flag, str):
                 append_flag = append_flag.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -158,11 +183,21 @@ def build_react_workspace_tools(workspace_dir):
             with open(full_path, mode, encoding="utf-8") as handle:
                 handle.write(text)
 
+            work_dir = os.environ.get("MAZE_WORK_DIR") or os.getcwd()
+            sandbox_output_path = os.path.abspath(os.path.join(work_dir, normalized))
+            if sandbox_output_path.startswith(os.path.abspath(work_dir) + os.sep):
+                os.makedirs(os.path.dirname(sandbox_output_path), exist_ok=True)
+                with open(sandbox_output_path, mode, encoding="utf-8") as handle:
+                    handle.write(text)
+
             return {
                 "path": normalized,
                 "bytes": len(text_bytes),
                 "appended": append_flag,
                 "error": None,
+                "metadata": {
+                    "permission": decision.to_dict() if decision is not None else None,
+                },
             }
         except Exception as exc:
             return {
@@ -170,6 +205,7 @@ def build_react_workspace_tools(workspace_dir):
                 "bytes": 0,
                 "appended": False,
                 "error": str(exc),
+                "metadata": permission_error_payload(exc),
             }
 
     @task(
@@ -178,7 +214,7 @@ def build_react_workspace_tools(workspace_dir):
     )
     def read_file(path: str, max_bytes: int = 20000):
         try:
-            full_path, normalized = resolve_workspace_file(path)
+            full_path, normalized, decision = resolve_workspace_file(path, "read")
             limit = int(max_bytes or 20000)
             env_limit = env_int("MAZE_AGENT_READ_MAX_BYTES", 200000, 1, 5_000_000)
             limit = min(max(limit, 1), env_limit)
@@ -192,6 +228,9 @@ def build_react_workspace_tools(workspace_dir):
                 "bytes": len(raw[:limit]),
                 "truncated": truncated,
                 "error": None,
+                "metadata": {
+                    "permission": decision.to_dict() if decision is not None else None,
+                },
             }
         except Exception as exc:
             return {
@@ -200,83 +239,62 @@ def build_react_workspace_tools(workspace_dir):
                 "bytes": 0,
                 "truncated": False,
                 "error": str(exc),
+                "metadata": permission_error_payload(exc),
             }
 
     @task(
-        data_types={"path": "str", "code": "str", "timeout_seconds": "int"},
+        data_types={
+            "path": "str",
+            "code": "str",
+            "timeout_seconds": "int",
+            "backend": "str",
+            "cpu": "int",
+            "cpu_mem": "int",
+            "gpu": "int",
+            "gpu_mem": "int",
+            "target_node_id": "str",
+        },
         resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
     )
-    def exec_code(path: str = "", code: str = "", timeout_seconds: int = 20):
-        try:
-            if not env_flag("MAZE_ENABLE_AGENT_EXEC_CODE", True):
-                return {
-                    "path": str(path or ""),
-                    "returncode": None,
-                    "stdout": "",
-                    "stderr": "",
-                    "error": "exec_code is disabled by MAZE_ENABLE_AGENT_EXEC_CODE",
-                }
-
-            timeout_value = float(timeout_seconds or 20)
-            timeout_value = min(
-                max(timeout_value, 1),
-                env_int("MAZE_AGENT_EXEC_TIMEOUT_SECONDS", 60, 1, 600),
-            )
-            code_text = str(code or "")
-            max_code_bytes = env_int("MAZE_AGENT_EXEC_CODE_MAX_BYTES", 200000, 1, 5_000_000)
-            code_size = len(code_text.encode("utf-8"))
-            if code_size > max_code_bytes:
-                raise ValueError(f"code is too large for exec_code ({code_size} > {max_code_bytes} bytes)")
-            target_path = str(path or "").strip()
-
-            if code_text and not target_path:
-                target_path = f"generated/exec_{int(time.time() * 1000)}.py"
-
-            if not target_path:
-                return {
-                    "path": "",
-                    "returncode": None,
-                    "stdout": "",
-                    "stderr": "",
-                    "error": "path or code is required",
-                }
-
-            full_path, normalized = resolve_workspace_file(target_path)
-            if code_text:
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, "w", encoding="utf-8") as handle:
-                    handle.write(code_text)
-
-            completed = subprocess.run(
-                [sys.executable, full_path],
-                cwd=files_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout_value,
-            )
-            return {
-                "path": normalized,
-                "returncode": completed.returncode,
-                "stdout": completed.stdout[-12000:],
-                "stderr": completed.stderr[-12000:],
-                "error": None,
-            }
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "path": str(path or ""),
-                "returncode": None,
-                "stdout": (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else "",
-                "stderr": (exc.stderr or "")[-12000:] if isinstance(exc.stderr, str) else "",
-                "error": f"Execution timed out after {timeout_seconds} seconds",
-            }
-        except Exception as exc:
-            return {
-                "path": str(path or ""),
-                "returncode": None,
-                "stdout": "",
-                "stderr": "",
-                "error": str(exc),
-            }
+    def exec_code(
+        path: str = "",
+        code: str = "",
+        timeout_seconds: int = 0,
+        backend: str = "",
+        cpu: int = 1,
+        cpu_mem: int = 128,
+        gpu: int = 0,
+        gpu_mem: int = 0,
+        target_node_id: str = "",
+    ):
+        result = run_agent_exec_code(
+            path=path,
+            code=code,
+            timeout_seconds=timeout_seconds or default_exec_timeout,
+            workspace_dir=resolved_workspace_dir,
+            backend=backend or default_exec_backend,
+        )
+        metadata = dict(result.get("metadata", {}) or {})
+        metadata["resource_request"] = {
+            "cpu": cpu,
+            "cpu_mem": cpu_mem,
+            "gpu": gpu,
+            "gpu_mem": gpu_mem,
+            "target_node_id": target_node_id,
+        }
+        return {
+            "path": result.get("path", str(path or "")),
+            "backend": result.get("backend", backend or default_exec_backend),
+            "returncode": result.get("returncode"),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "error": result.get("error"),
+            "timed_out": result.get("timed_out", False),
+            "stdout_truncated": result.get("stdout_truncated", False),
+            "stderr_truncated": result.get("stderr_truncated", False),
+            "generated_files": result.get("generated_files", []),
+            "metadata": metadata,
+        }
 
     return [write_file, read_file, exec_code]
 
@@ -448,15 +466,121 @@ def _load_module_from_file(file_path, workspace_dir):
     return module
 
 
-def _resolve_workspace_dir(workspace_dir):
-    if not workspace_dir:
-        workspace_dir = project_root
+def _is_windows_drive_path(value):
+    return bool(re.match(r"^[a-zA-Z]:[\\/]", str(value or "").strip()))
 
-    resolved = os.path.abspath(os.path.expanduser(workspace_dir))
+
+def _workspace_id_to_dir(workspace_id):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(workspace_id or "").strip()).strip("-")
+    safe = safe[:80] or "default"
+    return os.path.join(workspaces_dir, safe)
+
+
+def _ensure_workspace_layout(resolved):
+    os.makedirs(resolved, exist_ok=True)
+    for name in ("files", "workflows", "tasks", "skills", "policies", "runs"):
+        os.makedirs(os.path.join(resolved, name), exist_ok=True)
+
+    manifest_path = os.path.join(resolved, "workspace.json")
+    if not os.path.exists(manifest_path):
+        workspace_id = os.path.basename(resolved.rstrip(os.sep)) or "default"
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "maze_workspace",
+                "schema_version": 1,
+                "manifest_version": 1,
+                "workspace_id": workspace_id,
+                "name": "Default workspace" if workspace_id == "default" else "Untitled workspace",
+                "created_at": now,
+                "updated_at": now,
+                "mode": "session",
+                "default_sandbox": "workspace_sandbox",
+                "files_dir": "files",
+                "workflows_dir": "workflows",
+                "tasks_dir": "tasks",
+                "skills_dir": "skills",
+                "runs_dir": "runs",
+                "policy_path": "policies/sandbox_policy.json",
+                "imports": [],
+                "local_mounts": [],
+            }, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+
+    policy_path = os.path.join(resolved, "policies", "sandbox_policy.json")
+    if not os.path.exists(policy_path):
+        with open(policy_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema": "maze_sandbox_policy",
+                "schema_version": 1,
+                "permission": {
+                    "read": {
+                        "*": "allow",
+                        ".env": "deny",
+                        ".env.*": "deny",
+                        "*secret*": "deny",
+                        "*credential*": "deny",
+                        "*token*": "deny",
+                        "api_key*": "deny",
+                    },
+                    "write": {
+                        "*": "ask",
+                        ".env": "deny",
+                        ".env.*": "deny",
+                        "*secret*": "deny",
+                        "*credential*": "deny",
+                        "*token*": "deny",
+                        "api_key*": "deny",
+                    },
+                    "exec_code": {"*": "ask", "python *": "allow", "rm *": "deny"},
+                    "mcp": {"*": "ask"},
+                    "skill": {"*": "allow"},
+                },
+            }, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+
+
+def _resolve_workspace_dir(workspace_dir=None, workspace_id=None):
+    raw = str(workspace_dir or "").strip()
+    if workspace_id and not raw:
+        raw = _workspace_id_to_dir(workspace_id)
+    if not raw:
+        raw = default_workspace_dir
+
+    if sys.platform != "win32":
+        if _is_windows_drive_path(raw):
+            return None, {"error": "Windows drive paths cannot be used as service-side workspace paths"}
+        if "\\" in raw:
+            return None, {"error": "Workspace paths must use POSIX-style separators on this service"}
+
+    if raw and not os.path.isabs(os.path.expanduser(raw)) and "/" not in raw and "\\" not in raw:
+        raw = _workspace_id_to_dir(raw)
+
+    resolved = os.path.abspath(os.path.expanduser(raw))
+    if resolved == project_root:
+        return None, {"error": f"Project root cannot be used as a workspace directory: {project_root}"}
+
+    try:
+        _ensure_workspace_layout(resolved)
+    except Exception as exc:
+        return None, {"error": f"Failed to initialize workspace directory {resolved}: {exc}"}
+
     if not os.path.isdir(resolved):
         return None, {"error": f"Workspace directory does not exist: {resolved}"}
 
     return resolved, None
+
+
+def _string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 def _normalize_task_relative_path(relative_path):
@@ -558,6 +682,39 @@ def get_workspace_tasks(workspace_dir):
         "tasks": tasks,
         "errors": errors,
     }
+
+
+def list_workspace_skills(workspace_dir):
+    """Scan <workspace>/skills and return Maze agent skill metadata."""
+    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
+    if error:
+        return error
+
+    skills_dir = os.path.join(workspace_dir, "skills")
+    os.makedirs(skills_dir, exist_ok=True)
+
+    try:
+        registry = AgentSkillRegistry([skills_dir])
+        return {
+            "success": True,
+            "workspaceDir": workspace_dir,
+            "skillsDir": skills_dir,
+            "skills": registry.list_skills(),
+            "errors": [],
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "workspaceDir": workspace_dir,
+            "skillsDir": skills_dir,
+            "skills": [],
+            "errors": [{
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }],
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
 
 
 def save_workspace_task(workspace_dir, relative_path, code, parse=True):
@@ -732,9 +889,21 @@ def create_maze_workflow(workflow_id, server_url="http://localhost:8000"):
     }
 
 
-def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, workspace_dir=None):
+def build_and_run_workflow(
+    workflow_id,
+    nodes,
+    edges,
+    static_run_id=None,
+    workspace_dir=None,
+    workspace_id=None,
+    workspace_manifest_version=None,
+):
     """构建并运行工作流"""
     try:
+        workflow_workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir)
+        if workspace_error:
+            return {"success": False, "error": workspace_error["error"]}
+
         print(f"[DEBUG] 开始构建工作流: {workflow_id}", file=sys.stderr)
         print(f"[DEBUG] 节点数: {len(nodes)}, 边数: {len(edges)}", file=sys.stderr)
         
@@ -807,9 +976,9 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                             else:
                                 return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
 
-                if module_name == "agentTools" and workspace_dir:
+                if module_name == "agentTools" and workflow_workspace_dir:
                     if not str(task_inputs.get("workspace_dir") or "").strip():
-                        task_inputs["workspace_dir"] = workspace_dir
+                        task_inputs["workspace_dir"] = workflow_workspace_dir
                 
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)
@@ -818,7 +987,11 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                 print(f"[DEBUG] 任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
 
             elif category == "workspace":
-                workspace_dir = node_data.get("workspaceDir", project_root)
+                node_workspace_dir, workspace_error = _resolve_workspace_dir(
+                    node_data.get("workspaceDir") or workflow_workspace_dir
+                )
+                if workspace_error:
+                    return {"success": False, "error": workspace_error["error"]}
                 task_path = node_data.get("taskPath") or node_data.get("relativePath")
                 function_name = node_data.get("functionName") or node_data.get("label")
 
@@ -829,7 +1002,7 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                     }
 
                 try:
-                    task_func = _load_workspace_task_func(workspace_dir, task_path, function_name)
+                    task_func = _load_workspace_task_func(node_workspace_dir, task_path, function_name)
                     task_inputs = _build_task_inputs(node_data, task_map)
                 except Exception as e:
                     return {
@@ -913,7 +1086,7 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
         # Step 3: 运行工作流并获取 run_id
         print(f"[DEBUG] 开始运行工作流...", file=sys.stderr)
         file_context = None
-        if static_run_id and workspace_dir:
+        if static_run_id and workflow_workspace_dir:
             import socket
 
             core_url = os.environ.get("MAZE_CORE_URL")
@@ -921,7 +1094,9 @@ def build_and_run_workflow(workflow_id, nodes, edges, static_run_id=None, worksp
                 core_url = f"http://{socket.gethostbyname(socket.gethostname())}:8000"
             file_context = {
                 "enabled": True,
-                "workspace_dir": workspace_dir,
+                "workspace_dir": workflow_workspace_dir,
+                "workspace_id": workspace_id or os.path.basename(workflow_workspace_dir.rstrip(os.sep)),
+                "workspace_manifest_version": workspace_manifest_version,
                 "run_id": static_run_id,
                 "task_node_ids": maze_task_to_node,
                 "artifact_store": {
@@ -960,9 +1135,28 @@ def run_react_workflow(params):
     mode = str(params.get("mode") or "local").strip().lower()
     prompt = str(params.get("prompt") or "").strip()
     max_steps = int(params.get("maxSteps") or params.get("max_steps") or 4)
-    timeout_seconds = int(params.get("timeoutSeconds") or params.get("timeout_seconds") or 180)
     task_timeout = int(params.get("taskTimeout") or params.get("task_timeout") or 120)
-    workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or project_root).strip()
+    task_timeout = min(max(task_timeout, 10), 3600)
+    timeout_seconds = int(
+        params.get("timeoutSeconds")
+        or params.get("timeout_seconds")
+        or max(90, max_steps * task_timeout * 2 + 60)
+    )
+    timeout_seconds = min(max(timeout_seconds, task_timeout + 30), 24 * 3600)
+    workspace_id = str(params.get("workspaceId") or params.get("workspace_id") or "").strip()
+    workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or "").strip()
+    workspace_manifest_version = params.get("workspaceManifestVersion") or params.get("workspace_manifest_version")
+    skill_names = _string_list(params.get("skills") or [])
+    skill_dirs = _string_list(params.get("skillDirs") or params.get("skill_dirs") or [])
+    has_explicit_skill_dirs = bool(skill_dirs)
+    max_skill_chars = int(params.get("maxSkillChars") or params.get("max_skill_chars") or 12000)
+    permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
+    exec_backend = str(
+        params.get("execBackend")
+        or params.get("exec_backend")
+        or os.environ.get("MAZE_AGENT_EXEC_BACKEND")
+        or "workspace_sandbox"
+    ).strip() or "workspace_sandbox"
     config_path = None
 
     if not prompt:
@@ -972,13 +1166,28 @@ def run_react_workflow(params):
 
     react = None
     try:
-        workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir)
+        workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir, workspace_id=workspace_id)
         if workspace_error:
             return {"success": False, "error": workspace_error["error"]}
+        workspace_id = workspace_id or os.path.basename(workspace_dir.rstrip(os.sep))
         os.makedirs(os.path.join(workspace_dir, "files"), exist_ok=True)
+        if not skill_dirs:
+            skill_dirs = [os.path.join(workspace_dir, "skills")]
+        skill_dirs = [
+            os.path.abspath(os.path.expanduser(skill_dir))
+            if os.path.isabs(skill_dir)
+            else os.path.abspath(os.path.join(workspace_dir, skill_dir))
+            for skill_dir in skill_dirs
+        ]
+        if not has_explicit_skill_dirs:
+            os.makedirs(skill_dirs[0], exist_ok=True)
 
         client = DynamicMaClient(server_url="http://localhost:8000")
-        workspace_tools = build_react_workspace_tools(workspace_dir)
+        workspace_tools = build_react_workspace_tools(
+            workspace_dir,
+            default_exec_backend=exec_backend,
+            default_exec_timeout=task_timeout,
+        )
         base_tools = [calculator, *workspace_tools]
 
         if mode == "local":
@@ -1038,12 +1247,31 @@ def run_react_workflow(params):
             max_steps=max_steps,
             timeout_seconds=timeout_seconds,
             task_timeout=task_timeout,
+            file_context={
+                "enabled": True,
+                "workspace_dir": workspace_dir,
+                "workspace_id": workspace_id,
+                "workspace_manifest_version": workspace_manifest_version,
+            },
+            workspace_dir=workspace_dir,
+            agent_skills=skill_names,
+            skill_dirs=skill_dirs,
+            max_skill_chars=max_skill_chars,
+            permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
         )
         emit_progress({
             "type": "react_run_created",
             "data": {
                 "run_id": react.run_id,
                 "mode": mode,
+                "workspace_id": workspace_id,
+                "workspace_dir": workspace_dir,
+                "workspace_manifest_version": workspace_manifest_version,
+                "skills": skill_names,
+                "exec_backend": exec_backend,
+                "max_steps": max_steps,
+                "timeout_seconds": timeout_seconds,
+                "task_timeout": task_timeout,
             },
         })
         answer = react.run(prompt)
@@ -1060,8 +1288,16 @@ def run_react_workflow(params):
         return {
             "success": True,
             "runId": react.run_id,
+            "workspaceId": workspace_id,
+            "workspaceDir": workspace_dir,
+            "workspaceManifestVersion": workspace_manifest_version,
             "answer": answer,
             "status": status.get("status"),
+            "skills": skill_names,
+            "execBackend": exec_backend,
+            "maxSteps": max_steps,
+            "timeoutSeconds": timeout_seconds,
+            "taskTimeout": task_timeout,
             "eventTypes": [
                 event.get("type")
                 for event in events
@@ -1107,6 +1343,9 @@ def main():
         elif action == 'get_workspace_tasks':
             result = get_workspace_tasks(params.get('workspaceDir', ''))
 
+        elif action == 'list_workspace_skills':
+            result = list_workspace_skills(params.get('workspaceDir', ''))
+
         elif action == 'save_workspace_task':
             result = save_workspace_task(
                 params.get('workspaceDir', ''),
@@ -1145,6 +1384,8 @@ def main():
                 params.get('edges', []),
                 params.get('staticRunId'),
                 params.get('workspaceDir'),
+                params.get('workspaceId') or params.get('workspace_id'),
+                params.get('workspaceManifestVersion') or params.get('workspace_manifest_version'),
             )
 
         elif action == 'run_react_workflow':

@@ -74,20 +74,20 @@ def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]
 
     parent_manifests = file_context.get("parent_file_manifests")
     if parent_manifests is None:
-        workspace_dir = Path(file_context["workspace_dir"])
         run_id = file_context["run_id"]
         parent_task_ids = file_context.get("parent_task_ids") or []
-        manifests_dir = workspace_dir / "workflow_runs" / "static" / run_id / "file_manifests" / "tasks"
         parent_manifests = []
 
         for parent_task_id in parent_task_ids:
-            manifest_path = manifests_dir / f"{parent_task_id}.json"
-            if not manifest_path.exists():
-                continue
+            for manifests_dir in _task_manifest_dirs(file_context, run_id):
+                manifest_path = manifests_dir / f"{parent_task_id}.json"
+                if not manifest_path.exists():
+                    continue
 
-            import json
+                import json
 
-            parent_manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+                parent_manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+                break
 
     for manifest in parent_manifests:
         for file_info in manifest.get("files", []):
@@ -116,6 +116,27 @@ def _artifact_base_url(file_context: Dict[str, Any]) -> str:
     if not base_url:
         raise ArtifactError("Artifact file context requires artifact_store.base_url")
     return str(base_url).rstrip("/")
+
+
+def _run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
+    workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
+    return workspace_dir / "runs" / (run_id or file_context["run_id"])
+
+
+def _legacy_static_run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
+    workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
+    return workspace_dir / "workflow_runs" / "static" / (run_id or file_context["run_id"])
+
+
+def _task_manifest_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
+    return _run_dir(file_context, run_id) / "file_manifests" / "tasks"
+
+
+def _task_manifest_dirs(file_context: Dict[str, Any], run_id: str | None = None) -> list[Path]:
+    return [
+        _task_manifest_dir(file_context, run_id),
+        _legacy_static_run_dir(file_context, run_id) / "file_manifests" / "tasks",
+    ]
 
 
 def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], target: Path):
@@ -183,10 +204,9 @@ def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
     if _artifact_mode(file_context) and not file_context.get("write_local_manifest", False):
         return
 
-    workspace_dir = Path(file_context["workspace_dir"])
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
-    manifests_dir = workspace_dir / "workflow_runs" / "static" / run_id / "file_manifests" / "tasks"
+    manifests_dir = _task_manifest_dir(file_context, run_id)
     manifests_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifests_dir / f"{task_id}.json"
     tmp_path = manifest_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
@@ -195,11 +215,10 @@ def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
 
 
 def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, before: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    workspace_dir = Path(file_context["workspace_dir"])
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
     after = _snapshot_files(work_dir)
-    artifacts_dir = workspace_dir / "workflow_runs" / "static" / run_id / "artifacts" / "tasks" / task_id
+    artifacts_dir = _run_dir(file_context, run_id) / "artifacts" / "tasks" / task_id
     files = []
 
     for relative_path, file_info in sorted(after.items()):
@@ -286,7 +305,7 @@ def run_task_with_file_context(
     workspace_dir = Path(file_context["workspace_dir"]).resolve()
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
-    work_dir = workspace_dir / "workflow_runs" / "static" / run_id / "sandboxes" / "tasks" / task_id / "work"
+    work_dir = _run_dir(file_context, run_id) / "work" / "tasks" / task_id
 
     if work_dir.exists():
         shutil.rmtree(work_dir)

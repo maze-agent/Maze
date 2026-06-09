@@ -15,6 +15,7 @@ class HttpClient(BaseClient):
         **client_kwargs: Any,
     ) -> None:
         assert transport in ["streamable_http", "sse"]
+        super().__init__(name=name)
         self.transport = transport
 
         if self.transport == "streamable_http":

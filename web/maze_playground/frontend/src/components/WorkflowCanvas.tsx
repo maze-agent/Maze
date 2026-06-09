@@ -14,6 +14,7 @@ import ReactFlow, {
 import { Button, message, Space, Spin, Tag, Typography } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
+import { defaultReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   BuiltinTaskMeta,
   DynamicRunEvent,
@@ -389,6 +390,7 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
           addNode(newNode);
           selectNode(newNode);
         } else if (type === 'agent-react') {
+          const templateTask = task || {};
           const newNode = {
             id: `node-${Date.now()}`,
             type: 'taskNode' as const,
@@ -396,12 +398,15 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
             data: {
               category: 'agent' as const,
               nodeType: 'task' as const,
-              label: 'ReAct Workflow',
+              label: templateTask.label || 'ReAct Workflow',
               agentKind: 'react' as const,
-              reactMode: 'local' as const,
-              prompt: 'Use the calculator to compute 18 * 7, then give the final answer.',
-              maxSteps: 4,
-              maxTokens: 2048,
+              reactMode: templateTask.reactMode || 'local' as const,
+              prompt: templateTask.prompt || 'Use the calculator to compute 18 * 7, then give the final answer.',
+              maxSteps: templateTask.maxSteps || 4,
+              maxTokens: templateTask.maxTokens || 2048,
+              taskTimeout: templateTask.taskTimeout || defaultReactTaskTimeout(templateTask.reactMode || 'local'),
+              skills: templateTask.skills || [],
+              recommendedSkills: templateTask.recommendedSkills || templateTask.skills || [],
               inputs: [],
               outputs: [{ name: 'answer', dataType: 'any' }],
               configured: true,
@@ -410,6 +415,9 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
           addNode(newNode);
           selectNode(newNode);
+          if ((templateTask.recommendedSkills || []).length > 0) {
+            message.info('Recommended skills can be imported from Skills Library if they are not in this workspace.');
+          }
         } else if (type === 'workflow-distributed-smoke') {
           const baseId = Date.now();
           const smokeNodes = Array.from({ length: 2 }, (_, index) => ({
@@ -446,6 +454,8 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
           smokeNodes.forEach((node) => addNode(node));
           selectNode(smokeNodes[0]);
+        } else if (type === 'workspace-example-task') {
+          message.info('Use Add in the Library to import this example task into the workspace.');
         }
       } catch (error) {
         console.error('Failed to drop node:', error);

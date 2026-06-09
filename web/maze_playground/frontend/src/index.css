@@ -76,3 +76,56 @@ body {
   overflow: hidden;
 }
 
+.workspace-file-dropzone {
+  border: 1px dashed #cfd6e4;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.workspace-file-dropzone.is-active {
+  border-color: #1677ff;
+  background: #f4f9ff;
+  box-shadow: inset 0 0 0 1px rgba(22, 119, 255, 0.16);
+}
+
+.workspace-file-dropzone-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.workspace-file-row {
+  border: 1px solid #edf0f5;
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 6px;
+  background: #fbfcfe;
+}
+
+.workspace-file-row:hover {
+  border-color: #c9ddff;
+  background: #f7fbff;
+}
+
+.workspace-file-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-file-icon-file {
+  background: #f2f4f7;
+  color: #475467;
+}
+
+.workspace-file-icon-directory {
+  background: #eef4ff;
+  color: #175cd3;
+}

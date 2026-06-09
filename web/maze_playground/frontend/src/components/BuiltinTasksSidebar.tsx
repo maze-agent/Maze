@@ -1,5 +1,5 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Divider, Drawer, Empty, Input, List, message, Modal, Radio, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Divider, Drawer, Empty, Input, List, message, Modal, Radio, Select, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   CodeOutlined,
   DeleteOutlined,
@@ -8,21 +8,150 @@ import {
   EyeOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
+  InboxOutlined,
+  AppstoreAddOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PartitionOutlined,
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
+  SettingOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import type { BuiltinTaskMeta, WorkflowNode, WorkspaceFileMeta, WorkspaceTaskMeta, WorkspaceWorkflowMeta } from '@/types/workflow';
-import { loadLlmSettings } from '@/utils/llmSettings';
+import { defaultReactTaskTimeout } from '@/utils/reactRuntime';
+import type {
+  BuiltinTaskMeta,
+  LocalWorkspaceFileMeta,
+  WorkflowNode,
+  SystemCatalogItem,
+  WorkspaceFileMeta,
+  WorkspaceSkillMeta,
+  WorkspaceTaskMeta,
+  WorkspaceWorkflowMeta,
+} from '@/types/workflow';
+import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
 
 const { Text, Paragraph } = Typography;
+
+type BuiltinWorkflowExample = {
+  key: string;
+  name: string;
+  description: string;
+  tags: string[];
+  color: string;
+  kind: 'react' | 'distributed-smoke' | 'workspace-task';
+  recommendedSkills?: string[];
+  reactMode?: 'local' | 'online';
+  prompt?: string;
+  maxSteps?: number;
+  maxTokens?: number;
+  taskSourceId?: string;
+  taskRelativePath?: string;
+  workflowName?: string;
+};
+
+const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
+  {
+    key: 'json-canvas-agent',
+    name: 'JSON Canvas Agent',
+    description: 'Creates an Obsidian JSON Canvas map and saves a .canvas artifact.',
+    tags: ['agent', '.canvas', 'artifact'],
+    color: '#13a8a8',
+    kind: 'react',
+    reactMode: 'online',
+    recommendedSkills: ['json-canvas'],
+    maxSteps: 5,
+    maxTokens: 4096,
+    prompt: [
+      'Create a JSON Canvas file about "Maze workflow workspace design".',
+      'Use the json-canvas skill guidance.',
+      'Call write_file to save it as examples/maze-workspace.canvas.',
+      'The file must be valid JSON Canvas with at least 5 text nodes and 4 edges.',
+      'Finish with the artifact path and a short summary.',
+    ].join(' '),
+  },
+  {
+    key: 'debugging-agent',
+    name: 'Debugging Agent',
+    description: 'Turns a failure log into a root cause report using systematic debugging.',
+    tags: ['agent', 'debug', 'report'],
+    color: '#d46b08',
+    kind: 'react',
+    reactMode: 'online',
+    recommendedSkills: ['systematic-debugging'],
+    maxSteps: 5,
+    maxTokens: 4096,
+    prompt: [
+      'Use the systematic-debugging skill to analyze this failing test log:',
+      '"TypeError: Cannot read properties of undefined (reading tasks) at WorkflowCanvas.tsx:412 after importing a workflow template."',
+      'Create a concise root cause report with evidence, likely source, and next diagnostic action.',
+      'Call write_file to save the report as reports/root-cause.md, then finish with the path.',
+    ].join(' '),
+  },
+  {
+    key: 'slack-gif-agent',
+    name: 'Slack GIF Agent',
+    description: 'Builds a Slack-ready animated GIF artifact from a short idea.',
+    tags: ['agent', 'GIF', 'creative'],
+    color: '#eb2f96',
+    kind: 'react',
+    reactMode: 'online',
+    recommendedSkills: ['slack-gif-creator'],
+    maxSteps: 6,
+    maxTokens: 4096,
+    prompt: [
+      'Create a polished 128x128 Slack emoji GIF of a tiny rocket drawing a check mark.',
+      'Use the slack-gif-creator skill constraints.',
+      'Call exec_code with Python/PIL code that writes examples/rocket-check.gif.',
+      'Finish with the artifact path and validation notes.',
+    ].join(' '),
+  },
+  {
+    key: 'distributed-smoke',
+    name: 'Distributed GPU Smoke',
+    description: 'Runs two GPU probe tasks so Run Detail can show head/worker placement.',
+    tags: ['distributed', 'GPU', 'placement'],
+    color: '#0958d9',
+    kind: 'distributed-smoke',
+    workflowName: 'Distributed GPU Smoke',
+  },
+  {
+    key: 'file-sandbox-demo',
+    name: 'File Sandbox Demo',
+    description: 'Reads a workspace file and writes a report artifact without LLM setup.',
+    tags: ['sandbox', 'file', 'artifact'],
+    color: '#389e0d',
+    kind: 'workspace-task',
+    taskSourceId: 'file_sandbox_demo.py',
+    taskRelativePath: 'tasks/examples/file_sandbox_demo.py',
+    workflowName: 'File Sandbox Demo',
+  },
+];
+
+const SKILL_PACKS = [
+  {
+    key: 'engineering',
+    name: 'Engineering Pack',
+    description: 'Debugging, tests, web app checks, and MCP building.',
+    skills: ['systematic-debugging', 'test-driven-development', 'webapp-testing', 'mcp-builder'],
+  },
+  {
+    key: 'creative',
+    name: 'Creative Pack',
+    description: 'Algorithmic visuals and Slack GIF creation.',
+    skills: ['algorithmic-art', 'slack-gif-creator'],
+  },
+  {
+    key: 'knowledge',
+    name: 'Knowledge Pack',
+    description: 'Obsidian-friendly canvas and markdown workflows.',
+    skills: ['json-canvas', 'obsidian-markdown'],
+  },
+];
 
 const defaultWorkspaceTaskCode = (functionName: string) => `from maze import task
 
@@ -48,6 +177,45 @@ function joinWorkspacePath(base: string, name: string) {
   return [base, name].filter(Boolean).join('/');
 }
 
+function normalizeLocalRelativePath(path: string) {
+  return path
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/');
+}
+
+function stripTopLevelDirectory(path: string) {
+  const normalized = normalizeLocalRelativePath(path);
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 1) return normalized;
+  return parts.slice(1).join('/');
+}
+
+function describeLocalSelection(paths: string[]) {
+  const roots = Array.from(new Set(
+    paths
+      .map((item) => normalizeLocalRelativePath(item).split('/').filter(Boolean)[0])
+      .filter(Boolean),
+  ));
+  if (roots.length === 0) return '';
+  if (roots.length === 1) return roots[0];
+  return `${roots.length} local folders`;
+}
+
+function canUseDirectoryPicker() {
+  return typeof window !== 'undefined' && typeof (window as any).showDirectoryPicker === 'function';
+}
+
+function localWorkspaceIdForName(name: string) {
+  const safeName = String(name || 'local-workspace')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'local-workspace';
+  return `${safeName}-${Date.now().toString(36)}`;
+}
+
 function parentWorkspacePath(path: string) {
   const parts = path.split('/').filter(Boolean);
   parts.pop();
@@ -61,6 +229,21 @@ function formatFileSize(size?: number | null) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function compactSkillDescription(skill: WorkspaceSkillMeta) {
+  const value = String(skill.description || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!value) return 'No summary available';
+  return value.length > 180 ? `${value.slice(0, 177).trim()}...` : value;
+}
+
+function shortSkillPath(pathValue?: string) {
+  if (!pathValue) return '';
+  const parts = pathValue.replace(/\\/g, '/').split('/').filter(Boolean);
+  if (parts.length <= 2) return pathValue;
+  return parts.slice(-2).join('/');
+}
+
 async function fileToBase64(file: File) {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -71,11 +254,57 @@ async function fileToBase64(file: File) {
   return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
 }
 
+type UploadCandidate = {
+  file: File;
+  relativePath: string;
+};
+
+async function collectLocalWorkspaceFiles(
+  directoryHandle: any,
+  basePath = '',
+): Promise<LocalWorkspaceFileMeta[]> {
+  const files: LocalWorkspaceFileMeta[] = [];
+
+  for await (const [name, handle] of directoryHandle.entries()) {
+    const relativePath = normalizeLocalRelativePath(joinWorkspacePath(basePath, name));
+    if (!relativePath) {
+      continue;
+    }
+    if (handle.kind === 'directory') {
+      files.push({
+        name,
+        relativePath,
+        type: 'directory',
+        size: null,
+        updatedAt: null,
+      });
+      files.push(...await collectLocalWorkspaceFiles(handle, relativePath));
+    } else if (handle.kind === 'file') {
+      const file = await handle.getFile();
+      files.push({
+        name,
+        relativePath,
+        type: 'file',
+        size: file.size,
+        updatedAt: new Date(file.lastModified).toISOString(),
+      });
+    }
+  }
+
+  return files.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return a.relativePath.localeCompare(b.relativePath);
+  });
+}
+
 export default function BuiltinTasksSidebar() {
   const {
     builtinTasks,
     setBuiltinTasks,
+    workspaceId,
     workspaceDir,
+    workspaceManifestVersion,
+    setWorkspaceContext,
     setWorkspaceDir,
     workspaceTasks,
     setWorkspaceTasks,
@@ -83,14 +312,24 @@ export default function BuiltinTasksSidebar() {
     setWorkspaceWorkflows,
     currentWorkspaceWorkflowPath,
     setCurrentWorkspaceWorkflowPath,
+    localWorkspaceId,
+    localWorkspaceName,
+    localWorkspaceFiles,
+    localWorkspaceLastSyncedAt,
+    setLocalWorkspace,
+    setLocalWorkspaceFiles,
     workflowId,
     setWorkflowId,
     workflowName,
     setWorkflowName,
+    workflowSaveState,
+    workflowSavedAt,
+    workflowDraftError,
     nodes,
     edges,
     setNodes,
     setEdges,
+    setWorkflowSaveState,
     addNode,
     selectNode,
     clearRunResults,
@@ -100,10 +339,24 @@ export default function BuiltinTasksSidebar() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [filesLoading, setFilesLoading] = useState(false);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogItems, setCatalogItems] = useState<Record<'workflows' | 'tasks' | 'skills', SystemCatalogItem[]>>({
+    workflows: [],
+    tasks: [],
+    skills: [],
+  });
+  const [importingCatalogKey, setImportingCatalogKey] = useState<string | null>(null);
+  const [catalogImportType, setCatalogImportType] = useState<'workflows' | 'tasks' | 'skills' | null>(null);
+  const [importingSkillPackKey, setImportingSkillPackKey] = useState<string | null>(null);
+  const [importingExampleKey, setImportingExampleKey] = useState<string | null>(null);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
+  const [testingLlm, setTestingLlm] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const [newTaskMode, setNewTaskMode] = useState<'manual' | 'ai'>('manual');
+  const [newTaskMode, setNewTaskMode] = useState<'manual' | 'ai' | 'template'>('manual');
   const [newTaskFunctionName, setNewTaskFunctionName] = useState('');
   const [newTaskRelativePath, setNewTaskRelativePath] = useState('');
   const [newTaskDescription, setNewTaskDescription] = useState('');
@@ -115,8 +368,13 @@ export default function BuiltinTasksSidebar() {
   const [workspaceInput, setWorkspaceInput] = useState(workspaceDir);
   const [workspaceErrors, setWorkspaceErrors] = useState<Array<{ relativePath: string; error: string }>>([]);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileMeta[]>([]);
+  const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkillMeta[]>([]);
+  const [workspaceSkillErrors, setWorkspaceSkillErrors] = useState<Array<{ error: string; traceback?: string }>>([]);
   const [workspaceFilesPath, setWorkspaceFilesPath] = useState('');
   const [previewFile, setPreviewFile] = useState<{ path: string; content: string } | null>(null);
+  const [previewSkill, setPreviewSkill] = useState<WorkspaceSkillMeta | null>(null);
+  const [fileDropActive, setFileDropActive] = useState(false);
+  const [syncingLocalWorkspace, setSyncingLocalWorkspace] = useState(false);
   const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
   const [selectedWorkspaceTaskKey, setSelectedWorkspaceTaskKey] = useState<string | null>(null);
   const [selectedWorkflowPath, setSelectedWorkflowPath] = useState<string | null>(null);
@@ -135,34 +393,67 @@ export default function BuiltinTasksSidebar() {
   const taskImportInputRef = useRef<HTMLInputElement | null>(null);
   const taskImportTargetRef = useRef<WorkspaceTaskMeta | null>(null);
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
   const fileUploadTargetPathRef = useRef('');
 
   useEffect(() => {
     loadWorkspaceTasks();
     loadWorkspaceWorkflows();
     loadWorkspaceFiles();
+    loadWorkspaceSkills();
+    loadSystemCatalog();
     if (builtinTasks.length === 0) {
       loadBuiltinTasks(false);
     }
   }, []);
 
   useEffect(() => {
-    setWorkspaceTaskScope(currentWorkspaceWorkflowPath ? 'workflow' : 'all');
-  }, [currentWorkspaceWorkflowPath]);
-
-  const workflowWorkspaceTaskKeys = useMemo(() => new Set(
-    nodes
-      .filter((node) => node.data.category === 'workspace')
-      .map((node) => `${node.data.taskPath || ''}:${node.data.functionName || ''}`),
-  ), [nodes]);
-
-  const displayedWorkspaceTasks = useMemo(() => {
-    if (workspaceTaskScope !== 'workflow' || !currentWorkspaceWorkflowPath) {
-      return workspaceTasks;
+    if (!folderUploadInputRef.current) {
+      return;
     }
+    folderUploadInputRef.current.setAttribute('webkitdirectory', '');
+    folderUploadInputRef.current.setAttribute('directory', '');
+  }, []);
 
-    return workspaceTasks.filter((task) => workflowWorkspaceTaskKeys.has(`${task.relativePath}:${task.functionName}`));
-  }, [currentWorkspaceWorkflowPath, workflowWorkspaceTaskKeys, workspaceTaskScope, workspaceTasks]);
+  const workflowTaskNodes = useMemo(
+    () => nodes.filter((node) => node.data.nodeType === 'task'),
+    [nodes],
+  );
+
+  const hasWorkflowTaskNodes = workflowTaskNodes.length > 0;
+  const hasWorkflowContext = hasWorkflowTaskNodes || Boolean(currentWorkspaceWorkflowPath);
+  const showingWorkflowTasks = workspaceTaskScope === 'workflow' && hasWorkflowContext;
+
+  const renderWorkflowSaveState = () => {
+    if (nodes.length === 0 || workflowSaveState === 'empty') {
+      return <Tag style={{ margin: 0 }}>empty</Tag>;
+    }
+    if (workflowSaveState === 'unsaved_draft') {
+      return <Tag color="orange" style={{ margin: 0 }}>Unsaved Draft</Tag>;
+    }
+    if (workflowSaveState === 'saving_draft') {
+      return <Tag color="processing" style={{ margin: 0 }}>Saving Draft</Tag>;
+    }
+    if (workflowSaveState === 'saved_draft') {
+      return (
+        <Tag color="blue" style={{ margin: 0 }} title={workflowSavedAt ? `Saved at ${new Date(workflowSavedAt).toLocaleString()}` : undefined}>
+          Draft Saved
+        </Tag>
+      );
+    }
+    if (workflowSaveState === 'saved_workflow') {
+      return <Tag color="green" style={{ margin: 0 }}>Saved Workflow</Tag>;
+    }
+    return (
+      <Tag color="red" style={{ margin: 0 }} title={workflowDraftError || undefined}>
+        Draft Error
+      </Tag>
+    );
+  };
+
+  useEffect(() => {
+    setWorkspaceTaskScope(hasWorkflowContext ? 'workflow' : 'all');
+  }, [hasWorkflowContext]);
 
   const ensureWorkflow = async () => {
     if (workflowId) {
@@ -212,11 +503,155 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
+  const loadSystemCatalog = async (showSuccess = false) => {
+    setCatalogLoading(true);
+    try {
+      const result = await api.getSystemCatalog();
+      setCatalogItems({
+        workflows: result.catalog.workflows || [],
+        tasks: result.catalog.tasks || [],
+        skills: result.catalog.skills || [],
+      });
+      if (showSuccess) {
+        message.success('System catalog refreshed');
+      }
+      return result;
+    } catch (error: any) {
+      console.error('Failed to load system catalog:', error);
+      message.error(error.response?.data?.error || 'Failed to load system catalog');
+      throw error;
+    } finally {
+      setCatalogLoading(false);
+    }
+  };
+
+  const importCatalogItem = async (item: SystemCatalogItem) => {
+    const key = `${item.type}:${item.id}`;
+    setImportingCatalogKey(key);
+    try {
+      const type = item.type as 'workflows' | 'tasks' | 'skills';
+      const result = await api.importSystemCatalogItem({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || undefined,
+        type,
+        sourceId: item.id,
+      });
+      setWorkspaceContext(result);
+      setWorkspaceDir(result.workspaceDir);
+      setWorkspaceInput(result.workspaceDir);
+
+      if (type === 'workflows') {
+        await loadWorkspaceWorkflows(result.workspaceDir);
+        const recommendedSkills = item.recommendedSkills || [];
+        const missingRecommended = recommendedSkills.filter((skillName) => !workspaceSkillNames().has(skillName));
+        if (missingRecommended.length > 0) {
+          Modal.confirm({
+            title: 'Import recommended skills?',
+            content: `${item.name} recommends: ${missingRecommended.join(', ')}`,
+            okText: 'Import Skills',
+            cancelText: 'Skip',
+            onOk: async () => {
+              await importRecommendedSkills(missingRecommended);
+              message.success('Recommended skills imported');
+            },
+          });
+        }
+      } else if (type === 'tasks') {
+        await loadWorkspaceTasks(result.workspaceDir);
+      } else {
+        await loadWorkspaceSkills(result.workspaceDir);
+      }
+      message.success(`Imported ${item.name}`);
+      setCatalogImportType(null);
+    } catch (error: any) {
+      console.error('Failed to import system catalog item:', error);
+      message.error(error.response?.data?.error || 'Failed to import system catalog item');
+    } finally {
+      setImportingCatalogKey(null);
+    }
+  };
+
+  const importSystemCatalogItem = async (
+    type: 'workflows' | 'tasks' | 'skills',
+    sourceId: string,
+    targetPath?: string,
+  ) => {
+    const result = await api.importSystemCatalogItem({
+      workspaceId: workspaceId || undefined,
+      workspaceDir: workspaceDir || undefined,
+      type,
+      sourceId,
+      targetPath,
+    });
+    setWorkspaceContext(result);
+    setWorkspaceDir(result.workspaceDir);
+    setWorkspaceInput(result.workspaceDir);
+    return result;
+  };
+
+  const workspaceSkillNames = () => new Set(workspaceSkills.map((skill) => skill.name));
+
+  const importRecommendedSkills = async (skillNames: string[] = []) => {
+    const uniqueSkills = Array.from(new Set(skillNames.filter(Boolean)));
+    if (uniqueSkills.length === 0) {
+      return [];
+    }
+
+    let knownSkills = workspaceSkillNames();
+    const missing = uniqueSkills.filter((skillName) => !knownSkills.has(skillName));
+    if (missing.length === 0) {
+      return [];
+    }
+
+    let catalogSkills = catalogItems.skills || [];
+    if (catalogSkills.length === 0) {
+      const catalog = await loadSystemCatalog(false);
+      catalogSkills = catalog.catalog.skills || [];
+    }
+    const availableCatalogSkills = new Set(catalogSkills.map((item) => item.id));
+    const unknown = missing.filter((skillName) => !availableCatalogSkills.has(skillName));
+    const importable = missing.filter((skillName) => availableCatalogSkills.has(skillName));
+
+    if (unknown.length > 0) {
+      message.warning(`Missing built-in skill(s): ${unknown.join(', ')}`);
+    }
+    if (importable.length === 0) {
+      return [];
+    }
+
+    const imported: string[] = [];
+    for (const skillName of importable) {
+      await importSystemCatalogItem('skills', skillName, skillName);
+      imported.push(skillName);
+    }
+    const refreshed = await loadWorkspaceSkills();
+    knownSkills = new Set((refreshed.skills || []).map((skill) => skill.name));
+    return imported.filter((skillName) => knownSkills.has(skillName));
+  };
+
+  const importSkillPack = async (pack: typeof SKILL_PACKS[number]) => {
+    setImportingSkillPackKey(pack.key);
+    try {
+      const imported = await importRecommendedSkills(pack.skills);
+      if (imported.length > 0) {
+        message.success(`Imported ${pack.name}`);
+      } else {
+        message.info(`${pack.name} is already available`);
+      }
+    } catch (error: any) {
+      console.error('Failed to import skill pack:', error);
+      message.error(error.response?.data?.error || 'Failed to import skill pack');
+    } finally {
+      setImportingSkillPackKey(null);
+    }
+  };
+
   const loadWorkspaceTasks = async (dir?: string, showSuccess = false) => {
     setWorkspaceLoading(true);
     try {
       const normalizedDir = dir?.trim() || undefined;
       const result = await api.getWorkspaceTasks(normalizedDir);
+      setWorkspaceContext(result);
       setWorkspaceDir(result.workspaceDir);
       setWorkspaceInput(result.workspaceDir);
       setWorkspaceTasks(result.tasks || []);
@@ -243,6 +678,7 @@ export default function BuiltinTasksSidebar() {
     try {
       const normalizedDir = dir?.trim() || undefined;
       const result = await api.getWorkspaceWorkflows(normalizedDir);
+      setWorkspaceContext(result);
       setWorkspaceDir(result.workspaceDir);
       setWorkspaceInput(result.workspaceDir);
       setWorkspaceWorkflows(result.workflows || []);
@@ -271,6 +707,7 @@ export default function BuiltinTasksSidebar() {
         workspaceDir: normalizedDir,
         path: filePath,
       });
+      setWorkspaceContext(result);
       setWorkspaceDir(result.workspaceDir);
       setWorkspaceInput(result.workspaceDir);
       setWorkspaceFiles(result.files || []);
@@ -290,15 +727,79 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
+  const loadWorkspaceSkills = async (dir?: string, showSuccess = false) => {
+    setSkillsLoading(true);
+    try {
+      const normalizedDir = dir?.trim() || undefined;
+      const result = await api.getWorkspaceSkills(normalizedDir);
+      setWorkspaceContext(result);
+      setWorkspaceDir(result.workspaceDir);
+      setWorkspaceInput(result.workspaceDir);
+      setWorkspaceSkills(result.skills || []);
+      setWorkspaceSkillErrors(result.errors || []);
+
+      if ((result.errors || []).length > 0) {
+        message.warning('Some skills could not be loaded');
+      } else if (showSuccess) {
+        message.success('Skills refreshed');
+      }
+
+      return result;
+    } catch (error: any) {
+      console.error('Failed to load skills:', error);
+      message.error(error.response?.data?.error || 'Failed to load skills');
+      throw error;
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
   const handleChangeWorkspace = async (dir: string) => {
     try {
       const tasksResult = await loadWorkspaceTasks(dir);
       await loadWorkspaceWorkflows(tasksResult.workspaceDir);
       await loadWorkspaceFiles(tasksResult.workspaceDir, '');
+      await loadWorkspaceSkills(tasksResult.workspaceDir);
       setCurrentWorkspaceWorkflowPath(null);
       message.success('Workspace loaded');
     } catch (error) {
       console.error('Failed to change workspace:', error);
+    }
+  };
+
+  const openAdvancedSettings = () => {
+    setWorkspaceInput(workspaceDir);
+    setLlmSettingsDraft(loadLlmSettings());
+    setAdvancedSettingsOpen(true);
+  };
+
+  const saveAdvancedSettings = () => {
+    saveLlmSettings(llmSettingsDraft);
+    setAdvancedSettingsOpen(false);
+    message.success('Advanced settings saved');
+  };
+
+  const testLlmConnection = async () => {
+    const settings = {
+      ...llmSettingsDraft,
+      baseUrl: llmSettingsDraft.baseUrl.trim(),
+      model: llmSettingsDraft.model.trim(),
+    };
+
+    if (!settings.model) {
+      message.warning('Model is required');
+      return;
+    }
+
+    setTestingLlm(true);
+    try {
+      await api.testLlmConnection(settings);
+      message.success('LLM connection works');
+    } catch (error: any) {
+      console.error('Failed to test LLM connection:', error);
+      message.error(error.response?.data?.error || 'Failed to test LLM connection');
+    } finally {
+      setTestingLlm(false);
     }
   };
 
@@ -310,33 +811,305 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
+  const publishLocalWorkspaceManifest = async (
+    workspaceId: string,
+    displayName: string,
+    files: LocalWorkspaceFileMeta[],
+    version = Date.now().toString(),
+  ) => {
+    await api.updateLocalWorkspaceManifest(workspaceId, {
+      displayName,
+      version,
+      files,
+    });
+    return version;
+  };
+
+  const refreshLocalWorkspaceManifest = async (showSuccess = false) => {
+    if (!localWorkspaceId || !localWorkspaceName || !useWorkflowStore.getState().localWorkspaceHandle) {
+      message.warning('Select a local file cache first');
+      return null;
+    }
+
+    setSyncingLocalWorkspace(true);
+    try {
+      const handle = useWorkflowStore.getState().localWorkspaceHandle;
+      let files: LocalWorkspaceFileMeta[] = [];
+      if (handle?.kind === 'fileMap') {
+        files = Array.from<[string, File]>(handle.filesByPath.entries()).map(([relativePath, file]) => ({
+          name: file.name,
+          relativePath,
+          type: 'file' as const,
+          size: file.size,
+          updatedAt: new Date(file.lastModified).toISOString(),
+        })).filter((file) => file.relativePath);
+      } else {
+        files = await collectLocalWorkspaceFiles(handle);
+      }
+
+      const version = await publishLocalWorkspaceManifest(localWorkspaceId, localWorkspaceName, files);
+      setLocalWorkspaceFiles(files, version);
+      if (showSuccess) {
+        message.success(`Local file cache refreshed: ${files.filter((file) => file.type === 'file').length} files`);
+      }
+      return { files, version };
+    } catch (error: any) {
+      console.error('Failed to refresh local file cache:', error);
+      message.error(error?.message || 'Failed to refresh local file cache');
+      return null;
+    } finally {
+      setSyncingLocalWorkspace(false);
+    }
+  };
+
+  const startOpenLocalWorkspace = async () => {
+    if (canUseDirectoryPicker()) {
+      try {
+        const handle = await (window as any).showDirectoryPicker({ mode: 'read' });
+        setSyncingLocalWorkspace(true);
+        const files = await collectLocalWorkspaceFiles(handle);
+        const workspaceId = localWorkspaceIdForName(handle.name);
+        const version = await publishLocalWorkspaceManifest(workspaceId, handle.name, files);
+        setLocalWorkspace({
+          id: workspaceId,
+          name: handle.name,
+          handle,
+          files,
+          version,
+        });
+        message.success(`Local file cache set: ${handle.name}`);
+      } catch (error: any) {
+        if (error?.name !== 'AbortError') {
+          console.error('Failed to select local file cache:', error);
+          message.error(error?.message || 'Failed to select local file cache');
+        }
+      } finally {
+        setSyncingLocalWorkspace(false);
+      }
+      return;
+    }
+
+    if (folderUploadInputRef.current) {
+      folderUploadInputRef.current.value = '';
+      folderUploadInputRef.current.click();
+    }
+  };
+
+  const uploadWorkspaceCandidates = async (
+    candidates: UploadCandidate[],
+    options: {
+      targetPath?: string;
+      preserveRelativePath?: boolean;
+      stripRoot?: boolean;
+      refreshPath?: string;
+      loadingLabel?: string;
+      successLabel?: (count: number) => string;
+    } = {},
+  ) => {
+    const activeWorkspace = workspaceDir || (await loadWorkspaceFiles()).workspaceDir;
+    const targetPath = options.targetPath ?? workspaceFilesPath;
+    const refreshPath = options.refreshPath ?? workspaceFilesPath;
+
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const hideLoading = message.loading(options.loadingLabel || 'Uploading files...', 0);
+    try {
+      let lastUploadResult: any = null;
+      for (const candidate of candidates) {
+        const localPath = options.preserveRelativePath
+          ? (options.stripRoot ? stripTopLevelDirectory(candidate.relativePath) : normalizeLocalRelativePath(candidate.relativePath))
+          : candidate.file.name;
+        if (!localPath) {
+          continue;
+        }
+        const contentBase64 = await fileToBase64(candidate.file);
+        lastUploadResult = await api.uploadWorkspaceFile({
+          workspaceId: workspaceId || undefined,
+          workspaceDir: activeWorkspace,
+          relativePath: joinWorkspacePath(targetPath, localPath),
+          contentBase64,
+        });
+      }
+      if (lastUploadResult) {
+        setWorkspaceContext(lastUploadResult);
+      }
+      const refreshedFiles = await loadWorkspaceFiles(activeWorkspace, refreshPath);
+      await loadWorkspaceTasks(activeWorkspace);
+      const label = options.successLabel
+        ? options.successLabel(candidates.length)
+        : candidates.length === 1
+          ? 'File uploaded'
+          : `${candidates.length} files uploaded`;
+      message.success(label);
+      return refreshedFiles;
+    } catch (error: any) {
+      console.error('Failed to upload workspace files:', error);
+      message.error(error.response?.data?.error || 'Failed to upload workspace files');
+      return null;
+    } finally {
+      hideLoading();
+    }
+  };
+
   const handleUploadWorkspaceFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
 
-    if (files.length === 0 || !workspaceDir) {
+    if (files.length === 0) {
       return;
     }
 
     const targetPath = fileUploadTargetPathRef.current || workspaceFilesPath;
+    await uploadWorkspaceCandidates(
+      files.map((file) => ({ file, relativePath: file.name })),
+      {
+        targetPath,
+        refreshPath: workspaceFilesPath,
+        successLabel: (count) => {
+          const targetLabel = targetPath ? ` to ${targetPath}` : '';
+          return count === 1 ? `File uploaded${targetLabel}` : `${count} files uploaded${targetLabel}`;
+        },
+      },
+    );
+    fileUploadTargetPathRef.current = workspaceFilesPath;
+  };
 
+  const handleOpenLocalWorkspace = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+
+    if (files.length === 0) {
+      return;
+    }
+
+    setSyncingLocalWorkspace(true);
     try {
-      for (const file of files) {
-        const contentBase64 = await fileToBase64(file);
-        await api.uploadWorkspaceFile({
-          workspaceDir,
-          relativePath: joinWorkspacePath(targetPath, file.name),
-          contentBase64,
+      const rawPaths = files.map((file) => (file as any).webkitRelativePath || file.name);
+      const selectionLabel = describeLocalSelection(rawPaths) || 'Local File Cache';
+      const filesByPath = new Map<string, File>();
+      const manifestFiles: LocalWorkspaceFileMeta[] = [];
+
+      files.forEach((file) => {
+        const rawPath = (file as any).webkitRelativePath || file.name;
+        const relativePath = stripTopLevelDirectory(rawPath) || file.name;
+        const normalizedPath = normalizeLocalRelativePath(relativePath);
+        if (!normalizedPath) {
+          return;
+        }
+        filesByPath.set(normalizedPath, file);
+        manifestFiles.push({
+          name: file.name,
+          relativePath: normalizedPath,
+          type: 'file',
+          size: file.size,
+          updatedAt: new Date(file.lastModified).toISOString(),
         });
-      }
-      await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
-      const targetLabel = targetPath ? ` to ${targetPath}` : '';
-      message.success(files.length === 1 ? `File uploaded${targetLabel}` : `${files.length} files uploaded${targetLabel}`);
-    } catch (error: any) {
-      console.error('Failed to upload workspace file:', error);
-      message.error(error.response?.data?.error || 'Failed to upload workspace file');
+      });
+
+      const workspaceId = localWorkspaceIdForName(selectionLabel);
+      const version = await publishLocalWorkspaceManifest(workspaceId, selectionLabel, manifestFiles);
+      setLocalWorkspace({
+        id: workspaceId,
+        name: selectionLabel,
+        handle: {
+          kind: 'fileMap',
+          filesByPath,
+        },
+        files: manifestFiles,
+        version,
+      });
+      message.success(`Local file cache set: ${selectionLabel}`);
     } finally {
-      fileUploadTargetPathRef.current = workspaceFilesPath;
+      setSyncingLocalWorkspace(false);
+    }
+  };
+
+  const readDroppedFileEntry = (entry: any, prefix = ''): Promise<UploadCandidate[]> => {
+    if (!entry) {
+      return Promise.resolve([]);
+    }
+    if (entry.isFile) {
+      return new Promise((resolve) => {
+        entry.file((file: File) => {
+          resolve([{ file, relativePath: normalizeLocalRelativePath(`${prefix}${file.name}`) }]);
+        }, () => resolve([]));
+      });
+    }
+    if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const nextPrefix = `${prefix}${entry.name}/`;
+      return new Promise((resolve) => {
+        const entries: any[] = [];
+        const readBatch = () => {
+          reader.readEntries(async (batch: any[]) => {
+            if (!batch.length) {
+              const nested = await Promise.all(entries.map((item) => readDroppedFileEntry(item, nextPrefix)));
+              resolve(nested.flat());
+              return;
+            }
+            entries.push(...batch);
+            readBatch();
+          }, () => resolve([]));
+        };
+        readBatch();
+      });
+    }
+    return Promise.resolve([]);
+  };
+
+  const collectDroppedFiles = async (dataTransfer: DataTransfer): Promise<UploadCandidate[]> => {
+    const items = Array.from(dataTransfer.items || []);
+    const entryItems = items
+      .map((item) => (item as any).webkitGetAsEntry?.())
+      .filter(Boolean);
+
+    if (entryItems.length > 0) {
+      const nested = await Promise.all(entryItems.map((entry) => readDroppedFileEntry(entry)));
+      return nested.flat();
+    }
+
+    return Array.from(dataTransfer.files || []).map((file) => ({
+      file,
+      relativePath: (file as any).webkitRelativePath || file.name,
+    }));
+  };
+
+  const handleFilesDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setFileDropActive(false);
+
+    if (draggingWorkspaceRef.current) {
+      return;
+    }
+
+    const candidates = await collectDroppedFiles(event.dataTransfer);
+    await uploadWorkspaceCandidates(candidates, {
+      targetPath: workspaceFilesPath,
+      refreshPath: workspaceFilesPath,
+      preserveRelativePath: true,
+      stripRoot: false,
+      loadingLabel: 'Uploading dropped files...',
+      successLabel: (count) => `${count} dropped file${count === 1 ? '' : 's'} uploaded`,
+    });
+  };
+
+  const handleFilesDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (draggingWorkspaceRef.current) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setFileDropActive(true);
+  };
+
+  const handleFilesDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    const relatedTarget = event.relatedTarget;
+    if (!relatedTarget || !(relatedTarget instanceof Node) || !event.currentTarget.contains(relatedTarget)) {
+      setFileDropActive(false);
     }
   };
 
@@ -363,10 +1136,12 @@ export default function BuiltinTasksSidebar() {
           message.warning('Please enter a folder name');
           return Promise.reject();
         }
-        await api.createWorkspaceFolder({
+        const created = await api.createWorkspaceFolder({
+          workspaceId: workspaceId || undefined,
           workspaceDir,
           relativePath: joinWorkspacePath(workspaceFilesPath, cleanName),
         });
+        setWorkspaceContext(created);
         await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
         message.success('Folder created');
       },
@@ -384,10 +1159,12 @@ export default function BuiltinTasksSidebar() {
       okText: 'Delete',
       okButtonProps: { danger: true },
       onOk: async () => {
-        await api.deleteWorkspaceFile({
+        const deleted = await api.deleteWorkspaceFile({
+          workspaceId: workspaceId || undefined,
           workspaceDir,
           relativePath: file.relativePath,
         });
+        setWorkspaceContext(deleted);
         await loadWorkspaceFiles(workspaceDir, workspaceFilesPath);
         message.success('Deleted');
       },
@@ -491,12 +1268,14 @@ export default function BuiltinTasksSidebar() {
 
     try {
       const saved = await api.saveWorkspaceTask({
+        workspaceId: workspaceId || undefined,
         workspaceDir: workspaceTaskEditor.workspaceDir,
         relativePath: workspaceTaskEditor.relativePath,
         code: workspaceTaskEditorCode,
         parse: true,
       });
       const updatedTask = saved.task as WorkspaceTaskMeta;
+      setWorkspaceContext(saved);
       const oldTaskKey = getWorkspaceTaskKey(workspaceTaskEditor);
       const updatedTaskKey = getWorkspaceTaskKey(updatedTask);
 
@@ -589,12 +1368,14 @@ export default function BuiltinTasksSidebar() {
     try {
       const code = await file.text();
       const saved = await api.saveWorkspaceTask({
+        workspaceId: workspaceId || undefined,
         workspaceDir: targetTask.workspaceDir,
         relativePath: targetTask.relativePath,
         code,
         parse: true,
       });
       const updatedTask = saved.task as WorkspaceTaskMeta;
+      setWorkspaceContext(saved);
       const updatedTaskKey = getWorkspaceTaskKey(updatedTask);
 
       updateCanvasNodesForWorkspaceTask(targetTask, updatedTask);
@@ -628,10 +1409,12 @@ export default function BuiltinTasksSidebar() {
       cancelText: 'Cancel',
       onOk: async () => {
         try {
-          await api.deleteWorkspaceTask({
+          const deleted = await api.deleteWorkspaceTask({
+            workspaceId: workspaceId || undefined,
             workspaceDir: task.workspaceDir,
             relativePath: task.relativePath,
           });
+          setWorkspaceContext(deleted);
 
           const deletedNodeIds = nodes
             .filter((node) =>
@@ -676,12 +1459,14 @@ export default function BuiltinTasksSidebar() {
 
     try {
       const renamed = await api.renameWorkspaceTask({
+        workspaceId: workspaceId || undefined,
         workspaceDir: task.workspaceDir,
         relativePath: task.relativePath,
         oldFunctionName: task.functionName,
         newName: nextName,
       });
       const updatedTask = renamed.task as WorkspaceTaskMeta;
+      setWorkspaceContext(renamed);
       const updatedTaskKey = getWorkspaceTaskKey(updatedTask);
 
       updateCanvasNodesForWorkspaceTask(task, updatedTask);
@@ -727,10 +1512,12 @@ export default function BuiltinTasksSidebar() {
       onOk: async () => {
         try {
           const activeWorkspace = workspaceInput.trim() || workspaceDir;
-          await api.deleteWorkspaceWorkflow({
+          const deleted = await api.deleteWorkspaceWorkflow({
+            workspaceId: workspaceId || undefined,
             workspaceDir: activeWorkspace,
             relativePath: item.relativePath,
           });
+          setWorkspaceContext(deleted);
 
           if (selectedWorkflowPath === item.relativePath) {
             setSelectedWorkflowPath(null);
@@ -760,11 +1547,13 @@ export default function BuiltinTasksSidebar() {
 
     try {
       const activeWorkspace = workspaceInput.trim() || workspaceDir;
-      await api.renameWorkspaceWorkflow({
+      const renamed = await api.renameWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
         workspaceDir: activeWorkspace,
         relativePath: item.relativePath,
         name: nextName,
       });
+      setWorkspaceContext(renamed);
 
       if (currentWorkspaceWorkflowPath === item.relativePath) {
         setWorkflowName(nextName);
@@ -815,6 +1604,7 @@ export default function BuiltinTasksSidebar() {
       }
 
       const saved = await api.saveWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
         workspaceDir: activeWorkspace,
         relativePath: currentWorkspaceWorkflowPath,
         name: workflowName,
@@ -829,11 +1619,18 @@ export default function BuiltinTasksSidebar() {
         edges: saved.workflow.edges,
       });
 
+      setWorkspaceContext(saved);
       setWorkspaceDir(saved.workspaceDir);
       setWorkspaceInput(saved.workspaceDir);
       setCurrentWorkspaceWorkflowPath(saved.relativePath);
       setNodes(saved.workflow.nodes);
       setEdges(saved.workflow.edges);
+      setWorkflowSaveState({
+        status: 'saved_workflow',
+        draftPath: 'workflows/.drafts/current.workflow.json',
+        savedAt: new Date().toISOString(),
+        error: null,
+      });
       await loadWorkspaceWorkflows(saved.workspaceDir);
       message.success(`Workflow saved to ${saved.relativePath}`);
     } catch (error: any) {
@@ -849,6 +1646,7 @@ export default function BuiltinTasksSidebar() {
     try {
       const activeWorkspace = workspaceInput.trim() || workspaceDir;
       const loaded = await api.loadWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
         workspaceDir: activeWorkspace,
         relativePath: item.relativePath,
       });
@@ -866,9 +1664,16 @@ export default function BuiltinTasksSidebar() {
       setEdges(loaded.workflow.edges);
       selectNode(null);
       clearRunResults();
+      setWorkspaceContext(loaded);
       setWorkspaceDir(loaded.workspaceDir);
       setWorkspaceInput(loaded.workspaceDir);
       setCurrentWorkspaceWorkflowPath(loaded.relativePath);
+      setWorkflowSaveState({
+        status: 'saved_workflow',
+        draftPath: 'workflows/.drafts/current.workflow.json',
+        savedAt: new Date().toISOString(),
+        error: null,
+      });
       await loadWorkspaceTasks(loaded.workspaceDir);
       const importedCount = loaded.importedTaskDefinitions?.imported.length || 0;
       const reusedCount = loaded.importedTaskDefinitions?.skipped.filter((entry) => entry.reason === 'exists-same').length || 0;
@@ -921,11 +1726,13 @@ export default function BuiltinTasksSidebar() {
       await ensureWorkflow();
 
       const saved = await api.saveWorkspaceTask({
+        workspaceId: workspaceId || undefined,
         workspaceDir: activeWorkspace,
         relativePath,
         code,
         parse: true,
       });
+      setWorkspaceContext(saved);
 
       await loadWorkspaceTasks(activeWorkspace);
       const newNode = createWorkspaceNode(saved.task);
@@ -1041,11 +1848,18 @@ export default function BuiltinTasksSidebar() {
     event.dataTransfer.effectAllowed = 'move';
   };
 
-  const onDragStartReAct = (event: React.DragEvent) => {
+  const onDragStartReAct = (event: React.DragEvent, template?: BuiltinWorkflowExample) => {
     event.dataTransfer.setData('application/reactflow', JSON.stringify({
       type: 'agent-react',
       task: {
-        label: 'ReAct Workflow',
+        label: template?.name || 'ReAct Workflow',
+        prompt: template?.prompt,
+        reactMode: template?.reactMode || 'local',
+        maxSteps: template?.maxSteps,
+        maxTokens: template?.maxTokens,
+        taskTimeout: defaultReactTaskTimeout(template?.reactMode || 'local'),
+        skills: template?.recommendedSkills || [],
+        recommendedSkills: template?.recommendedSkills || [],
       },
     }));
     event.dataTransfer.effectAllowed = 'move';
@@ -1059,6 +1873,184 @@ export default function BuiltinTasksSidebar() {
       },
     }));
     event.dataTransfer.effectAllowed = 'move';
+  };
+
+  const onDragStartWorkflowExample = (event: React.DragEvent, template: BuiltinWorkflowExample) => {
+    if (template.kind === 'react') {
+      onDragStartReAct(event, template);
+    } else if (template.kind === 'distributed-smoke') {
+      onDragStartDistributedSmoke(event);
+    } else {
+      event.dataTransfer.setData('application/reactflow', JSON.stringify({
+        type: 'workspace-example-task',
+        task: {
+          label: template.name,
+          taskSourceId: template.taskSourceId,
+          taskRelativePath: template.taskRelativePath,
+        },
+      }));
+      event.dataTransfer.effectAllowed = 'move';
+    }
+  };
+
+  const addBuiltinTaskToCanvas = async (task: BuiltinTaskMeta, closeAfterAdd = false) => {
+    await ensureWorkflow();
+    const newNode: WorkflowNode = {
+      id: `node-${Date.now()}`,
+      type: 'taskNode',
+      position: getDefaultPosition(),
+      data: {
+        category: 'builtin',
+        nodeType: 'task',
+        label: task.displayName,
+        taskRef: `${task.module}.${task.functionRef}`,
+        inputs: task.inputs.map((input) => ({
+          name: input.name,
+          dataType: input.dataType,
+          source: 'user',
+          value: '',
+        })),
+        outputs: task.outputs,
+        resources: task.resources,
+        configured: true,
+      },
+    };
+
+    addNode(newNode);
+    selectNode(newNode);
+    if (closeAfterAdd) {
+      setNewTaskOpen(false);
+    }
+    message.success(`${task.displayName} added to canvas`);
+  };
+
+  const addReactTemplateToCanvas = async (template: BuiltinWorkflowExample = BUILTIN_WORKFLOW_EXAMPLES[0]) => {
+    await ensureWorkflow();
+    const importedSkills = await importRecommendedSkills(template.recommendedSkills || []);
+    if (template.workflowName || template.name) {
+      setWorkflowName(template.workflowName || template.name);
+    }
+    const newNode: WorkflowNode = {
+      id: `node-${Date.now()}`,
+      type: 'taskNode',
+      position: getDefaultPosition(),
+      data: {
+        category: 'agent',
+        nodeType: 'task',
+        label: template.name || 'ReAct Workflow',
+        agentKind: 'react',
+        reactMode: template.reactMode || 'local',
+        prompt: template.prompt || 'Use the calculator to compute 18 * 7, then give the final answer.',
+        maxSteps: template.maxSteps || 4,
+        maxTokens: template.maxTokens || 2048,
+        taskTimeout: defaultReactTaskTimeout(template.reactMode || 'local'),
+        skills: template.recommendedSkills || [],
+        recommendedSkills: template.recommendedSkills || [],
+        inputs: [],
+        outputs: [{ name: 'answer', dataType: 'any' }],
+        configured: true,
+      },
+    };
+
+    addNode(newNode);
+    selectNode(newNode);
+    setCatalogImportType(null);
+    message.success(importedSkills.length > 0
+      ? `${template.name} added with ${importedSkills.length} skill(s)`
+      : `${template.name} added`);
+  };
+
+  const addDistributedSmokeTemplateToCanvas = async (template?: BuiltinWorkflowExample) => {
+    await ensureWorkflow();
+    setWorkflowName(template?.workflowName || 'Distributed GPU Smoke');
+    const position = getDefaultPosition();
+    const baseId = Date.now();
+    const smokeNodes: WorkflowNode[] = Array.from({ length: 2 }, (_, index) => ({
+      id: `node-${baseId}-${index + 1}`,
+      type: 'taskNode',
+      position: {
+        x: position.x + (index % 2) * 260,
+        y: position.y + Math.floor(index / 2) * 180,
+      },
+      data: {
+        category: 'builtin',
+        nodeType: 'task',
+        label: `GPU Probe ${index + 1}`,
+        taskRef: 'distributedSmoke.distributed_gpu_probe',
+        inputs: [
+          {
+            name: 'probe_id',
+            dataType: 'int',
+            source: 'user',
+            value: String(index + 1),
+          },
+          {
+            name: 'sleep_seconds',
+            dataType: 'int',
+            source: 'user',
+            value: '1',
+          },
+        ],
+        outputs: [{ name: 'placement', dataType: 'dict' }],
+        resources: { cpu: 1, cpu_mem: 128, gpu: 1, gpu_mem: 0 },
+        configured: true,
+      },
+    }));
+
+    smokeNodes.forEach((node) => addNode(node));
+    selectNode(smokeNodes[0]);
+    setCatalogImportType(null);
+    message.success(`${template?.name || 'Distributed smoke workflow'} added`);
+  };
+
+  const importWorkspaceExampleTask = async (template: BuiltinWorkflowExample) => {
+    if (!template.taskSourceId) {
+      throw new Error('Example task source is missing');
+    }
+
+    const imported = await importSystemCatalogItem(
+      'tasks',
+      template.taskSourceId,
+      template.taskRelativePath || template.taskSourceId,
+    );
+    const tasksResult = await loadWorkspaceTasks(imported.workspaceDir);
+    const targetPath = imported.import?.targetPath || template.taskRelativePath || `tasks/${template.taskSourceId}`;
+    const task = (tasksResult.tasks || []).find((item) => item.relativePath === targetPath)
+      || (tasksResult.tasks || []).find((item) => item.relativePath.endsWith(template.taskSourceId || ''));
+    if (!task) {
+      throw new Error(`Imported task was not parsed: ${targetPath}`);
+    }
+
+    return task;
+  };
+
+  const addWorkspaceExampleTaskToCanvas = async (template: BuiltinWorkflowExample) => {
+    await ensureWorkflow();
+    setWorkflowName(template.workflowName || template.name);
+    const task = await importWorkspaceExampleTask(template);
+    const newNode = createWorkspaceNode(task);
+    addNode(newNode);
+    selectNode(newNode);
+    setCatalogImportType(null);
+    message.success(`${template.name} added`);
+  };
+
+  const addWorkflowExampleToCanvas = async (template: BuiltinWorkflowExample) => {
+    setImportingExampleKey(template.key);
+    try {
+      if (template.kind === 'react') {
+        await addReactTemplateToCanvas(template);
+      } else if (template.kind === 'distributed-smoke') {
+        await addDistributedSmokeTemplateToCanvas(template);
+      } else {
+        await addWorkspaceExampleTaskToCanvas(template);
+      }
+    } catch (error: any) {
+      console.error('Failed to add workflow example:', error);
+      message.error(error.response?.data?.error || error.message || 'Failed to add workflow example');
+    } finally {
+      setImportingExampleKey(null);
+    }
   };
 
   const onDragEndWorkspace = () => {
@@ -1148,6 +2140,431 @@ export default function BuiltinTasksSidebar() {
     </>
   );
 
+  const renderWorkflowNodeDetails = (node: WorkflowNode) => (
+    <div style={{ fontSize: '12px', color: '#666' }}>
+      {node.data.taskRef && (
+        <div style={{ marginBottom: '6px' }}>
+          <Text type="secondary">Task ref: </Text>
+          <Tag>{node.data.taskRef}</Tag>
+        </div>
+      )}
+      {node.data.taskPath && (
+        <div style={{ marginBottom: '6px' }}>
+          <Text type="secondary">File: </Text>
+          <Tag>{node.data.taskPath}</Tag>
+        </div>
+      )}
+      {node.data.prompt && (
+        <Paragraph
+          type="secondary"
+          ellipsis={{ rows: 3, tooltip: node.data.prompt }}
+          style={{ fontSize: '12px', marginBottom: '8px' }}
+        >
+          {node.data.prompt}
+        </Paragraph>
+      )}
+      <Space size={[4, 4]} wrap style={{ marginBottom: '8px' }}>
+        <Tag color="geekblue">Inputs {node.data.inputs.length}</Tag>
+        <Tag color="cyan">Outputs {node.data.outputs.length}</Tag>
+        {node.data.reactMode && <Tag color="purple">{node.data.reactMode}</Tag>}
+      </Space>
+      <div>
+        <Text type="secondary">In: </Text>
+        {node.data.inputs.length === 0 ? (
+          <Tag>none</Tag>
+        ) : node.data.inputs.map((input) => (
+          <Tag key={input.name} style={{ marginBottom: '4px' }}>
+            {input.name}:{input.dataType}
+          </Tag>
+        ))}
+      </div>
+      <div>
+        <Text type="secondary">Out: </Text>
+        {node.data.outputs.length === 0 ? (
+          <Tag>none</Tag>
+        ) : node.data.outputs.map((output) => (
+          <Tag key={output.name} style={{ marginBottom: '4px' }}>
+            {output.name}:{output.dataType}
+          </Tag>
+        ))}
+      </div>
+      {node.data.resources && (
+        <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginTop: '6px' }}>
+          CPU {node.data.resources.cpu}, GPU {node.data.resources.gpu}, Mem {node.data.resources.cpu_mem}MB, VRAM {node.data.resources.gpu_mem}MB
+        </Text>
+      )}
+    </div>
+  );
+
+  const renderWorkflowTaskNodeCard = (node: WorkflowNode) => {
+    const nodeKey = `workflow-node:${node.id}`;
+    const expanded = expandedTaskKey === nodeKey;
+    const workspaceTask = node.data.category === 'workspace'
+      ? workspaceTasks.find((task) =>
+          task.workspaceDir === node.data.workspaceDir &&
+          task.relativePath === node.data.taskPath &&
+          task.functionName === node.data.functionName)
+      : null;
+    const builtinTask = node.data.category === 'builtin'
+      ? builtinTasks.find((task) => `${task.module}.${task.functionRef}` === node.data.taskRef)
+      : null;
+    const matchedTask = workspaceTask || builtinTask;
+    const icon = node.data.category === 'agent'
+      ? <PartitionOutlined style={{ color: '#722ed1' }} />
+      : node.data.category === 'workspace'
+        ? <CodeOutlined style={{ color: '#722ed1' }} />
+        : <ThunderboltOutlined style={{ color: '#1677ff' }} />;
+    const categoryColor = node.data.category === 'agent'
+      ? 'purple'
+      : node.data.category === 'workspace'
+        ? 'geekblue'
+        : 'blue';
+
+    return (
+      <Card
+        key={node.id}
+        size="small"
+        style={{
+          marginBottom: '8px',
+          cursor: 'pointer',
+          borderColor: selectedWorkspaceTaskKey === nodeKey ? '#1677ff' : undefined,
+        }}
+        hoverable
+        tabIndex={0}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          setSelectedWorkspaceTaskKey(nodeKey);
+          selectNode(node);
+          toggleTask(nodeKey);
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+          {icon}
+          <strong
+            style={{
+              maxWidth: '230px',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {node.data.label}
+          </strong>
+        </div>
+        <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
+          <Tag color={categoryColor}>{node.data.category}</Tag>
+          <Tag>canvas</Tag>
+          {node.data.agentKind && <Tag>{node.data.agentKind}</Tag>}
+        </Space>
+        {matchedTask ? (
+          node.data.category === 'workspace'
+            ? renderWorkspaceTaskSummary(matchedTask as WorkspaceTaskMeta)
+            : renderBuiltinTaskSummary(matchedTask as BuiltinTaskMeta)
+        ) : (
+          <Paragraph
+            type="secondary"
+            ellipsis={{ rows: 2, tooltip: node.data.prompt || node.data.taskRef || node.data.taskPath || node.id }}
+            style={{ fontSize: '12px', marginBottom: '6px' }}
+          >
+            {node.data.prompt || node.data.taskRef || node.data.taskPath || 'Canvas task node'}
+          </Paragraph>
+        )}
+        {expanded && (
+          <>
+            <Divider style={{ margin: '10px 0' }} />
+            {matchedTask ? renderTaskDetails(matchedTask) : renderWorkflowNodeDetails(node)}
+          </>
+        )}
+      </Card>
+    );
+  };
+
+  const renderBuiltinWorkflowTemplates = () => {
+    return (
+      <div>
+        <Space align="center" size={6} style={{ marginBottom: 8 }}>
+          <Text strong>Examples</Text>
+          <Tag color="purple" style={{ margin: 0 }}>canvas</Tag>
+        </Space>
+        <List
+          size="small"
+          dataSource={BUILTIN_WORKFLOW_EXAMPLES}
+          renderItem={(template) => (
+            <List.Item
+              className="workspace-file-row"
+              draggable
+              onDragStart={(event) => onDragStartWorkflowExample(event, template)}
+              style={{ cursor: 'grab' }}
+              actions={[
+                <Button
+                  key="add"
+                  type="primary"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  loading={importingExampleKey === template.key}
+                  onClick={() => addWorkflowExampleToCanvas(template)}
+                >
+                  Add
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta
+                avatar={<PartitionOutlined style={{ color: template.color }} />}
+                title={<Text strong>{template.name}</Text>}
+                description={
+                  <Space direction="vertical" size={4}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {template.description}
+                    </Text>
+                    <Space size={4} wrap>
+                      {template.tags.map((tag) => (
+                        <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
+                      ))}
+                      {(template.recommendedSkills || []).map((skillName) => (
+                        <Tag key={skillName} color="green" style={{ margin: 0 }}>
+                          skill:{skillName}
+                        </Tag>
+                      ))}
+                    </Space>
+                  </Space>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      </div>
+    );
+  };
+
+  const renderBuiltinTaskTemplates = (closeAfterAdd = false) => (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <Space align="center" size={6}>
+          <Text strong>Built-in Templates</Text>
+          <Tag color="blue" style={{ margin: 0 }}>canvas</Tag>
+        </Space>
+        <Button
+          type="text"
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={() => loadBuiltinTasks(true)}
+          loading={builtinLoading}
+        >
+          Refresh
+        </Button>
+      </div>
+      <List
+        size="small"
+        loading={builtinLoading}
+        dataSource={builtinTasks}
+        locale={{
+          emptyText: (
+            <Empty description="No built-in tasks" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+              <Button size="small" icon={<ReloadOutlined />} onClick={() => loadBuiltinTasks(true)}>
+                Load Templates
+              </Button>
+            </Empty>
+          ),
+        }}
+        renderItem={(task) => {
+          const taskKey = getBuiltinTaskKey(task);
+          const expanded = expandedTaskKey === taskKey;
+
+          return (
+            <List.Item
+              className="workspace-file-row"
+              draggable
+              onDragStart={(event) => onDragStartBuiltin(event, task)}
+              onClick={() => {
+                setSelectedWorkspaceTaskKey(null);
+                toggleTask(taskKey);
+              }}
+              style={{ cursor: 'grab' }}
+              actions={[
+                <Button
+                  key="add"
+                  size="small"
+                  type="primary"
+                  icon={<PlusOutlined />}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    addBuiltinTaskToCanvas(task, closeAfterAdd);
+                  }}
+                >
+                  Add
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta
+                avatar={<ThunderboltOutlined style={{ color: '#1677ff' }} />}
+                title={
+                  <Text style={{ fontSize: 13, maxWidth: 230 }} ellipsis={{ tooltip: task.displayName }}>
+                    {task.displayName}
+                  </Text>
+                }
+                description={
+                  <div>
+                    {renderBuiltinTaskSummary(task)}
+                    {expanded && (
+                      <>
+                        <Divider style={{ margin: '8px 0' }} />
+                        {renderTaskDetails(task)}
+                      </>
+                    )}
+                  </div>
+                }
+              />
+            </List.Item>
+          );
+        }}
+      />
+    </div>
+  );
+
+  const renderSkillPacks = () => (
+    <div>
+      <Space align="center" size={6} style={{ marginBottom: 8 }}>
+        <Text strong>Skill Packs</Text>
+        <Tag color="green" style={{ margin: 0 }}>one-click import</Tag>
+      </Space>
+      <List
+        size="small"
+        dataSource={SKILL_PACKS}
+        renderItem={(pack) => {
+          const availableCount = pack.skills.filter((skillName) => workspaceSkillNames().has(skillName)).length;
+          return (
+            <List.Item
+              className="workspace-file-row"
+              actions={[
+                <Button
+                  key="import"
+                  type="primary"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  loading={importingSkillPackKey === pack.key}
+                  onClick={() => importSkillPack(pack)}
+                >
+                  Import
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta
+                avatar={<AppstoreAddOutlined style={{ color: '#389e0d' }} />}
+                title={<Text strong>{pack.name}</Text>}
+                description={
+                  <Space direction="vertical" size={4}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {pack.description}
+                    </Text>
+                    <Space size={4} wrap>
+                      <Tag color={availableCount === pack.skills.length ? 'green' : 'default'} style={{ margin: 0 }}>
+                        {availableCount}/{pack.skills.length} available
+                      </Tag>
+                      {pack.skills.map((skillName) => (
+                        <Tag key={skillName} style={{ margin: 0 }}>{skillName}</Tag>
+                      ))}
+                    </Space>
+                  </Space>
+                }
+              />
+            </List.Item>
+          );
+        }}
+      />
+    </div>
+  );
+
+  const renderCatalogList = (type: 'workflows' | 'tasks' | 'skills') => {
+    const items = catalogItems[type] || [];
+
+    return (
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        {type === 'workflows' && renderBuiltinWorkflowTemplates()}
+        {type === 'tasks' && renderBuiltinTaskTemplates()}
+        {type === 'skills' && renderSkillPacks()}
+
+        <div>
+          <Space align="center" size={6} style={{ marginBottom: 8 }}>
+            <Text strong>Built-in Library</Text>
+            <Tag color="geekblue" style={{ margin: 0 }}>built-in</Tag>
+            <Tag color="green" style={{ margin: 0 }}>import to workspace</Tag>
+          </Space>
+          {items.length === 0 ? (
+            <Empty description={`No ${type} in library`} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : (
+            <List
+              size="small"
+              dataSource={items}
+              renderItem={(item) => {
+                const key = `${item.type}:${item.id}`;
+                return (
+                  <List.Item
+                    className="workspace-file-row"
+                    actions={[
+                      <Tooltip key="import" title="Import">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          loading={importingCatalogKey === key}
+                          onClick={() => importCatalogItem(item)}
+                        />
+                      </Tooltip>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      avatar={<AppstoreAddOutlined style={{ color: '#1677ff' }} />}
+                      title={
+                        <Text style={{ fontSize: '13px', maxWidth: '190px' }} ellipsis={{ tooltip: item.id }}>
+                          {item.name}
+                        </Text>
+                      }
+                      description={
+                        <Space direction="vertical" size={4}>
+                          {item.description && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {item.description}
+                            </Text>
+                          )}
+                          <Space size={4} wrap>
+                            <Tag color="geekblue" style={{ margin: 0 }}>built-in</Tag>
+                            <Tag style={{ margin: 0 }}>{item.kind}</Tag>
+                            {(item.tags || []).map((tag) => (
+                              <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
+                            ))}
+                            {(item.recommendedSkills || []).map((skillName) => (
+                              <Tag key={skillName} color="green" style={{ margin: 0 }}>
+                                skill:{skillName}
+                              </Tag>
+                            ))}
+                            {item.updatedAt && (
+                              <Text type="secondary" style={{ fontSize: '11px' }}>
+                                {formatUpdatedAt(item.updatedAt)}
+                              </Text>
+                            )}
+                          </Space>
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                );
+              }}
+            />
+          )}
+        </div>
+      </Space>
+    );
+  };
+
+  const openCatalogImport = (type: 'workflows' | 'tasks' | 'skills') => {
+    setCatalogImportType(type);
+    void loadSystemCatalog(false);
+  };
+
+  const catalogImportTitle = catalogImportType
+    ? `Import ${catalogImportType === 'skills' ? 'Skills' : catalogImportType === 'tasks' ? 'Tasks' : 'Workflows'}`
+    : 'Import';
+
   const toggleButton = (
     <Tooltip title={collapsed ? 'Open sidebar' : 'Close sidebar'} placement="right">
       <Button
@@ -1194,6 +2611,13 @@ export default function BuiltinTasksSidebar() {
           onChange={handleUploadWorkspaceFile}
           style={{ display: 'none' }}
         />
+        <input
+          ref={folderUploadInputRef}
+          type="file"
+          multiple
+          onChange={handleOpenLocalWorkspace}
+          style={{ display: 'none' }}
+        />
       {collapsed ? (
         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: '12px' }}>
           {toggleButton}
@@ -1201,28 +2625,27 @@ export default function BuiltinTasksSidebar() {
       ) : (
         <div style={{ padding: '16px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>Workspace</h3>
+            <Space size={8}>
+              <h3 style={{ margin: 0 }}>Workspace</h3>
+              <Button
+                size="small"
+                icon={<SettingOutlined />}
+                onClick={openAdvancedSettings}
+              >
+                Advanced Setting
+              </Button>
+            </Space>
             {toggleButton}
           </div>
 
-          <div style={{ marginBottom: '16px' }}>
-            <Space size={6} style={{ width: '100%', marginBottom: '8px' }}>
-              <FolderOpenOutlined style={{ color: '#666' }} />
-              <Text strong>Directory</Text>
+          {workspaceId && (
+            <Space size={[4, 4]} wrap style={{ marginBottom: '10px' }}>
+              <Tag color="blue" style={{ margin: 0 }}>{workspaceId}</Tag>
+              {workspaceManifestVersion !== null && workspaceManifestVersion !== undefined && (
+                <Tag style={{ margin: 0 }}>v{workspaceManifestVersion}</Tag>
+              )}
             </Space>
-            <Input.Search
-              size="small"
-              value={workspaceInput}
-              onChange={(event) => setWorkspaceInput(event.target.value)}
-              onSearch={handleChangeWorkspace}
-              enterButton="Change"
-              loading={workspaceLoading || workflowLoading}
-              placeholder="/home/user/project"
-            />
-            <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginTop: '6px' }}>
-              Scans tasks/**/*.py and workflows/**/*.json
-            </Text>
-          </div>
+          )}
 
           {workspaceErrors.length > 0 && (
             <Alert
@@ -1235,7 +2658,12 @@ export default function BuiltinTasksSidebar() {
           )}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>Workflows</h3>
+            <Space size={6}>
+              <h3 style={{ margin: 0 }}>Workflows</h3>
+              <Tag color={showingWorkflowTasks ? 'purple' : 'blue'} style={{ margin: 0 }}>
+                {showingWorkflowTasks ? 'canvas' : 'service'}
+              </Tag>
+            </Space>
             <Space size={4}>
               <Button
                 type="text"
@@ -1244,6 +2672,13 @@ export default function BuiltinTasksSidebar() {
                 onClick={() => loadWorkspaceWorkflows(workspaceInput || workspaceDir, true)}
                 loading={workflowLoading}
               />
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={() => openCatalogImport('workflows')}
+              >
+                Library
+              </Button>
               <Button
                 type="primary"
                 size="small"
@@ -1256,11 +2691,18 @@ export default function BuiltinTasksSidebar() {
               </Button>
             </Space>
           </div>
-          {currentWorkspaceWorkflowPath && (
-            <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginBottom: '8px' }}>
-              Current: {currentWorkspaceWorkflowPath}
-            </Text>
-          )}
+          <Space size={4} wrap style={{ marginBottom: 8 }}>
+            {renderWorkflowSaveState()}
+            {currentWorkspaceWorkflowPath ? (
+              <Text type="secondary" style={{ fontSize: '11px' }}>
+                Current: {currentWorkspaceWorkflowPath}
+              </Text>
+            ) : nodes.length > 0 ? (
+              <Text type="secondary" style={{ fontSize: '11px' }}>
+                Current: service-side draft
+              </Text>
+            ) : null}
+          </Space>
           {workspaceWorkflows.length === 0 ? (
             <Empty description="No workspace workflows" image={Empty.PRESENTED_IMAGE_SIMPLE}>
               <Button size="small" icon={<SaveOutlined />} onClick={handleSaveWorkspaceWorkflow} loading={savingWorkflow} disabled={nodes.length === 0}>
@@ -1347,105 +2789,13 @@ export default function BuiltinTasksSidebar() {
 
           <Divider />
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-            <h3 style={{ margin: 0 }}>Files</h3>
-            <Space size={4}>
-              <Button
-                type="text"
-                size="small"
-                icon={<ReloadOutlined />}
-                onClick={() => loadWorkspaceFiles(workspaceInput || workspaceDir, workspaceFilesPath, true)}
-                loading={filesLoading}
-              />
-              <Button
-                size="small"
-                icon={<FolderOpenOutlined />}
-                onClick={createWorkspaceFolder}
-              />
-              <Button
-                type="primary"
-                size="small"
-                icon={<UploadOutlined />}
-                onClick={() => startUploadWorkspaceFiles(workspaceFilesPath)}
-              >
-                Upload
-              </Button>
-            </Space>
-          </div>
-          <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginBottom: '8px' }}>
-            workspace/files/{workspaceFilesPath || ''}
-          </Text>
-          {workspaceFilesPath && (
-            <Button
-              size="small"
-              type="link"
-              style={{ padding: 0, marginBottom: '6px' }}
-              onClick={() => loadWorkspaceFiles(workspaceDir, parentWorkspacePath(workspaceFilesPath))}
-            >
-              .. parent
-            </Button>
-          )}
-          <List
-            size="small"
-            loading={filesLoading}
-            dataSource={workspaceFiles}
-            locale={{ emptyText: <Empty description="No workspace files" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-            renderItem={(file) => (
-              <List.Item
-                style={{ padding: '6px 0' }}
-                actions={[
-                  file.type === 'file' ? (
-                    <Tooltip key="preview" title="Preview">
-                      <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => previewWorkspaceFile(file)} />
-                    </Tooltip>
-                  ) : null,
-                  file.type === 'file' ? (
-                    <Tooltip key="download" title="Download">
-                      <Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => downloadWorkspaceFile(file)} />
-                    </Tooltip>
-                  ) : null,
-                  file.type === 'directory' ? (
-                    <Tooltip key="upload" title="Upload here">
-                      <Button type="text" size="small" icon={<UploadOutlined />} onClick={() => startUploadWorkspaceFiles(file.relativePath)} />
-                    </Tooltip>
-                  ) : null,
-                  <Tooltip key="delete" title="Delete">
-                    <Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={() => deleteWorkspaceFile(file)} />
-                  </Tooltip>,
-                ].filter(Boolean)}
-              >
-                <List.Item.Meta
-                  avatar={file.type === 'directory' ? <FolderOpenOutlined /> : <FileTextOutlined />}
-                  title={
-                    file.type === 'directory' ? (
-                      <Button
-                        type="link"
-                        size="small"
-                        style={{ padding: 0 }}
-                        onClick={() => loadWorkspaceFiles(workspaceDir, file.relativePath)}
-                      >
-                        {file.name}
-                      </Button>
-                    ) : (
-                      <Text style={{ fontSize: '13px' }}>{file.name}</Text>
-                    )
-                  }
-                  description={
-                    <Text type="secondary" style={{ fontSize: '11px' }}>
-                      {file.type === 'file' ? formatFileSize(file.size) : 'folder'}
-                    </Text>
-                  }
-                />
-              </List.Item>
-            )}
-          />
-
-          <Divider />
-
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>
-              {workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath ? 'Workflow Tasks' : 'Workspace Tasks'}
-            </h3>
+            <Space size={6}>
+              <h3 style={{ margin: 0 }}>
+                {showingWorkflowTasks ? 'Workflow Tasks' : 'Tasks'}
+              </h3>
+              <Tag color="blue" style={{ margin: 0 }}>service</Tag>
+            </Space>
             <Space size={4}>
               <Button
                 type="text"
@@ -1455,17 +2805,15 @@ export default function BuiltinTasksSidebar() {
                 loading={workspaceLoading}
               />
               <Button
-                type="primary"
                 size="small"
-                icon={<PlusOutlined />}
-                onClick={openNewWorkspaceTaskModal}
-                loading={creatingTask}
+                icon={<DownloadOutlined />}
+                onClick={() => openCatalogImport('tasks')}
               >
-                New Task
+                Library
               </Button>
             </Space>
           </div>
-          {currentWorkspaceWorkflowPath && (
+          {hasWorkflowContext && (
             <Radio.Group
               size="small"
               value={workspaceTaskScope}
@@ -1473,20 +2821,27 @@ export default function BuiltinTasksSidebar() {
               style={{ marginBottom: '8px' }}
             >
               <Radio.Button value="workflow">Current Workflow</Radio.Button>
-              <Radio.Button value="all">All Workspace</Radio.Button>
+              <Radio.Button value="all">All Tasks</Radio.Button>
             </Radio.Group>
           )}
           <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
-            {workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath
-              ? 'Tasks referenced by the current workflow'
-              : 'Click to expand or drag to canvas'}
+            {showingWorkflowTasks
+              ? 'Canvas tasks in the current workflow'
+              : 'Workspace task files. Click to expand or drag to canvas'}
           </p>
 
-          {displayedWorkspaceTasks.length === 0 ? (
+          {showingWorkflowTasks ? (
+            workflowTaskNodes.length === 0 ? (
+              <Empty description="No tasks in current workflow" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <List
+                dataSource={workflowTaskNodes}
+                renderItem={(node) => renderWorkflowTaskNodeCard(node)}
+              />
+            )
+          ) : workspaceTasks.length === 0 ? (
             <Empty
-              description={workspaceTaskScope === 'workflow' && currentWorkspaceWorkflowPath
-                ? 'No workspace tasks in current workflow'
-                : 'No workspace tasks'}
+              description="No tasks"
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             >
               <Button size="small" icon={<PlusOutlined />} onClick={openNewWorkspaceTaskModal} loading={creatingTask}>
@@ -1495,7 +2850,7 @@ export default function BuiltinTasksSidebar() {
             </Empty>
           ) : (
             <List
-              dataSource={displayedWorkspaceTasks}
+              dataSource={workspaceTasks}
               renderItem={(task) => {
                 const taskKey = getWorkspaceTaskKey(task);
                 const expanded = expandedTaskKey === taskKey;
@@ -1610,115 +2965,358 @@ export default function BuiltinTasksSidebar() {
 
           <Divider />
 
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <h3 style={{ margin: 0 }}>Builtin Workflows</h3>
-              <Tag color="purple" style={{ margin: 0 }}>template</Tag>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <Space size={6}>
+              <h3 style={{ margin: 0 }}>Files</h3>
+              <Tag color="blue" style={{ margin: 0 }}>service</Tag>
+            </Space>
+            <Space size={4}>
+              <Button
+                type="text"
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => loadWorkspaceFiles(workspaceInput || workspaceDir, workspaceFilesPath, true)}
+                loading={filesLoading}
+              />
+              <Button
+                size="small"
+                icon={<FolderOpenOutlined />}
+                onClick={createWorkspaceFolder}
+              />
+              <Button
+                type="primary"
+                size="small"
+                icon={<UploadOutlined />}
+                onClick={() => startUploadWorkspaceFiles(workspaceFilesPath)}
+              >
+                Upload
+              </Button>
+            </Space>
+          </div>
+          <div
+            className={`workspace-file-dropzone${fileDropActive ? ' is-active' : ''}`}
+            onDrop={handleFilesDrop}
+            onDragOver={handleFilesDragOver}
+            onDragLeave={handleFilesDragLeave}
+          >
+            <div className="workspace-file-dropzone-header">
+              <Space size={8}>
+                <InboxOutlined />
+                <Text strong>files/{workspaceFilesPath || ''}</Text>
+              </Space>
+              {workspaceFilesPath && (
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ padding: 0 }}
+                  onClick={() => loadWorkspaceFiles(workspaceDir, parentWorkspacePath(workspaceFilesPath))}
+                >
+                  Parent
+                </Button>
+              )}
             </div>
-            <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
-              Drag workflow templates to canvas
-            </p>
-            <Card
+            <Text type="secondary" style={{ display: 'block', fontSize: '11px', marginBottom: '8px' }}>
+              Workspace Files are available to runs when explicitly selected or materialized.
+            </Text>
+            <List
               size="small"
-              style={{ cursor: 'grab' }}
-              hoverable
-              draggable
-              onDragStart={onDragStartReAct}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                <PartitionOutlined style={{ color: '#722ed1' }} />
-                <strong>ReAct Workflow</strong>
-              </div>
-              <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
-                <Tag color="purple">agent</Tag>
-                <Tag>LLM + tools</Tag>
-              </Space>
-              <Text type="secondary" style={{ display: 'block', fontSize: '12px' }}>
-                Drag to canvas, configure the prompt, then use the main Run button.
-              </Text>
-            </Card>
-            <Card
-              size="small"
-              style={{ cursor: 'grab', marginTop: '8px' }}
-              hoverable
-              draggable
-              onDragStart={onDragStartDistributedSmoke}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                <PartitionOutlined style={{ color: '#0958d9' }} />
-                <strong>Distributed Smoke Workflow</strong>
-              </div>
-              <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
-                <Tag color="blue">distributed</Tag>
-                <Tag>GPU probe</Tag>
-              </Space>
-              <Text type="secondary" style={{ display: 'block', fontSize: '12px' }}>
-                Creates parallel probe tasks so the canvas can show which machines ran them.
-              </Text>
-            </Card>
+              loading={filesLoading}
+              dataSource={workspaceFiles}
+              locale={{ emptyText: <Empty description="No workspace files" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+              renderItem={(file) => (
+                <List.Item
+                  className="workspace-file-row"
+                  actions={[
+                    file.type === 'file' ? (
+                      <Tooltip key="preview" title="Preview">
+                        <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => previewWorkspaceFile(file)} />
+                      </Tooltip>
+                    ) : null,
+                    file.type === 'file' ? (
+                      <Tooltip key="download" title="Download">
+                        <Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => downloadWorkspaceFile(file)} />
+                      </Tooltip>
+                    ) : null,
+                    file.type === 'directory' ? (
+                      <Tooltip key="upload" title="Upload here">
+                        <Button type="text" size="small" icon={<UploadOutlined />} onClick={() => startUploadWorkspaceFiles(file.relativePath)} />
+                      </Tooltip>
+                    ) : null,
+                    <Tooltip key="delete" title="Delete">
+                      <Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={() => deleteWorkspaceFile(file)} />
+                    </Tooltip>,
+                  ].filter(Boolean)}
+                >
+                  <List.Item.Meta
+                    avatar={
+                      <span className={`workspace-file-icon workspace-file-icon-${file.type}`}>
+                        {file.type === 'directory' ? <FolderOpenOutlined /> : <FileTextOutlined />}
+                      </span>
+                    }
+                    title={
+                      file.type === 'directory' ? (
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                          onClick={() => loadWorkspaceFiles(workspaceDir, file.relativePath)}
+                        >
+                          {file.name}
+                        </Button>
+                      ) : (
+                        <Text style={{ fontSize: '13px', maxWidth: '150px' }} ellipsis={{ tooltip: file.relativePath }}>
+                          {file.name}
+                        </Text>
+                      )
+                    }
+                    description={
+                      <Space size={4} wrap>
+                        <Tag color={file.type === 'directory' ? 'geekblue' : 'default'} style={{ margin: 0 }}>
+                          {file.type === 'file' ? formatFileSize(file.size) : 'folder'}
+                        </Tag>
+                        {file.updatedAt && (
+                          <Text type="secondary" style={{ fontSize: '11px' }}>
+                            {formatUpdatedAt(file.updatedAt)}
+                          </Text>
+                        )}
+                      </Space>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
           </div>
 
           <Divider />
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <h3 style={{ margin: 0 }}>Builtin Tasks</h3>
-            <Button
-              type="text"
-              size="small"
-              icon={<ReloadOutlined />}
-              onClick={() => loadBuiltinTasks(true)}
-              loading={builtinLoading}
-            >
-              Refresh
-            </Button>
+            <Space size={6}>
+              <h3 style={{ margin: 0 }}>Skills</h3>
+              <Tag color="blue" style={{ margin: 0 }}>service</Tag>
+            </Space>
+            <Space size={4}>
+              <Button
+                type="text"
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => loadWorkspaceSkills(workspaceInput || workspaceDir, true)}
+                loading={skillsLoading}
+              />
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={() => openCatalogImport('skills')}
+              >
+                Library
+              </Button>
+            </Space>
           </div>
-          <p style={{ fontSize: '12px', color: '#999', marginBottom: '12px' }}>
-            Click to expand or drag to canvas
-          </p>
-          {builtinTasks.length === 0 ? (
-            <Empty description="No builtin tasks" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button type="primary" size="small" icon={<ReloadOutlined />} onClick={() => loadBuiltinTasks(true)}>
-                Load Builtin Tasks
+          {workspaceSkillErrors.length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: '8px' }}
+              message={`${workspaceSkillErrors.length} skill${workspaceSkillErrors.length > 1 ? 's' : ''} failed to load`}
+            />
+          )}
+          {workspaceSkills.length === 0 ? (
+            <Empty description="No skills" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => openCatalogImport('skills')}>
+                Open Library
               </Button>
             </Empty>
           ) : (
             <List
-              dataSource={builtinTasks}
-              renderItem={(task) => {
-                const taskKey = getBuiltinTaskKey(task);
-                const expanded = expandedTaskKey === taskKey;
+              size="small"
+              loading={skillsLoading}
+              dataSource={workspaceSkills}
+              renderItem={(skill) => {
+                const skillSummary = compactSkillDescription(skill);
+                const compactPath = shortSkillPath(skill.path);
 
                 return (
-                  <Card
-                    size="small"
-                    style={{ marginBottom: '8px', cursor: 'pointer' }}
-                    hoverable
-                    draggable
-                    onClick={() => {
-                      setSelectedWorkspaceTaskKey(null);
-                      toggleTask(taskKey);
-                    }}
-                    onDragStart={(event) => onDragStartBuiltin(event, task)}
+                  <List.Item
+                    className="workspace-file-row"
+                    actions={[
+                      <Tooltip key="preview" title="Preview">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EyeOutlined />}
+                          onClick={() => setPreviewSkill(skill)}
+                        />
+                      </Tooltip>,
+                    ]}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                      <ThunderboltOutlined style={{ color: '#1890ff' }} />
-                      <strong>{task.displayName}</strong>
-                    </div>
-                    {renderBuiltinTaskSummary(task)}
-                    {expanded && (
-                      <>
-                        <Divider style={{ margin: '10px 0' }} />
-                        {renderTaskDetails(task)}
-                      </>
-                    )}
-                  </Card>
+                    <List.Item.Meta
+                      avatar={<AppstoreAddOutlined style={{ color: '#722ed1' }} />}
+                      title={
+                        <Text style={{ fontSize: '13px', maxWidth: '190px' }} ellipsis={{ tooltip: skill.name }}>
+                          {skill.name}
+                        </Text>
+                      }
+                      description={
+                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                          <Paragraph
+                            type="secondary"
+                            ellipsis={{ rows: 2 }}
+                            style={{ fontSize: '11px', marginBottom: 0, lineHeight: 1.35 }}
+                          >
+                            {skillSummary}
+                          </Paragraph>
+                          <Space size={4} wrap>
+                            <Tag color="purple" style={{ margin: 0 }}>skill</Tag>
+                            {skill.resources && skill.resources.length > 0 && (
+                              <Tag style={{ margin: 0 }}>{skill.resources.length} resource(s)</Tag>
+                            )}
+                            {compactPath && (
+                              <Tag style={{ margin: 0 }}>{compactPath}</Tag>
+                            )}
+                          </Space>
+                        </Space>
+                      }
+                    />
+                  </List.Item>
                 );
               }}
             />
           )}
+
         </div>
       )}
       </div>
+
+      <Modal
+        title={
+          <Space>
+            <SettingOutlined />
+            <span>Advanced Setting</span>
+          </Space>
+        }
+        open={advancedSettingsOpen}
+        onCancel={() => setAdvancedSettingsOpen(false)}
+        width={680}
+        footer={[
+          <Button key="test" loading={testingLlm} onClick={testLlmConnection}>
+            Test Connection
+          </Button>,
+          <Button key="cancel" onClick={() => setAdvancedSettingsOpen(false)}>
+            Cancel
+          </Button>,
+          <Button key="save" type="primary" onClick={saveAdvancedSettings}>
+            Save
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          <div>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <FolderOpenOutlined style={{ color: '#666' }} />
+              <Text strong>Runtime Root</Text>
+            </Space>
+            <Input.Search
+              value={workspaceInput}
+              onChange={(event) => setWorkspaceInput(event.target.value)}
+              onSearch={handleChangeWorkspace}
+              enterButton="Change"
+              loading={workspaceLoading || workflowLoading}
+              placeholder="/root/data/Maze/workspace"
+            />
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+              Service-side workspace for workflows, tasks, skills, files, and run artifacts.
+            </Text>
+          </div>
+
+          <div>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <FolderOpenOutlined style={{ color: '#1677ff' }} />
+              <Text strong>Local File Cache</Text>
+            </Space>
+            <Space size={8} wrap>
+              <Tooltip title="Optional browser-local file cache. Missing files are copied into Workspace Files before runs.">
+                <Button
+                  icon={<FolderOpenOutlined />}
+                  onClick={startOpenLocalWorkspace}
+                  loading={syncingLocalWorkspace}
+                >
+                  Select Folder
+                </Button>
+              </Tooltip>
+              {localWorkspaceName && (
+                <Button
+                  onClick={() => refreshLocalWorkspaceManifest(true)}
+                  loading={syncingLocalWorkspace}
+                >
+                  Refresh Cache
+                </Button>
+              )}
+            </Space>
+            {localWorkspaceName ? (
+              <div className="local-workspace-summary" style={{ marginTop: 10 }}>
+                <Space size={[4, 4]} wrap>
+                  <Tag color="green" style={{ margin: 0 }}>cache</Tag>
+                  <Text strong ellipsis={{ tooltip: localWorkspaceName }} style={{ maxWidth: 280 }}>
+                    {localWorkspaceName}
+                  </Text>
+                  <Tag style={{ margin: 0 }}>
+                    {localWorkspaceFiles.filter((file) => file.type === 'file').length} files
+                  </Tag>
+                  {localWorkspaceLastSyncedAt && (
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {formatUpdatedAt(localWorkspaceLastSyncedAt)}
+                    </Text>
+                  )}
+                </Space>
+              </div>
+            ) : (
+              <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+                No local file cache selected.
+              </Text>
+            )}
+          </div>
+
+          <div>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <ThunderboltOutlined style={{ color: '#fa8c16' }} />
+              <Text strong>LLM</Text>
+            </Space>
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <div>
+                <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 6 }}>
+                  Base URL
+                </Text>
+                <Input
+                  value={llmSettingsDraft.baseUrl}
+                  onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                  placeholder="https://api.siliconflow.cn/v1"
+                />
+              </div>
+              <div>
+                <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 6 }}>
+                  API Key
+                </Text>
+                <Input.Password
+                  value={llmSettingsDraft.apiKey}
+                  onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                  placeholder="sk-..."
+                />
+              </div>
+              <div>
+                <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 6 }}>
+                  Model
+                </Text>
+                <Select
+                  showSearch
+                  value={llmSettingsDraft.model}
+                  onChange={(model) => setLlmSettingsDraft((current) => ({ ...current, model }))}
+                  options={SILICONFLOW_MODELS.map((model) => ({ label: model, value: model }))}
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </Space>
+          </div>
+        </Space>
+      </Modal>
 
       <Drawer
         title={
@@ -1778,7 +3376,11 @@ export default function BuiltinTasksSidebar() {
         open={newTaskOpen}
         onCancel={closeNewWorkspaceTaskModal}
         width={760}
-        footer={newTaskMode === 'manual' ? [
+        footer={newTaskMode === 'template' ? [
+          <Button key="close" onClick={closeNewWorkspaceTaskModal}>
+            Close
+          </Button>,
+        ] : newTaskMode === 'manual' ? [
           <Button key="cancel" onClick={closeNewWorkspaceTaskModal} disabled={creatingTask}>
             Cancel
           </Button>,
@@ -1809,6 +3411,7 @@ export default function BuiltinTasksSidebar() {
             options={[
               { label: 'Manual', value: 'manual' },
               { label: 'Generate with AI', value: 'ai' },
+              { label: 'Built-in Templates', value: 'template' },
             ]}
           />
 
@@ -1823,25 +3426,31 @@ export default function BuiltinTasksSidebar() {
             />
           )}
 
-          <Space direction="vertical" size="small" style={{ width: '100%' }}>
-            <Text strong>Function name</Text>
-            <Input
-              value={newTaskFunctionName}
-              onChange={(event) => setNewTaskFunctionName(event.target.value)}
-              placeholder="process_file"
-            />
-          </Space>
+          {newTaskMode !== 'template' && (
+            <>
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Text strong>Function name</Text>
+                <Input
+                  value={newTaskFunctionName}
+                  onChange={(event) => setNewTaskFunctionName(event.target.value)}
+                  placeholder="process_file"
+                />
+              </Space>
 
-          <Space direction="vertical" size="small" style={{ width: '100%' }}>
-            <Text strong>Task file</Text>
-            <Input
-              value={newTaskRelativePath}
-              onChange={(event) => setNewTaskRelativePath(event.target.value)}
-              placeholder="tasks/ai_generated/process_file.py"
-            />
-          </Space>
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Text strong>Task file</Text>
+                <Input
+                  value={newTaskRelativePath}
+                  onChange={(event) => setNewTaskRelativePath(event.target.value)}
+                  placeholder="tasks/ai_generated/process_file.py"
+                />
+              </Space>
+            </>
+          )}
 
-          {newTaskMode === 'manual' ? (
+          {newTaskMode === 'template' ? (
+            renderBuiltinTaskTemplates(true)
+          ) : newTaskMode === 'manual' ? (
             <Alert
               type="info"
               showIcon
@@ -1911,6 +3520,105 @@ export default function BuiltinTasksSidebar() {
         >
           {previewFile?.content}
         </pre>
+      </Modal>
+
+      <Modal
+        title={previewSkill?.name || 'Skill'}
+        open={!!previewSkill}
+        onCancel={() => setPreviewSkill(null)}
+        footer={[
+          <Button key="close" onClick={() => setPreviewSkill(null)}>
+            Close
+          </Button>,
+        ]}
+        width={720}
+        destroyOnClose
+      >
+        {previewSkill && (
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Space size={4} wrap>
+              <Tag color="purple">workspace</Tag>
+              {previewSkill.truncated && <Tag color="orange">truncated</Tag>}
+              {previewSkill.resources && previewSkill.resources.length > 0 && (
+                <Tag color="geekblue">{previewSkill.resources.length} resource(s)</Tag>
+              )}
+              {previewSkill.original_chars !== undefined && (
+                <Tag>{previewSkill.returned_chars || 0}/{previewSkill.original_chars} chars</Tag>
+              )}
+            </Space>
+
+            {previewSkill.description && (
+              <Paragraph style={{ marginBottom: 0 }}>
+                {previewSkill.description}
+              </Paragraph>
+            )}
+
+            {previewSkill.path && (
+              <Text copyable={{ text: previewSkill.path }} type="secondary" style={{ fontSize: 12 }}>
+                {previewSkill.path}
+              </Text>
+            )}
+
+            {previewSkill.resources && previewSkill.resources.length > 0 && (
+              <div>
+                <Text strong>Resources</Text>
+                <pre
+                  style={{
+                    marginTop: 6,
+                    maxHeight: 180,
+                    overflow: 'auto',
+                    background: '#f5f5f5',
+                    padding: 12,
+                    borderRadius: 4,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontSize: 12,
+                  }}
+                >
+                  {JSON.stringify(previewSkill.resources, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {previewSkill.metadata && Object.keys(previewSkill.metadata).length > 0 && (
+              <div>
+                <Text strong>Metadata</Text>
+                <pre
+                  style={{
+                    marginTop: 6,
+                    maxHeight: 220,
+                    overflow: 'auto',
+                    background: '#f5f5f5',
+                    padding: 12,
+                    borderRadius: 4,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontSize: 12,
+                  }}
+                >
+                  {JSON.stringify(previewSkill.metadata, null, 2)}
+                </pre>
+              </div>
+            )}
+          </Space>
+        )}
+      </Modal>
+
+      <Modal
+        title={catalogImportTitle}
+        open={!!catalogImportType}
+        onCancel={() => setCatalogImportType(null)}
+        width={680}
+        footer={[
+          <Button key="close" onClick={() => setCatalogImportType(null)}>
+            Close
+          </Button>,
+          <Button key="refresh" icon={<ReloadOutlined />} onClick={() => loadSystemCatalog(true)} loading={catalogLoading}>
+            Refresh Library
+          </Button>,
+        ]}
+      >
+        {catalogImportType && renderCatalogList(catalogImportType)}
       </Modal>
     </>
   );

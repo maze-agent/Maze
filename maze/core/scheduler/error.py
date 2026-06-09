@@ -12,6 +12,7 @@ ERROR_RETRYABLE_DEFAULTS = {
     "resource_unavailable": True,
     "node_lost": True,
     "artifact_error": True,
+    "serialization_error": False,
     "timeout": False,
     "scheduler_error": False,
     "cancelled": False,

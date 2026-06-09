@@ -9,6 +9,7 @@ import {
   Empty,
   Input,
   List,
+  Modal,
   Popconfirm,
   Space,
   Statistic,
@@ -19,7 +20,9 @@ import {
 import {
   DownloadOutlined,
   DeleteOutlined,
+  EyeOutlined,
   HistoryOutlined,
+  InboxOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -27,6 +30,7 @@ import {
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
+import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   DynamicRunEvent,
   DynamicRunSnapshot,
@@ -39,7 +43,9 @@ import type {
   StaticWorkflowRunStatus,
   UnifiedRunSnapshot,
   UnifiedRunTaskSnapshot,
+  WorkspaceSkillMeta,
 } from '@/types/workflow';
+import { loadLlmSettings } from '@/utils/llmSettings';
 import ReActRuntimeCanvas, {
   buildAgentTrace,
   formatJson,
@@ -111,6 +117,14 @@ type RunItem =
       status: DynamicRunStatus;
       run: DynamicRunSnapshot;
     };
+
+type ArtifactPreviewState = {
+  artifact: RunArtifact;
+  href: string;
+  content?: string;
+  error?: string;
+  loading: boolean;
+};
 
 interface RunsInspectorProps {
   open: boolean;
@@ -186,6 +200,234 @@ function errorSummary(error: any) {
   if (!error) return '';
   if (typeof error === 'string') return error;
   return String(error.message || error.error || error.kind || error.type || formatJson(error));
+}
+
+function compactText(value: any, maxLength = 180) {
+  const text = typeof value === 'string' ? value : formatJson(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}...`;
+}
+
+function formatResources(resources?: any) {
+  if (!resources || typeof resources !== 'object') return '';
+  const parts = [];
+  if (resources.cpu !== undefined) parts.push(`CPU ${resources.cpu}`);
+  if (resources.gpu !== undefined) parts.push(`GPU ${resources.gpu}`);
+  if (resources.cpu_mem !== undefined) parts.push(`Mem ${resources.cpu_mem}MB`);
+  if (resources.gpu_mem !== undefined) parts.push(`VRAM ${resources.gpu_mem}MB`);
+  return parts.join(' / ');
+}
+
+function runtimeNodeInfo(node: any) {
+  const selected = node?.selected_node || node?.schedule_decision?.selected_node || {};
+  return {
+    nodeIp: selected.node_ip || node?.node_ip || null,
+    nodeId: selected.node_id || node?.node_id_runtime || null,
+    gpuId: selected.gpu_id ?? node?.gpu_id ?? null,
+  };
+}
+
+function collectPlacementSummary(nodes: any[]) {
+  const byKey = new Map<string, {
+    nodeIp?: string | null;
+    nodeId?: string | null;
+    gpuIds: Set<string>;
+    count: number;
+  }>();
+
+  nodes.forEach((node) => {
+    const runtime = runtimeNodeInfo(node);
+    if (!runtime.nodeIp && !runtime.nodeId) return;
+    const key = `${runtime.nodeIp || runtime.nodeId}`;
+    const current = byKey.get(key) || {
+      nodeIp: runtime.nodeIp,
+      nodeId: runtime.nodeId,
+      gpuIds: new Set<string>(),
+      count: 0,
+    };
+    if (runtime.gpuId !== undefined && runtime.gpuId !== null) {
+      current.gpuIds.add(String(runtime.gpuId));
+    }
+    current.count += 1;
+    byKey.set(key, current);
+  });
+
+  return Array.from(byKey.values());
+}
+
+function collectResourceSummary(nodes: any[]) {
+  const values = new Set<string>();
+  nodes.forEach((node) => {
+    const direct = formatResources(node?.resources);
+    const requested = formatResources(node?.schedule_decision?.requested_resources);
+    if (direct) values.add(direct);
+    if (requested) values.add(requested);
+  });
+  return Array.from(values);
+}
+
+function collectSandboxSummary(nodes: any[], events: DynamicRunEvent[] = [], run?: DynamicRunSnapshot | null) {
+  const values = new Set<string>();
+  const finalBackend = run?.final_result?.exec_backend || run?.final_result?.backend;
+  if (finalBackend) values.add(String(finalBackend));
+
+  events.forEach((event) => {
+    const data = event.data || {};
+    if (data.exec_backend) values.add(String(data.exec_backend));
+    if (data.sandbox_backend) values.add(String(data.sandbox_backend));
+  });
+
+  nodes.forEach((node) => {
+    const result = node?.result_summary || node?.result || {};
+    const backend = result?.metadata?.sandbox_backend || result?.sandbox_backend || result?.backend;
+    if (backend) values.add(String(backend));
+  });
+
+  return Array.from(values);
+}
+
+function collectToolSummary(events: DynamicRunEvent[]) {
+  const byTool = new Map<string, { count: number; failed: number }>();
+  events.forEach((event) => {
+    const data = event.data || {};
+    const tool = data.tool || data.tool_name;
+    if (!tool) return;
+    if (![
+      'agent_action',
+      'agent_tool_call_started',
+      'agent_tool_call_finished',
+      'agent_observation',
+      'agent_repair_observation',
+    ].includes(event.type)) {
+      return;
+    }
+    const key = String(tool);
+    const current = byTool.get(key) || { count: 0, failed: 0 };
+    if (event.type === 'agent_action' || event.type === 'agent_tool_call_started') {
+      current.count += 1;
+    }
+    if (data.error || data.error_type || data.ok === false) {
+      current.failed += 1;
+    }
+    byTool.set(key, current);
+  });
+  return Array.from(byTool.entries())
+    .map(([tool, summary]) => ({ tool, ...summary }))
+    .sort((a, b) => a.tool.localeCompare(b.tool));
+}
+
+function collectRunErrors(run: any, nodes: any[], events: DynamicRunEvent[] = []) {
+  const errors: string[] = [];
+  if (run?.failure_reason) errors.push(compactText(run.failure_reason));
+  if (run?.cancel_reason) errors.push(compactText(run.cancel_reason));
+  nodes.forEach((node) => {
+    if (node?.error || node?.last_error) {
+      errors.push(compactText(node.error || node.last_error));
+    }
+  });
+  events.forEach((event) => {
+    if (['agent_error', 'agent_skill_load_failed', 'task_exception'].includes(event.type)) {
+      errors.push(compactText(event.data?.error || event.data?.result || event.data));
+    }
+  });
+  return Array.from(new Set(errors)).slice(0, 5);
+}
+
+function issueGuidance(issue: any) {
+  const text = compactText(issue, 300);
+  const lower = text.toLowerCase();
+  let stage = 'runtime';
+  let suggestion = 'Open the failed task or event, inspect the raw error, then retry after fixing the input, tool call, or environment.';
+
+  if (lower.includes('api key') || lower.includes('unauthorized') || lower.includes('401')) {
+    stage = 'llm';
+    suggestion = 'Check Advanced Setting -> LLM API key/base URL/model, then rerun the ReAct workflow.';
+  } else if (lower.includes('skill_not_found') || lower.includes('skill not found')) {
+    stage = 'skills';
+    suggestion = 'Import the missing skill from Library, or remove it from the ReAct run skill selection.';
+  } else if (lower.includes('docker')) {
+    stage = 'sandbox';
+    suggestion = 'Switch to workspace_sandbox, or connect a worker that reports docker_sandbox=true before rerunning.';
+  } else if (lower.includes('permission')) {
+    stage = 'sandbox';
+    suggestion = 'Review the permission target and policy. Prefer writing under workspace/files or generated artifact paths.';
+  } else if (lower.includes('timeout') || lower.includes('timed out')) {
+    stage = 'execution';
+    suggestion = 'Increase timeout, reduce max steps, or split the work into a smaller task before rerunning.';
+  } else if (lower.includes('no registered') || lower.includes('no alive') || lower.includes('insufficient')) {
+    stage = 'scheduler';
+    suggestion = 'Check Cluster resources. Reconnect worker nodes or lower requested CPU/GPU resources.';
+  } else if (lower.includes('json') || lower.includes('parse')) {
+    stage = 'llm/tool';
+    suggestion = 'Inspect the raw LLM decision and repair prompt. Rerun after making the prompt/tool schema more explicit.';
+  }
+
+  return { stage, issue: text, suggestion };
+}
+
+function collectRepairGuidance(run: any, nodes: any[], events: DynamicRunEvent[] = []) {
+  const rawIssues: any[] = [];
+  if (run?.failure_reason) rawIssues.push(run.failure_reason);
+  if (run?.cancel_reason) rawIssues.push(run.cancel_reason);
+  nodes.forEach((node) => {
+    if (node?.error || node?.last_error) rawIssues.push(node.error || node.last_error);
+    if (node?.pending_reason) rawIssues.push(node.pending_reason);
+  });
+  events.forEach((event) => {
+    if (['agent_error', 'agent_skill_load_failed', 'task_exception'].includes(event.type)) {
+      rawIssues.push(event.data?.error || event.data?.result || event.data);
+    }
+  });
+
+  const byKey = new Map<string, ReturnType<typeof issueGuidance>>();
+  rawIssues.forEach((issue) => {
+    const guidance = issueGuidance(issue);
+    byKey.set(`${guidance.stage}:${guidance.issue}`, guidance);
+  });
+  return Array.from(byKey.values()).slice(0, 5);
+}
+
+function artifactLooksImage(artifact: RunArtifact) {
+  const mime = String(artifact.mime || '').toLowerCase();
+  const name = String(artifact.path || artifact.name || '').toLowerCase();
+  return mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/.test(name);
+}
+
+function artifactLooksText(artifact: RunArtifact) {
+  const mime = String(artifact.mime || '').toLowerCase();
+  const name = String(artifact.path || artifact.name || '').toLowerCase();
+  return (
+    mime.startsWith('text/') ||
+    mime.includes('json') ||
+    mime.includes('xml') ||
+    /\.(txt|md|json|jsonl|csv|log|py|js|ts|tsx|jsx|html|css|xml|yaml|yml|toml|canvas)$/.test(name)
+  );
+}
+
+function canPreviewArtifact(artifact: RunArtifact) {
+  return artifactLooksImage(artifact) || artifactLooksText(artifact);
+}
+
+function formatArtifactPreview(artifact: RunArtifact, content: string) {
+  const name = String(artifact.path || artifact.name || '').toLowerCase();
+  const mime = String(artifact.mime || '').toLowerCase();
+  if (mime.includes('json') || /\.(json|canvas)$/.test(name)) {
+    try {
+      return JSON.stringify(JSON.parse(content), null, 2);
+    } catch {
+      return content;
+    }
+  }
+  return content;
+}
+
+function inferReactRerunMode(started: Record<string, any> | null, run?: DynamicRunSnapshot | null): 'local' | 'online' {
+  const llmTask = String(started?.llm_task || '').toLowerCase();
+  const mode = String(started?.mode || run?.final_result?.mode || run?.mode || '').toLowerCase();
+  if (llmTask.includes('openai') || llmTask.includes('online')) return 'online';
+  if (mode === 'local' || mode.includes('local')) return 'local';
+  if (mode === 'online' || mode.includes('online')) return 'online';
+  return 'local';
 }
 
 function scheduleRejectSummary(decision: any): string[] {
@@ -412,6 +654,10 @@ function dynamicEventSummary(event: DynamicRunEvent) {
       return data.reason || 'Run interrupted';
     case 'agent_run_started':
       return `Agent started with ${Array.isArray(data.tools) ? data.tools.length : 0} tool(s)`;
+    case 'agent_skill_loaded':
+      return `Skill loaded: ${data.skill?.name || data.skill || 'unknown'}`;
+    case 'agent_skill_load_failed':
+      return `Skill load failed: ${data.skill || data.error?.details?.skill || data.error?.message || 'unknown'}`;
     case 'agent_action':
       return `Agent step ${data.step || '?'} selected ${data.tool || 'unknown tool'}`;
     case 'agent_observation':
@@ -425,6 +671,54 @@ function dynamicEventSummary(event: DynamicRunEvent) {
     default:
       return event.type;
   }
+}
+
+function normalizeSkillSummary(skill: any, source?: string): WorkspaceSkillMeta & { source?: string } | null {
+  if (!skill) return null;
+  const name = String(skill.name || '').trim();
+  if (!name) return null;
+  return {
+    name,
+    path: String(skill.path || ''),
+    description: skill.description ? String(skill.description) : '',
+    metadata: skill.metadata || {},
+    resources: Array.isArray(skill.resources) ? skill.resources : [],
+    truncated: Boolean(skill.truncated),
+    original_chars: skill.original_chars,
+    returned_chars: skill.returned_chars,
+    source,
+  };
+}
+
+function collectLoadedSkills(
+  run?: DynamicRunSnapshot | null,
+  events: DynamicRunEvent[] = [],
+): Array<WorkspaceSkillMeta & { source?: string }> {
+  const byName = new Map<string, WorkspaceSkillMeta & { source?: string }>();
+  const addSkill = (skill: any, source?: string) => {
+    const normalized = normalizeSkillSummary(skill, source);
+    if (!normalized) return;
+    byName.set(normalized.name, {
+      ...(byName.get(normalized.name) || {}),
+      ...normalized,
+      source: normalized.source || byName.get(normalized.name)?.source,
+    });
+  };
+
+  const finalSkills = Array.isArray(run?.final_result?.skills) ? run?.final_result?.skills : [];
+  finalSkills.forEach((skill: any) => addSkill(skill, 'final'));
+  events.forEach((event) => {
+    const data = event.data || {};
+    if (event.type === 'agent_run_started') {
+      const startedSkills = Array.isArray(data.skills) ? data.skills : [];
+      startedSkills.forEach((skill: any) => addSkill(skill, 'start'));
+    }
+    if (event.type === 'agent_skill_loaded') {
+      addSkill(data.skill, data.source || 'event');
+    }
+  });
+
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function rawDecisionText(step: AgentTraceStep) {
@@ -452,6 +746,7 @@ export default function RunsInspector({
   focusStaticRunId,
 }: RunsInspectorProps) {
   const {
+    workspaceId,
     workspaceDir,
     staticRuns,
     setStaticRuns,
@@ -472,7 +767,11 @@ export default function RunsInspector({
   const [loading, setLoading] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [staticCleanupLoading, setStaticCleanupLoading] = useState(false);
+  const [artifactCleanupLoading, setArtifactCleanupLoading] = useState(false);
   const [runActionLoading, setRunActionLoading] = useState(false);
+  const [artifactPreview, setArtifactPreview] = useState<ArtifactPreviewState | null>(null);
+  const [promotingArtifactKey, setPromotingArtifactKey] = useState<string | null>(null);
 
   const runItems = useMemo<RunItem[]>(() => {
     const staticItems: RunItem[] = staticRuns.map((run) => ({
@@ -532,6 +831,10 @@ export default function RunsInspector({
   const selectedDynamicEdges = selectedDynamicRun?.graph?.edges || [];
   const agentTrace = useMemo(() => buildAgentTrace(dynamicEvents), [dynamicEvents]);
   const showAgentTrace = hasAgentTrace(agentTrace);
+  const selectedLoadedSkills = useMemo(
+    () => collectLoadedSkills(selectedDynamicRun, dynamicEvents),
+    [dynamicEvents, selectedDynamicRun],
+  );
 
   const loadRuns = useCallback(async (silent = false) => {
     if (!silent) {
@@ -678,12 +981,66 @@ export default function RunsInspector({
         older_than_days: 7,
         dry_run: true,
       });
-      message.info(`Cleanup dry run matched ${result.cleanup?.matched_count || 0} run(s)`);
+      message.info(`Dynamic cleanup dry run matched ${result.cleanup?.matched_count || 0} run(s)`);
     } catch (error: any) {
       console.error('Failed to run cleanup dry run:', error);
-      message.error(error.response?.data?.error || 'Failed to run cleanup dry run');
+      message.error(error.response?.data?.error || 'Failed to run dynamic cleanup dry run');
     } finally {
       setCleanupLoading(false);
+    }
+  };
+
+  const cleanupStaticRuns = async (dryRun: boolean) => {
+    setStaticCleanupLoading(true);
+    try {
+      const result = await api.cleanupStaticWorkflowRuns({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || undefined,
+        statuses: ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted'],
+        older_than_days: 7,
+        keep_latest: 100,
+        dry_run: dryRun,
+      });
+      const cleanup = result.cleanup || {};
+      if (dryRun) {
+        message.info(`Static cleanup dry run matched ${cleanup.matched_count || 0} run(s)`);
+      } else {
+        message.success(`Deleted ${cleanup.deleted_count || 0} old static run(s)`);
+        setSelectedRunKey(null);
+        setSelectedStaticRun(null);
+        setSelectedRunArtifacts([]);
+        setSelectedRunLogs([]);
+        setStaticEvents([]);
+        await loadRuns(true);
+      }
+    } catch (error: any) {
+      console.error('Failed to clean up static runs:', error);
+      message.error(error.response?.data?.error || 'Failed to clean up static runs');
+    } finally {
+      setStaticCleanupLoading(false);
+    }
+  };
+
+  const cleanupArtifacts = async (dryRun: boolean) => {
+    setArtifactCleanupLoading(true);
+    try {
+      const result = await api.cleanupArtifacts({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || undefined,
+        older_than_days: 7,
+        dry_run: dryRun,
+      });
+      const cleanup = result.cleanup || {};
+      if (dryRun) {
+        message.info(`Artifact cleanup dry run matched ${cleanup.matched_count || 0} orphan artifact(s)`);
+      } else {
+        message.success(`Deleted ${cleanup.deleted_count || 0} orphan artifact(s)`);
+      }
+    } catch (error: any) {
+      console.error('Failed to clean up artifacts:', error);
+      message.error(error.response?.data?.error || 'Failed to clean up artifacts');
+    } finally {
+      setArtifactCleanupLoading(false);
     }
   };
 
@@ -719,6 +1076,72 @@ export default function RunsInspector({
     } catch (error: any) {
       console.error('Failed to retry run:', error);
       message.error(error.response?.data?.error || 'Failed to retry run');
+    } finally {
+      setRunActionLoading(false);
+    }
+  };
+
+  const rerunSelectedDynamicReactRun = async () => {
+    if (!selectedDynamicRun) return;
+
+    const started = agentTrace.started || {};
+    const prompt = String(started.prompt || '').trim();
+    if (!prompt) {
+      message.warning('The selected ReAct run does not include its original prompt');
+      return;
+    }
+
+    const mode = inferReactRerunMode(agentTrace.started, selectedDynamicRun);
+    const maxSteps = Number(started.max_steps || selectedDynamicRun.final_result?.max_steps || 4);
+    const maxTokensValue = Number(started.max_tokens || selectedDynamicRun.final_result?.max_tokens || 0);
+    const taskTimeout = normalizeReactTaskTimeout(
+      started.task_timeout || selectedDynamicRun.final_result?.task_timeout,
+      mode,
+    );
+    const sandboxes = collectSandboxSummary(selectedDynamicTaskNodes, dynamicEvents, selectedDynamicRun);
+    const execBackend = (
+      sandboxes.find((value) => value === 'workspace_sandbox' || value === 'docker')
+      || selectedDynamicRun.final_result?.exec_backend
+      || 'workspace_sandbox'
+    ) as 'workspace_sandbox' | 'docker';
+
+    const llmSettings = loadLlmSettings();
+    if (mode === 'online') {
+      if (!llmSettings.baseUrl.trim() || !llmSettings.model.trim() || !llmSettings.apiKey.trim()) {
+        message.warning('Please configure online LLM settings first');
+        return;
+      }
+    }
+
+    setRunActionLoading(true);
+    try {
+      const result = await api.startReactRun({
+        mode,
+        prompt,
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || undefined,
+        maxSteps: Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 4,
+        maxTokens: Number.isFinite(maxTokensValue) && maxTokensValue > 0 ? maxTokensValue : undefined,
+        timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
+        taskTimeout,
+        skills: selectedLoadedSkills.map((skill) => skill.name),
+        execBackend,
+        llm: mode === 'online'
+          ? {
+              ...llmSettings,
+              baseUrl: llmSettings.baseUrl.trim(),
+              model: llmSettings.model.trim(),
+            }
+          : undefined,
+      });
+
+      message.success(`ReAct rerun started: ${result.runId.slice(0, 8)}...`);
+      await loadRuns(true);
+      setSelectedRunKey(`dynamic:${result.runId}`);
+      await loadDynamicRunDetails(result.runId, true);
+    } catch (error: any) {
+      console.error('Failed to rerun ReAct workflow:', error);
+      message.error(error.response?.data?.error || 'Failed to rerun ReAct workflow');
     } finally {
       setRunActionLoading(false);
     }
@@ -872,6 +1295,77 @@ export default function RunsInspector({
     return null;
   };
 
+  const openArtifactPreview = async (artifact: RunArtifact) => {
+    const href = artifactDownloadUrl(artifact);
+    if (!href) {
+      message.warning('This artifact does not have a previewable download URL');
+      return;
+    }
+
+    if (artifactLooksImage(artifact)) {
+      setArtifactPreview({ artifact, href, loading: false });
+      return;
+    }
+
+    setArtifactPreview({ artifact, href, loading: true });
+    try {
+      const response = await fetch(href);
+      if (!response.ok) {
+        throw new Error(`Preview request failed with HTTP ${response.status}`);
+      }
+      const rawContent = await response.text();
+      const maxPreviewChars = 240000;
+      const formatted = formatArtifactPreview(
+        artifact,
+        rawContent.length > maxPreviewChars
+          ? `${rawContent.slice(0, maxPreviewChars)}\n\n... preview truncated ...`
+          : rawContent,
+      );
+      setArtifactPreview({ artifact, href, content: formatted, loading: false });
+    } catch (error: any) {
+      console.error('Failed to preview artifact:', error);
+      setArtifactPreview({
+        artifact,
+        href,
+        error: error?.message || 'Failed to preview artifact',
+        loading: false,
+      });
+    }
+  };
+
+  const artifactKey = (artifact: RunArtifact) => (
+    artifact.sha256 || artifact.uri || `${artifact.run_id || selectedStaticRun?.run_id || ''}:${artifact.task_id || artifact.producer_task_id || ''}:${artifact.path || artifact.name || ''}`
+  );
+
+  const promoteArtifact = async (artifact: RunArtifact) => {
+    const activeWorkspaceDir = selectedStaticRun?.workspace_dir || workspaceDir;
+    if (!activeWorkspaceDir) {
+      message.warning('Workspace is not available for this run');
+      return;
+    }
+
+    const taskId = artifact.task_id || artifact.producer_task_id;
+    const key = artifactKey(artifact);
+    setPromotingArtifactKey(key);
+    try {
+      const result = await api.promoteArtifactToWorkspaceFile({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: activeWorkspaceDir,
+        artifact,
+        targetPath: artifact.path || artifact.name || artifact.sha256,
+        runId: artifact.run_id || selectedStaticRun?.run_id || selectedDynamicRun?.run_id,
+        taskId,
+        overwrite: true,
+      });
+      message.success(`Promoted to Workspace Files: ${result.file?.relativePath || artifact.path || artifact.name}`);
+    } catch (error: any) {
+      console.error('Failed to promote artifact:', error);
+      message.error(error.response?.data?.error || 'Failed to promote artifact');
+    } finally {
+      setPromotingArtifactKey(null);
+    }
+  };
+
   const renderRunLogs = () => (
     <div>
       <Title level={5}>Logs</Title>
@@ -923,6 +1417,25 @@ export default function RunsInspector({
               <List.Item
                 actions={[
                   <Button
+                    key="preview"
+                    size="small"
+                    icon={<EyeOutlined />}
+                    disabled={!href || !canPreviewArtifact(artifact)}
+                    onClick={() => openArtifactPreview(artifact)}
+                  >
+                    Preview
+                  </Button>,
+                  <Button
+                    key="promote"
+                    size="small"
+                    icon={<InboxOutlined />}
+                    loading={promotingArtifactKey === artifactKey(artifact)}
+                    disabled={!artifact.path && !artifact.name && !artifact.sha256}
+                    onClick={() => promoteArtifact(artifact)}
+                  >
+                    Promote
+                  </Button>,
+                  <Button
                     key="download"
                     size="small"
                     icon={<DownloadOutlined />}
@@ -936,13 +1449,17 @@ export default function RunsInspector({
               >
                 <Space direction="vertical" size={2} style={{ width: '100%' }}>
                   <Space wrap>
-                    <Text strong>{name}</Text>
+                    <Text strong copyable={{ text: name }}>{name}</Text>
                     {taskId && <Tag>{shortId(taskId)}</Tag>}
+                    {artifact.run_id && <Tag color="purple">{shortId(artifact.run_id)}</Tag>}
                     {artifact.sha256 && <Tag color="geekblue">CAS</Tag>}
                     {artifact.mime && <Tag>{artifact.mime}</Tag>}
                   </Space>
                   <Space size={8} wrap>
                     <Text type="secondary" style={{ fontSize: 12 }}>{formatBytes(artifact.size)}</Text>
+                    {artifact.created_time && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>{formatTime(artifact.created_time)}</Text>
+                    )}
                     {artifact.sha256 && (
                       <Text copyable={{ text: artifact.sha256 }} type="secondary" style={{ fontSize: 12 }}>
                         sha256 {shortId(artifact.sha256)}
@@ -960,6 +1477,188 @@ export default function RunsInspector({
       )}
     </div>
   );
+
+  const renderLoadedSkills = () => {
+    if (selectedLoadedSkills.length === 0) {
+      return null;
+    }
+
+    return (
+      <div>
+        <Title level={5}>Skills</Title>
+        <List
+          size="small"
+          bordered
+          dataSource={selectedLoadedSkills}
+          renderItem={(skill) => (
+            <List.Item>
+              <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Text strong>{skill.name}</Text>
+                  {skill.source && <Tag>{skill.source}</Tag>}
+                  {skill.truncated && <Tag color="orange">truncated</Tag>}
+                  {skill.resources && skill.resources.length > 0 && (
+                    <Tag color="geekblue">{skill.resources.length} resource(s)</Tag>
+                  )}
+                </Space>
+                {skill.description && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {skill.description}
+                  </Text>
+                )}
+                {skill.path && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {skill.path}
+                  </Text>
+                )}
+              </Space>
+            </List.Item>
+          )}
+        />
+      </div>
+    );
+  };
+
+  const renderRuntimeEvidence = ({
+    title,
+    run,
+    nodes,
+    events = [],
+    skills = [],
+  }: {
+    title: string;
+    run?: StaticWorkflowRunSnapshot | DynamicRunSnapshot | null;
+    nodes: any[];
+    events?: DynamicRunEvent[];
+    skills?: Array<WorkspaceSkillMeta & { source?: string }>;
+  }) => {
+    const placements = collectPlacementSummary(nodes);
+    const resources = collectResourceSummary(nodes);
+    const sandboxes = collectSandboxSummary(nodes, events, run as DynamicRunSnapshot);
+    const tools = collectToolSummary(events);
+    const errors = collectRunErrors(run, nodes, events);
+    const repairGuidance = collectRepairGuidance(run, nodes, events);
+    const finalResult = (run as any)?.final_result || {};
+    const artifactFiles = Array.isArray(finalResult?.artifacts?.files) ? finalResult.artifacts.files : [];
+    const totalArtifacts = Math.max(
+      selectedRunArtifacts.length,
+      Number(finalResult?.artifacts?.count || 0),
+      artifactFiles.length,
+    );
+    const timing = finalResult?.timings;
+
+    return (
+      <div>
+        <Title level={5}>{title}</Title>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+            gap: 10,
+          }}
+        >
+          <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
+            <Text strong>Placement</Text>
+            <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
+              {placements.length === 0 ? (
+                <Tag>not scheduled yet</Tag>
+              ) : placements.map((placement) => (
+                <Tag key={placement.nodeIp || placement.nodeId || 'node'} color="geekblue">
+                  {placement.nodeIp || shortId(placement.nodeId || '')}
+                  {placement.gpuIds.size > 0 ? ` GPU ${Array.from(placement.gpuIds).join(',')}` : ''}
+                  {` x${placement.count}`}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+
+          <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
+            <Text strong>Sandbox & Resources</Text>
+            <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
+              {sandboxes.length === 0 ? <Tag>default</Tag> : sandboxes.map((sandbox) => (
+                <Tag key={sandbox} color="volcano">{sandbox}</Tag>
+              ))}
+              {resources.length === 0 ? <Tag>no explicit resources</Tag> : resources.slice(0, 4).map((resource) => (
+                <Tag key={resource} color="gold">{resource}</Tag>
+              ))}
+            </Space>
+          </div>
+
+          <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
+            <Text strong>Skills & Tools</Text>
+            <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
+              {skills.length === 0 ? <Tag>no skills</Tag> : skills.map((skill) => (
+                <Tag key={skill.name} color="purple">{skill.name}</Tag>
+              ))}
+              {tools.length === 0 ? <Tag>no tool calls</Tag> : tools.map((tool) => (
+                <Tag key={tool.tool} color={tool.failed ? 'red' : 'blue'}>
+                  {tool.tool} x{tool.count || 1}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+
+          <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
+            <Text strong>Artifacts & Timing</Text>
+            <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
+              <Tag color={totalArtifacts > 0 ? 'green' : 'default'}>{totalArtifacts} artifact(s)</Tag>
+              {timing?.total_seconds !== undefined && (
+                <Tag>{formatDurationSeconds(timing.total_seconds)}</Tag>
+              )}
+              {timing?.llm_seconds !== undefined && (
+                <Tag color="cyan">LLM {formatDurationSeconds(timing.llm_seconds)}</Tag>
+              )}
+              {timing?.tool_seconds !== undefined && (
+                <Tag color="green">Tools {formatDurationSeconds(timing.tool_seconds)}</Tag>
+              )}
+            </Space>
+          </div>
+        </div>
+
+        {errors.length > 0 && (
+          <Alert
+            style={{ marginTop: 10 }}
+            type="error"
+            showIcon
+            message="Run Issues"
+            description={(
+              <Space direction="vertical" size={2}>
+                {errors.map((error) => (
+                  <Text key={error} type="danger" style={{ fontSize: 12 }}>{error}</Text>
+                ))}
+              </Space>
+            )}
+          />
+        )}
+
+        {repairGuidance.length > 0 && (
+          <Alert
+            style={{ marginTop: 10 }}
+            type="warning"
+            showIcon
+            message="Repair Guidance"
+            description={(
+              <List
+                size="small"
+                dataSource={repairGuidance}
+                renderItem={(item) => (
+                  <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                      <Space wrap>
+                        <Tag color="orange">{item.stage}</Tag>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{item.issue}</Text>
+                      </Space>
+                      <Text style={{ fontSize: 12 }}>{item.suggestion}</Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            )}
+          />
+        )}
+      </div>
+    );
+  };
 
   const renderStaticDetails = () => {
     if (!selectedStaticRun) {
@@ -1067,6 +1766,12 @@ export default function RunsInspector({
           ))}
         </Space>
 
+        {renderRuntimeEvidence({
+          title: 'Run Evidence',
+          run: selectedStaticRun,
+          nodes: selectedStaticTaskNodes,
+        })}
+
         {renderRunLogs()}
 
         {renderArtifacts()}
@@ -1092,6 +1797,7 @@ export default function RunsInspector({
                         {node.maze_task_id && <Tag>{shortId(node.maze_task_id)}</Tag>}
                         {node.node_ip && <Tag color="geekblue">{node.node_ip}</Tag>}
                         {node.gpu_id !== undefined && node.gpu_id !== null && <Tag color="gold">GPU {node.gpu_id}</Tag>}
+                        {formatResources(node.resources) && <Tag color="gold">{formatResources(node.resources)}</Tag>}
                         {nodeDuration(node) !== null && <Tag>{formatDurationSeconds(nodeDuration(node))}</Tag>}
                         {node.timeout_seconds !== undefined && node.timeout_seconds !== null && (
                           <Tag color="volcano">timeout {formatDurationSeconds(node.timeout_seconds)}</Tag>
@@ -1201,6 +1907,16 @@ export default function RunsInspector({
             >
               Refresh
             </Button>
+            {(getRunMode(selectedDynamicRun) === 'react' || showAgentTrace) && (
+              <Button
+                icon={<PlayCircleOutlined />}
+                onClick={rerunSelectedDynamicReactRun}
+                loading={runActionLoading}
+                disabled={!agentTrace.started?.prompt}
+              >
+                Rerun
+              </Button>
+            )}
             {!dynamicTerminalStatuses.has(selectedDynamicRun.status) && (
               <Popconfirm
                 title="Cancel this run?"
@@ -1274,6 +1990,16 @@ export default function RunsInspector({
           ))}
         </Space>
 
+        {renderRuntimeEvidence({
+          title: 'Run Evidence',
+          run: selectedDynamicRun,
+          nodes: selectedDynamicTaskNodes,
+          events: dynamicEvents,
+          skills: selectedLoadedSkills,
+        })}
+
+        {renderLoadedSkills()}
+
         {renderRunLogs()}
 
         {renderArtifacts()}
@@ -1294,6 +2020,15 @@ export default function RunsInspector({
                 )}
                 {agentTrace.started.llm_task && (
                   <Tag color="cyan">LLM {String(agentTrace.started.llm_task)}</Tag>
+                )}
+                {agentTrace.permissions?.agent_permission_checked !== undefined && (
+                  <Tag color="green">permissions {agentTrace.permissions.agent_permission_checked}</Tag>
+                )}
+                {agentTrace.permissions?.agent_permission_denied !== undefined && (
+                  <Tag color="red">denied {agentTrace.permissions.agent_permission_denied}</Tag>
+                )}
+                {agentTrace.permissions?.agent_permission_ask !== undefined && (
+                  <Tag color="orange">ask {agentTrace.permissions.agent_permission_ask}</Tag>
                 )}
               </Space>
             )}
@@ -1387,6 +2122,13 @@ export default function RunsInspector({
                 const selectedNode = node.selected_node || {};
                 const manifestArtifacts = node.file_manifest?.files || [];
                 const rejectSummaries = scheduleRejectSummary(node.schedule_decision);
+                const resultSummary = node.result_summary || node.result || {};
+                const sandboxBackend = node.task_name === 'exec_code'
+                  ? (resultSummary.metadata?.sandbox_backend || resultSummary.backend)
+                  : null;
+                const generatedFiles = Array.isArray(resultSummary.generated_files)
+                  ? resultSummary.generated_files
+                  : [];
                 return (
                   <List.Item>
                     <Space direction="vertical" size={2} style={{ width: '100%' }}>
@@ -1397,6 +2139,8 @@ export default function RunsInspector({
                         {node.request_id && <Tag color="cyan">{node.request_id}</Tag>}
                         {selectedNode.node_ip && <Tag color="geekblue">{selectedNode.node_ip}</Tag>}
                         {selectedNode.gpu_id !== undefined && selectedNode.gpu_id !== null && <Tag color="gold">GPU {selectedNode.gpu_id}</Tag>}
+                        {sandboxBackend && <Tag color="volcano">sandbox {String(sandboxBackend)}</Tag>}
+                        {formatResources(node.resources) && <Tag color="gold">{formatResources(node.resources)}</Tag>}
                         {nodeDuration(node) !== null && <Tag>{formatDurationSeconds(nodeDuration(node))}</Tag>}
                         {node.timeout_seconds !== undefined && node.timeout_seconds !== null && (
                           <Tag color="volcano">timeout {formatDurationSeconds(node.timeout_seconds)}</Tag>
@@ -1446,6 +2190,11 @@ export default function RunsInspector({
                           {manifestArtifacts.length} artifact(s)
                         </Text>
                       )}
+                      {generatedFiles.length > 0 && (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Generated: {generatedFiles.map((file: any) => file.path || file.name).filter(Boolean).join(', ')}
+                        </Text>
+                      )}
                     </Space>
                   </List.Item>
                 );
@@ -1492,41 +2241,138 @@ export default function RunsInspector({
     );
   };
 
-  return (
-    <Drawer
-      title={
-        <Space>
-          <HistoryOutlined />
-          Runs
-        </Space>
-      }
-      open={open}
-      onClose={onClose}
-      width={1040}
-      extra={
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => loadRuns()} loading={loading}>
-            Refresh
-          </Button>
-          <Button onClick={runDryCleanup} loading={cleanupLoading}>
-            Cleanup Dry Run
-          </Button>
-        </Space>
-      }
-    >
-      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 20, height: '100%' }}>
-        {renderRunList()}
+  const previewName = artifactPreview
+    ? artifactPreview.artifact.path || artifactPreview.artifact.name || artifactPreview.artifact.sha256 || 'Artifact'
+    : 'Artifact';
 
-        <div style={{ minWidth: 0, overflow: 'auto', paddingRight: 4 }}>
-          {!selectedItem ? (
-            <Empty description="Select a run" />
-          ) : selectedItem.kind === 'static' ? (
-            renderStaticDetails()
-          ) : (
-            renderDynamicDetails()
-          )}
+  return (
+    <>
+      <Drawer
+        title={
+          <Space>
+            <HistoryOutlined />
+            Runs
+          </Space>
+        }
+        open={open}
+        onClose={onClose}
+        width={1040}
+        extra={
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={() => loadRuns()} loading={loading}>
+              Refresh
+            </Button>
+            <Button onClick={runDryCleanup} loading={cleanupLoading}>
+              Dynamic Dry Run
+            </Button>
+            <Button onClick={() => cleanupStaticRuns(true)} loading={staticCleanupLoading}>
+              Static Dry Run
+            </Button>
+            <Button onClick={() => cleanupArtifacts(true)} loading={artifactCleanupLoading}>
+              Artifact Dry Run
+            </Button>
+            <Popconfirm
+              title="Delete old static runs?"
+              description="Deletes terminal static runs older than 7 days while keeping the latest 100."
+              okText="Delete"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => cleanupStaticRuns(false)}
+            >
+              <Button danger icon={<DeleteOutlined />} loading={staticCleanupLoading}>
+                Clean Static Runs
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="Delete orphan artifacts?"
+              description="Deletes CAS artifacts older than 7 days that are not referenced by any service workspace run."
+              okText="Delete"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => cleanupArtifacts(false)}
+            >
+              <Button danger icon={<DeleteOutlined />} loading={artifactCleanupLoading}>
+                Clean Artifacts
+              </Button>
+            </Popconfirm>
+          </Space>
+        }
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 20, height: '100%' }}>
+          {renderRunList()}
+
+          <div style={{ minWidth: 0, overflow: 'auto', paddingRight: 4 }}>
+            {!selectedItem ? (
+              <Empty description="Select a run" />
+            ) : selectedItem.kind === 'static' ? (
+              renderStaticDetails()
+            ) : (
+              renderDynamicDetails()
+            )}
+          </div>
         </div>
-      </div>
-    </Drawer>
+      </Drawer>
+
+      <Modal
+        open={Boolean(artifactPreview)}
+        title={
+          <Space direction="vertical" size={0}>
+            <Text strong>{previewName}</Text>
+            {artifactPreview?.href && (
+              <Text copyable={{ text: artifactPreview.href }} type="secondary" style={{ fontSize: 12 }}>
+                Preview URL
+              </Text>
+            )}
+          </Space>
+        }
+        footer={[
+          <Button key="close" onClick={() => setArtifactPreview(null)}>
+            Close
+          </Button>,
+          <Button
+            key="download"
+            icon={<DownloadOutlined />}
+            href={artifactPreview?.href}
+            target="_blank"
+            disabled={!artifactPreview?.href}
+          >
+            Download
+          </Button>,
+        ]}
+        onCancel={() => setArtifactPreview(null)}
+        width={860}
+        destroyOnClose
+      >
+        {!artifactPreview ? null : artifactPreview.loading ? (
+          <Alert type="info" showIcon message="Loading artifact preview..." />
+        ) : artifactPreview.error ? (
+          <Alert type="error" showIcon message="Preview failed" description={artifactPreview.error} />
+        ) : artifactLooksImage(artifactPreview.artifact) ? (
+          <div style={{ textAlign: 'center' }}>
+            <img
+              src={artifactPreview.href}
+              alt={previewName}
+              style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain' }}
+            />
+          </div>
+        ) : (
+          <pre
+            style={{
+              margin: 0,
+              maxHeight: '70vh',
+              overflow: 'auto',
+              padding: 12,
+              border: '1px solid #f0f0f0',
+              borderRadius: 6,
+              background: '#fafafa',
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {artifactPreview.content || ''}
+          </pre>
+        )}
+      </Modal>
+    </>
   );
 }

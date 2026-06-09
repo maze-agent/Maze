@@ -5,11 +5,17 @@ export interface LlmSettings {
 }
 
 export const SILICONFLOW_MODELS = [
+  'deepseek-ai/DeepSeek-V4-Flash',
   'zai-org/GLM-4.6',
+  'Pro/zai-org/GLM-5.1',
+  'Pro/moonshotai/Kimi-K2.6',
+  'MiniMaxAI/MiniMax-M2.5',
   'deepseek-ai/DeepSeek-V3',
   'deepseek-ai/DeepSeek-V3.2',
   'deepseek-ai/DeepSeek-R1',
   'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B',
+  'Qwen/Qwen3.6-35B-A3B',
+  'Qwen/Qwen3.6-27B',
   'Qwen/Qwen3-32B',
   'Qwen/Qwen3-8B',
 ];

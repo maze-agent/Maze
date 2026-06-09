@@ -297,6 +297,22 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
         );
       },
     },
+    {
+      title: 'Sandbox',
+      key: 'sandbox',
+      width: 220,
+      render: (_, node) => (
+        <Space size={4} wrap>
+          <Tag color={node.capabilities?.workspace_sandbox ? 'green' : 'default'}>workspace</Tag>
+          <Tag
+            color={node.capabilities?.docker_sandbox ? 'green' : 'orange'}
+            title={node.capabilities?.docker_reason || undefined}
+          >
+            docker {node.capabilities?.docker_sandbox ? 'ready' : 'off'}
+          </Tag>
+        </Space>
+      ),
+    },
   ];
 
   const queueColumns: ColumnsType<QueueRow> = [

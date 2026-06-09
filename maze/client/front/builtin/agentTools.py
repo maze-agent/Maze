@@ -3,6 +3,9 @@ Built-in agent utility tasks for workspace file and code execution workflows.
 """
 
 from maze.client.front.decorator import task
+from maze.client.maze.agent_permissions import permission_error_payload
+from maze.client.maze.agent_sandbox import build_workspace_sandbox
+from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -25,33 +28,19 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def _resolve_workspace_files_dir(workspace_dir: str = ""):
-    import os
-
-    requested = str(workspace_dir or "").strip()
-    if not requested:
-        requested = os.environ.get("MAZE_WORKSPACE_DIR") or os.path.join(os.getcwd(), "workspace")
-
-    root = os.path.abspath(os.path.expanduser(requested))
-    files_dir = os.path.abspath(os.path.join(root, "files"))
-    os.makedirs(files_dir, exist_ok=True)
-    return files_dir
+    sandbox = build_workspace_sandbox(workspace_dir)
+    return str(sandbox.files_dir)
 
 
-def _resolve_workspace_file(path: str, workspace_dir: str = ""):
-    import os
-
-    files_dir = _resolve_workspace_files_dir(workspace_dir)
-    cleaned = str(path or "").strip().replace("\\", "/").lstrip("/")
-    normalized = os.path.normpath(cleaned).replace("\\", "/")
-    if not normalized or normalized == ".":
-        raise ValueError("path is required")
-    if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
-        raise ValueError("path must stay inside workspace/files")
-
-    full_path = os.path.abspath(os.path.join(files_dir, normalized))
-    if full_path != files_dir and not full_path.startswith(files_dir + os.sep):
-        raise ValueError("path must stay inside workspace/files")
-    return full_path, normalized, files_dir
+def _resolve_workspace_file(path: str, workspace_dir: str = "", permission: str = ""):
+    sandbox = build_workspace_sandbox(workspace_dir)
+    full_path, normalized, decision = sandbox_resolve_workspace_file(
+        path,
+        sandbox.files_dir,
+        policy=sandbox.policy,
+        permission=permission or None,
+    )
+    return str(full_path), normalized, str(sandbox.files_dir), decision
 
 
 @task(
@@ -63,7 +52,7 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
     try:
         import os
 
-        full_path, normalized, _ = _resolve_workspace_file(path, workspace_dir)
+        full_path, normalized, _, decision = _resolve_workspace_file(path, workspace_dir, "write")
         append_flag = append
         if isinstance(append_flag, str):
             append_flag = append_flag.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -85,6 +74,9 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
             "bytes": len(text_bytes),
             "appended": append_flag,
             "error": None,
+            "metadata": {
+                "permission": decision.to_dict() if decision is not None else None,
+            },
         }
     except Exception as exc:
         return {
@@ -92,6 +84,7 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
             "bytes": 0,
             "appended": False,
             "error": str(exc),
+            "metadata": permission_error_payload(exc),
         }
 
 
@@ -102,7 +95,7 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
 def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
     """Read text content from a file under workspace/files."""
     try:
-        full_path, normalized, _ = _resolve_workspace_file(path, workspace_dir)
+        full_path, normalized, _, decision = _resolve_workspace_file(path, workspace_dir, "read")
         limit = int(max_bytes or 20000)
         env_limit = _env_int("MAZE_AGENT_READ_MAX_BYTES", 200000, 1, 5_000_000)
         limit = min(max(limit, 1), env_limit)
@@ -116,6 +109,9 @@ def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
             "bytes": len(raw[:limit]),
             "truncated": truncated,
             "error": None,
+            "metadata": {
+                "permission": decision.to_dict() if decision is not None else None,
+            },
         }
     except Exception as exc:
         return {
@@ -124,86 +120,68 @@ def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
             "bytes": 0,
             "truncated": False,
             "error": str(exc),
+            "metadata": permission_error_payload(exc),
         }
 
 
 @task(
-    data_types={"path": "str", "code": "str", "timeout_seconds": "int", "workspace_dir": "str"},
+    data_types={
+        "path": "str",
+        "code": "str",
+        "timeout_seconds": "int",
+        "workspace_dir": "str",
+        "backend": "str",
+        "input_paths": "list",
+        "cpu": "int",
+        "cpu_mem": "int",
+        "gpu": "int",
+        "gpu_mem": "int",
+        "target_node_id": "str",
+    },
     resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
 )
-def exec_code(path: str = "", code: str = "", timeout_seconds: int = 20, workspace_dir: str = ""):
+def exec_code(
+    path: str = "",
+    code: str = "",
+    timeout_seconds: int = 20,
+    workspace_dir: str = "",
+    backend: str = "workspace_sandbox",
+    input_paths: list | str | None = None,
+    cpu: int = 1,
+    cpu_mem: int = 128,
+    gpu: int = 0,
+    gpu_mem: int = 0,
+    target_node_id: str = "",
+):
     """Run a Python file under workspace/files, optionally writing code first."""
-    try:
-        if not _env_flag("MAZE_ENABLE_AGENT_EXEC_CODE", True):
-            return {
-                "path": str(path or ""),
-                "returncode": None,
-                "stdout": "",
-                "stderr": "",
-                "error": "exec_code is disabled by MAZE_ENABLE_AGENT_EXEC_CODE",
-            }
+    from maze.client.maze.agent_exec import run_agent_exec_code
 
-        import os
-        import subprocess
-        import sys
-        import time
-
-        timeout_value = float(timeout_seconds or 20)
-        timeout_value = min(
-            max(timeout_value, 1),
-            _env_int("MAZE_AGENT_EXEC_TIMEOUT_SECONDS", 60, 1, 600),
-        )
-        code_text = str(code or "")
-        max_code_bytes = _env_int("MAZE_AGENT_EXEC_CODE_MAX_BYTES", 200000, 1, 5_000_000)
-        if len(code_text.encode("utf-8")) > max_code_bytes:
-            raise ValueError(f"code is too large for exec_code ({len(code_text.encode('utf-8'))} > {max_code_bytes} bytes)")
-        target_path = str(path or "").strip()
-
-        if code_text and not target_path:
-            target_path = f"generated/exec_{int(time.time() * 1000)}.py"
-
-        if not target_path:
-            return {
-                "path": "",
-                "returncode": None,
-                "stdout": "",
-                "stderr": "",
-                "error": "path or code is required",
-            }
-
-        full_path, normalized, files_dir = _resolve_workspace_file(target_path, workspace_dir)
-        if code_text:
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, "w", encoding="utf-8") as handle:
-                handle.write(code_text)
-
-        completed = subprocess.run(
-            [sys.executable, full_path],
-            cwd=files_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout_value,
-        )
-        return {
-            "path": normalized,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout[-12000:],
-            "stderr": completed.stderr[-12000:],
-            "error": None,
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "path": str(path or ""),
-            "returncode": None,
-            "stdout": (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else "",
-            "stderr": (exc.stderr or "")[-12000:] if isinstance(exc.stderr, str) else "",
-            "error": f"Execution timed out after {timeout_seconds} seconds",
-        }
-    except Exception as exc:
-        return {
-            "path": str(path or ""),
-            "returncode": None,
-            "stdout": "",
-            "stderr": "",
-            "error": str(exc),
-        }
+    result = run_agent_exec_code(
+        path=path,
+        code=code,
+        timeout_seconds=timeout_seconds,
+        workspace_dir=workspace_dir,
+        backend=backend,
+        input_paths=input_paths,
+    )
+    metadata = dict(result.get("metadata", {}) or {})
+    metadata["resource_request"] = {
+        "cpu": cpu,
+        "cpu_mem": cpu_mem,
+        "gpu": gpu,
+        "gpu_mem": gpu_mem,
+        "target_node_id": target_node_id,
+    }
+    return {
+        "path": result.get("path", str(path or "")),
+        "backend": result.get("backend", backend),
+        "returncode": result.get("returncode"),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "error": result.get("error"),
+        "timed_out": result.get("timed_out", False),
+        "stdout_truncated": result.get("stdout_truncated", False),
+        "stderr_truncated": result.get("stderr_truncated", False),
+        "generated_files": result.get("generated_files", []),
+        "metadata": metadata,
+    }

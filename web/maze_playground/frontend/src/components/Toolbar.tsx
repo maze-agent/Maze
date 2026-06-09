@@ -1,12 +1,93 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
-import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, SettingOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
+import { Button, Input, Space, Tag, Typography, message } from 'antd';
+import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
-import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
+import type { LocalWorkspaceFileMeta, TaskDefinition, WorkflowNode } from '@/types/workflow';
+import { loadLlmSettings } from '@/utils/llmSettings';
+import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 
 const { Text } = Typography;
+
+function joinWorkspacePath(base: string, name: string) {
+  return [base, name].filter(Boolean).join('/');
+}
+
+function normalizeLocalRelativePath(path: string) {
+  return path
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/');
+}
+
+async function fileToBase64(file: File) {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+}
+
+async function collectLocalWorkspaceFiles(
+  directoryHandle: any,
+  basePath = '',
+): Promise<LocalWorkspaceFileMeta[]> {
+  const files: LocalWorkspaceFileMeta[] = [];
+
+  for await (const [name, handle] of directoryHandle.entries()) {
+    const relativePath = normalizeLocalRelativePath(joinWorkspacePath(basePath, name));
+    if (!relativePath) {
+      continue;
+    }
+    if (handle.kind === 'directory') {
+      files.push({
+        name,
+        relativePath,
+        type: 'directory',
+        size: null,
+        updatedAt: null,
+      });
+      files.push(...await collectLocalWorkspaceFiles(handle, relativePath));
+    } else if (handle.kind === 'file') {
+      const file = await handle.getFile();
+      files.push({
+        name,
+        relativePath,
+        type: 'file',
+        size: file.size,
+        updatedAt: new Date(file.lastModified).toISOString(),
+      });
+    }
+  }
+
+  return files;
+}
+
+async function getFileFromLocalWorkspace(directoryHandle: any, relativePath: string): Promise<File | null> {
+  const normalizedPath = normalizeLocalRelativePath(relativePath);
+  if (directoryHandle?.kind === 'fileMap') {
+    return directoryHandle.filesByPath?.get(normalizedPath) || null;
+  }
+
+  const parts = normalizedPath.split('/').filter(Boolean);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  let handle = directoryHandle;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (index === parts.length - 1) {
+      const fileHandle = await handle.getFileHandle(part);
+      return fileHandle.getFile();
+    }
+    handle = await handle.getDirectoryHandle(part);
+  }
+  return null;
+}
 
 interface ToolbarProps {
   onOpenRuns?: () => void;
@@ -20,18 +101,28 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
   const { 
     workflowId, 
     workflowName, 
+    workspaceId,
     workspaceDir,
     workspaceTasks,
     currentWorkspaceWorkflowPath,
+    localWorkspaceId,
+    localWorkspaceName,
+    localWorkspaceHandle,
+    localWorkspaceFiles,
     nodes, 
     edges, 
     isRunning,
+    workflowSaveState,
+    workflowDraftError,
+    workflowSavedAt,
     setWorkflowId,
     setWorkflowName,
     setNodes,
     setEdges,
     setWorkspaceDir,
+    setWorkspaceContext,
     setWorkspaceTasks,
+    setLocalWorkspaceFiles,
     selectNode,
     setCurrentWorkspaceWorkflowPath,
     setWorkspaceWorkflows,
@@ -41,9 +132,6 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
   } = useWorkflowStore();
   const [editingWorkflowName, setEditingWorkflowName] = useState(false);
   const [workflowNameDraft, setWorkflowNameDraft] = useState(workflowName);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
-  const [testingLlm, setTestingLlm] = useState(false);
 
   useEffect(() => {
     if (!editingWorkflowName) {
@@ -210,6 +298,77 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     return Array.from(definitions.values());
   };
 
+  const refreshLocalWorkspaceManifest = async () => {
+    if (!localWorkspaceId || !localWorkspaceName || !localWorkspaceHandle) {
+      return localWorkspaceFiles;
+    }
+
+    let files = localWorkspaceFiles;
+    if (localWorkspaceHandle.kind === 'fileMap') {
+      files = Array.from<[string, File]>(localWorkspaceHandle.filesByPath.entries()).map(([relativePath, file]) => ({
+        name: file.name,
+        relativePath,
+        type: 'file' as const,
+        size: file.size,
+        updatedAt: new Date(file.lastModified).toISOString(),
+      })).filter((file) => file.relativePath);
+    } else {
+      files = await collectLocalWorkspaceFiles(localWorkspaceHandle);
+    }
+
+    const version = Date.now().toString();
+    await api.updateLocalWorkspaceManifest(localWorkspaceId, {
+      displayName: localWorkspaceName,
+      version,
+      files,
+    });
+    setLocalWorkspaceFiles(files, version);
+    return files;
+  };
+
+  const hydrateMissingLocalWorkspaceFiles = async () => {
+    if (!localWorkspaceId || !localWorkspaceName || !localWorkspaceHandle) {
+      return;
+    }
+
+    const files = await refreshLocalWorkspaceManifest();
+    const localFilePaths = files
+      .filter((file) => file.type === 'file')
+      .map((file) => file.relativePath);
+    if (localFilePaths.length === 0) {
+      return;
+    }
+
+    const missingResult = await api.getMissingWorkspaceFiles({
+      workspaceId: workspaceId || undefined,
+      workspaceDir: workspaceDir || undefined,
+      paths: localFilePaths,
+    });
+    if (!missingResult.missing.length) {
+      message.info('Local file cache is already available in Workspace Files');
+      return;
+    }
+
+    const hideLoading = message.loading(`Hydrating ${missingResult.missing.length} local file${missingResult.missing.length === 1 ? '' : 's'} into file sandbox...`, 0);
+    try {
+      for (const relativePath of missingResult.missing) {
+        const file = await getFileFromLocalWorkspace(localWorkspaceHandle, relativePath);
+        if (!file) {
+          throw new Error(`Local file is no longer available: ${relativePath}`);
+        }
+        await api.uploadWorkspaceFile({
+          workspaceId: workspaceId || undefined,
+          workspaceDir: missingResult.workspaceDir,
+          relativePath,
+          contentBase64: await fileToBase64(file),
+        });
+      }
+      message.success(`Hydrated ${missingResult.missing.length} local file${missingResult.missing.length === 1 ? '' : 's'} into file sandbox`);
+    } finally {
+      hideLoading();
+    }
+  };
+
   const handleExportWorkflow = () => {
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before exporting');
@@ -262,6 +421,7 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
       const text = await file.text();
       const payload = JSON.parse(text);
       const imported = await api.importWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
         workspaceDir: workspaceDir || undefined,
         payload,
       });
@@ -280,6 +440,7 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
       setEdges(workflow.edges);
       selectNode(null);
       setCurrentWorkspaceWorkflowPath(null);
+      setWorkspaceContext(imported);
       setWorkspaceDir(imported.workspaceDir);
       clearRunResults();
 
@@ -301,14 +462,22 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
   };
 
   const handleRunWorkflow = async () => {
-    if (!workflowId) {
-      message.warning('Please create a workflow first');
-      return;
-    }
-
     if (nodes.length === 0) {
       message.warning('Please add at least one task node');
       return;
+    }
+
+    let activeWorkflowId = workflowId;
+    if (!activeWorkflowId) {
+      try {
+        const created = await api.createWorkflow(workflowName);
+        activeWorkflowId = created.workflowId;
+        setWorkflowId(created.workflowId);
+      } catch (error) {
+        console.error('Failed to create workflow before run:', error);
+        message.error('Failed to create workflow before run');
+        return;
+      }
     }
 
     const agentNodes = nodes.filter((node) => node.data.category === 'agent');
@@ -339,14 +508,20 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
 
       setIsRunning(true);
       try {
+        await hydrateMissingLocalWorkspaceFiles();
+        const maxSteps = agentNode.data.maxSteps || 4;
+        const taskTimeout = normalizeReactTaskTimeout(agentNode.data.taskTimeout, mode);
         const started = await api.startReactRun({
           mode,
           prompt,
+          workspaceId: workspaceId || undefined,
           workspaceDir: workspaceDir || undefined,
-          maxSteps: agentNode.data.maxSteps || 4,
+          maxSteps,
           maxTokens: agentNode.data.maxTokens || 2048,
-          timeoutSeconds: mode === 'online' ? 180 : 90,
-          taskTimeout: mode === 'online' ? 120 : 60,
+          timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
+          taskTimeout,
+          skills: agentNode.data.skills || [],
+          execBackend: agentNode.data.execBackend || 'workspace_sandbox',
           llm: mode === 'online' ? settings : undefined,
         });
         message.success(`ReAct run started: ${started.runId.slice(0, 8)}...`);
@@ -367,10 +542,11 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     }
 
     try {
-      await api.saveWorkflow(workflowId, { name: workflowName, nodes, edges });
       setIsRunning(true);
+      await api.saveWorkflow(activeWorkflowId, { name: workflowName, nodes, edges });
+      await hydrateMissingLocalWorkspaceFiles();
       clearRunResults();
-      const started = await api.runWorkflow(workflowId, workspaceDir || undefined);
+      const started = await api.runWorkflow(activeWorkflowId, workspaceDir || undefined, workspaceId || undefined);
       setActiveRun(started.run);
       message.info('Workflow started running');
       
@@ -381,39 +557,35 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     }
   };
 
-  const openSettings = () => {
-    setLlmSettingsDraft(loadLlmSettings());
-    setSettingsOpen(true);
-  };
-
-  const saveSettings = () => {
-    saveLlmSettings(llmSettingsDraft);
-    setSettingsOpen(false);
-    message.success('LLM settings saved in this browser');
-  };
-
-  const testLlmConnection = async () => {
-    const settings = {
-      ...llmSettingsDraft,
-      baseUrl: llmSettingsDraft.baseUrl.trim(),
-      model: llmSettingsDraft.model.trim(),
-    };
-
-    if (!settings.model) {
-      message.warning('Model is required');
-      return;
+  const saveStateTag = () => {
+    if (nodes.length === 0 || workflowSaveState === 'empty') {
+      return <Tag>Empty</Tag>;
     }
-
-    setTestingLlm(true);
-    try {
-      await api.testLlmConnection(settings);
-      message.success('LLM connection works');
-    } catch (error: any) {
-      console.error('Failed to test LLM connection:', error);
-      message.error(error.response?.data?.error || 'Failed to test LLM connection');
-    } finally {
-      setTestingLlm(false);
+    if (workflowSaveState === 'unsaved_draft') {
+      return <Tag color="orange">Unsaved Draft</Tag>;
     }
+    if (workflowSaveState === 'saving_draft') {
+      return <Tag color="processing">Saving Draft</Tag>;
+    }
+    if (workflowSaveState === 'saved_draft') {
+      return (
+        <Tag color="blue" title={workflowSavedAt ? `Saved at ${new Date(workflowSavedAt).toLocaleString()}` : undefined}>
+          Draft Saved
+        </Tag>
+      );
+    }
+    if (workflowSaveState === 'saved_workflow') {
+      return (
+        <Tag color="green" title={currentWorkspaceWorkflowPath || undefined}>
+          Saved Workflow
+        </Tag>
+      );
+    }
+    return (
+      <Tag color="red" title={workflowDraftError || undefined}>
+        Draft Error
+      </Tag>
+    );
   };
 
   return (
@@ -463,16 +635,10 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
             {workflowName}{workflowId ? ` (${workflowId.substring(0, 8)}...)` : ''}
           </Text>
         )}
+        {saveStateTag()}
       </Space>
 
       <Space>
-        <Button
-          icon={<SettingOutlined />}
-          onClick={openSettings}
-        >
-          Settings
-        </Button>
-
         <Button
           icon={<ThunderboltOutlined />}
           onClick={onOpenReactRunner}
@@ -530,65 +696,13 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
           type="primary"
           icon={<PlayCircleOutlined />}
           onClick={handleRunWorkflow}
-          disabled={!workflowId || isRunning}
+          disabled={nodes.length === 0 || isRunning}
           loading={isRunning}
           style={{ background: '#52c41a', borderColor: '#52c41a' }}
         >
           {isRunning ? 'Running...' : 'Run'}
         </Button>
       </Space>
-
-      <Modal
-        title="Settings"
-        open={settingsOpen}
-        onCancel={() => setSettingsOpen(false)}
-        width={560}
-        footer={[
-          <Button key="test" loading={testingLlm} onClick={testLlmConnection}>
-            Test Connection
-          </Button>,
-          <Button key="cancel" onClick={() => setSettingsOpen(false)}>
-            Cancel
-          </Button>,
-          <Button key="save" type="primary" onClick={saveSettings}>
-            Save
-          </Button>,
-        ]}
-      >
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <div>
-            <Text strong>Base URL</Text>
-            <Input
-              value={llmSettingsDraft.baseUrl}
-              onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, baseUrl: event.target.value }))}
-              placeholder="https://api.siliconflow.cn/v1"
-              style={{ marginTop: '6px' }}
-            />
-          </div>
-          <div>
-            <Text strong>API Key</Text>
-            <Input.Password
-              value={llmSettingsDraft.apiKey}
-              onChange={(event) => setLlmSettingsDraft((current) => ({ ...current, apiKey: event.target.value }))}
-              placeholder="sk-..."
-              style={{ marginTop: '6px' }}
-            />
-            <Text type="secondary" style={{ display: 'block', fontSize: '12px', marginTop: '6px' }}>
-              Stored only in this browser. Leave empty to use backend MARBLE_API_KEYS when configured.
-            </Text>
-          </div>
-          <div>
-            <Text strong>Model</Text>
-            <Select
-              showSearch
-              value={llmSettingsDraft.model}
-              onChange={(model) => setLlmSettingsDraft((current) => ({ ...current, model }))}
-              options={SILICONFLOW_MODELS.map((model) => ({ label: model, value: model }))}
-              style={{ width: '100%', marginTop: '6px' }}
-            />
-          </div>
-        </Space>
-      </Modal>
     </div>
   );
 }

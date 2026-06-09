@@ -85,6 +85,19 @@ def _wrap_with_envelope(raw_output, started_at, finished_at, reported_metrics):
     return envelope
 
 
+def _ensure_result_can_cross_worker_boundary(result):
+    try:
+        cloudpickle.dumps(result)
+    except Exception as exc:
+        raise TypeError(
+            "Task result cannot be serialized for transport from worker to scheduler. "
+            "Return JSON-safe values, numpy arrays, bytes, pathlib paths, or objects "
+            "that cloudpickle can serialize; write large model/binary outputs to files "
+            "so Maze can return artifact references."
+        ) from exc
+    return result
+
+
 def run_code_task(
     code_str: str = None,
     code_ser: str = None,
@@ -94,10 +107,14 @@ def run_code_task(
     try:
         if code_ser is not None:
             func = cloudpickle.loads(base64.b64decode(code_ser))
-            return run_task_with_file_context(func, task_input_data, file_context)
+            return _ensure_result_can_cross_worker_boundary(
+                run_task_with_file_context(func, task_input_data, file_context)
+            )
         if code_str is not None:
             runner = Runner(code_str, task_input_data)
-            return run_task_with_file_context(lambda data: runner.run(data), task_input_data, file_context)
+            return _ensure_result_can_cross_worker_boundary(
+                run_task_with_file_context(lambda data: runner.run(data), task_input_data, file_context)
+            )
         raise ValueError("Missing code_str or code_ser")
     except ArtifactError as exc:
         return task_error_result(
@@ -105,6 +122,22 @@ def run_code_task(
                 "artifact_error",
                 exc,
                 origin="artifact",
+            )
+        )
+    except TypeError as exc:
+        if "Task result cannot be serialized" not in str(exc):
+            return task_error_result(
+                exception_to_error_envelope(
+                    "user_code",
+                    exc,
+                    origin="runner",
+                )
+            )
+        return task_error_result(
+            exception_to_error_envelope(
+                "serialization_error",
+                exc,
+                origin="runner",
             )
         )
     except Exception as exc:

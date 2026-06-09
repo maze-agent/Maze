@@ -4,8 +4,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
 
-from maze.client.maze.decorator import get_task_metadata
 from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
+from maze.client.maze.agent_tools import AgentToolRegistry, AgentToolRuntime
+from maze.client.maze.agent_permissions import AgentPermissionPolicy
 
 
 AgentPlanner = Callable[["AgentContext"], Dict[str, Any]]
@@ -32,6 +33,8 @@ class AgentContext:
 
     prompt: str
     tool_specs: Dict[str, Dict[str, Any]]
+    skills: List[Dict[str, Any]] = field(default_factory=list)
+    available_skills: List[Dict[str, Any]] = field(default_factory=list)
     steps: List[AgentStep] = field(default_factory=list)
 
     @property
@@ -58,6 +61,10 @@ class AgentRun:
         planner: AgentPlanner,
         max_steps: int = 10,
         task_timeout: float | None = None,
+        mcp_manager: Any | None = None,
+        mcp_tools: List[Any] | None = None,
+        skill_registry: Any | None = None,
+        permission_policy: AgentPermissionPolicy | Dict[str, Any] | None = None,
     ):
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -66,15 +73,31 @@ class AgentRun:
         self.planner = planner
         self.max_steps = max_steps
         self.task_timeout = task_timeout
+        self.mcp_manager = mcp_manager
+        self.skill_registry = skill_registry
+        self._initial_skill_events_emitted = False
         self.steps: List[AgentStep] = []
-        self.tool_specs: Dict[str, Dict[str, Any]] = {}
-        self._registered_tools: Dict[str, DynamicTaskSpec] = {}
+        self.tool_registry = AgentToolRegistry(dynamic_run)
+        self.tool_runtime = AgentToolRuntime(
+            dynamic_run=dynamic_run,
+            registry=self.tool_registry,
+            task_timeout=task_timeout,
+            permission_policy=permission_policy,
+        )
 
         for tool in tools:
             self._register_tool(tool)
+        for mcp_tool in (mcp_tools or []):
+            self.tool_registry.register_mcp_tool(mcp_tool)
+        if self.skill_registry is not None:
+            self.tool_registry.register_skill_loader(self.skill_registry)
 
-        if not self._registered_tools:
-            raise ValueError("AgentRun requires at least one @task tool")
+        if not self.tool_registry.specs:
+            raise ValueError("AgentRun requires at least one agent tool")
+
+        self.tool_specs: Dict[str, Dict[str, Any]] = self.tool_registry.tool_specs_for_llm()
+        self._registered_tools: Dict[str, DynamicTaskSpec] = self.tool_registry.task_specs
+        self._available_tools = self.tool_registry.available_tool_names()
 
     @property
     def run_id(self) -> str:
@@ -85,16 +108,25 @@ class AgentRun:
         context = AgentContext(
             prompt=prompt,
             tool_specs=self.tool_specs,
+            skills=self._loaded_skills_for_llm(),
+            available_skills=self._available_skills_summary(),
             steps=self.steps,
         )
 
         try:
+            self._emit_loaded_skill_events_once(mode="agent")
             self.dynamic_run.emit_event("agent_run_started", {
                 "prompt": prompt,
                 "max_steps": self.max_steps,
-                "tools": sorted(self._registered_tools),
+                "task_timeout": self.task_timeout,
+                "tools": self._available_tools,
+                "skills": self._loaded_skills_for_llm(),
+                "available_skills": self._available_skills_summary(),
+                "tool_harness": "agent_tool_runtime_v1",
             })
             for step_index in range(1, self.max_steps + 1):
+                context.skills = self._loaded_skills_for_llm()
+                context.available_skills = self._available_skills_summary()
                 action = self._next_action(context)
                 if "final" in action:
                     final_result = action["final"]
@@ -104,6 +136,9 @@ class AgentRun:
                         "answer": final_result,
                         "step_count": len(self.steps),
                         "stop_reason": "final",
+                        "max_steps": self.max_steps,
+                        "task_timeout": self.task_timeout,
+                        "skills": self._loaded_skills_for_llm(),
                         "timings": {
                             "total_seconds": round(total_seconds, 6),
                             "task_seconds": round(sum(
@@ -116,7 +151,10 @@ class AgentRun:
                         "mode": "agent",
                         "answer": final_result,
                         "stop_reason": "final",
+                        "max_steps": self.max_steps,
+                        "task_timeout": self.task_timeout,
                         "step_count": len(self.steps),
+                        "skills": self._loaded_skills_for_llm(),
                         "timings": {
                             "total_seconds": round(total_seconds, 6),
                             "task_seconds": round(sum(
@@ -126,6 +164,7 @@ class AgentRun:
                         },
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
+                    self._close_mcp()
                     return final_result
 
                 step = self._run_tool_step(step_index, action)
@@ -140,6 +179,7 @@ class AgentRun:
                 "elapsed_seconds": round(time.time() - run_started, 6),
             })
             self._cancel_if_active("Agent controller error")
+            self._close_mcp()
             raise
 
     def status(self) -> Dict[str, Any]:
@@ -149,28 +189,13 @@ class AgentRun:
         return self.dynamic_run.get_events(after=after)
 
     def cancel(self, reason: str | None = None):
-        return self.dynamic_run.cancel(reason)
+        try:
+            return self.dynamic_run.cancel(reason)
+        finally:
+            self._close_mcp()
 
     def _register_tool(self, tool: Callable[..., Dict[str, Any]]):
-        metadata = get_task_metadata(tool)
-        tool_name = metadata.func_name
-        if tool_name in self._registered_tools:
-            raise ValueError(f"Duplicate agent tool name: {tool_name}")
-
-        task_spec = self.dynamic_run.register_task_spec(
-            tool,
-            task_spec_id=tool_name,
-            task_name=tool_name,
-        )
-        self._registered_tools[tool_name] = task_spec
-        self.tool_specs[tool_name] = {
-            "name": tool_name,
-            "description": (getattr(tool, "__doc__", None) or "").strip(),
-            "inputs": metadata.inputs,
-            "outputs": metadata.outputs,
-            "data_types": metadata.data_types,
-            "resources": metadata.resources,
-        }
+        self.tool_registry.register_task_tool(tool)
 
     def _next_action(self, context: AgentContext) -> Dict[str, Any]:
         action = self.planner(context)
@@ -187,25 +212,43 @@ class AgentRun:
         tool_name = action.get("tool")
         if not isinstance(tool_name, str) or not tool_name:
             raise ValueError("Agent tool action requires a non-empty string 'tool'")
-        if tool_name not in self._registered_tools:
-            raise ValueError(f"Agent tool is not allowed: {tool_name}")
 
         args = action.get("args") or {}
         if not isinstance(args, dict):
             raise TypeError("Agent tool action 'args' must be a dict")
+        validation_error = self.tool_runtime.validate_tool_call(tool_name, args)
+        if validation_error is not None:
+            observation = self.tool_runtime.repair_observation(
+                validation_error,
+                tool_name=tool_name,
+                args=args,
+                action=action,
+            )
+            self.tool_runtime.emit_repair(
+                mode="agent",
+                step=step_index,
+                tool_name=tool_name,
+                args=args,
+                observation=observation,
+            )
+            if validation_error.error_type == "tool_not_allowed":
+                raise ValueError(f"Agent tool is not allowed: {tool_name}")
+            raise ValueError(validation_error.message)
 
         self.dynamic_run.emit_event("agent_action", {
             "step": step_index,
             "tool": tool_name,
             "args": args,
         })
-        task = self.dynamic_run.append_task(
-            self._registered_tools[tool_name],
-            inputs=args,
+        call_result = self.tool_runtime.execute_task_tool(
+            step=step_index,
+            tool_name=tool_name,
+            args=args,
+            mode="agent",
             request_id=f"agent-step-{step_index}",
         )
-        finish_event = self.dynamic_run.wait_for_task(task, timeout=self.task_timeout)
-        observation = self._observation_from_finish_event(tool_name, task, finish_event)
+        task = call_result.task
+        observation = call_result.observation
         finished_time = time.time()
         duration_seconds = finished_time - started_time
         self.dynamic_run.emit_event("agent_observation", {
@@ -213,6 +256,8 @@ class AgentRun:
             "tool": tool_name,
             "task_id": task.task_id,
             "result": observation["result"],
+            "tool_result": observation["tool_result"],
+            "artifacts": observation["artifacts"],
             "timings": {
                 "duration_seconds": round(duration_seconds, 6),
             },
@@ -273,3 +318,35 @@ class AgentRun:
             self.dynamic_run.emit_event(event_type, data)
         except Exception:
             pass
+
+    def _loaded_skills_for_llm(self) -> List[Dict[str, Any]]:
+        if self.skill_registry is None:
+            return []
+        return self.skill_registry.loaded_for_llm()
+
+    def _available_skills_summary(self) -> List[Dict[str, Any]]:
+        if self.skill_registry is None:
+            return []
+        return self.skill_registry.list_skills()
+
+    def _emit_loaded_skill_events_once(self, mode: str):
+        if self._initial_skill_events_emitted or self.skill_registry is None:
+            return
+        self._initial_skill_events_emitted = True
+        for skill in self.skill_registry.loaded_events():
+            self._emit_best_effort("agent_skill_loaded", {
+                "mode": mode,
+                "skill": skill,
+                "source": "initial",
+            })
+
+    def _close_mcp(self):
+        if self.mcp_manager is None:
+            return
+        try:
+            from maze.client.maze.agent_mcp import close_mcp_manager_blocking
+
+            close_mcp_manager_blocking(self.mcp_manager)
+        except Exception:
+            pass
+        self.mcp_manager = None

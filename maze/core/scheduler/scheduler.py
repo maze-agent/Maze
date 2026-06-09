@@ -356,7 +356,12 @@ class Scheduler():
                             self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
                 elif(message_type=="start_worker"):
                     with self.lock:
-                        worker = self.resource_manager.start_worker(node_id=message_data["node_id"], resources=message_data["resources"], node_ip=message_data["node_ip"])
+                        worker = self.resource_manager.start_worker(
+                            node_id=message_data["node_id"],
+                            resources=message_data["resources"],
+                            node_ip=message_data["node_ip"],
+                            capabilities=message_data.get("capabilities"),
+                        )
                     request_id = message_data.get("request_id")
                     if request_id:
                         response = {
@@ -586,7 +591,11 @@ class Scheduler():
                         message_data = {
                             "workflow_id": finished_task.workflow_id,
                             "task_id": finished_task.task_id,
-                            "result": summarize_task_result(finished_task.result),
+                            "result": summarize_task_result(
+                                finished_task.result,
+                                run_id=finished_task.workflow_id,
+                                task_id=finished_task.task_id,
+                            ),
                             "attempt": finished_task.attempt,
                             "node_id": node_id,
                         }

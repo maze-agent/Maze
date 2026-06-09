@@ -32,6 +32,7 @@ export interface AgentTrace {
   started: Record<string, any> | null;
   final: Record<string, any> | null;
   error: Record<string, any> | null;
+  permissions: Record<string, number>;
   steps: AgentTraceStep[];
 }
 
@@ -322,6 +323,7 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
   let started: Record<string, any> | null = null;
   let final: Record<string, any> | null = null;
   let error: Record<string, any> | null = null;
+  const permissions: Record<string, number> = {};
 
   const getStep = (stepValue: any) => {
     const step = Number(stepValue || 0);
@@ -345,6 +347,9 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
     if (event.type === 'agent_error') {
       error = data;
       return;
+    }
+    if (event.type.startsWith('agent_permission_')) {
+      permissions[event.type] = (permissions[event.type] || 0) + 1;
     }
 
     const step = getStep(data.step);
@@ -379,12 +384,13 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
     started,
     final,
     error,
+    permissions,
     steps: Array.from(stepMap.values()).sort((a, b) => a.step - b.step),
   };
 }
 
 export function hasAgentTrace(trace: AgentTrace) {
-  return Boolean(trace.started || trace.final || trace.error || trace.steps.length);
+  return Boolean(trace.started || trace.final || trace.error || trace.steps.length || Object.keys(trace.permissions || {}).length);
 }
 
 interface ReActRuntimeCanvasProps {
