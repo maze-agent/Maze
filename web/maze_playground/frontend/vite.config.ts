@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+const backendUrl = process.env.VITE_MAZE_BACKEND_URL || 'http://localhost:3001'
+const backendWsUrl = backendUrl.replace(/^http/, 'ws')
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -14,11 +17,11 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: backendUrl,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:3001',
+        target: backendWsUrl,
         ws: true,
       },
     },

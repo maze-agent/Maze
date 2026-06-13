@@ -79,11 +79,13 @@ class DynamicRun:
         max_tasks: int = 100,
         timeout_seconds: int | None = None,
         file_context: Dict[str, Any] | None = None,
+        metadata: Dict[str, Any] | None = None,
     ):
         self.run_id = run_id
         self.max_tasks = max_tasks
         self.timeout_seconds = timeout_seconds
         self.file_context = file_context
+        self.metadata = to_json_safe(metadata or {})
         self.created_time = time.time()
         self.updated_time = self.created_time
 
@@ -343,6 +345,13 @@ class DynamicRun:
         self._touch()
         return event
 
+    def update_metadata(self, metadata: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not isinstance(metadata, dict):
+            return dict(self.metadata)
+        self.metadata.update(to_json_safe(metadata))
+        self._touch()
+        return dict(self.metadata)
+
     def get_events(self, after: int | None = None) -> List[Dict[str, Any]]:
         if after is None:
             return list(self.event_log)
@@ -365,6 +374,7 @@ class DynamicRun:
             "max_tasks": self.max_tasks,
             "timeout_seconds": self.timeout_seconds,
             "file_context": to_json_safe(self.file_context),
+            "metadata": to_json_safe(self.metadata),
             "created_time": self.created_time,
             "updated_time": self.updated_time,
             "finished_time": self.finished_time,

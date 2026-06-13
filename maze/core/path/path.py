@@ -321,6 +321,7 @@ class MaPath:
         max_tasks:int=100,
         timeout_seconds:int|None=None,
         file_context:Dict[str,Any]|None=None,
+        metadata:Dict[str,Any]|None=None,
     ):
         run_id = str(uuid.uuid4())
         file_context = self._prepare_initial_artifacts(file_context, run_id) if file_context else None
@@ -329,6 +330,7 @@ class MaPath:
             max_tasks=max_tasks,
             timeout_seconds=timeout_seconds,
             file_context=file_context,
+            metadata=metadata,
         )
         self.async_que[run_id] = asyncio.Queue()
         await self._emit_dynamic_event(run_id, {
@@ -507,6 +509,91 @@ class MaPath:
             },
         })
         return self.get_dynamic_run(run_id).event_log[-1]
+
+    async def update_dynamic_run_metadata(self, run_id:str, metadata:Dict[str,Any]):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        updated = dynamic_run.update_metadata(metadata)
+        self._persist_dynamic_run(run_id)
+        return updated
+
+    async def upsert_dynamic_permission_request(self, run_id:str, request:Dict[str,Any]):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        if not isinstance(request, dict):
+            raise ValueError("permission request must be a JSON object")
+        request_id = str(request.get("request_id") or request.get("id") or "").strip()
+        if not request_id:
+            raise ValueError("permission request_id is required")
+        requests_map = dict(dynamic_run.metadata.get("permission_requests") or {})
+        existing = requests_map.get(request_id) if isinstance(requests_map.get(request_id), dict) else {}
+        now = time.time()
+        normalized = {
+            **existing,
+            **request,
+            "request_id": request_id,
+            "status": str(request.get("status") or existing.get("status") or "pending"),
+            "created_time": existing.get("created_time") or now,
+            "updated_time": now,
+        }
+        requests_map[request_id] = normalized
+        pending = [
+            item
+            for item in requests_map.values()
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
+        dynamic_run.update_metadata({
+            "permission_requests": requests_map,
+            "pending_permission_request_count": len(pending),
+        })
+        await self._emit_dynamic_event(run_id, {
+            "type": "agent_permission_request_created",
+            "data": normalized,
+        })
+        return normalized
+
+    async def decide_dynamic_permission_request(self, run_id:str, request_id:str, decision:Dict[str,Any]):
+        await self._refresh_dynamic_timeout(run_id)
+        dynamic_run = self.get_dynamic_run(run_id)
+        request_key = str(request_id or "").strip()
+        if not request_key:
+            raise ValueError("permission request_id is required")
+        requests_map = dict(dynamic_run.metadata.get("permission_requests") or {})
+        request_payload = requests_map.get(request_key)
+        if not isinstance(request_payload, dict):
+            raise ValueError(f"Permission request not found: {request_key}")
+        if request_payload.get("status") != "pending":
+            return request_payload
+        action = str((decision or {}).get("action") or "").strip().lower()
+        if action not in {"allow", "deny"}:
+            raise ValueError("permission decision action must be allow or deny")
+        now = time.time()
+        decided = {
+            **request_payload,
+            "status": "allowed" if action == "allow" else "denied",
+            "decision": {
+                "action": action,
+                "reason": str((decision or {}).get("reason") or "").strip(),
+                "decided_by": str((decision or {}).get("decided_by") or "user").strip() or "user",
+                "decided_time": now,
+            },
+            "updated_time": now,
+        }
+        requests_map[request_key] = decided
+        pending = [
+            item
+            for item in requests_map.values()
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
+        dynamic_run.update_metadata({
+            "permission_requests": requests_map,
+            "pending_permission_request_count": len(pending),
+        })
+        await self._emit_dynamic_event(run_id, {
+            "type": "agent_permission_request_decided",
+            "data": decided,
+        })
+        return decided
 
     async def delete_dynamic_run(self, run_id:str):
         snapshot = await self.get_dynamic_run_snapshot(run_id)

@@ -608,6 +608,7 @@ export interface DynamicRunSnapshot {
   final_result?: any;
   cancel_reason?: string | null;
   failure_reason?: any;
+  metadata?: Record<string, any>;
 }
 
 export interface DynamicRunEvent {

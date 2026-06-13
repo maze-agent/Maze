@@ -33,6 +33,15 @@ export interface AgentTrace {
   final: Record<string, any> | null;
   error: Record<string, any> | null;
   permissions: Record<string, number>;
+  permissionEvents: any[];
+  mcp: {
+    servers: any[];
+    tools: any[];
+    calls: Record<string, number>;
+    callEvents: any[];
+    toolErrors: any[];
+    discoveryError?: any;
+  };
   steps: AgentTraceStep[];
 }
 
@@ -324,6 +333,15 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
   let final: Record<string, any> | null = null;
   let error: Record<string, any> | null = null;
   const permissions: Record<string, number> = {};
+  const permissionEvents: any[] = [];
+  const mcp = {
+    servers: [] as any[],
+    tools: [] as any[],
+    calls: {} as Record<string, number>,
+    callEvents: [] as any[],
+    toolErrors: [] as any[],
+    discoveryError: undefined as any,
+  };
 
   const getStep = (stepValue: any) => {
     const step = Number(stepValue || 0);
@@ -350,6 +368,24 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
     }
     if (event.type.startsWith('agent_permission_')) {
       permissions[event.type] = (permissions[event.type] || 0) + 1;
+      permissionEvents.push({ type: event.type, ...data });
+    }
+    if (event.type === 'agent_mcp_servers_configured') {
+      mcp.servers = Array.isArray(data.servers) ? data.servers : [];
+    } else if (event.type === 'agent_mcp_tools_discovered') {
+      mcp.tools = Array.isArray(data.tools) ? data.tools : [];
+    } else if (event.type === 'agent_mcp_discovery_failed') {
+      mcp.discoveryError = data.error || data;
+    } else if (event.type === 'agent_mcp_tool_call_started') {
+      const key = String(data.tool || data.mcp_tool || 'mcp');
+      mcp.calls[key] = (mcp.calls[key] || 0) + 1;
+      mcp.callEvents.push({ status: 'started', ...data });
+    } else if (event.type === 'agent_mcp_tool_call_finished') {
+      mcp.callEvents.push({ status: 'finished', ...data });
+    } else if (event.type === 'agent_tool_call_failed' && String(data.tool || '').includes('__')) {
+      mcp.toolErrors.push(data);
+    } else if (event.type === 'agent_tool_call_finished' && data.tool_result?.error && String(data.tool || '').includes('__')) {
+      mcp.toolErrors.push(data);
     }
 
     const step = getStep(data.step);
@@ -385,12 +421,24 @@ export function buildAgentTrace(events: DynamicRunEvent[]): AgentTrace {
     final,
     error,
     permissions,
+    permissionEvents,
+    mcp,
     steps: Array.from(stepMap.values()).sort((a, b) => a.step - b.step),
   };
 }
 
 export function hasAgentTrace(trace: AgentTrace) {
-  return Boolean(trace.started || trace.final || trace.error || trace.steps.length || Object.keys(trace.permissions || {}).length);
+  return Boolean(
+    trace.started ||
+    trace.final ||
+    trace.error ||
+    trace.steps.length ||
+    Object.keys(trace.permissions || {}).length ||
+    trace.mcp?.servers?.length ||
+    trace.mcp?.tools?.length ||
+    Object.keys(trace.mcp?.calls || {}).length ||
+    trace.mcp?.discoveryError
+  );
 }
 
 interface ReActRuntimeCanvasProps {

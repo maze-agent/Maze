@@ -36,6 +36,34 @@ function isTerminalRunStatus(status?: string | null): boolean {
   return ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted'].includes(status || '');
 }
 
+function formatEventValue(value: any): string {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    const directMessage = value.message || value.error || value.error_message || value.detail;
+    if (directMessage && typeof directMessage !== 'object') {
+      return String(directMessage);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function normalizeWorkflowEvent(event: any): WorkflowEvent | null {
+  if (!event || typeof event !== 'object' || !event.type) return null;
+  return {
+    ...event,
+    type: String(event.type),
+    data: event.data && typeof event.data === 'object' ? event.data : {},
+    timestamp: event.timestamp || new Date().toISOString(),
+  };
+}
+
 export default function ResultsModal() {
   const {
     workflowId,
@@ -83,14 +111,15 @@ export default function ResultsModal() {
           setEvents((prev) => [...prev, { type: 'building', data: { message }, timestamp: new Date().toISOString() }]);
         },
         onTaskUpdate: (event) => {
-          const eventStatus = statusFromEvent(event?.type);
+          const nextEvent = normalizeWorkflowEvent(event);
+          if (!nextEvent) return;
+          const eventStatus = statusFromEvent(nextEvent.type);
           if (eventStatus) {
             terminalRunSeenRef.current = true;
             setStatus(eventStatus);
           } else {
             setStatus((prev) => (isTerminalRunStatus(prev) ? prev : 'running'));
           }
-          const nextEvent = { ...event, timestamp: event.timestamp || new Date().toISOString() };
           setEvents((prev) => [...prev, nextEvent]);
           if (activeRunId) {
             addStaticRunEvent(activeRunId, nextEvent);
@@ -108,7 +137,7 @@ export default function ResultsModal() {
               setResults(payload.run.final_result);
             }
             if (payload.run.error) {
-              setError(payload.run.error);
+              setError(formatEventValue(payload.run.error));
             }
           }
         },
@@ -121,7 +150,7 @@ export default function ResultsModal() {
         onWorkflowFailed: (err, trace) => {
           terminalRunSeenRef.current = true;
           setStatus('failed');
-          setError(err);
+          setError(formatEventValue(err));
           setTraceback(trace || '');
           setEvents((prev) => [...prev, { type: 'workflow_failed', data: { error: err }, timestamp: new Date().toISOString() }]);
         },
@@ -180,19 +209,20 @@ export default function ResultsModal() {
     if (selectedRun) {
       setStatus(toRunViewerStatus(selectedRun.status));
       setResults(selectedRun.final_result || null);
-      setError(selectedRun.error || '');
+      setError(formatEventValue(selectedRun.error));
     }
 
     const knownEvents = staticRunEvents[selectedRunId];
     if (knownEvents) {
-      setEvents(knownEvents);
+      setEvents(knownEvents.map(normalizeWorkflowEvent).filter(Boolean) as WorkflowEvent[]);
       return;
     }
 
     api.getStaticWorkflowRunEvents(selectedRunId, workspaceDir || undefined)
       .then((result) => {
-        setStaticRunEvents(selectedRunId, result.events || []);
-        setEvents(result.events || []);
+        const nextEvents = (result.events || []).map(normalizeWorkflowEvent).filter(Boolean) as WorkflowEvent[];
+        setStaticRunEvents(selectedRunId, nextEvents);
+        setEvents(nextEvents);
       })
       .catch((error) => {
         console.error('Failed to load workflow run events:', error);
@@ -240,10 +270,10 @@ export default function ResultsModal() {
       return `Dynamic run ${data.run_id ? String(data.run_id).slice(0, 8) : ''} started`;
     }
     if (event.type === 'register_task_spec') {
-      return `Task spec registered: ${data.task_name || data.task_spec_id || 'unknown'}`;
+      return `Task spec registered: ${formatEventValue(data.task_name || data.task_spec_id) || 'unknown'}`;
     }
     if (event.type === 'append_task') {
-      return `Task ${shortTaskId} appended${data.status ? ` (${data.status})` : ''}`;
+      return `Task ${shortTaskId} appended${data.status ? ` (${formatEventValue(data.status)})` : ''}`;
     }
     if (event.type === 'task_ready') {
       return `Task ${shortTaskId} is ready to run`;
@@ -256,19 +286,19 @@ export default function ResultsModal() {
       return `Task ${shortTaskId} finished`;
     }
     if (event.type === 'task_exception') {
-      return `Task ${shortTaskId} failed: ${data.result || 'Unknown error'}`;
+      return `Task ${shortTaskId} failed: ${formatEventValue(data.error || data.result) || 'Unknown error'}`;
     }
     if (event.type === 'finish_workflow') {
       return 'All workflow tasks finished';
     }
     if (event.type === 'cancel_dynamic_run') {
-      return `Dynamic run canceled${data.reason ? `: ${data.reason}` : ''}`;
+      return `Dynamic run canceled${data.reason ? `: ${formatEventValue(data.reason)}` : ''}`;
     }
     if (event.type === 'timeout_dynamic_run') {
       return `Dynamic run timed out${data.timeout_seconds ? ` after ${data.timeout_seconds}s` : ''}`;
     }
     if (event.type === 'building') {
-      return data.message || 'Building workflow...';
+      return formatEventValue(data.message) || 'Building workflow...';
     }
     if (event.type === 'workflow_started') {
       return 'Workflow started';
@@ -277,16 +307,16 @@ export default function ResultsModal() {
       return 'Workflow completed';
     }
     if (event.type === 'workflow_failed') {
-      return data.error || 'Workflow failed';
+      return formatEventValue(data.error) || 'Workflow failed';
     }
     if (event.type === 'workflow_canceled') {
-      return data.message || data.error || 'Workflow run was canceled';
+      return formatEventValue(data.message || data.error) || 'Workflow run was canceled';
     }
     if (event.type === 'workflow_interrupted') {
-      return data.message || data.error || 'Workflow run was interrupted';
+      return formatEventValue(data.message || data.error) || 'Workflow run was interrupted';
     }
     if (event.type === 'stream_warning') {
-      return data.message || 'Live result stream disconnected; polling will continue.';
+      return formatEventValue(data.message) || 'Live result stream disconnected; polling will continue.';
     }
     return 'Connected to result stream';
   };

@@ -13,6 +13,7 @@
 ## 📰 News
 
 
+- **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
 - **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
 - **2026-06**: Maze Playground ReAct workflows now expose a single `Task Timeout` control. Maze uses it for ReAct task waits, `exec_code` subprocess defaults, and an automatically derived run-level timeout, so users do not need to tune several timeout knobs.
 - **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.
@@ -74,6 +75,8 @@
    ```
    maze start --head --port HEAD_PORT
    ```
+   The head uses the `least-loaded` scheduling strategy by default, so ready tasks prefer the registered node with the fewest running Maze tasks. To force the older registration-order behavior, pass `--strategy default`.
+
    If there are multiple machines, you can connect other machines as maze workers to the maze head.
    ```
    maze start --worker --addr HEAD_IP:HEAD_PORT
@@ -325,14 +328,18 @@ maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
 
 
 ## 🖥️ Maze Playground
-Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, and inspecting static, dynamic, and app runs in one `Runs` console. You can start the playground with the following command option.
+Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, using MCP tools, collaborating with a built-in Workspace Agent, and inspecting static, dynamic, ReAct, and app runs in one `Runs` console. You can start the playground with the following command option.
 ```
 maze start --head --port HEAD_PORT --playground
 ```
 
 The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include `Max Tokens`; ReAct nodes and the ReAct run modal include `Task Timeout`, which controls both per-task waits and the default `Exec Code` subprocess timeout while Maze derives the run-level safety timeout automatically. Long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
 
-The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs.
+ReAct runs can connect to MCP servers from the run modal. Users can paste JSON MCP configuration, test server discovery before starting an LLM run, save reusable workspace MCP profiles, and run with a saved profile without sending hidden environment variables or headers back through the frontend. Run metadata, progress events, API responses, and Agent Trace views keep MCP server summaries, discovered tools, tool calls, tool errors, discovery failures, and permission decisions visible while redacting secrets.
+
+The Workspace Agent panel helps turn user intent into workflow progress inside the current workspace. It can inspect workspace inventory, read task and workflow files, create or update safe workflow drafts, validate drafts, save or run drafts after confirmation, inspect failed runs, create repair drafts from failures, and promote run artifacts into workspace files for downstream workflows. Agent sessions are persisted and can be created, selected, renamed, exported, or deleted from the panel.
+
+The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs. Run detail rendering is hardened against malformed event payloads, failed snapshots are preserved instead of being overwritten by later completion events, and artifact download/promotion can fall back to content-addressed storage when a static artifact lacks a direct storage path.
 
 The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons.
 

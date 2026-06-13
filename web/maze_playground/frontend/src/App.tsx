@@ -10,6 +10,7 @@ import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
 import ReActRunModal from './components/ReActRunModal';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
+import WorkspaceAgentPanel from './components/WorkspaceAgentPanel';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
@@ -26,9 +27,11 @@ function App() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
   const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
+  const [staticRunFocusId, setStaticRunFocusId] = useState<string | null>(null);
   const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
   const [reactRunnerOpen, setReactRunnerOpen] = useState(false);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
+  const [workspaceAgentOpen, setWorkspaceAgentOpen] = useState(true);
   const {
     workflowId,
     workflowName,
@@ -359,11 +362,12 @@ function App() {
           onReactRunStarted={(runId) => {
             setActiveDynamicRunId(runId);
             setDynamicRunFocusId(runId);
+            setStaticRunFocusId(null);
           }}
         />
         
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          {workspaceReady ? <BuiltinTasksSidebar /> : null}
+          {workspaceReady && workspaceDir ? <BuiltinTasksSidebar /> : null}
           
           <div style={{ flex: 1, position: 'relative' }}>
             <WorkflowCanvas
@@ -373,6 +377,21 @@ function App() {
           </div>
           
           <NodePanel />
+          {workspaceReady && workspaceDir ? (
+            <WorkspaceAgentPanel
+              open={workspaceAgentOpen}
+              workspaceReady={workspaceReady}
+              onToggle={() => setWorkspaceAgentOpen((value) => !value)}
+              onOpenRuns={(runId) => {
+                if (runId) {
+                  setActiveDynamicRunId(null);
+                  setDynamicRunFocusId(null);
+                  setStaticRunFocusId(runId);
+                }
+                setRunsOpen(true);
+              }}
+            />
+          ) : null}
         </div>
         
         <ResultsModal />
@@ -380,6 +399,7 @@ function App() {
           open={runsOpen}
           onClose={() => setRunsOpen(false)}
           focusDynamicRunId={dynamicRunFocusId}
+          focusStaticRunId={staticRunFocusId}
         />
         <ReActRunModal
           open={reactRunnerOpen}
@@ -387,6 +407,7 @@ function App() {
           onCompleted={(runId) => {
             setActiveDynamicRunId(runId);
             setDynamicRunFocusId(runId);
+            setStaticRunFocusId(null);
           }}
         />
         <ClusterResourcesDrawer

@@ -426,6 +426,7 @@ async def create_dynamic_run(req: Request):
             max_tasks=data.get("max_tasks", 100),
             timeout_seconds=data.get("timeout_seconds"),
             file_context=await _worker_reachable_file_context(req, data.get("file_context")),
+            metadata=data.get("metadata"),
         )
         return {"status": "success", "run_id": run_id}
     except Exception as e:
@@ -756,6 +757,66 @@ async def emit_dynamic_run_event(run_id: str, req: Request):
             "status": "success",
             "run_id": run_id,
             "event": event,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/dynamic_runs/{run_id}/metadata")
+async def update_dynamic_run_metadata(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        metadata = data.get("metadata", data)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a JSON object")
+        updated = await mapath.update_dynamic_run_metadata(run_id, metadata)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "metadata": updated,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/permission_requests")
+async def create_dynamic_permission_request(run_id: str, req: Request):
+    try:
+        data = await req.json()
+        request_payload = data.get("request", data)
+        created = await mapath.upsert_dynamic_permission_request(run_id, request_payload)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "request": created,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dynamic_runs/{run_id}/permission_requests/{request_id}")
+async def get_dynamic_permission_request(run_id: str, request_id: str):
+    try:
+        snapshot = await mapath.get_dynamic_run_snapshot(run_id)
+        requests_map = (snapshot.get("metadata") or {}).get("permission_requests") or {}
+        request_payload = requests_map.get(request_id)
+        if not isinstance(request_payload, dict):
+            raise ValueError(f"Permission request not found: {request_id}")
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "request": request_payload,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dynamic_runs/{run_id}/permission_requests/{request_id}/decision")
+async def decide_dynamic_permission_request(run_id: str, request_id: str, req: Request):
+    try:
+        data = await req.json()
+        decision = data.get("decision", data)
+        decided = await mapath.decide_dynamic_permission_request(run_id, request_id, decision)
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "request": decided,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -25,6 +25,8 @@ const workflows = new Map();
 // 存储 WebSocket 连接
 const wsConnections = new Map(); // workflowId -> Set<WebSocket>
 const activeReactRunProcesses = new Map();
+const activeAgentRuns = new Map();
+const agentRunSseClients = new Map();
 const localWorkspaceManifests = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
 const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace'));
@@ -48,16 +50,17 @@ function getPythonBin() {
       process.platform === 'win32' ? 'python.exe' : 'bin/python'
     );
   }
+
+  const defaultMazePython = '/root/miniconda3/envs/maze/bin/python';
+  if (process.platform !== 'win32' && fsSync.existsSync(defaultMazePython)) {
+    return defaultMazePython;
+  }
+
   if (process.env.CONDA_PREFIX) {
     return path.join(
       process.env.CONDA_PREFIX,
       process.platform === 'win32' ? 'python.exe' : 'bin/python'
     );
-  }
-
-  const defaultMazePython = '/root/miniconda3/envs/maze/bin/python';
-  if (process.platform !== 'win32' && fsSync.existsSync(defaultMazePython)) {
-    return defaultMazePython;
   }
 
   return 'python';
@@ -84,6 +87,18 @@ function safeFileName(name, fallbackPrefix = 'workflow') {
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   return `${fallbackPrefix}-${stamp}`;
+}
+
+function safeMcpProfileName(value) {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  if (!safe) {
+    throw new Error('MCP profile name is required');
+  }
+  return safe;
 }
 
 function safeWorkspaceId(value, fallbackPrefix = 'ws') {
@@ -238,6 +253,7 @@ async function ensureWorkspacePolicy(workspaceDir) {
           '*credential*': 'deny',
           '*token*': 'deny',
           'api_key*': 'deny',
+          'mcp_profiles/*': 'deny',
         },
         write: {
           '*': 'ask',
@@ -247,6 +263,7 @@ async function ensureWorkspacePolicy(workspaceDir) {
           '*credential*': 'deny',
           '*token*': 'deny',
           'api_key*': 'deny',
+          'mcp_profiles/*': 'deny',
         },
         exec_code: { '*': 'ask', 'python *': 'allow', 'rm *': 'deny' },
         mcp: { '*': 'ask' },
@@ -267,6 +284,10 @@ async function ensureWorkspaceDirs(workspaceDir) {
   await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'skills'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'mcp_profiles'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'agent_sessions'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'agent_drafts'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'agent_runs'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'policies'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'runs'), { recursive: true });
   await ensureWorkspacePolicy(resolved);
@@ -543,6 +564,30 @@ function normalizeWorkspaceFileRelativePath(relativePath = '') {
   return normalized;
 }
 
+function assertAgentFileReadAllowed(relativePath) {
+  const normalized = String(relativePath || '').replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  const denied = parts.some((part) => {
+    const lower = part.toLowerCase();
+    return (
+      lower === '.env' ||
+      lower.startsWith('.env.') ||
+      lower.includes('secret') ||
+      lower.includes('credential') ||
+      lower.includes('password') ||
+      lower.includes('token') ||
+      lower.includes('api_key') ||
+      lower.includes('apikey')
+    );
+  });
+  if (denied) {
+    const error = new Error('Workspace Agent cannot read secret, token, credential, password, api key, or .env files');
+    error.status = 403;
+    error.code = 'AGENT_FILE_READ_DENIED';
+    throw error;
+  }
+}
+
 function normalizeLocalWorkspaceId(value = '') {
   return String(value || '')
     .trim()
@@ -649,14 +694,39 @@ function getOpenAICompatibleApiKeys(apiKey) {
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 90000) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = options.signal;
+  let timedOut = false;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else if (externalSignal) {
+    externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     return await fetch(url, {
       ...options,
       signal: controller.signal,
     });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const reason = timedOut && !externalSignal?.aborted
+        ? `LLM request timed out after ${Math.round(Number(timeoutMs || 0) / 1000)}s`
+        : 'LLM request was canceled';
+      const abortError = new Error(reason);
+      abortError.code = timedOut && !externalSignal?.aborted ? 'LLM_TIMEOUT' : 'LLM_ABORTED';
+      abortError.status = timedOut && !externalSignal?.aborted ? 504 : 499;
+      throw abortError;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', abortFromExternal);
+    }
   }
 }
 
@@ -667,6 +737,7 @@ async function callOpenAICompatibleChat({
   messages,
   temperature = 0.2,
   maxTokens = 2048,
+  signal,
 }) {
   const explicitApiKey = String(apiKey || '').trim();
   const apiKeys = getOpenAICompatibleApiKeys(apiKey);
@@ -687,6 +758,7 @@ async function callOpenAICompatibleChat({
         'Content-Type': 'application/json',
         Authorization: `Bearer ${key}`,
       },
+      signal,
       body: JSON.stringify({
         model,
         messages,
@@ -1054,6 +1126,2968 @@ async function writeJsonAtomic(filePath, payload) {
   await fs.rename(tmpPath, filePath);
 }
 
+function mcpProfilesDir(workspaceDir) {
+  return path.join(workspaceDir, 'mcp_profiles');
+}
+
+function mcpProfilePath(workspaceDir, name) {
+  return path.join(mcpProfilesDir(workspaceDir), `${safeMcpProfileName(name)}.json`);
+}
+
+function safeAgentId(value, fallbackPrefix = 'agent') {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100);
+  return safe || `${fallbackPrefix}-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function agentSessionsDir(workspaceDir) {
+  return path.join(workspaceDir, 'agent_sessions');
+}
+
+function agentDraftsDir(workspaceDir) {
+  return path.join(workspaceDir, 'agent_drafts');
+}
+
+function agentRunsDir(workspaceDir) {
+  return path.join(workspaceDir, 'agent_runs');
+}
+
+function agentSessionPath(workspaceDir, sessionId) {
+  return path.join(agentSessionsDir(workspaceDir), `${safeAgentId(sessionId, 'session')}.json`);
+}
+
+function agentDraftPath(workspaceDir, draftId) {
+  return path.join(agentDraftsDir(workspaceDir), `${safeAgentId(draftId, 'draft')}.json`);
+}
+
+function agentRunPath(workspaceDir, runId) {
+  return path.join(agentRunsDir(workspaceDir), `${safeAgentId(runId, 'agent-run')}.json`);
+}
+
+function agentRunEventsPath(workspaceDir, runId) {
+  return path.join(agentRunsDir(workspaceDir), `${safeAgentId(runId, 'agent-run')}.events.jsonl`);
+}
+
+const SECRET_KEY_PATTERN = /(^|[_-])(api[_-]?key|authorization|secret|credential|password|passwd|bearer|access[_-]?token|refresh[_-]?token)([_-]|$)/i;
+
+function redactSecretText(text) {
+  return String(text || '')
+    .replace(/(^|[^a-zA-Z0-9])sk-[a-zA-Z0-9_-]{8,}/g, '$1<redacted>')
+    .replace(/\b(api[_-]?key|authorization|secret|credential|password|passwd|bearer|access[_-]?token|refresh[_-]?token|token)\b\s*[:=]\s*["']?[^"',;\n\r]+/gi, '$1=<redacted>');
+}
+
+function redactSecrets(value) {
+  if (typeof value === 'string') {
+    return redactSecretText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSecrets(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      SECRET_KEY_PATTERN.test(key) ? '<redacted>' : redactSecrets(item),
+    ]));
+  }
+  return value;
+}
+
+function approximateAgentTokens(text) {
+  return Math.ceil(String(text || '').length / 4);
+}
+
+function agentMessageApproxTokens(message) {
+  return approximateAgentTokens(JSON.stringify(message?.parts || []));
+}
+
+function summarizeAgentMessageForCompaction(message) {
+  const parts = (message.parts || []).map((part) => {
+    if (part.type === 'text') return part.text;
+    if (part.type === 'error') return `[error] ${part.message}`;
+    if (part.type === 'tool_call') return `[tool_call ${part.name}] ${JSON.stringify(redactSecrets(part.input || {}))}`;
+    if (part.type === 'tool_result') {
+      const result = redactSecrets(part.result || {});
+      return `[tool_result ${part.name}] ${JSON.stringify(result).slice(0, 1200)}`;
+    }
+    return JSON.stringify(redactSecrets(part));
+  });
+  return `${message.role} ${message.createdAt}:\n${parts.join('\n')}`;
+}
+
+function compactAgentMessages(messages, existingSummary = '', options = {}) {
+  const maxApproxTokens = Number(options.maxApproxTokens || 12000);
+  const keepRecentMessages = Number(options.keepRecentMessages || 16);
+  const total = messages.reduce((sum, message) => sum + agentMessageApproxTokens(message), 0);
+  if (total <= maxApproxTokens) {
+    return { messages, summary: existingSummary || '', compactedCount: 0, recentApproxTokens: total };
+  }
+
+  const recent = messages.slice(-keepRecentMessages);
+  const older = messages.slice(0, -keepRecentMessages);
+  const recentApproxTokens = recent.reduce((sum, message) => sum + agentMessageApproxTokens(message), 0);
+  const body = older
+    .map((message) => summarizeAgentMessageForCompaction(message))
+    .join('\n\n')
+    .slice(0, maxApproxTokens * 2);
+  const previous = String(existingSummary || '').trim();
+  const nextSummary = [
+    previous ? `Previous summary:\n${previous}` : '',
+    `Compacted ${older.length} older messages. Recent approx tokens: ${recentApproxTokens}.`,
+    body,
+  ].filter(Boolean).join('\n\n');
+
+  return {
+    messages: recent,
+    summary: nextSummary,
+    compactedCount: older.length,
+    recentApproxTokens,
+  };
+}
+
+function createAgentMessage(sessionId, role, parts) {
+  return {
+    id: safeAgentId(`msg-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`, 'msg'),
+    sessionId,
+    role,
+    createdAt: new Date().toISOString(),
+    parts: redactSecrets(parts || []),
+  };
+}
+
+function agentSessionSummary(session) {
+  return {
+    id: session.id,
+    title: session.title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    workspaceId: session.workspaceId,
+    workspaceDir: session.workspaceDir,
+    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+    summary: session.summary || '',
+    compaction: session.compaction || null,
+    metadata: redactSecrets(session.metadata || {}),
+  };
+}
+
+function collectAgentDraftIdsFromMessages(messages = []) {
+  const draftIds = new Set();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+      const result = part?.result || {};
+      const draft = result.draft || part?.draft;
+      if (draft?.id) {
+        draftIds.add(String(draft.id));
+      }
+    }
+  }
+  return Array.from(draftIds);
+}
+
+async function loadAgentDraftsForMessages(workspaceDir, messages = []) {
+  const drafts = [];
+  for (const draftId of collectAgentDraftIdsFromMessages(messages)) {
+    try {
+      drafts.push(agentDraftPublic(await loadAgentDraft(workspaceDir, draftId)));
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.error(`Failed to hydrate Workspace Agent draft ${draftId}:`, error);
+      }
+    }
+  }
+  return drafts;
+}
+
+async function createAgentSessionRecord(context, input = {}) {
+  const now = new Date().toISOString();
+  const session = {
+    schema: 'maze_workspace_agent_session',
+    schema_version: 1,
+    id: safeAgentId(input.id, 'session'),
+    title: String(input.title || input.message || 'Workspace Agent').slice(0, 80),
+    workspaceId: context.workspaceId,
+    workspaceDir: context.workspaceDir,
+    createdAt: now,
+    updatedAt: now,
+    summary: '',
+    compaction: {
+      compactedCount: 0,
+      recentApproxTokens: 0,
+    },
+    metadata: redactSecrets(input.metadata || {}),
+    messages: [],
+  };
+  await writeJsonAtomic(agentSessionPath(context.workspaceDir, session.id), session);
+  return session;
+}
+
+async function loadAgentSession(workspaceDir, sessionId) {
+  const raw = await fs.readFile(agentSessionPath(workspaceDir, sessionId), 'utf-8');
+  const session = JSON.parse(raw);
+  session.messages = Array.isArray(session.messages) ? session.messages : [];
+  return session;
+}
+
+async function saveAgentSession(workspaceDir, session) {
+  session.updatedAt = new Date().toISOString();
+  session.messages = Array.isArray(session.messages) ? session.messages.map(redactSecrets) : [];
+  await writeJsonAtomic(agentSessionPath(workspaceDir, session.id), redactSecrets(session));
+  return session;
+}
+
+async function updateAgentSessionRecord(workspaceDir, sessionId, updates = {}) {
+  const session = await loadAgentSession(workspaceDir, sessionId);
+  if (Object.prototype.hasOwnProperty.call(updates, 'title')) {
+    const title = String(updates.title || '').trim();
+    if (!title) {
+      const error = new Error('Session title is required');
+      error.status = 400;
+      throw error;
+    }
+    session.title = title.slice(0, 80);
+  }
+  if (updates.metadata && typeof updates.metadata === 'object' && !Array.isArray(updates.metadata)) {
+    session.metadata = {
+      ...(session.metadata || {}),
+      ...redactSecrets(updates.metadata),
+    };
+  }
+  await saveAgentSession(workspaceDir, session);
+  return session;
+}
+
+async function deleteAgentSessionRecord(workspaceDir, sessionId) {
+  await fs.unlink(agentSessionPath(workspaceDir, sessionId));
+  return { id: sessionId };
+}
+
+async function buildAgentSessionExport(context, sessionId) {
+  const session = await loadAgentSession(context.workspaceDir, sessionId);
+  const drafts = await loadAgentDraftsForMessages(context.workspaceDir, session.messages);
+  return redactSecrets({
+    schema: 'maze_workspace_agent_session_export',
+    schema_version: 1,
+    exportedAt: new Date().toISOString(),
+    workspaceId: context.workspaceId,
+    workspaceManifestVersion: context.workspaceManifestVersion,
+    session: agentSessionSummary(session),
+    messages: session.messages,
+    drafts,
+    summary: session.summary || '',
+    compaction: session.compaction || null,
+  });
+}
+
+async function listAgentSessions(workspaceDir) {
+  const entries = await fs.readdir(agentSessionsDir(workspaceDir), { withFileTypes: true }).catch(() => []);
+  const sessions = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    try {
+      const raw = await fs.readFile(path.join(agentSessionsDir(workspaceDir), entry.name), 'utf-8');
+      sessions.push(agentSessionSummary(JSON.parse(raw)));
+    } catch {
+      // Ignore malformed session files in the list view.
+    }
+  }
+  sessions.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  return sessions;
+}
+
+async function appendAgentSessionMessage(workspaceDir, session, role, parts) {
+  const message = createAgentMessage(session.id, role, parts);
+  session.messages.push(message);
+  await saveAgentSession(workspaceDir, session);
+  return message;
+}
+
+function agentMessagesToLLM(messages) {
+  return messages.map((message) => {
+    const toolResult = (message.parts || []).find((part) => part.type === 'tool_result');
+    const toolCalls = (message.parts || [])
+      .filter((part) => part.type === 'tool_call')
+      .map((part) => ({
+        id: part.id,
+        type: 'function',
+        function: {
+          name: part.name,
+          arguments: JSON.stringify(part.input || {}),
+        },
+      }));
+    const text = (message.parts || [])
+      .filter((part) => part.type === 'text' || part.type === 'error')
+      .map((part) => part.type === 'error' ? `[error] ${part.message}` : part.text)
+      .join('\n');
+    const llmMessage = {
+      role: message.role === 'tool' ? 'tool' : message.role,
+      content: toolResult ? JSON.stringify(redactSecrets(toolResult.result || {})) : text,
+    };
+    if (toolResult?.toolCallId) {
+      llmMessage.tool_call_id = toolResult.toolCallId;
+    }
+    if (toolCalls.length) {
+      llmMessage.tool_calls = toolCalls;
+    }
+    return llmMessage;
+  });
+}
+
+async function callOpenAICompatibleToolChat({
+  baseUrl,
+  apiKey,
+  model,
+  messages,
+  tools = [],
+  temperature = 0.2,
+  maxTokens = 2048,
+  timeoutMs = 90000,
+  signal,
+}) {
+  const apiKeys = getOpenAICompatibleApiKeys(apiKey);
+  if (apiKeys.length === 0) {
+    throw new Error('API key is required');
+  }
+  if (!model || !String(model).trim()) {
+    throw new Error('Model is required');
+  }
+
+  const endpoint = normalizeOpenAIBaseUrl(baseUrl);
+  const explicitApiKey = String(apiKey || '').trim();
+  let lastError = null;
+
+  for (const key of apiKeys) {
+    const response = await fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      signal,
+      body: JSON.stringify({
+        model,
+        messages,
+        tools,
+        tool_choice: tools.length ? 'auto' : undefined,
+        temperature,
+        max_tokens: maxTokens,
+        stream: false,
+      }),
+    }, timeoutMs);
+
+    const text = await response.text();
+    let payload = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = { error: text };
+      }
+    }
+
+    if (!response.ok) {
+      const message =
+        payload?.error?.message ||
+        payload?.message ||
+        payload?.detail ||
+        (typeof payload?.error === 'string' ? payload.error : '') ||
+        `LLM request failed: ${response.status}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.payload = payload;
+      lastError = error;
+      if (!explicitApiKey && [401, 403, 429, 500, 502, 503, 504].includes(response.status)) {
+        continue;
+      }
+      throw error;
+    }
+
+    return payload?.choices?.[0]?.message || {};
+  }
+
+  throw lastError || new Error('LLM request failed');
+}
+
+function normalizeAgentTaskDefinitions(taskDefinitions = []) {
+  if (!Array.isArray(taskDefinitions)) return [];
+  return taskDefinitions
+    .map((definition) => ({
+      type: 'workspace',
+      relativePath: normalizeTaskRelativePath(definition.relativePath || definition.taskPath || definition.sourcePath || ''),
+      functionName: definition.functionName || definition.name || undefined,
+      displayName: definition.displayName || definition.label || definition.functionName || undefined,
+      code: String(definition.code || ''),
+      inputs: Array.isArray(definition.inputs) ? definition.inputs : [],
+      outputs: Array.isArray(definition.outputs) ? definition.outputs : [],
+      resources: definition.resources || { cpu: 1, cpu_mem: 128, gpu: 0, gpu_mem: 0 },
+    }))
+    .filter((definition) => definition.relativePath && definition.code.trim());
+}
+
+function validateAgentTaskDefinitionCode(definition) {
+  const errors = [];
+  const code = String(definition?.code || '');
+  const relativePath = definition?.relativePath || 'task definition';
+  const decoratorMatches = code.matchAll(/@task\s*\(([\s\S]*?)\)/g);
+
+  for (const match of decoratorMatches) {
+    const args = match[1] || '';
+    if (/(^|[,\s])(?:inputs|outputs)\s*=/.test(args)) {
+      errors.push(
+        `${relativePath}: @task no longer accepts inputs/outputs. Use @task or @task(resources={...}); Maze infers inputs from the function signature and outputs from returned dict keys.`,
+      );
+    }
+  }
+  if (/(["'])workspace\/files\//.test(code) || /(["'])files\//.test(code)) {
+    errors.push(
+      `${relativePath}: task code should read/write files relative to the task cwd, for example "input.csv" or "reports/output.md"; do not prefix paths with "workspace/files/" or "files/".`,
+    );
+  }
+
+  return errors;
+}
+
+function normalizeWorkflowNodeInputs(inputs) {
+  if (!Array.isArray(inputs)) return [];
+  return inputs.map((input) => {
+    const nextInput = { ...(input || {}) };
+    if (nextInput.source === 'node') {
+      const taskId = nextInput.nodeId || nextInput.taskId || nextInput.taskSource?.taskId || nextInput.taskSource?.nodeId;
+      const outputKey = nextInput.outputName || nextInput.outputKey || nextInput.taskSource?.outputKey || nextInput.taskSource?.outputName;
+      nextInput.source = 'task';
+      if (taskId || outputKey) {
+        nextInput.taskSource = {
+          taskId: String(taskId || ''),
+          outputKey: String(outputKey || ''),
+        };
+      }
+      delete nextInput.nodeId;
+      delete nextInput.outputName;
+    } else if (nextInput.source === 'task' && nextInput.taskSource) {
+      nextInput.taskSource = {
+        taskId: String(nextInput.taskSource.taskId || nextInput.taskSource.nodeId || nextInput.taskId || ''),
+        outputKey: String(nextInput.taskSource.outputKey || nextInput.taskSource.outputName || nextInput.outputKey || ''),
+      };
+      delete nextInput.taskId;
+      delete nextInput.outputKey;
+      delete nextInput.nodeId;
+      delete nextInput.outputName;
+    }
+    return nextInput;
+  });
+}
+
+function normalizeAgentWorkflowDraftInput(input = {}) {
+  const workflow = input.workflow && typeof input.workflow === 'object' ? input.workflow : input;
+  const name = String(workflow.name || input.name || 'Agent Workflow').trim() || 'Agent Workflow';
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const edges = Array.isArray(workflow.edges) ? workflow.edges : [];
+  return {
+    name,
+    relativePath: normalizeWorkflowRelativePath(input.relativePath || workflow.relativePath || '', name),
+    workflow: {
+      name,
+      nodes: nodes.map((node, index) => ({
+        id: String(node.id || `node-${index + 1}`),
+        type: 'taskNode',
+        position: node.position && typeof node.position === 'object'
+          ? node.position
+          : { x: 120 + index * 260, y: 120 },
+        data: {
+          category: node.data?.category || node.category || 'workspace',
+          nodeType: node.data?.nodeType || node.nodeType || 'task',
+          label: node.data?.label || node.label || node.data?.functionName || node.functionName || `Task ${index + 1}`,
+          taskRef: node.data?.taskRef || node.taskRef,
+          workspaceDir: node.data?.workspaceDir,
+          taskPath: node.data?.taskPath || node.data?.relativePath || node.taskPath || node.relativePath,
+          functionName: node.data?.functionName || node.functionName,
+          customCode: node.data?.customCode || node.customCode,
+          inputs: normalizeWorkflowNodeInputs(node.data?.inputs || node.inputs),
+          outputs: Array.isArray(node.data?.outputs || node.outputs) ? (node.data?.outputs || node.outputs) : [],
+          resources: node.data?.resources || node.resources || { cpu: 1, cpu_mem: 128, gpu: 0, gpu_mem: 0 },
+          configured: node.data?.configured !== false,
+        },
+      })),
+      edges: edges.map((edge, index) => ({
+        id: String(edge.id || `edge-${index + 1}`),
+        source: String(edge.source || ''),
+        target: String(edge.target || ''),
+        sourceHandle: edge.sourceHandle || undefined,
+        targetHandle: edge.targetHandle || undefined,
+      })).filter((edge) => edge.source && edge.target),
+    },
+    taskDefinitions: normalizeAgentTaskDefinitions(input.taskDefinitions || workflow.taskDefinitions || workflow.includedTasks || []),
+    description: String(input.description || workflow.description || ''),
+  };
+}
+
+async function writeAgentDraft(workspaceDir, draft) {
+  const now = new Date().toISOString();
+  const next = {
+    schema: 'maze_workspace_agent_draft',
+    schema_version: 1,
+    createdAt: draft.createdAt || now,
+    updatedAt: now,
+    status: draft.status || 'draft',
+    ...draft,
+  };
+  await writeJsonAtomic(agentDraftPath(workspaceDir, next.id), redactSecrets(next));
+  return next;
+}
+
+async function loadAgentDraft(workspaceDir, draftId) {
+  const raw = await fs.readFile(agentDraftPath(workspaceDir, draftId), 'utf-8');
+  return JSON.parse(raw);
+}
+
+async function readWorkspaceWorkflowForAgent(context, input = {}) {
+  const relativePathInput = input.relativePath || input.path || '';
+  if (!relativePathInput) {
+    const error = new Error('relativePath is required');
+    error.status = 400;
+    throw error;
+  }
+  const { relativePath, fullPath } = resolveWorkflowFile(context.workspaceDir, relativePathInput, 'workflow');
+  const raw = await fs.readFile(fullPath, 'utf-8');
+  const payload = JSON.parse(raw);
+  const workflow = normalizeWorkflowPayload(payload);
+  const importResult = await importTaskDefinitions(context.workspaceDir, workflow.includedTasks, workflow.name);
+  const hydratedNodes = await hydrateWorkspaceWorkflowNodes(
+    workflow.nodes,
+    context.workspaceDir,
+    workflow.includedTasks,
+    importResult.taskPathMap,
+  );
+  const stat = await fs.stat(fullPath);
+  const taskDefinitions = collectTaskDefinitions(hydratedNodes, workflow.includedTasks).map((definition) => ({
+    relativePath: definition.relativePath,
+    functionName: definition.functionName,
+    displayName: definition.displayName,
+    inputs: definition.inputs || [],
+    outputs: definition.outputs || [],
+    resources: definition.resources || {},
+    code: input.includeCode === false ? undefined : String(definition.code || '').slice(0, Math.min(Math.max(Number(input.maxCodeChars || 4000), 0), 20000)),
+    truncated: input.includeCode === false ? undefined : String(definition.code || '').length > Math.min(Math.max(Number(input.maxCodeChars || 4000), 0), 20000),
+  }));
+  return {
+    ok: true,
+    relativePath,
+    updatedAt: stat.mtime.toISOString(),
+    size: stat.size,
+    workflow: {
+      name: workflow.name,
+      nodes: hydratedNodes,
+      edges: workflow.edges,
+    },
+    taskDefinitions,
+    importedTaskDefinitions: {
+      imported: importResult.imported || [],
+      skipped: importResult.skipped || [],
+      remapped: importResult.remapped || [],
+    },
+  };
+}
+
+async function readWorkspaceTaskForAgent(context, input = {}) {
+  const relativePathInput = input.relativePath || input.path || '';
+  if (!relativePathInput) {
+    const error = new Error('relativePath is required');
+    error.status = 400;
+    throw error;
+  }
+  const maxChars = Math.min(Math.max(Number(input.maxChars || 12000), 0), 50000);
+  const { relativePath, fullPath } = resolveTaskDefinitionFile(context.workspaceDir, relativePathInput);
+  const stat = await fs.stat(fullPath);
+  if (!stat.isFile()) {
+    const error = new Error('Task path is not a file');
+    error.status = 400;
+    throw error;
+  }
+  const code = await fs.readFile(fullPath, 'utf-8');
+  return {
+    ok: true,
+    relativePath,
+    updatedAt: stat.mtime.toISOString(),
+    size: stat.size,
+    code: code.slice(0, maxChars),
+    truncated: code.length > maxChars,
+  };
+}
+
+async function listWorkspaceFilesForAgent(context, input = {}) {
+  const { fullPath, filesDir, relativePath } = resolveWorkspaceFilePath(context.workspaceDir, input.path || '');
+  const stat = await fs.stat(fullPath).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!stat) {
+    const error = new Error('Workspace file path not found');
+    error.status = 404;
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    const error = new Error('Workspace file path is not a directory');
+    error.status = 400;
+    throw error;
+  }
+  const maxEntries = Math.min(Math.max(Number(input.maxEntries || 100), 1), 500);
+  const entries = await fs.readdir(fullPath, { withFileTypes: true });
+  const files = await Promise.all(entries.slice(0, maxEntries).map((entry) => (
+    describeWorkspaceFile(filesDir, path.join(fullPath, entry.name))
+  )));
+  files.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return {
+    ok: true,
+    path: relativePath,
+    files,
+    truncated: entries.length > maxEntries,
+    totalEntries: entries.length,
+  };
+}
+
+async function readWorkspaceFileForAgent(context, input = {}) {
+  const relativePathInput = input.relativePath || input.path || '';
+  if (!relativePathInput) {
+    const error = new Error('relativePath is required');
+    error.status = 400;
+    throw error;
+  }
+  const maxBytes = Math.min(Math.max(Number(input.maxBytes || 256 * 1024), 1), 1024 * 1024);
+  const maxChars = Math.min(Math.max(Number(input.maxChars || 20000), 1), 100000);
+  const { fullPath, relativePath } = resolveWorkspaceFilePath(context.workspaceDir, relativePathInput);
+  assertAgentFileReadAllowed(relativePath);
+  const stat = await fs.stat(fullPath);
+  if (!stat.isFile()) {
+    const error = new Error('Workspace file path is not a file');
+    error.status = 400;
+    throw error;
+  }
+  if (stat.size > maxBytes) {
+    const error = new Error(`Workspace file is too large to read: ${stat.size} bytes > ${maxBytes} bytes`);
+    error.status = 413;
+    error.code = 'FILE_TOO_LARGE';
+    throw error;
+  }
+  const buffer = await fs.readFile(fullPath);
+  const hasNul = buffer.includes(0);
+  const text = buffer.toString('utf-8');
+  return {
+    ok: true,
+    relativePath,
+    updatedAt: stat.mtime.toISOString(),
+    size: stat.size,
+    content: hasNul ? '' : text.slice(0, maxChars),
+    encoding: hasNul ? 'binary' : 'utf-8',
+    truncated: !hasNul && text.length > maxChars,
+    binary: hasNul,
+  };
+}
+
+async function createAgentWorkflowDraft(context, input = {}) {
+  const normalized = normalizeAgentWorkflowDraftInput(input);
+  const draftId = safeAgentId(input.draftId, 'draft');
+  const draft = await writeAgentDraft(context.workspaceDir, {
+    id: draftId,
+    workspaceId: context.workspaceId,
+    workspaceDir: context.workspaceDir,
+    name: normalized.name,
+    relativePath: normalized.relativePath,
+    description: normalized.description,
+    workflow: normalized.workflow,
+    taskDefinitions: normalized.taskDefinitions,
+    validation: validateAgentWorkflowDraftShape(normalized),
+    saved: null,
+    run: null,
+  });
+  return agentDraftPublic(draft);
+}
+
+async function cloneWorkspaceWorkflowToDraft(context, input = {}) {
+  const relativePath = input.relativePath || input.sourceRelativePath || input.path || '';
+  if (!relativePath) {
+    const error = new Error('relativePath is required');
+    error.status = 400;
+    throw error;
+  }
+  const source = await readWorkspaceWorkflowForAgent(context, {
+    relativePath,
+    includeCode: input.includeCode !== false,
+    maxCodeChars: input.maxCodeChars || 12000,
+  });
+  const draft = await createAgentWorkflowDraft(context, {
+    draftId: input.draftId,
+    name: input.name || source.workflow.name,
+    relativePath: input.draftRelativePath || input.targetRelativePath || source.relativePath,
+    description: input.description || `Draft cloned from ${source.relativePath}.`,
+    nodes: source.workflow.nodes,
+    edges: source.workflow.edges,
+    taskDefinitions: source.taskDefinitions || [],
+  });
+  return {
+    ...draft,
+    source: {
+      relativePath: source.relativePath,
+      updatedAt: source.updatedAt,
+      size: source.size,
+    },
+  };
+}
+
+function hasOwnValue(value, key) {
+  return Boolean(value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key));
+}
+
+async function updateAgentWorkflowDraft(context, draftId, input = {}) {
+  const current = await loadAgentDraft(context.workspaceDir, draftId);
+  const workflowInput = input.workflow && typeof input.workflow === 'object' && !Array.isArray(input.workflow)
+    ? input.workflow
+    : input;
+  const merged = {
+    name: hasOwnValue(workflowInput, 'name') ? workflowInput.name : (current.workflow?.name || current.name),
+    relativePath: hasOwnValue(input, 'relativePath')
+      ? input.relativePath
+      : (hasOwnValue(workflowInput, 'relativePath') ? workflowInput.relativePath : current.relativePath),
+    description: hasOwnValue(input, 'description')
+      ? input.description
+      : (hasOwnValue(workflowInput, 'description') ? workflowInput.description : current.description),
+    nodes: hasOwnValue(workflowInput, 'nodes') ? workflowInput.nodes : (current.workflow?.nodes || []),
+    edges: hasOwnValue(workflowInput, 'edges') ? workflowInput.edges : (current.workflow?.edges || []),
+    taskDefinitions: hasOwnValue(input, 'taskDefinitions')
+      ? input.taskDefinitions
+      : (
+        hasOwnValue(workflowInput, 'taskDefinitions')
+          ? workflowInput.taskDefinitions
+          : (
+            hasOwnValue(workflowInput, 'includedTasks')
+              ? workflowInput.includedTasks
+              : (current.taskDefinitions || [])
+          )
+      ),
+  };
+  const normalized = normalizeAgentWorkflowDraftInput(merged);
+  const draft = await writeAgentDraft(context.workspaceDir, {
+    ...current,
+    status: 'draft',
+    dismissedAt: null,
+    dismissedReason: '',
+    name: normalized.name,
+    relativePath: normalized.relativePath,
+    description: normalized.description,
+    workflow: normalized.workflow,
+    taskDefinitions: normalized.taskDefinitions,
+    validation: validateAgentWorkflowDraftShape(normalized),
+    saved: null,
+    run: null,
+    revision: Number(current.revision || 1) + 1,
+    updatedBy: 'workspace_agent',
+  });
+  return agentDraftPublic(draft);
+}
+
+function validateAgentWorkflowDraftShape(draft) {
+  const workflow = draft.workflow || {};
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const edges = Array.isArray(workflow.edges) ? workflow.edges : [];
+  const errors = [];
+  const warnings = [];
+  const nodeIds = new Set();
+
+  if (!String(workflow.name || draft.name || '').trim()) {
+    errors.push('Workflow name is required.');
+  }
+  if (nodes.length === 0) {
+    errors.push('At least one task node is required.');
+  }
+
+  for (const node of nodes) {
+    if (!node.id) {
+      errors.push('Every node needs an id.');
+      continue;
+    }
+    if (nodeIds.has(node.id)) {
+      errors.push(`Duplicate node id: ${node.id}`);
+    }
+    nodeIds.add(node.id);
+    if (!node.data?.label) {
+      warnings.push(`Node ${node.id} has no label.`);
+    }
+    if (node.data?.category === 'workspace') {
+      if (!node.data?.taskPath) {
+        errors.push(`Workspace node ${node.id} needs taskPath.`);
+      }
+      if (!node.data?.functionName) {
+        errors.push(`Workspace node ${node.id} needs functionName.`);
+      }
+    }
+    if (node.data?.category === 'builtin' && !node.data?.taskRef) {
+      errors.push(`Builtin node ${node.id} needs taskRef.`);
+    }
+  }
+
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.source)) {
+      errors.push(`Edge ${edge.id || `${edge.source}->${edge.target}`} has unknown source ${edge.source}.`);
+    }
+    if (!nodeIds.has(edge.target)) {
+      errors.push(`Edge ${edge.id || `${edge.source}->${edge.target}`} has unknown target ${edge.target}.`);
+    }
+  }
+
+  const taskDefinitions = normalizeAgentTaskDefinitions(draft.taskDefinitions || []);
+  for (const definition of taskDefinitions) {
+    errors.push(...validateAgentTaskDefinitionCode(definition));
+  }
+  const definitions = new Set(taskDefinitions.map((definition) => taskDefinitionKey(definition.relativePath, definition.functionName)));
+  for (const node of nodes) {
+    if (node.data?.category !== 'workspace') continue;
+    if (!node.data.taskPath) {
+      continue;
+    }
+    const key = taskDefinitionKey(node.data.taskPath, node.data.functionName);
+    if (!definitions.has(key)) {
+      warnings.push(`Workspace node ${node.id} references ${node.data.taskPath} without an inline task definition; an existing workspace task must provide it.`);
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    taskDefinitionCount: taskDefinitions.length,
+    validatedAt: new Date().toISOString(),
+  };
+}
+
+function agentDraftPublic(draft) {
+  return {
+    id: draft.id,
+    status: draft.status || 'draft',
+    revision: draft.revision || 1,
+    name: draft.name || draft.workflow?.name,
+    relativePath: draft.relativePath,
+    description: draft.description || '',
+    workflow: draft.workflow,
+    taskDefinitions: draft.taskDefinitions || [],
+    validation: draft.validation || null,
+    saved: draft.saved || null,
+    run: draft.run || null,
+    fixContext: draft.fixContext || null,
+    dismissedAt: draft.dismissedAt || null,
+    dismissedReason: draft.dismissedReason || '',
+    createdAt: draft.createdAt,
+    updatedAt: draft.updatedAt,
+  };
+}
+
+async function validateAgentWorkflowDraft(context, draftId) {
+  const draft = await loadAgentDraft(context.workspaceDir, draftId);
+  draft.validation = validateAgentWorkflowDraftShape(draft);
+  await writeAgentDraft(context.workspaceDir, draft);
+  return agentDraftPublic(draft);
+}
+
+async function dismissAgentWorkflowDraft(context, draftId, options = {}) {
+  const draft = await loadAgentDraft(context.workspaceDir, draftId);
+  draft.status = 'dismissed';
+  draft.dismissedAt = new Date().toISOString();
+  draft.dismissedReason = String(options.reason || '').slice(0, 500);
+  await writeAgentDraft(context.workspaceDir, draft);
+  return agentDraftPublic(draft);
+}
+
+async function saveAgentWorkflowDraft(context, draftId, options = {}) {
+  if (!options.confirmed) {
+    const error = new Error('Confirmation required before saving a workflow draft');
+    error.status = 409;
+    error.code = 'CONFIRMATION_REQUIRED';
+    throw error;
+  }
+
+  const draft = await loadAgentDraft(context.workspaceDir, draftId);
+  draft.validation = validateAgentWorkflowDraftShape(draft);
+  if (!draft.validation.ok) {
+    const error = new Error(`Draft is invalid: ${draft.validation.errors.join('; ')}`);
+    error.status = 400;
+    throw error;
+  }
+
+  const importResult = await importTaskDefinitions(context.workspaceDir, draft.taskDefinitions || [], draft.workflow?.name || draft.name);
+  const taskPathMap = importResult.taskPathMap || new Map();
+  const workflowNodes = (draft.workflow.nodes || []).map((node) => stripNodeTaskCode(node, context.workspaceDir));
+  const hydratedNodes = await hydrateWorkspaceWorkflowNodes(
+    workflowNodes,
+    context.workspaceDir,
+    draft.taskDefinitions || [],
+    taskPathMap,
+  );
+  const strippedHydrated = hydratedNodes.map((node) => stripNodeTaskCode(node, context.workspaceDir));
+  const workflowName = draft.workflow?.name || draft.name || 'Agent Workflow';
+  const { relativePath, fullPath } = resolveWorkflowFile(context.workspaceDir, options.relativePath || draft.relativePath, workflowName);
+  if (await fileExists(fullPath) && draft.saved?.relativePath !== relativePath && options.overwrite !== true) {
+    const error = new Error(`Workflow already exists: ${relativePath}`);
+    error.status = 409;
+    error.code = 'WORKFLOW_EXISTS';
+    throw error;
+  }
+  const workflowId = options.workflowId || draft.saved?.workflowId || uuidv4();
+  const payload = {
+    schema: 'maze-playground-workflow',
+    version: 3,
+    savedAt: new Date().toISOString(),
+    workflow: {
+      name: workflowName,
+      sourceWorkflowId: workflowId,
+      nodes: strippedHydrated,
+      edges: draft.workflow.edges || [],
+    },
+  };
+
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  await fs.writeFile(fullPath, JSON.stringify(payload, null, 2), 'utf-8');
+  const manifest = await recordWorkspaceMutation(context.workspaceDir, 'agent_workflow_saved', {
+    path: relativePath,
+    draft_id: draft.id,
+    name: workflowName,
+    imported_task_count: importResult.imported?.length || 0,
+  });
+
+  const workflow = {
+    id: workflowId,
+    name: workflowName,
+    mazeWorkflowId: draft.saved?.mazeWorkflowId || null,
+    nodes: hydratedNodes,
+    edges: draft.workflow.edges || [],
+    createdAt: draft.saved?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: 'saved',
+    workspaceDir: context.workspaceDir,
+    workspaceId: context.workspaceId,
+    relativePath,
+  };
+  workflows.set(workflowId, workflow);
+
+  draft.saved = {
+    workflowId,
+    relativePath,
+    savedAt: new Date().toISOString(),
+    workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    importedTaskDefinitions: {
+      imported: importResult.imported || [],
+      skipped: importResult.skipped || [],
+      remapped: importResult.remapped || [],
+    },
+  };
+  draft.workflow = {
+    ...draft.workflow,
+    nodes: hydratedNodes,
+  };
+  await writeAgentDraft(context.workspaceDir, draft);
+
+  return {
+    draft: agentDraftPublic(draft),
+    workflow,
+    workspaceId: manifest.workspace_id,
+    workspaceDir: context.workspaceDir,
+    workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    relativePath,
+  };
+}
+
+async function runAgentWorkflowDraft(context, draftId, options = {}) {
+  if (!options.confirmed) {
+    const error = new Error('Confirmation required before running a workflow draft');
+    error.status = 409;
+    error.code = 'CONFIRMATION_REQUIRED';
+    throw error;
+  }
+  const saved = await saveAgentWorkflowDraft(context, draftId, { ...options, confirmed: true });
+  const workflow = saved.workflow;
+  const workflowRunId = uuidv4();
+  const runSnapshot = createStaticRunSnapshot({
+    runId: workflowRunId,
+    workflow,
+    workspaceDir: context.workspaceDir,
+    workspaceContext: context,
+  });
+  await saveStaticRun(context.workspaceDir, runSnapshot);
+
+  workflow.status = 'running';
+  workflow.activeRunId = workflowRunId;
+  workflows.set(workflow.id, workflow);
+
+  await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+    type: 'workflow_started',
+    data: {
+      workflow_id: workflow.id,
+      workflow_run_id: workflowRunId,
+      workspace_id: context.workspaceId,
+      workspace_manifest_version: context.workspaceManifestVersion,
+      source: 'workspace_agent',
+      draft_id: draftId,
+    },
+    timestamp: new Date().toISOString(),
+  });
+
+  (async () => {
+    try {
+      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+        type: 'building',
+        data: { message: 'Building workflow from Workspace Agent draft...' },
+        timestamp: new Date().toISOString(),
+      });
+      const result = await callPython(
+        'run_workflow',
+        {
+          workflowId: workflow.id,
+          staticRunId: workflowRunId,
+          workspaceId: context.workspaceId,
+          workspaceDir: context.workspaceDir,
+          workspaceManifestVersion: context.workspaceManifestVersion,
+          nodes: workflow.nodes,
+          edges: workflow.edges,
+        },
+        async (progress) => {
+          await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+            ...progress,
+            timestamp: new Date().toISOString(),
+          });
+        },
+      );
+
+      if (!result.success) {
+        workflow.status = 'failed';
+        workflow.error = compactAgentDiagnosticText(result.error || 'Workflow failed', 2000);
+        workflows.set(workflow.id, workflow);
+        const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
+        if (failedDraft) {
+          failedDraft.run = {
+            ...(failedDraft.run || {}),
+            runId: workflowRunId,
+            workflowId: workflow.id,
+            status: 'failed',
+            error: workflow.error,
+            finishedAt: new Date().toISOString(),
+          };
+          await writeAgentDraft(context.workspaceDir, failedDraft);
+        }
+        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+          type: 'workflow_failed',
+          data: {
+            error: workflow.error,
+            traceback: result.traceback,
+          },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const latestRunAfterPython = await loadStaticRun(context.workspaceDir, workflowRunId).catch(() => null);
+      if (latestRunAfterPython?.status === 'failed') {
+        workflow.status = 'failed';
+        workflow.error = compactAgentDiagnosticText(latestRunAfterPython.error || 'Workflow task failed', 2000);
+        workflow.lastRunId = workflowRunId;
+        workflow.mazeRunId = result.mazeRunId;
+        workflows.set(workflow.id, workflow);
+        const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
+        if (failedDraft) {
+          failedDraft.run = {
+            ...(failedDraft.run || {}),
+            runId: workflowRunId,
+            workflowId: workflow.id,
+            status: 'failed',
+            error: workflow.error,
+            finishedAt: new Date().toISOString(),
+            mazeRunId: result.mazeRunId || null,
+          };
+          await writeAgentDraft(context.workspaceDir, failedDraft);
+        }
+        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+          type: 'workflow_failed',
+          data: {
+            error: workflow.error,
+            traceback: result.traceback,
+          },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      workflow.status = 'completed';
+      workflow.results = result.results;
+      workflow.lastRunId = workflowRunId;
+      workflow.mazeRunId = result.mazeRunId;
+      workflows.set(workflow.id, workflow);
+      const completedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
+      if (completedDraft) {
+        completedDraft.run = {
+          ...(completedDraft.run || {}),
+          runId: workflowRunId,
+          workflowId: workflow.id,
+          status: 'completed',
+          finishedAt: new Date().toISOString(),
+          mazeRunId: result.mazeRunId || null,
+        };
+        await writeAgentDraft(context.workspaceDir, completedDraft);
+      }
+
+      if (result.mazeRunId) {
+        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+          type: 'maze_run_created',
+          data: { maze_run_id: result.mazeRunId },
+          timestamp: new Date().toISOString(),
+        });
+      }
+      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+        type: 'workflow_completed',
+        data: { results: result.results },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      workflow.status = 'failed';
+      workflow.error = error.message;
+      workflows.set(workflow.id, workflow);
+      const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
+      if (failedDraft) {
+        failedDraft.run = {
+          ...(failedDraft.run || {}),
+          runId: workflowRunId,
+          workflowId: workflow.id,
+          status: 'failed',
+          error: error.message,
+          finishedAt: new Date().toISOString(),
+        };
+        await writeAgentDraft(context.workspaceDir, failedDraft);
+      }
+      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
+        type: 'workflow_failed',
+        data: { error: error.message },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  })();
+
+  const draft = await loadAgentDraft(context.workspaceDir, draftId);
+  draft.run = {
+    runId: workflowRunId,
+    workflowId: workflow.id,
+    startedAt: new Date().toISOString(),
+    status: 'running',
+  };
+  await writeAgentDraft(context.workspaceDir, draft);
+
+  return {
+    draft: agentDraftPublic(draft),
+    workflow,
+    run: runSnapshot,
+    runId: workflowRunId,
+    workflowId: workflow.id,
+    workspaceId: context.workspaceId,
+    workspaceDir: context.workspaceDir,
+  };
+}
+
+async function appendAgentRunEvent(context, run, event) {
+  const nextSeq = Number(run.lastSeq || 0) + 1;
+  const clean = redactSecrets({
+    ...event,
+    seq: nextSeq,
+    timestamp: event.timestamp || new Date().toISOString(),
+  });
+  run.lastSeq = nextSeq;
+  run.updatedAt = clean.timestamp;
+  run.events = Number(run.events || 0) + 1;
+  await fs.mkdir(agentRunsDir(context.workspaceDir), { recursive: true });
+  await fs.appendFile(agentRunEventsPath(context.workspaceDir, run.id), `${JSON.stringify(clean)}\n`, 'utf-8');
+  await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
+  broadcastAgentRunEvent(context.workspaceDir, run.id, clean);
+  return clean;
+}
+
+function agentRunSseKey(workspaceDir, runId) {
+  return `${workspaceDir}::${safeAgentId(runId, 'agent-run')}`;
+}
+
+function sendAgentSse(res, event) {
+  res.write(`id: ${event.seq || Date.now()}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function broadcastAgentRunEvent(workspaceDir, runId, event) {
+  const clients = agentRunSseClients.get(agentRunSseKey(workspaceDir, runId));
+  if (!clients) return;
+  for (const [res, client] of clients.entries()) {
+    try {
+      if (Number(event.seq || 0) <= Number(client.lastSeq || 0)) {
+        continue;
+      }
+      sendAgentSse(res, event);
+      client.lastSeq = Number(event.seq || client.lastSeq || 0);
+    } catch {
+      clients.delete(res);
+    }
+  }
+  if (clients.size === 0) {
+    agentRunSseClients.delete(agentRunSseKey(workspaceDir, runId));
+  }
+}
+
+function isAgentRunTerminal(status) {
+  return ['succeeded', 'failed', 'canceled', 'interrupted'].includes(String(status || ''));
+}
+
+function agentRunKey(workspaceDir, runId) {
+  return `${workspaceDir}::${safeAgentId(runId, 'agent-run')}`;
+}
+
+function createAgentCanceledError(reason = 'Workspace Agent run was canceled') {
+  const error = new Error(reason);
+  error.code = 'AGENT_RUN_CANCELED';
+  error.status = 499;
+  return error;
+}
+
+async function latestAgentRun(workspaceDir, runId) {
+  return readJsonFile(agentRunPath(workspaceDir, runId), null);
+}
+
+async function assertAgentRunNotCanceled(context, run, signal) {
+  if (signal?.aborted) {
+    throw createAgentCanceledError();
+  }
+  const latest = await latestAgentRun(context.workspaceDir, run.id);
+  if (latest?.status === 'canceled') {
+    throw createAgentCanceledError(latest.cancelReason || 'Workspace Agent run was canceled');
+  }
+}
+
+async function cancelAgentRun(context, runId, reason = 'Canceled by user') {
+  const run = await latestAgentRun(context.workspaceDir, runId);
+  if (!run) {
+    const error = new Error('Agent run not found');
+    error.status = 404;
+    throw error;
+  }
+
+  const key = agentRunKey(context.workspaceDir, runId);
+  activeAgentRuns.get(key)?.controller?.abort();
+
+  if (!isAgentRunTerminal(run.status)) {
+    run.status = 'canceled';
+    run.cancelReason = String(reason || 'Canceled by user').slice(0, 500);
+    run.canceledAt = new Date().toISOString();
+    run.updatedAt = run.canceledAt;
+    await writeJsonAtomic(agentRunPath(context.workspaceDir, runId), redactSecrets(run));
+    await appendAgentRunEvent(context, run, {
+      type: 'canceled',
+      reason: run.cancelReason,
+      sessionId: run.sessionId,
+      runId: run.id,
+    });
+    await appendAgentRunEvent(context, run, {
+      type: 'finish',
+      reason: 'canceled',
+      sessionId: run.sessionId,
+      runId: run.id,
+    });
+    if (run.sessionId) {
+      const session = await loadAgentSession(context.workspaceDir, run.sessionId).catch(() => null);
+      if (session) {
+        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{
+          type: 'text',
+          text: `Canceled: ${run.cancelReason}`,
+        }]);
+      }
+    }
+  }
+
+  return latestAgentRun(context.workspaceDir, runId);
+}
+
+async function markInterruptedAgentRunsOnStartup() {
+  let interrupted = 0;
+  for (const workspaceDir of await listServiceWorkspaceDirs()) {
+    const entries = await fs.readdir(agentRunsDir(workspaceDir), { withFileTypes: true }).catch((error) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.events.json')) continue;
+      const runId = entry.name.replace(/\.json$/, '');
+      const run = await latestAgentRun(workspaceDir, runId);
+      if (!run || isAgentRunTerminal(run.status)) continue;
+      run.status = 'interrupted';
+      run.error = run.error || 'Workspace Agent run was interrupted by a backend restart';
+      run.interruptedAt = new Date().toISOString();
+      run.updatedAt = run.interruptedAt;
+      await writeJsonAtomic(agentRunPath(workspaceDir, runId), redactSecrets(run));
+      await appendAgentRunEvent({ workspaceDir }, run, {
+        type: 'interrupted',
+        reason: run.error,
+        sessionId: run.sessionId,
+        runId: run.id,
+      });
+      await appendAgentRunEvent({ workspaceDir }, run, {
+        type: 'finish',
+        reason: 'interrupted',
+        sessionId: run.sessionId,
+        runId: run.id,
+      });
+      interrupted += 1;
+    }
+  }
+  return interrupted;
+}
+
+async function loadAgentRunEvents(workspaceDir, runId, after = null) {
+  const raw = await fs.readFile(agentRunEventsPath(workspaceDir, runId), 'utf-8').catch((error) => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  });
+  return raw
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((event) => after === null || Number(event.seq || 0) > Number(after));
+}
+
+function agentToolDefinitions() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'list_workspace_items',
+        description: 'List workspace workflows, tasks, skills, and files with compact metadata.',
+        parameters: {
+          type: 'object',
+          properties: {
+            include: {
+              type: 'array',
+              items: { type: 'string', enum: ['workflows', 'tasks', 'skills', 'files'] },
+              description: 'Which item types to include. Defaults to all.',
+            },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'list_workspace_files',
+        description: 'List files under workspace/files. Use this before reading user data files.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional path inside workspace/files.' },
+            maxEntries: { type: 'number', description: 'Maximum entries to return, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_workspace_file',
+        description: 'Read a text-like file under workspace/files with size and content caps.',
+        parameters: {
+          type: 'object',
+          required: ['relativePath'],
+          properties: {
+            relativePath: { type: 'string', description: 'A path inside workspace/files.' },
+            maxBytes: { type: 'number', description: 'Maximum file size to read, capped by the server.' },
+            maxChars: { type: 'number', description: 'Maximum content chars to return, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_current_workflow',
+        description: 'Read the workflow currently open in the Maze Playground UI.',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_workspace_workflow',
+        description: 'Read a saved workspace workflow by relativePath and return hydrated nodes, edges, and task definitions.',
+        parameters: {
+          type: 'object',
+          required: ['relativePath'],
+          properties: {
+            relativePath: { type: 'string', description: 'A workflows/*.json path.' },
+            includeCode: { type: 'boolean', description: 'Whether to include task code snippets. Defaults to true.' },
+            maxCodeChars: { type: 'number', description: 'Maximum task code chars per task, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_workspace_task',
+        description: 'Read a workspace task Python file by relativePath.',
+        parameters: {
+          type: 'object',
+          required: ['relativePath'],
+          properties: {
+            relativePath: { type: 'string', description: 'A tasks/*.py path.' },
+            maxChars: { type: 'number', description: 'Maximum code chars, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'create_workflow_draft',
+        description: 'Create a workflow draft immediately when the user asks for a new workflow or agrees to proceed with a proposed workflow design. This does not overwrite saved workflows.',
+        parameters: {
+          type: 'object',
+          required: ['name', 'nodes', 'edges'],
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            relativePath: { type: 'string', description: 'Optional workflows/*.json path.' },
+            nodes: { type: 'array', items: { type: 'object' } },
+            edges: { type: 'array', items: { type: 'object' } },
+            taskDefinitions: {
+              type: 'array',
+              items: { type: 'object' },
+              description: 'Optional workspace task files with relativePath, functionName, code, inputs, outputs, resources.',
+            },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'clone_workflow_to_draft',
+        description: 'Clone an existing saved workspace workflow into a draft so it can be safely revised without overwriting the source.',
+        parameters: {
+          type: 'object',
+          required: ['relativePath'],
+          properties: {
+            relativePath: { type: 'string', description: 'Source workflows/*.json path.' },
+            name: { type: 'string', description: 'Optional draft workflow name.' },
+            description: { type: 'string' },
+            draftRelativePath: { type: 'string', description: 'Optional draft target workflows/*.json path.' },
+            draftId: { type: 'string' },
+            includeCode: { type: 'boolean', description: 'Whether to include task code snippets. Defaults to true.' },
+            maxCodeChars: { type: 'number', description: 'Maximum task code chars per task, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'update_workflow_draft',
+        description: 'Update an existing workflow draft in place when the user asks to iterate on a prior draft.',
+        parameters: {
+          type: 'object',
+          required: ['draftId'],
+          properties: {
+            draftId: { type: 'string' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            relativePath: { type: 'string', description: 'Optional workflows/*.json path.' },
+            nodes: { type: 'array', items: { type: 'object' } },
+            edges: { type: 'array', items: { type: 'object' } },
+            taskDefinitions: {
+              type: 'array',
+              items: { type: 'object' },
+              description: 'Optional replacement workspace task files with relativePath, functionName, code, inputs, outputs, resources.',
+            },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'validate_workflow_draft',
+        description: 'Validate a workflow draft structure and task references.',
+        parameters: {
+          type: 'object',
+          required: ['draftId'],
+          properties: {
+            draftId: { type: 'string' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'save_workflow_draft',
+        description: 'Save a workflow draft after explicit user confirmation.',
+        parameters: {
+          type: 'object',
+          required: ['draftId', 'confirmed'],
+          properties: {
+            draftId: { type: 'string' },
+            confirmed: { type: 'boolean' },
+            relativePath: { type: 'string' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'run_workflow_draft',
+        description: 'Run a workflow draft after explicit user confirmation.',
+        parameters: {
+          type: 'object',
+          required: ['draftId', 'confirmed'],
+          properties: {
+            draftId: { type: 'string' },
+            confirmed: { type: 'boolean' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'inspect_recent_run_errors',
+        description: 'Inspect recent static or dynamic workflow run failures.',
+        parameters: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'inspect_workflow_run',
+        description: 'Inspect one workflow run by runId, including status, nodes, recent events, artifacts, final result, and guidance.',
+        parameters: {
+          type: 'object',
+          required: ['runId'],
+          properties: {
+            runId: { type: 'string', description: 'The workflow run id to inspect.' },
+            kind: {
+              type: 'string',
+              enum: ['auto', 'static', 'dynamic'],
+              description: 'Run storage type. Defaults to auto.',
+            },
+            eventLimit: { type: 'number', description: 'Maximum recent events to return, capped by the server.' },
+            nodeLimit: { type: 'number', description: 'Maximum nodes to return, capped by the server.' },
+            artifactLimit: { type: 'number', description: 'Maximum artifacts to return, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'create_fix_draft_from_run',
+        description: 'Create a safe workflow draft for fixing a failed workflow run. This does not overwrite or run anything.',
+        parameters: {
+          type: 'object',
+          required: ['runId'],
+          properties: {
+            runId: { type: 'string', description: 'The failed static workflow run id.' },
+            workflowRelativePath: { type: 'string', description: 'Optional source workflows/*.json path if the run cannot be mapped automatically.' },
+            draftRelativePath: { type: 'string', description: 'Optional target workflows/*.json path for the fix draft.' },
+            name: { type: 'string', description: 'Optional draft workflow name.' },
+            maxCodeChars: { type: 'number', description: 'Maximum task code chars per related task, capped by the server.' },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'promote_run_artifact',
+        description: 'Copy an artifact from a static workflow run into workspace/files so it can be reused by later workflow drafts.',
+        parameters: {
+          type: 'object',
+          required: ['runId', 'path'],
+          properties: {
+            runId: { type: 'string', description: 'The static workflow run id that produced the artifact.' },
+            path: { type: 'string', description: 'Artifact path from inspect_workflow_run, for example reports/output.txt.' },
+            taskId: { type: 'string', description: 'Optional task id or node id that produced the artifact.' },
+            targetPath: { type: 'string', description: 'Optional target path under workspace/files. Defaults to artifact path.' },
+            overwrite: { type: 'boolean', description: 'Whether to overwrite an existing workspace file. Defaults to true.' },
+          },
+        },
+      },
+    },
+  ];
+}
+
+function compactAgentDiagnosticText(value, maxLength = 420) {
+  let text = '';
+  if (typeof value === 'string') {
+    text = value;
+  } else if (value !== undefined && value !== null) {
+    try {
+      text = JSON.stringify(redactSecrets(value));
+    } catch {
+      text = String(value);
+    }
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function agentIssueGuidance(issue) {
+  const text = compactAgentDiagnosticText(issue, 500);
+  const lower = text.toLowerCase();
+  let stage = 'runtime';
+  let suggestion = 'Inspect the failed node/event, fix the task code, inputs, resources, or environment, then rerun.';
+
+  if (lower.includes('api key') || lower.includes('unauthorized') || lower.includes('401')) {
+    stage = 'llm';
+    suggestion = 'Check the LLM base URL, API key, and model before rerunning.';
+  } else if (lower.includes('mcp') && (lower.includes('connection') || lower.includes('not found') || lower.includes('closed'))) {
+    stage = 'mcp';
+    suggestion = 'Test the MCP profile/server, verify command/url/cwd/env, and rerun after discovery succeeds.';
+  } else if (lower.includes('permission')) {
+    stage = 'permission';
+    suggestion = 'Review the requested permission target and either approve it or adjust the workflow/tool to use allowed paths.';
+  } else if (lower.includes('docker')) {
+    stage = 'sandbox';
+    suggestion = 'Use workspace_sandbox or connect a worker that reports docker_sandbox=true.';
+  } else if (lower.includes('timeout') || lower.includes('timed out')) {
+    stage = 'execution';
+    suggestion = 'Increase timeout, reduce max steps, or split the workflow into smaller tasks.';
+  } else if (lower.includes('no registered') || lower.includes('no alive') || lower.includes('insufficient')) {
+    stage = 'scheduler';
+    suggestion = 'Check Cluster resources and lower CPU/GPU requests or reconnect worker nodes.';
+  } else if (lower.includes('json') || lower.includes('parse')) {
+    stage = 'llm/tool';
+    suggestion = 'Inspect the raw LLM/tool output and make the prompt or schema stricter.';
+  } else if (lower.includes('modulenotfounderror') || lower.includes('no module named')) {
+    stage = 'dependency';
+    suggestion = 'Use an available dependency, vendor the code into a workspace task, or install the package in the runtime environment.';
+  } else if (lower.includes('filenotfounderror') || lower.includes('no such file or directory')) {
+    stage = 'filesystem';
+    suggestion = 'Use workspace-relative paths and ensure required files are created or uploaded before the run.';
+  }
+
+  return { stage, issue: text, suggestion };
+}
+
+function collectAgentRunIssues(run, nodes = [], events = []) {
+  const rawIssues = [];
+  if (run?.error) rawIssues.push(run.error);
+  if (run?.failure_reason) rawIssues.push(run.failure_reason);
+  if (run?.cancel_reason) rawIssues.push(run.cancel_reason);
+  if (run?.final_result?.error) rawIssues.push(run.final_result.error);
+  if (run?.final_result?.failure_reason) rawIssues.push(run.final_result.failure_reason);
+
+  nodes.forEach((node) => {
+    if (node?.error) rawIssues.push(node.error);
+    if (node?.last_error) rawIssues.push(node.last_error);
+    if (node?.pending_reason) rawIssues.push(node.pending_reason);
+  });
+
+  events.forEach((event) => {
+    const data = event?.data || event;
+    if ([
+      'agent_error',
+      'agent_skill_load_failed',
+      'agent_mcp_discovery_failed',
+      'agent_mcp_tool_call_finished',
+      'agent_permission_denied',
+      'task_exception',
+      'workflow_failed',
+    ].includes(event?.type)) {
+      rawIssues.push(data?.error || data?.result || data?.reason || data);
+    }
+  });
+
+  const byIssue = new Map();
+  rawIssues.forEach((issue) => {
+    const guidance = agentIssueGuidance(issue);
+    if (guidance.issue && !byIssue.has(guidance.issue)) {
+      byIssue.set(guidance.issue, guidance);
+    }
+  });
+  return Array.from(byIssue.values()).slice(0, 8);
+}
+
+function summarizeAgentRunNodes(run, limit = 12) {
+  const nodes = Object.values(run?.task_nodes || {});
+  return nodes.slice(0, limit).map((node) => ({
+    nodeId: node.node_id || node.id || node.task_id,
+    taskId: node.task_id || node.maze_task_id,
+    label: node.label || node.name || node.task_name,
+    status: node.status,
+    taskPath: node.task_path || node.taskPath,
+    functionName: node.function_name || node.functionName,
+    nodeIp: node.node_ip,
+    gpuId: node.gpu_id,
+    error: compactAgentDiagnosticText(node.error || node.last_error || node.pending_reason || '', 500),
+  }));
+}
+
+function summarizeAgentRunEvents(events = [], limit = 12) {
+  return events.slice(-limit).map((event) => {
+    const data = event?.data || {};
+    return {
+      seq: event.seq,
+      type: event.type,
+      timestamp: event.timestamp,
+      nodeId: data.node_id || data.nodeId,
+      taskId: data.task_id || data.maze_task_id,
+      tool: data.tool || data.tool_name || data.agent_tool,
+      status: data.status,
+      error: compactAgentDiagnosticText(data.error || data.result || data.reason || '', 420),
+    };
+  });
+}
+
+function buildAgentArtifactDownload(artifact, { kind, runId, workspaceId, workspaceDir, taskId, nodeId } = {}) {
+  const artifactPath = String(artifact?.path || artifact?.relative_path || artifact?.name || artifact?.filename || '').trim();
+  const sha256 = String(artifact?.sha256 || '').trim();
+  const download = {};
+
+  if (kind === 'static' && runId && artifactPath && (taskId || nodeId)) {
+    const params = new URLSearchParams({
+      taskId: String(taskId || nodeId),
+      path: artifactPath,
+    });
+    if (workspaceId) {
+      params.set('workspaceId', workspaceId);
+    } else if (workspaceDir) {
+      params.set('workspaceDir', workspaceDir);
+    }
+    download.staticRun = {
+      method: 'GET',
+      url: `/api/workflow-runs/static/${encodeURIComponent(runId)}/artifacts/download?${params.toString()}`,
+    };
+    download.url = download.staticRun.url;
+    download.kind = 'static-run';
+  }
+
+  if (/^[a-f0-9]{64}$/i.test(sha256)) {
+    download.cas = {
+      method: 'GET',
+      url: `/api/artifacts/sha256/${encodeURIComponent(sha256)}`,
+    };
+    if (!download.url) {
+      download.url = download.cas.url;
+      download.kind = 'cas';
+    }
+  }
+
+  return download.url ? download : null;
+}
+
+function findStaticRunArtifact(run, { taskId, artifactPath } = {}) {
+  const expectedTaskId = String(taskId || '').trim();
+  const expectedPath = String(artifactPath || '').trim();
+  if (!expectedPath) return null;
+
+  for (const node of Object.values(run?.task_nodes || {})) {
+    const taskMatches = !expectedTaskId || (
+      node.maze_task_id === expectedTaskId
+      || node.task_id === expectedTaskId
+      || node.node_id === expectedTaskId
+      || node.id === expectedTaskId
+    );
+    if (!taskMatches) continue;
+    const artifacts = [
+      ...(node.artifacts || []),
+      ...(node.file_manifest?.files || []),
+    ];
+    const artifact = artifacts.find((item) => (
+      item?.path === expectedPath
+      || item?.relative_path === expectedPath
+      || item?.name === expectedPath
+      || item?.filename === expectedPath
+    ));
+    if (artifact) {
+      return { node, artifact };
+    }
+  }
+
+  return null;
+}
+
+async function promoteArtifactIntoWorkspace(context, input = {}) {
+  const {
+    targetPath,
+    artifact = {},
+    runId,
+    taskId,
+    path: artifactPath,
+    sha256,
+    storagePath,
+    overwrite = true,
+  } = input || {};
+
+  let sourceSha = String(sha256 || artifact.sha256 || '').trim();
+  let sourceStoragePath = String(storagePath || artifact.storage_path || '').trim();
+  const sourceArtifactPath = String(artifactPath || artifact.path || artifact.name || sourceSha || '').trim();
+  const destinationPath = targetPath || sourceArtifactPath;
+
+  if (!destinationPath) {
+    const error = new Error('targetPath is required');
+    error.status = 400;
+    throw error;
+  }
+
+  const workspaceDir = context.workspaceDir;
+  if (!sourceStoragePath && runId && sourceArtifactPath) {
+    const run = await loadStaticRun(workspaceDir, runId);
+    const located = findStaticRunArtifact(run, {
+      taskId: taskId || artifact.taskId || artifact.task_id || artifact.producer_task_id || artifact.nodeId || artifact.node_id,
+      artifactPath: sourceArtifactPath,
+    });
+    const locatedArtifact = located?.artifact || null;
+    sourceStoragePath = String(locatedArtifact?.storage_path || '').trim();
+    if (!sourceSha) {
+      sourceSha = String(locatedArtifact?.sha256 || '').trim();
+    }
+    if (!sourceStoragePath && !sourceSha) {
+      const error = new Error('Static run artifact storage path not found');
+      error.status = 404;
+      throw error;
+    }
+  }
+
+  if (!sourceSha && !sourceStoragePath) {
+    const error = new Error('artifact sha256, storagePath, or static run artifact reference is required');
+    error.status = 400;
+    throw error;
+  }
+
+  const { fullPath, filesDir, relativePath } = resolveWorkspaceFilePath(workspaceDir, destinationPath);
+  if (!overwrite && await fileExists(fullPath)) {
+    const error = new Error(`Workspace file already exists: ${relativePath}`);
+    error.status = 409;
+    throw error;
+  }
+
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  if (sourceStoragePath) {
+    const resolvedStoragePath = path.resolve(sourceStoragePath);
+    const allowedRunRoots = [
+      path.resolve(workspaceDir, 'runs'),
+      path.resolve(workspaceDir, 'workflow_runs'),
+    ];
+    const allowed = allowedRunRoots.some((root) => (
+      resolvedStoragePath === root || resolvedStoragePath.startsWith(root + path.sep)
+    ));
+    if (!allowed) {
+      const error = new Error('Static artifact storage path is outside this workspace run directory');
+      error.status = 400;
+      throw error;
+    }
+    await fs.copyFile(resolvedStoragePath, fullPath);
+  } else {
+    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(sourceSha)}`);
+    if (!response.ok) {
+      const error = new Error(`Failed to download artifact: HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    await fs.writeFile(fullPath, data);
+  }
+
+  const file = await describeWorkspaceFile(filesDir, fullPath);
+  const manifest = await recordWorkspaceMutation(workspaceDir, 'artifact_promoted', {
+    path: file.relativePath,
+    runId: runId || artifact.run_id || null,
+    taskId: taskId || artifact.taskId || artifact.task_id || artifact.producer_task_id || null,
+    sha256: sourceSha || artifact.sha256 || null,
+  });
+
+  return {
+    success: true,
+    workspaceId: manifest.workspace_id,
+    workspaceDir,
+    workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+    file,
+  };
+}
+
+function summarizeAgentRunArtifacts(run, limit = 12, options = {}) {
+  const artifacts = [];
+  for (const node of Object.values(run?.task_nodes || {})) {
+    const nodeId = node.node_id || node.id || node.task_id;
+    const taskId = node.task_id || node.maze_task_id;
+    const addArtifact = (artifact, source) => {
+      if (!artifact || artifacts.length >= limit) return;
+      const artifactPath = artifact.path || artifact.relative_path || artifact.name || artifact.filename;
+      artifacts.push({
+        nodeId,
+        taskId,
+        source,
+        path: artifactPath,
+        sha256: artifact.sha256,
+        sizeBytes: artifact.size_bytes || artifact.sizeBytes || artifact.bytes,
+        contentType: artifact.content_type || artifact.contentType,
+        description: compactAgentDiagnosticText(artifact.description || artifact.summary || '', 240),
+        download: buildAgentArtifactDownload(artifact, {
+          kind: options.kind,
+          runId: options.runId || run?.run_id,
+          workspaceId: options.workspaceId || run?.workspace_id,
+          workspaceDir: options.workspaceDir,
+          taskId,
+          nodeId,
+        }),
+      });
+    };
+    for (const artifact of node?.artifacts || []) addArtifact(artifact, 'node.artifacts');
+    for (const artifact of node?.file_manifest?.files || []) addArtifact(artifact, 'file_manifest.files');
+  }
+  return artifacts;
+}
+
+function summarizeAgentFinalResult(run) {
+  const finalResult = run?.final_result;
+  if (!finalResult || typeof finalResult !== 'object') return null;
+  return {
+    status: finalResult.status,
+    stopReason: finalResult.stop_reason || finalResult.stopReason,
+    answer: compactAgentDiagnosticText(finalResult.answer || finalResult.output || '', 700),
+    error: compactAgentDiagnosticText(finalResult.error || finalResult.failure_reason || '', 700),
+  };
+}
+
+function inferAgentDiagnosticStatus(run, nodes = []) {
+  const status = String(run?.status || '').trim();
+  if (status === 'failed' || status === 'canceled' || status === 'cancelled' || status === 'timed_out') {
+    return status;
+  }
+  if (
+    run?.error ||
+    run?.failure_reason ||
+    run?.cancel_reason ||
+    nodes.some((node) => node?.status === 'failed' || node?.error || node?.last_error)
+  ) {
+    return 'failed';
+  }
+  return status || 'unknown';
+}
+
+async function buildStaticRunDiagnostic(context, summary, options = {}) {
+  const run = await loadStaticRun(context.workspaceDir, summary.run_id).catch(() => summary);
+  const events = await loadStaticRunEvents(context.workspaceDir, summary.run_id).catch(() => []);
+  const rawNodes = Object.values(run.task_nodes || {});
+  const nodes = summarizeAgentRunNodes(run, options.nodeLimit || 12);
+  const eventSummary = summarizeAgentRunEvents(events, options.eventLimit || 12);
+  const artifacts = summarizeAgentRunArtifacts(run, options.artifactLimit || 12, {
+    kind: 'static',
+    runId: run.run_id || summary.run_id,
+    workspaceId: run.workspace_id || summary.workspace_id || context.workspaceId,
+    workspaceDir: context.workspaceDir,
+  });
+  return {
+    kind: 'static',
+    runId: run.run_id || summary.run_id,
+    workflowId: run.workflow_id || summary.workflow_id,
+    workflowName: run.workflow_name || summary.workflow_name,
+    status: inferAgentDiagnosticStatus(run, rawNodes),
+    createdTime: run.created_time || summary.created_time,
+    updatedTime: run.updated_time || summary.updated_time,
+    finishedTime: run.finished_time || summary.finished_time,
+    taskCounts: run.task_counts || summary.task_counts || {},
+    error: compactAgentDiagnosticText(run.error || summary.error || '', 700),
+    finalResult: summarizeAgentFinalResult(run),
+    nodes,
+    recentEvents: eventSummary,
+    artifacts,
+    guidance: collectAgentRunIssues(run, rawNodes, events),
+  };
+}
+
+async function buildDynamicRunDiagnostic(summary, options = {}) {
+  let run = summary;
+  let events = [];
+  try {
+    const detail = await callMazeCore(`/dynamic_runs/${encodeURIComponent(summary.run_id)}`);
+    run = detail.run || summary;
+  } catch (error) {
+    run = { ...summary, detail_error: error.message };
+  }
+  try {
+    const payload = await callMazeCore(`/dynamic_runs/${encodeURIComponent(summary.run_id)}/events`);
+    events = payload.events || [];
+  } catch {
+    events = [];
+  }
+  const rawNodes = Object.values(run.task_nodes || {});
+  const nodes = summarizeAgentRunNodes(run, options.nodeLimit || 12);
+  const eventSummary = summarizeAgentRunEvents(events, options.eventLimit || 12);
+  const artifacts = summarizeAgentRunArtifacts(run, options.artifactLimit || 12, {
+    kind: 'dynamic',
+    runId: run.run_id || summary.run_id,
+  });
+  return {
+    kind: run.kind || run.run_type || 'dynamic',
+    runId: run.run_id || summary.run_id,
+    status: inferAgentDiagnosticStatus(run, rawNodes),
+    createdTime: run.created_time || summary.created_time,
+    updatedTime: run.updated_time || summary.updated_time,
+    finishedTime: run.finished_time || summary.finished_time,
+    finalResult: summarizeAgentFinalResult(run),
+    prompt: compactAgentDiagnosticText(run.final_result?.prompt || run.metadata?.prompt || '', 500),
+    answer: compactAgentDiagnosticText(run.final_result?.answer || '', 500),
+    error: compactAgentDiagnosticText(
+      run.error_summary || run.failure_reason || run.cancel_reason || run.detail_error || summary.error_summary || '',
+      700,
+    ),
+    nodes,
+    recentEvents: eventSummary,
+    artifacts,
+    guidance: collectAgentRunIssues(run, rawNodes, events),
+  };
+}
+
+async function inspectWorkflowRunForAgent(context, input = {}) {
+  const runId = String(input.runId || input.run_id || '').trim();
+  if (!runId) {
+    throw new Error('runId is required');
+  }
+  if (runId.includes('/') || runId.includes('\\')) {
+    throw new Error(`Invalid workflow run id: ${runId}`);
+  }
+
+  const kind = String(input.kind || 'auto').trim().toLowerCase() || 'auto';
+  if (!['auto', 'static', 'dynamic'].includes(kind)) {
+    throw new Error(`Unsupported workflow run kind: ${input.kind}`);
+  }
+
+  const options = {
+    eventLimit: Math.min(Math.max(Number(input.eventLimit || 12), 1), 50),
+    nodeLimit: Math.min(Math.max(Number(input.nodeLimit || 12), 1), 50),
+    artifactLimit: Math.min(Math.max(Number(input.artifactLimit || 12), 1), 50),
+  };
+
+  let staticError = null;
+  if (kind === 'auto' || kind === 'static') {
+    try {
+      const run = await loadStaticRun(context.workspaceDir, runId);
+      return { ok: true, run: await buildStaticRunDiagnostic(context, run, options) };
+    } catch (error) {
+      staticError = error;
+      if (kind === 'static') {
+        throw new Error(`Static workflow run not found: ${runId}`);
+      }
+    }
+  }
+
+  if (kind === 'auto' || kind === 'dynamic') {
+    try {
+      const detail = await callMazeCore(`/dynamic_runs/${encodeURIComponent(runId)}`);
+      return { ok: true, run: await buildDynamicRunDiagnostic(detail.run || { run_id: runId }, options) };
+    } catch (dynamicError) {
+      try {
+        const detail = await callMazeCore(`/runs/${encodeURIComponent(runId)}`);
+        return { ok: true, run: await buildDynamicRunDiagnostic(detail.run || { run_id: runId }, options) };
+      } catch (coreError) {
+        if (kind === 'dynamic') {
+          throw new Error(`Dynamic workflow run not found: ${runId}`);
+        }
+        const detail = compactAgentDiagnosticText(coreError.message || dynamicError.message || staticError?.message || '', 360);
+        throw new Error(`Workflow run not found: ${runId}${detail ? ` (${detail})` : ''}`);
+      }
+    }
+  }
+
+  throw new Error(`Workflow run not found: ${runId}`);
+}
+
+async function findWorkspaceWorkflowByIdOrPath(context, { workflowId, workflowRelativePath, workflowName } = {}) {
+  if (workflowRelativePath) {
+    const source = await readWorkspaceWorkflowForAgent(context, {
+      relativePath: workflowRelativePath,
+      includeCode: true,
+      maxCodeChars: 12000,
+    });
+    return source;
+  }
+
+  const files = await listWorkflowFiles(path.join(context.workspaceDir, 'workflows'));
+  for (const filePath of files) {
+    try {
+      const raw = await fs.readFile(filePath, 'utf-8');
+      const payload = JSON.parse(raw);
+      const workflow = payload?.workflow || payload;
+      const sourceWorkflowId = workflow?.sourceWorkflowId || workflow?.id || payload?.sourceWorkflowId || payload?.workflowId;
+      const relativePath = toPosixPath(path.relative(context.workspaceDir, filePath));
+      if (workflowId && sourceWorkflowId === workflowId) {
+        return readWorkspaceWorkflowForAgent(context, {
+          relativePath,
+          includeCode: true,
+          maxCodeChars: 12000,
+        });
+      }
+    } catch {
+      // Ignore malformed workflow files while searching for the source run workflow.
+    }
+  }
+
+  if (workflowName) {
+    for (const filePath of files) {
+      try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        const payload = JSON.parse(raw);
+        const workflow = normalizeWorkflowPayload(payload);
+        if (workflow.name === workflowName) {
+          return readWorkspaceWorkflowForAgent(context, {
+            relativePath: toPosixPath(path.relative(context.workspaceDir, filePath)),
+            includeCode: true,
+            maxCodeChars: 12000,
+          });
+        }
+      } catch {
+        // Ignore malformed workflow files while searching by name.
+      }
+    }
+  }
+
+  return null;
+}
+
+function failedRunNodes(run) {
+  return Object.values(run?.task_nodes || {})
+    .filter((node) => node?.status === 'failed' || node?.error || node?.last_error)
+    .map((node) => ({
+      nodeId: node.node_id || node.id || node.task_id,
+      taskId: node.task_id || node.maze_task_id,
+      label: node.label || node.name || node.task_name,
+      taskPath: node.task_path || node.taskPath,
+      functionName: node.function_name || node.functionName,
+      error: compactAgentDiagnosticText(node.error || node.last_error || '', 1000),
+    }));
+}
+
+async function buildFixTaskContext(context, source, failedNodes, maxCodeChars) {
+  const byKey = new Map();
+  for (const definition of source?.taskDefinitions || []) {
+    const key = taskDefinitionKey(definition.relativePath, definition.functionName);
+    byKey.set(key, {
+      relativePath: definition.relativePath,
+      functionName: definition.functionName,
+      displayName: definition.displayName,
+      inputs: definition.inputs || [],
+      outputs: definition.outputs || [],
+      resources: definition.resources || {},
+      code: String(definition.code || '').slice(0, maxCodeChars),
+      truncated: String(definition.code || '').length > maxCodeChars,
+    });
+  }
+
+  const related = [];
+  for (const failed of failedNodes) {
+    if (!failed.taskPath) continue;
+    const key = taskDefinitionKey(failed.taskPath, failed.functionName || '');
+    let definition = byKey.get(key) || Array.from(byKey.values()).find((item) => item.relativePath === failed.taskPath);
+    if (!definition) {
+      try {
+        const task = await readWorkspaceTaskForAgent(context, {
+          relativePath: failed.taskPath,
+          maxChars: maxCodeChars,
+        });
+        definition = {
+          relativePath: task.relativePath,
+          functionName: failed.functionName,
+          code: task.code,
+          truncated: task.truncated,
+        };
+      } catch (error) {
+        definition = {
+          relativePath: failed.taskPath,
+          functionName: failed.functionName,
+          error: compactAgentDiagnosticText(error.message || error, 500),
+        };
+      }
+    }
+    related.push({
+      failedNode: failed,
+      task: definition,
+    });
+  }
+  return related;
+}
+
+async function createFixDraftFromRunForAgent(context, input = {}) {
+  const runId = String(input.runId || input.run_id || '').trim();
+  if (!runId) {
+    throw new Error('runId is required');
+  }
+  if (runId.includes('/') || runId.includes('\\')) {
+    throw new Error(`Invalid workflow run id: ${runId}`);
+  }
+
+  const maxCodeChars = Math.min(Math.max(Number(input.maxCodeChars || 12000), 0), 50000);
+  const run = await loadStaticRun(context.workspaceDir, runId).catch((error) => {
+    const wrapped = new Error(`Static workflow run not found: ${runId}`);
+    wrapped.status = error.code === 'ENOENT' ? 404 : 500;
+    throw wrapped;
+  });
+  const events = await loadStaticRunEvents(context.workspaceDir, runId).catch(() => []);
+  const rawNodes = Object.values(run.task_nodes || {});
+  const failedNodes = failedRunNodes(run);
+  const source = await findWorkspaceWorkflowByIdOrPath(context, {
+    workflowId: run.workflow_id,
+    workflowRelativePath: input.workflowRelativePath,
+    workflowName: run.workflow_name,
+  });
+  if (!source) {
+    const error = new Error('Could not find the saved workflow for this run. Pass workflowRelativePath to create a fix draft.');
+    error.status = 404;
+    error.code = 'WORKFLOW_SOURCE_NOT_FOUND';
+    throw error;
+  }
+
+  const suffix = runId.slice(0, 8);
+  const draftRelativePath = input.draftRelativePath
+    || source.relativePath.replace(/\.json$/i, `-fix-${suffix}.json`);
+  const draft = await createAgentWorkflowDraft(context, {
+    name: input.name || `${source.workflow.name} Fix ${suffix}`,
+    relativePath: draftRelativePath,
+    description: `Fix draft for failed run ${runId} from ${source.relativePath}.`,
+    nodes: source.workflow.nodes,
+    edges: source.workflow.edges,
+    taskDefinitions: source.taskDefinitions || [],
+  });
+  const taskContext = await buildFixTaskContext(context, source, failedNodes, maxCodeChars);
+  const guidance = collectAgentRunIssues(run, rawNodes, events);
+  const fixContext = {
+    runId,
+    status: inferAgentDiagnosticStatus(run, rawNodes),
+    sourceWorkflow: {
+      relativePath: source.relativePath,
+      workflowId: run.workflow_id,
+      workflowName: run.workflow_name || source.workflow.name,
+    },
+    failedNodes,
+    guidance,
+    relatedTasks: taskContext,
+  };
+  const persistedDraft = await loadAgentDraft(context.workspaceDir, draft.id);
+  persistedDraft.fixContext = fixContext;
+  persistedDraft.description = persistedDraft.description || `Fix draft for failed run ${runId}.`;
+  await writeAgentDraft(context.workspaceDir, persistedDraft);
+  const publicDraft = agentDraftPublic(persistedDraft);
+
+  return {
+    ok: true,
+    draft: publicDraft,
+    run: await buildStaticRunDiagnostic(context, run, {
+      nodeLimit: 8,
+      eventLimit: 8,
+      artifactLimit: 8,
+    }),
+    nextStep: 'Use update_workflow_draft with this draft id to edit the failing task or workflow structure. Do not save or run until the user confirms.',
+  };
+}
+
+async function executeAgentTool(context, name, input = {}, runtime = {}) {
+  if (name === 'list_workspace_items') {
+    const include = Array.isArray(input.include) && input.include.length
+      ? new Set(input.include)
+      : new Set(['workflows', 'tasks', 'skills']);
+    const result = {};
+    if (include.has('workflows')) {
+      const files = await listWorkflowFiles(path.join(context.workspaceDir, 'workflows'));
+      result.workflows = [];
+      for (const filePath of files.slice(0, 80)) {
+        try {
+          const payload = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+          const workflow = normalizeWorkflowPayload(payload);
+          const stat = await fs.stat(filePath);
+          result.workflows.push({
+            name: workflow.name,
+            relativePath: toPosixPath(path.relative(context.workspaceDir, filePath)),
+            nodeCount: workflow.nodes.length,
+            edgeCount: workflow.edges.length,
+            updatedAt: stat.mtime.toISOString(),
+          });
+        } catch (error) {
+          result.workflows.push({
+            relativePath: toPosixPath(path.relative(context.workspaceDir, filePath)),
+            error: error.message,
+          });
+        }
+      }
+    }
+    if (include.has('tasks')) {
+      const tasks = await callPython('get_workspace_tasks', { workspaceDir: context.workspaceDir });
+      result.tasks = (tasks.tasks || []).slice(0, 120).map((task) => ({
+        displayName: task.displayName,
+        functionName: task.functionName,
+        relativePath: task.relativePath,
+        inputs: task.inputs || [],
+        outputs: task.outputs || [],
+      }));
+      if (tasks.errors?.length) result.taskErrors = tasks.errors;
+    }
+    if (include.has('skills')) {
+      const skills = await callPython('list_workspace_skills', { workspaceDir: context.workspaceDir });
+      result.skills = (skills.skills || []).slice(0, 80).map((skill) => ({
+        name: skill.name,
+        path: skill.path,
+        description: skill.description,
+      }));
+      if (skills.errors?.length) result.skillErrors = skills.errors;
+    }
+    if (include.has('files')) {
+      const listed = await listWorkspaceFilesForAgent(context, { maxEntries: 100 });
+      result.files = listed.files;
+      result.filesTruncated = listed.truncated;
+    }
+    return { ok: true, ...result };
+  }
+
+  if (name === 'read_current_workflow') {
+    return {
+      ok: true,
+      currentWorkflow: redactSecrets(runtime.currentWorkflow || null),
+    };
+  }
+
+  if (name === 'read_workspace_workflow') {
+    return readWorkspaceWorkflowForAgent(context, input);
+  }
+
+  if (name === 'read_workspace_task') {
+    return readWorkspaceTaskForAgent(context, input);
+  }
+
+  if (name === 'list_workspace_files') {
+    return listWorkspaceFilesForAgent(context, input);
+  }
+
+  if (name === 'read_workspace_file') {
+    return readWorkspaceFileForAgent(context, input);
+  }
+
+  if (name === 'create_workflow_draft') {
+    const draft = await createAgentWorkflowDraft(context, input);
+    return { ok: true, draft };
+  }
+
+  if (name === 'clone_workflow_to_draft') {
+    const draft = await cloneWorkspaceWorkflowToDraft(context, input);
+    return { ok: true, draft };
+  }
+
+  if (name === 'update_workflow_draft') {
+    const draft = await updateAgentWorkflowDraft(context, input.draftId, input);
+    return { ok: true, draft };
+  }
+
+  if (name === 'validate_workflow_draft') {
+    const draft = await validateAgentWorkflowDraft(context, input.draftId);
+    return { ok: true, draft };
+  }
+
+  if (name === 'save_workflow_draft') {
+    const saved = await saveAgentWorkflowDraft(context, input.draftId, {
+      confirmed: input.confirmed === true,
+      relativePath: input.relativePath,
+    });
+    return { ok: true, ...saved };
+  }
+
+  if (name === 'run_workflow_draft') {
+    const started = await runAgentWorkflowDraft(context, input.draftId, {
+      confirmed: input.confirmed === true,
+    });
+    return { ok: true, ...started };
+  }
+
+  if (name === 'inspect_recent_run_errors') {
+    const limit = Math.min(Math.max(Number(input.limit || 8), 1), 30);
+    const detail = input.detail !== false;
+    const staticRuns = (await listStaticRunFilesForWorkspace(context.workspaceDir, { summary: true }))
+      .filter((run) => run.status === 'failed' || run.error)
+      .slice(0, limit)
+      .sort((left, right) => Number(right.updated_time || 0) - Number(left.updated_time || 0));
+    let dynamicRuns = [];
+    try {
+      const payload = await callMazeCore('/runs?limit=30&detail=false');
+      dynamicRuns = (payload.runs || [])
+        .filter((run) => run.status === 'failed' || run.error_summary || run.failure_reason)
+        .slice(0, limit)
+        .sort((left, right) => Number(right.updated_time || 0) - Number(left.updated_time || 0));
+    } catch (error) {
+      dynamicRuns = [{ kind: 'dynamic', run_id: '', status: 'unavailable', error_summary: error.message }];
+    }
+    const combined = [
+      ...staticRuns.map((run) => ({ kind: 'static', run })),
+      ...dynamicRuns.map((run) => ({ kind: run.kind || run.run_type || 'dynamic', run })),
+    ]
+      .sort((left, right) => Number(right.run.updated_time || 0) - Number(left.run.updated_time || 0))
+      .slice(0, limit);
+
+    if (!detail) {
+      return {
+        ok: true,
+        runs: combined.map(({ kind, run }) => ({
+          kind,
+          runId: run.run_id,
+          workflowName: run.workflow_name,
+          status: run.status,
+          error: compactAgentDiagnosticText(run.error || run.error_summary || run.failure_reason || '', 700),
+          updatedTime: run.updated_time,
+        })),
+      };
+    }
+
+    const diagnostics = [];
+    for (const item of combined) {
+      if (item.kind === 'static') {
+        diagnostics.push(await buildStaticRunDiagnostic(context, item.run));
+      } else if (item.run.run_id) {
+        diagnostics.push(await buildDynamicRunDiagnostic(item.run));
+      } else {
+        diagnostics.push({
+          kind: 'dynamic',
+          status: item.run.status,
+          error: compactAgentDiagnosticText(item.run.error_summary || item.run.error || '', 700),
+          guidance: collectAgentRunIssues(item.run, [], []),
+        });
+      }
+    }
+    return { ok: true, runs: diagnostics };
+  }
+
+  if (name === 'inspect_workflow_run') {
+    return inspectWorkflowRunForAgent(context, input);
+  }
+
+  if (name === 'create_fix_draft_from_run') {
+    return createFixDraftFromRunForAgent(context, input);
+  }
+
+  if (name === 'promote_run_artifact') {
+    const result = await promoteArtifactIntoWorkspace(context, {
+      runId: input.runId || input.run_id,
+      taskId: input.taskId || input.task_id || input.nodeId || input.node_id,
+      path: input.path || input.artifactPath || input.artifact_path,
+      targetPath: input.targetPath || input.target_path,
+      overwrite: input.overwrite !== false,
+    });
+    return {
+      ok: true,
+      file: result.file,
+      workspaceId: result.workspaceId,
+      workspaceDir: result.workspaceDir,
+      workspaceManifestVersion: result.workspaceManifestVersion,
+      nextStep: 'Use list_workspace_files or read_workspace_file if you need to build a follow-up workflow that consumes this promoted file.',
+    };
+  }
+
+  return { ok: false, error: `Unknown Workspace Agent tool: ${name}` };
+}
+
+function workspaceAgentSystemPrompt(context) {
+  return [
+    'You are the Maze Workspace Agent inside Maze Playground.',
+    'Your job is to turn user intent into practical Maze workflow progress.',
+    'Use tools proactively whenever they can advance the user request; do not only describe an action you can perform with a tool.',
+    'If you say you will inspect, draft, validate, save, run, fix, promote, or update something, call the corresponding tool in the same assistant turn.',
+    'Only answer with text alone when you are explaining, asking for genuinely missing information, or waiting for explicit confirmation for save/run.',
+    'Create workflow drafts instead of overwriting saved workflows.',
+    'When the user references an existing saved workflow or task path, read it with read_workspace_workflow or read_workspace_task before drafting changes.',
+    'When the user wants to revise a saved workflow, prefer clone_workflow_to_draft first, then update_workflow_draft for changes.',
+    'When the user references uploaded data or workspace files, list/read workspace files under workspace/files before proposing tasks that consume them.',
+    'When the user asks to revise or extend an existing draft, use update_workflow_draft with the existing draftId instead of creating a new draft.',
+    'When the user asks about a specific workflow run id, use inspect_workflow_run before explaining status, results, artifacts, or errors.',
+    'When the user asks to fix a failed workflow run, use create_fix_draft_from_run to create a safe repair draft, then update_workflow_draft with concrete changes.',
+    'When the user asks to reuse or save a run artifact into the workspace, inspect the run first if needed, then use promote_run_artifact with the artifact path.',
+    'After promote_run_artifact, use the returned file.relativePath with read_workspace_file before creating a downstream workflow draft from that file.',
+    'For downstream tasks that consume workspace files, pass the file relative path as a user input value, for example "reports/output.json"; do not use "workspace/files/..." or "files/..." in workflow input values.',
+    'Do not save or run a draft unless the user has explicitly confirmed that action.',
+    'When creating workspace task definitions, generate safe Python Maze tasks using `from maze import task`, one @task function per file, no secrets, no absolute paths, no subprocess, no shell, no package installation, and no network calls.',
+    'Use only `@task` or `@task(resources={...})`; never use `@task(inputs=...)`, `@task(outputs=...)`, or inputs/outputs decorator arguments. Maze infers inputs from function parameters and outputs from returned dict keys.',
+    'For workspace workflow nodes, use category="workspace", nodeType="task", taskPath, functionName, inputs, outputs, resources, configured=true.',
+    'Use user input values by setting each input item as {name, dataType, source:"user", value:"..."} when appropriate.',
+    'For downstream node inputs, use {name, dataType, source:"task", taskSource:{taskId:"upstream-node-id", outputKey:"upstream_output_key"}}.',
+    'If a draft is created, explain what it contains and tell the user they can Preview, Save, or Run it from the draft card.',
+    `Workspace: ${context.workspaceId} (${context.workspaceDir})`,
+  ].join('\n');
+}
+
+function parseToolArguments(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function runWorkspaceAgent(context, input = {}) {
+  const message = String(input.message || '').trim();
+  if (!message) {
+    const error = new Error('message is required');
+    error.status = 400;
+    throw error;
+  }
+
+  let session = input.sessionId
+    ? await loadAgentSession(context.workspaceDir, input.sessionId).catch(() => null)
+    : null;
+  if (!session) {
+    session = await createAgentSessionRecord(context, {
+      title: input.title || message.slice(0, 60),
+      message,
+    });
+  }
+
+  const run = {
+    schema: 'maze_workspace_agent_run',
+    schema_version: 1,
+    id: safeAgentId(input.runId, 'agent-run'),
+    sessionId: session.id,
+    workspaceId: context.workspaceId,
+    workspaceDir: context.workspaceDir,
+    status: 'running',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastSeq: 0,
+    events: 0,
+    finalMessageId: null,
+    error: null,
+  };
+  await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), run);
+
+  const abortController = input.abortController || new AbortController();
+  const emittedEvents = [];
+  const emit = async (event) => {
+    const saved = await appendAgentRunEvent(context, run, event);
+    emittedEvents.push(saved);
+    return saved;
+  };
+
+  await emit({ type: 'session_started', sessionId: session.id, runId: run.id });
+  await appendAgentSessionMessage(context.workspaceDir, session, 'user', [{ type: 'text', text: message }]);
+
+  const compaction = compactAgentMessages(session.messages, session.summary, input.compaction || {});
+  if (compaction.compactedCount > 0) {
+    session.summary = compaction.summary;
+    session.compaction = {
+      compactedCount: Number(session.compaction?.compactedCount || 0) + compaction.compactedCount,
+      recentApproxTokens: compaction.recentApproxTokens,
+      compactedAt: new Date().toISOString(),
+    };
+    session.messages = compaction.messages;
+    await saveAgentSession(context.workspaceDir, session);
+    await emit({
+      type: 'context_compacted',
+      compactedCount: compaction.compactedCount,
+      recentApproxTokens: compaction.recentApproxTokens,
+    });
+  }
+
+  const llm = input.llm || {};
+  const maxSteps = Math.min(Math.max(Number(input.maxSteps || 8), 1), 16);
+  const llmTimeoutMs = Math.min(Math.max(Number(input.timeoutMs || 180000), 30000), 600000);
+  const tools = agentToolDefinitions();
+  let finalText = '';
+
+  try {
+    for (let step = 0; step < maxSteps; step += 1) {
+      await assertAgentRunNotCanceled(context, run, abortController.signal);
+      const llmMessages = [
+        { role: 'system', content: workspaceAgentSystemPrompt(context) },
+        ...(session.summary ? [{ role: 'system', content: `Conversation summary:\n${session.summary}` }] : []),
+        ...(input.currentWorkflow ? [{
+          role: 'system',
+          content: `Current open workflow snapshot:\n${JSON.stringify(redactSecrets(input.currentWorkflow)).slice(0, 12000)}`,
+        }] : []),
+        ...agentMessagesToLLM(session.messages),
+      ];
+      await emit({
+        type: 'context_usage',
+        source: 'estimated',
+        inputTokens: llmMessages.reduce((sum, item) => sum + approximateAgentTokens(`${item.role}\n${item.content || ''}`), 0),
+        step,
+      });
+      await assertAgentRunNotCanceled(context, run, abortController.signal);
+
+      await emit({
+        type: 'llm_waiting',
+        timeoutMs: llmTimeoutMs,
+        step,
+      });
+
+      const assistant = await callOpenAICompatibleToolChat({
+        baseUrl: llm.baseUrl,
+        apiKey: llm.apiKey,
+        model: llm.model,
+        messages: llmMessages,
+        tools,
+        maxTokens: Number(input.maxTokens || 2048),
+        temperature: Number(input.temperature ?? 0.2),
+        timeoutMs: llmTimeoutMs,
+        signal: abortController.signal,
+      });
+      await assertAgentRunNotCanceled(context, run, abortController.signal);
+
+      const assistantText = String(assistant.content || '');
+      const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+      const assistantParts = [
+        ...(assistantText ? [{ type: 'text', text: assistantText }] : []),
+        ...toolCalls.map((call, index) => ({
+          type: 'tool_call',
+          id: call.id || `tool-${step}-${index}`,
+          name: call.function?.name || call.name,
+          input: parseToolArguments(call.function?.arguments || call.arguments),
+        })),
+      ];
+
+      if (toolCalls.length && assistantParts.length > 0) {
+        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', assistantParts);
+      }
+
+      if (!toolCalls.length) {
+        finalText = assistantText || 'Done.';
+        break;
+      }
+
+      for (const call of toolCalls) {
+        await assertAgentRunNotCanceled(context, run, abortController.signal);
+        const toolName = call.function?.name || call.name;
+        const toolInput = parseToolArguments(call.function?.arguments || call.arguments);
+        const toolCallId = call.id || `tool-${step}-${toolName}`;
+        await emit({
+          type: 'tool_call',
+          toolCallId,
+          name: toolName,
+          input: redactSecrets(toolInput),
+        });
+        let result;
+        try {
+          result = await executeAgentTool(context, toolName, toolInput, {
+            currentWorkflow: input.currentWorkflow || null,
+            sessionId: session.id,
+            runId: run.id,
+          });
+        } catch (error) {
+          result = {
+            ok: false,
+            error: error.message,
+            code: error.code || undefined,
+            status: error.status || undefined,
+          };
+        }
+        await appendAgentSessionMessage(context.workspaceDir, session, 'tool', [{
+          type: 'tool_result',
+          toolCallId,
+          name: toolName,
+          result,
+        }]);
+        await emit({
+          type: 'tool_result',
+          toolCallId,
+          name: toolName,
+          ok: result?.ok !== false,
+          result: redactSecrets(result),
+        });
+        await assertAgentRunNotCanceled(context, run, abortController.signal);
+      }
+    }
+
+    await assertAgentRunNotCanceled(context, run, abortController.signal);
+    if (!finalText) {
+      finalText = `Stopped after maxSteps=${maxSteps}.`;
+    }
+    const finalMessage = await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'text', text: finalText }]);
+    run.status = 'succeeded';
+    run.finalMessageId = finalMessage.id;
+    run.updatedAt = new Date().toISOString();
+    await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
+    await emit({ type: 'finish', reason: 'stop', sessionId: session.id, messageId: finalMessage.id });
+  } catch (error) {
+    const errorMessage = error.message || String(error);
+    const canceledByUser = error.code === 'AGENT_RUN_CANCELED' || error.code === 'LLM_ABORTED' || abortController.signal.aborted;
+    if (canceledByUser) {
+      const latest = await latestAgentRun(context.workspaceDir, run.id);
+      if (latest?.status !== 'canceled') {
+        run.status = 'canceled';
+        run.cancelReason = errorMessage;
+        run.canceledAt = new Date().toISOString();
+        run.updatedAt = run.canceledAt;
+        await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
+        await emit({ type: 'canceled', reason: errorMessage, sessionId: session.id, runId: run.id });
+        await emit({ type: 'finish', reason: 'canceled', sessionId: session.id, runId: run.id });
+        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'text', text: `Canceled: ${errorMessage}` }]);
+      } else {
+        Object.assign(run, latest);
+      }
+      finalText = errorMessage;
+      const savedSession = await loadAgentSession(context.workspaceDir, session.id);
+      const events = await loadAgentRunEvents(context.workspaceDir, run.id);
+      return {
+        success: false,
+        run: redactSecrets(latest || run),
+        session: agentSessionSummary(savedSession),
+        messages: savedSession.messages,
+        events,
+        finalText,
+      };
+    }
+    await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'error', message: errorMessage }]);
+    run.status = 'failed';
+    run.error = errorMessage;
+    run.updatedAt = new Date().toISOString();
+    await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
+    await emit({ type: 'error', message: errorMessage, code: error.code || undefined, status: error.status || undefined });
+    await emit({ type: 'finish', reason: 'error', sessionId: session.id });
+  }
+
+  const savedSession = await loadAgentSession(context.workspaceDir, session.id);
+  const events = await loadAgentRunEvents(context.workspaceDir, run.id);
+  return {
+    success: run.status === 'succeeded',
+    run: redactSecrets(run),
+    session: agentSessionSummary(savedSession),
+    messages: savedSession.messages,
+    events,
+    finalText,
+  };
+}
+
+function redactMcpServerConfig(server) {
+  if (!server || typeof server !== 'object' || Array.isArray(server)) return {};
+  const redacted = { ...server };
+  if (redacted.env && typeof redacted.env === 'object' && !Array.isArray(redacted.env)) {
+    redacted.env = Object.fromEntries(Object.entries(redacted.env).map(([key, value]) => [
+      key,
+      mcpStringHasEnvRefs(value) ? String(value) : '<hidden>',
+    ]));
+  }
+  if (redacted.headers && typeof redacted.headers === 'object' && !Array.isArray(redacted.headers)) {
+    redacted.headers = Object.fromEntries(Object.entries(redacted.headers).map(([key, value]) => [
+      key,
+      mcpStringHasEnvRefs(value) ? String(value) : '<hidden>',
+    ]));
+  }
+  return redacted;
+}
+
+const MCP_ENV_REF_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+function mcpStringHasEnvRefs(value) {
+  return typeof value === 'string' && /\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(value);
+}
+
+function collectMcpEnvRefs(value, refs = new Set()) {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+      refs.add(match[1]);
+    }
+    return refs;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectMcpEnvRefs(item, refs));
+    return refs;
+  }
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach((item) => collectMcpEnvRefs(item, refs));
+  }
+  return refs;
+}
+
+function expandMcpEnvRefsInString(value, { profileName = '', serverName = '', fieldName = '' } = {}) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, envName) => {
+    if (process.env[envName] === undefined) {
+      const scope = [
+        profileName ? `profile "${profileName}"` : 'inline MCP config',
+        serverName ? `server "${serverName}"` : '',
+        fieldName ? `field "${fieldName}"` : '',
+      ].filter(Boolean).join(', ');
+      const error = new Error(`MCP env reference ${match} is not set${scope ? ` (${scope})` : ''}`);
+      error.status = 400;
+      error.missingEnv = envName;
+      throw error;
+    }
+    return process.env[envName];
+  });
+}
+
+function expandMcpEnvRefsInMap(mapValue, options = {}) {
+  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return mapValue;
+  return Object.fromEntries(Object.entries(mapValue).map(([key, value]) => [
+    key,
+    expandMcpEnvRefsInString(String(value ?? ''), { ...options, fieldName: `${options.fieldName || 'map'}.${key}` }),
+  ]));
+}
+
+function expandMcpServersEnvRefs(servers = [], { profileName = '' } = {}) {
+  return servers.map((server) => {
+    const serverName = String(server?.name || '');
+    return {
+      ...server,
+      env: expandMcpEnvRefsInMap(server.env, { profileName, serverName, fieldName: 'env' }),
+      headers: expandMcpEnvRefsInMap(server.headers, { profileName, serverName, fieldName: 'headers' }),
+    };
+  });
+}
+
+function mcpProfileEnvRefSummary(servers = []) {
+  const refs = collectMcpEnvRefs(servers);
+  return {
+    usesEnvRefs: refs.size > 0,
+    envRefCount: refs.size,
+    envRefs: Array.from(refs).sort(),
+  };
+}
+
+function summarizeMcpProfile(profile) {
+  const servers = Array.isArray(profile?.mcpServers) ? profile.mcpServers : [];
+  const envRefs = mcpProfileEnvRefSummary(servers);
+  const lastTest = profile?.lastTest && typeof profile.lastTest === 'object'
+    ? {
+        status: profile.lastTest.status || null,
+        testedAt: profile.lastTest.testedAt || null,
+        serverCount: profile.lastTest.serverCount ?? null,
+        toolCount: profile.lastTest.toolCount ?? null,
+        tools: Array.isArray(profile.lastTest.tools) ? profile.lastTest.tools : [],
+        error: profile.lastTest.error || undefined,
+        errorType: profile.lastTest.errorType || undefined,
+      }
+    : null;
+  return {
+    name: String(profile?.name || ''),
+    description: String(profile?.description || ''),
+    createdAt: profile?.createdAt || null,
+    updatedAt: profile?.updatedAt || null,
+    serverCount: servers.length,
+    toolCount: lastTest?.status === 'ok' ? Number(lastTest.toolCount || 0) : 0,
+    lastTest,
+    ...envRefs,
+    servers: summarizeMcpServers(servers),
+    redactedMcpServers: servers.map(redactMcpServerConfig),
+  };
+}
+
+async function loadMcpProfile(workspaceDir, name) {
+  const profileName = safeMcpProfileName(name);
+  const profile = await readJsonFile(mcpProfilePath(workspaceDir, profileName), null);
+  if (!profile) {
+    const error = new Error(`MCP profile not found: ${profileName}`);
+    error.status = 404;
+    throw error;
+  }
+  if (!Array.isArray(profile.mcpServers)) {
+    throw new Error(`MCP profile ${profileName} is missing mcpServers`);
+  }
+  return {
+    ...profile,
+    name: profileName,
+  };
+}
+
+async function listMcpProfiles(workspaceDir) {
+  const dir = mcpProfilesDir(workspaceDir);
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const profiles = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    try {
+      const profile = await readJsonFile(path.join(dir, entry.name), null);
+      if (profile) {
+        profiles.push(summarizeMcpProfile({
+          ...profile,
+          name: path.basename(entry.name, '.json'),
+        }));
+      }
+    } catch {
+      // Ignore malformed profile files in the list view.
+    }
+  }
+  profiles.sort((a, b) => a.name.localeCompare(b.name));
+  return profiles;
+}
+
+async function resolveMcpServersForRequest(context, { mcpServers, mcpProfileName } = {}) {
+  const profileName = mcpProfileName ? safeMcpProfileName(mcpProfileName) : '';
+  if (profileName) {
+    const profile = await loadMcpProfile(context.workspaceDir, profileName);
+    const normalized = validateMcpServers(profile.mcpServers);
+    const expanded = expandMcpServersEnvRefs(normalized, { profileName });
+    return {
+      mcpServers: expanded,
+      profileName,
+      profileSummary: summarizeMcpProfile({ ...profile, mcpServers: normalized }),
+    };
+  }
+  return {
+    mcpServers: expandMcpServersEnvRefs(validateMcpServers(mcpServers)),
+    profileName: '',
+    profileSummary: null,
+  };
+}
+
+function summarizeMcpDiscoveredTools(tools = []) {
+  if (!Array.isArray(tools)) return [];
+  return tools.slice(0, 80).map((tool) => ({
+    server: tool?.server || '',
+    tool: tool?.tool || '',
+    agent_tool: tool?.agent_tool || '',
+    description: String(tool?.description || '').slice(0, 300),
+    required_inputs: Array.isArray(tool?.required_inputs) ? tool.required_inputs.slice(0, 20) : [],
+  }));
+}
+
+async function updateMcpProfileLastTest(workspaceDir, profileName, lastTest) {
+  if (!profileName) return null;
+  const safeName = safeMcpProfileName(profileName);
+  const profile = await loadMcpProfile(workspaceDir, safeName);
+  const updated = {
+    ...profile,
+    updatedAt: profile.updatedAt || new Date().toISOString(),
+    lastTest,
+  };
+  await writeJsonAtomic(mcpProfilePath(workspaceDir, safeName), updated);
+  return summarizeMcpProfile(updated);
+}
+
+function buildMcpProfileExport(profile) {
+  return {
+    schema: 'maze_mcp_profile_export',
+    schema_version: 1,
+    exportedAt: new Date().toISOString(),
+    name: String(profile?.name || ''),
+    description: String(profile?.description || ''),
+    redacted: true,
+    mcpServers: (Array.isArray(profile?.mcpServers) ? profile.mcpServers : []).map(redactMcpServerConfig),
+    profile: summarizeMcpProfile(profile),
+  };
+}
+
+function rejectRedactedMcpPlaceholders(servers = []) {
+  const serialized = JSON.stringify(servers || []);
+  if (serialized.includes('"<hidden>"')) {
+    const error = new Error('Replace <hidden> values before importing this MCP profile');
+    error.status = 400;
+    throw error;
+  }
+}
+
+function sameJsonValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 function withStaticRunWriteQueue(workspaceDir, runId, operation) {
   const key = `${workspaceDir}::${runId}`;
   const previous = staticRunWriteQueues.get(key) || Promise.resolve();
@@ -1171,13 +4205,15 @@ function applyStaticRunEvent(snapshot, event) {
   if (event.type === 'workflow_started') {
     snapshot.status = 'running';
   } else if (event.type === 'workflow_completed') {
-    snapshot.status = 'completed';
-    snapshot.finished_time = snapshot.finished_time || eventTime;
-    snapshot.final_result = data.results ?? snapshot.final_result;
+    if (snapshot.status !== 'failed') {
+      snapshot.status = 'completed';
+      snapshot.finished_time = snapshot.finished_time || eventTime;
+      snapshot.final_result = data.results ?? snapshot.final_result;
+    }
   } else if (event.type === 'workflow_failed') {
     snapshot.status = 'failed';
     snapshot.finished_time = snapshot.finished_time || eventTime;
-    snapshot.error = data.error || 'Workflow failed';
+    snapshot.error = compactAgentDiagnosticText(data.error || 'Workflow failed', 2000);
   } else if (event.type === 'workflow_canceled') {
     snapshot.status = 'canceled';
     snapshot.finished_time = snapshot.finished_time || eventTime;
@@ -1220,7 +4256,7 @@ function applyStaticRunEvent(snapshot, event) {
   } else if (event.type === 'task_exception' && node) {
     node.status = 'failed';
     node.finished_time = eventTime;
-    node.error = data.result || 'Task failed';
+    node.error = compactAgentDiagnosticText(data.error || data.result || 'Task failed', 2000);
     node.maze_task_id = data.maze_task_id || data.task_id || node.maze_task_id;
     snapshot.status = 'failed';
     snapshot.finished_time = snapshot.finished_time || eventTime;
@@ -1691,7 +4727,7 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
     const progressPromises = [];
-    
+
     // 设置 Python 环境变量，强制使用 UTF-8 编码
     const python = spawn(PYTHON_BIN, [bridgePath, action, JSON.stringify(params)], {
       env: {
@@ -1705,17 +4741,17 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
         PYTHONUTF8: '1'
       }
     });
-    
+
     let output = '';
     let error = '';
     let stderrLineBuffer = '';
-    
+
     // 设置 stdout 编码为 utf8
     python.stdout.setEncoding('utf8');
     python.stdout.on('data', (data) => {
       output += data;
     });
-    
+
     // 设置 stderr 编码为 utf8
     python.stderr.setEncoding('utf8');
     python.stderr.on('data', (data) => {
@@ -1740,7 +4776,7 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
         }
       });
     });
-    
+
     python.on('close', async (code) => {
       if (code === 0) {
         try {
@@ -1758,7 +4794,7 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
         reject(new Error('Python执行失败: ' + error));
       }
     });
-    
+
     python.on('error', (err) => {
       console.error('Python进程错误:', err);
       reject(err);
@@ -1848,6 +4884,17 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
 
       if (!settled) {
         settled = true;
+        try {
+          const result = parseBridgeJsonOutput(output);
+          if (result.runId || result.error || result.success === false) {
+            const bridgeError = new Error(result.error || 'ReAct process exited before returning a run id');
+            bridgeError.bridgePayload = result;
+            reject(bridgeError);
+            return;
+          }
+        } catch {
+          // Fall through to the generic process error below.
+        }
         const message = code === 0
           ? 'ReAct process exited before returning a run id'
           : `ReAct process failed before returning a run id: ${error}`;
@@ -1861,7 +4908,7 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
       }
 
       try {
-        const result = JSON.parse(output || '{}');
+        const result = parseBridgeJsonOutput(output);
         if (result.error || result.success === false) {
           console.error(`ReAct process returned an error (${runId || result.runId || 'unknown'}):`, result.error);
         }
@@ -1885,12 +4932,207 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
   });
 }
 
+function parseBridgeJsonOutput(output) {
+  const text = String(output || '').trim();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!lines[index].startsWith('{')) continue;
+      try {
+        return JSON.parse(lines[index]);
+      } catch {
+        // Keep scanning older lines.
+      }
+    }
+    throw new Error(`Failed to parse bridge JSON output: ${text}`);
+  }
+}
+
+function runMcpDiscoveryProcess(params = {}) {
+  return new Promise((resolve, reject) => {
+    const bridgePath = path.join(__dirname, '../maze_bridge.py');
+    const python = spawn(PYTHON_BIN, [bridgePath, 'discover_mcp_tools', JSON.stringify(params)], {
+      env: {
+        ...process.env,
+        MAZE_WORKSPACE_ROOT_DIR: WORKSPACE_ROOT_DIR,
+        MAZE_WORKSPACES_DIR: WORKSPACES_DIR,
+        MAZE_DEFAULT_WORKSPACE_DIR: DEFAULT_WORKSPACE_DIR,
+        MAZE_SYSTEM_CATALOG_DIR: SYSTEM_CATALOG_DIR,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+      },
+    });
+
+    let output = '';
+    let error = '';
+    python.stdout.setEncoding('utf8');
+    python.stderr.setEncoding('utf8');
+    python.stdout.on('data', (data) => {
+      output += data;
+    });
+    python.stderr.on('data', (data) => {
+      error += data;
+    });
+    python.on('close', (code) => {
+      try {
+        const result = parseBridgeJsonOutput(output);
+        if (code !== 0) {
+          reject(new Error(result.error || error || `MCP discovery process failed with code ${code}`));
+          return;
+        }
+        resolve(result);
+      } catch {
+        reject(new Error(error || `Failed to parse MCP discovery output: ${output}`));
+      }
+    });
+    python.on('error', reject);
+  });
+}
+
+const MCP_TRANSPORTS = new Set(['stdio', 'streamable_http', 'sse']);
+
+function sanitizeNamePart(value, fallback = 'mcp') {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return safe || fallback;
+}
+
+function normalizeStringList(value, fieldName) {
+  if (value === undefined || value === null || value === '') return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`MCP ${fieldName} must be an array`);
+  }
+  return value.map((item) => String(item));
+}
+
+function normalizeStringMap(value, fieldName) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`MCP ${fieldName} must be an object`);
+  }
+  const result = {};
+  Object.entries(value).forEach(([key, entryValue]) => {
+    const normalizedKey = String(key || '').trim();
+    if (!normalizedKey) {
+      throw new Error(`MCP ${fieldName} contains an empty key`);
+    }
+    result[normalizedKey] = String(entryValue ?? '');
+  });
+  return result;
+}
+
+function normalizeMcpTimeout(value, serverLabel) {
+  if (value === undefined || value === null || value === '') return 30;
+  const timeout = Number(value);
+  if (!Number.isFinite(timeout)) {
+    throw new Error(`MCP server "${serverLabel}" timeout must be a number`);
+  }
+  return Math.min(Math.max(timeout, 1), 300);
+}
+
+function validateMcpServers(value) {
+  if (value === undefined || value === null || value === '') return [];
+  if (!Array.isArray(value)) {
+    throw new Error('mcpServers must be an array');
+  }
+  if (value.length > 8) {
+    throw new Error('mcpServers supports at most 8 servers per run');
+  }
+
+  return value.map((server, index) => {
+    if (!server || typeof server !== 'object' || Array.isArray(server)) {
+      throw new Error(`MCP server #${index + 1} must be an object`);
+    }
+
+    const transport = String(server.transport || 'stdio').trim();
+    if (!MCP_TRANSPORTS.has(transport)) {
+      throw new Error(`MCP server #${index + 1} has unsupported transport: ${transport}`);
+    }
+
+    const name = sanitizeNamePart(server.name || `mcp-${index + 1}`, `mcp-${index + 1}`);
+    const toolPrefix = server.tool_prefix || server.toolPrefix
+      ? sanitizeNamePart(server.tool_prefix || server.toolPrefix, name)
+      : undefined;
+    const timeout = normalizeMcpTimeout(server.timeout, name);
+    const normalized = {
+      name,
+      transport,
+      args: normalizeStringList(server.args, 'args'),
+      env: normalizeStringMap(server.env, 'env'),
+      cwd: server.cwd ? String(server.cwd) : undefined,
+      headers: normalizeStringMap(server.headers, 'headers'),
+      timeout,
+      tool_prefix: toolPrefix,
+    };
+
+    if (transport === 'stdio') {
+      const command = String(server.command || '').trim();
+      if (!command) {
+        throw new Error(`MCP stdio server "${name}" requires command`);
+      }
+      normalized.command = command;
+    } else {
+      const url = String(server.url || '').trim();
+      if (!url) {
+        throw new Error(`MCP ${transport} server "${name}" requires url`);
+      }
+      try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          throw new Error('URL must use http or https');
+        }
+      } catch (error) {
+        throw new Error(`MCP ${transport} server "${name}" has invalid url: ${error.message}`);
+      }
+      normalized.url = url;
+    }
+
+    return normalized;
+  });
+}
+
+function summarizeMcpServers(servers = []) {
+  return servers.map((server) => {
+    const summary = {
+      name: server.name,
+      transport: server.transport,
+      tool_prefix: server.tool_prefix,
+      timeout: server.timeout,
+      has_env: Boolean(server.env && Object.keys(server.env).length),
+      has_headers: Boolean(server.headers && Object.keys(server.headers).length),
+    };
+    if (server.transport === 'stdio') {
+      summary.command = server.command;
+      summary.args_count = Array.isArray(server.args) ? server.args.length : 0;
+      summary.cwd = server.cwd || null;
+    } else if (server.url) {
+      const parsed = new URL(server.url);
+      summary.url_scheme = parsed.protocol.replace(':', '');
+      summary.url_host = parsed.host;
+    }
+    return summary;
+  });
+}
+
+function mcpApiErrorStatus(error) {
+  if (Number.isInteger(error?.status)) return error.status;
+  const message = String(error?.message || '');
+  if (message.startsWith('MCP ') || message.startsWith('mcpServers ')) return 400;
+  return 500;
+}
+
 // ========== WebSocket 辅助函数 ==========
 
 function broadcastToWorkflow(workflowId, message) {
   const connections = wsConnections.get(workflowId);
   console.log(`[WebSocket] 尝试广播到工作流 ${workflowId}, 连接数: ${connections ? connections.size : 0}`);
-  
+
   if (connections) {
     const data = JSON.stringify(message);
     let sentCount = 0;
@@ -2160,12 +5402,12 @@ app.get('/api/builtin-tasks', async (req, res) => {
   try {
     console.log('📋 获取内置任务列表...');
     const result = await callPython('get_builtin_tasks');
-    
+
     if (result.error) {
       console.error('❌ 获取内置任务失败:', result.error);
       return res.status(500).json({ error: result.error });
     }
-    
+
     console.log(`✅ 成功获取 ${result.tasks.length} 个内置任务`);
     res.json(result.tasks || []);
   } catch (error) {
@@ -2524,76 +5766,12 @@ app.post('/api/artifacts/promote', async (req, res) => {
     const {
       workspaceId,
       workspaceDir: requestedWorkspaceDir,
-      targetPath,
-      artifact = {},
-      runId,
-      taskId,
-      path: artifactPath,
-      sha256,
-      storagePath,
-      overwrite = true,
     } = req.body || {};
-
-    const sourceSha = String(sha256 || artifact.sha256 || '').trim();
-    const sourceStoragePath = String(storagePath || artifact.storage_path || '').trim();
-    const sourceArtifactPath = String(artifactPath || artifact.path || artifact.name || sourceSha || '').trim();
-    const destinationPath = targetPath || sourceArtifactPath;
-
-    if (!destinationPath) {
-      return res.status(400).json({ error: 'targetPath is required' });
-    }
-    if (!sourceSha && !sourceStoragePath) {
-      return res.status(400).json({ error: 'artifact sha256 or storagePath is required' });
-    }
-
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const { fullPath, filesDir, relativePath } = resolveWorkspaceFilePath(workspaceDir, destinationPath);
-    if (!overwrite && await fileExists(fullPath)) {
-      return res.status(409).json({ error: `Workspace file already exists: ${relativePath}` });
-    }
-
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    if (sourceStoragePath) {
-      const resolvedStoragePath = path.resolve(sourceStoragePath);
-      const allowedRunRoots = [
-        path.resolve(workspaceDir, 'runs'),
-        path.resolve(workspaceDir, 'workflow_runs'),
-      ];
-      const allowed = allowedRunRoots.some((root) => (
-        resolvedStoragePath === root || resolvedStoragePath.startsWith(root + path.sep)
-      ));
-      if (!allowed) {
-        return res.status(400).json({ error: 'Static artifact storage path is outside this workspace run directory' });
-      }
-      await fs.copyFile(resolvedStoragePath, fullPath);
-    } else {
-      const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(sourceSha)}`);
-      if (!response.ok) {
-        return res.status(response.status).json({ error: `Failed to download artifact: HTTP ${response.status}` });
-      }
-      const data = Buffer.from(await response.arrayBuffer());
-      await fs.writeFile(fullPath, data);
-    }
-
-    const file = await describeWorkspaceFile(filesDir, fullPath);
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'artifact_promoted', {
-      path: file.relativePath,
-      runId: runId || artifact.run_id || null,
-      taskId: taskId || artifact.task_id || artifact.producer_task_id || null,
-      sha256: sourceSha || artifact.sha256 || null,
-    });
-
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      file,
-    });
+    res.json(await promoteArtifactIntoWorkspace(context, req.body || {}));
   } catch (error) {
     console.error('❌ Promote artifact 失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -3388,6 +6566,38 @@ app.post('/api/dynamic-runs/:runId/events', async (req, res) => {
   }
 });
 
+app.post('/api/dynamic-runs/:runId/permission-requests/:requestId/decision', async (req, res) => {
+  try {
+    const action = String(req.body?.action || req.body?.decision?.action || '').trim().toLowerCase();
+    const reason = String(req.body?.reason || req.body?.decision?.reason || '').trim();
+    if (!['allow', 'deny'].includes(action)) {
+      res.status(400).json({ success: false, error: 'Permission decision action must be allow or deny' });
+      return;
+    }
+    const result = await callMazeCore(
+      `/dynamic_runs/${encodeURIComponent(req.params.runId)}/permission_requests/${encodeURIComponent(req.params.requestId)}/decision`,
+      {
+        method: 'POST',
+        body: {
+          decision: {
+            action,
+            reason,
+            decided_by: 'playground',
+          },
+        },
+      },
+    );
+    res.json({
+      success: true,
+      runId: result.run_id,
+      request: result.request,
+    });
+  } catch (error) {
+    console.error('Failed to decide dynamic run permission request:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message, payload: error.payload });
+  }
+});
+
 app.delete('/api/dynamic-runs/:runId', async (req, res) => {
   try {
     const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}`, {
@@ -3420,6 +6630,525 @@ app.post('/api/dynamic-runs/cleanup', async (req, res) => {
   }
 });
 
+app.get('/api/mcp/profiles', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const profiles = await listMcpProfiles(context.workspaceDir);
+    res.json({ success: true, ...workspaceResponseFields(context), profiles });
+  } catch (error) {
+    console.error('Failed to list MCP profiles:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/mcp/profiles', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      name,
+      description = '',
+      mcpServers,
+	    } = req.body || {};
+	    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+	    const profileName = safeMcpProfileName(name);
+	    const normalizedMcpServers = validateMcpServers(mcpServers);
+	    const now = new Date().toISOString();
+	    const existing = await readJsonFile(mcpProfilePath(context.workspaceDir, profileName), null);
+	    const keepLastTest = existing?.lastTest && sameJsonValue(existing?.mcpServers, normalizedMcpServers);
+	    const profile = {
+	      schema: 'maze_mcp_profile',
+	      schema_version: 1,
+	      name: profileName,
+	      description: String(description || ''),
+	      createdAt: existing?.createdAt || now,
+	      updatedAt: now,
+	      lastTest: keepLastTest ? existing.lastTest : null,
+	      mcpServers: normalizedMcpServers,
+	    };
+    await writeJsonAtomic(mcpProfilePath(context.workspaceDir, profileName), profile);
+    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'mcp_profile_saved', {
+      profile: profileName,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields({ ...context, workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion) }),
+      profile: summarizeMcpProfile(profile),
+    });
+  } catch (error) {
+    console.error('Failed to save MCP profile:', error);
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/mcp/profiles/:name', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const profileName = safeMcpProfileName(req.params.name);
+    await fs.unlink(mcpProfilePath(context.workspaceDir, profileName)).catch((error) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'mcp_profile_deleted', {
+      profile: profileName,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields({ ...context, workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion) }),
+      profileName,
+    });
+  } catch (error) {
+    console.error('Failed to delete MCP profile:', error);
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/mcp/profiles/:name/copy', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      name,
+      description,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const sourceName = safeMcpProfileName(req.params.name);
+    const targetName = safeMcpProfileName(name);
+    if (sourceName === targetName) {
+      const error = new Error('Copy target profile name must be different from the source profile name');
+      error.status = 400;
+      throw error;
+    }
+    if (await fileExists(mcpProfilePath(context.workspaceDir, targetName))) {
+      const error = new Error(`MCP profile already exists: ${targetName}`);
+      error.status = 409;
+      throw error;
+    }
+    const source = await loadMcpProfile(context.workspaceDir, sourceName);
+    const now = new Date().toISOString();
+    const target = {
+      ...source,
+      name: targetName,
+      description: description === undefined
+        ? `${String(source.description || '').trim() || sourceName} copy`
+        : String(description || ''),
+      createdAt: now,
+      updatedAt: now,
+      lastTest: null,
+    };
+    await writeJsonAtomic(mcpProfilePath(context.workspaceDir, targetName), target);
+    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'mcp_profile_copied', {
+      source: sourceName,
+      profile: targetName,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields({ ...context, workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion) }),
+      profile: summarizeMcpProfile(target),
+      sourceProfileName: sourceName,
+    });
+  } catch (error) {
+    console.error('Failed to copy MCP profile:', error);
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/mcp/profiles/:name/export', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const profileName = safeMcpProfileName(req.params.name);
+    const profile = await loadMcpProfile(context.workspaceDir, profileName);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      export: buildMcpProfileExport(profile),
+    });
+  } catch (error) {
+    console.error('Failed to export MCP profile:', error);
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/mcp/profiles/import', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      name,
+      description,
+      mcpServers,
+      redactedMcpServers,
+      profile,
+      export: exportBundle,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const bundle = profile || exportBundle || {};
+    const targetName = safeMcpProfileName(name || bundle.name);
+    const rawServers = mcpServers || redactedMcpServers || bundle.mcpServers || bundle.redactedMcpServers || bundle.profile?.redactedMcpServers;
+    rejectRedactedMcpPlaceholders(rawServers);
+    const normalizedMcpServers = validateMcpServers(rawServers);
+    const now = new Date().toISOString();
+    const existing = await readJsonFile(mcpProfilePath(context.workspaceDir, targetName), null);
+    const imported = {
+      schema: 'maze_mcp_profile',
+      schema_version: 1,
+      name: targetName,
+      description: String(description ?? bundle.description ?? ''),
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      lastTest: null,
+      mcpServers: normalizedMcpServers,
+    };
+    await writeJsonAtomic(mcpProfilePath(context.workspaceDir, targetName), imported);
+    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'mcp_profile_imported', {
+      profile: targetName,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields({ ...context, workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion) }),
+      profile: summarizeMcpProfile(imported),
+    });
+  } catch (error) {
+    console.error('Failed to import MCP profile:', error);
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agent/sessions', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const sessions = await listAgentSessions(context.workspaceDir);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      sessions,
+    });
+  } catch (error) {
+    console.error('Failed to list Workspace Agent sessions:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/sessions', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const session = await createAgentSessionRecord(context, req.body || {});
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      session: agentSessionSummary(session),
+      messages: session.messages,
+    });
+  } catch (error) {
+    console.error('Failed to create Workspace Agent session:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch('/api/agent/sessions/:id', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const session = await updateAgentSessionRecord(context.workspaceDir, req.params.id, req.body || {});
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      session: agentSessionSummary(session),
+    });
+  } catch (error) {
+    console.error('Failed to update Workspace Agent session:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/agent/sessions/:id', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query || {});
+    await deleteAgentSessionRecord(context.workspaceDir, req.params.id);
+    const sessions = await listAgentSessions(context.workspaceDir);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      deletedSessionId: req.params.id,
+      sessions,
+    });
+  } catch (error) {
+    console.error('Failed to delete Workspace Agent session:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agent/sessions/:id/export', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query || {});
+    const bundle = await buildAgentSessionExport(context, req.params.id);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      export: bundle,
+    });
+  } catch (error) {
+    console.error('Failed to export Workspace Agent session:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agent/sessions/:id/messages', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const session = await loadAgentSession(context.workspaceDir, req.params.id);
+    const drafts = await loadAgentDraftsForMessages(context.workspaceDir, session.messages);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      session: agentSessionSummary(session),
+      messages: session.messages,
+      drafts,
+    });
+  } catch (error) {
+    console.error('Failed to read Workspace Agent messages:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/runs', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    if (req.body?.async === true) {
+      const session = req.body.sessionId
+        ? await loadAgentSession(context.workspaceDir, req.body.sessionId).catch(() => null)
+        : await createAgentSessionRecord(context, {
+          title: req.body.title || String(req.body.message || 'Workspace Agent').slice(0, 60),
+          message: req.body.message,
+        });
+      const runId = safeAgentId(req.body.runId, 'agent-run');
+      const run = {
+        schema: 'maze_workspace_agent_run',
+        schema_version: 1,
+        id: runId,
+        sessionId: session?.id,
+        workspaceId: context.workspaceId,
+        workspaceDir: context.workspaceDir,
+        status: 'queued',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastSeq: 0,
+        events: 0,
+        finalMessageId: null,
+        error: null,
+      };
+      await writeJsonAtomic(agentRunPath(context.workspaceDir, runId), run);
+      const payload = {
+        ...(req.body || {}),
+        sessionId: session?.id,
+        runId,
+      };
+      const abortController = new AbortController();
+      payload.abortController = abortController;
+      const promise = runWorkspaceAgent(context, payload)
+        .catch((error) => {
+          console.error(`Workspace Agent async run failed: ${runId}`, error);
+        })
+        .finally(() => {
+          activeAgentRuns.delete(agentRunKey(context.workspaceDir, runId));
+        });
+      activeAgentRuns.set(agentRunKey(context.workspaceDir, runId), { promise, controller: abortController });
+      return res.status(202).json({
+        success: true,
+        ...workspaceResponseFields(context),
+        run,
+        session: session ? agentSessionSummary(session) : null,
+        messages: session?.messages || [],
+        events: [],
+      });
+    }
+    const result = await runWorkspaceAgent(context, req.body || {});
+    res.status(result.success ? 200 : 500).json({
+      ...result,
+      ...workspaceResponseFields(context),
+    });
+  } catch (error) {
+    console.error('Failed to run Workspace Agent:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agent/runs/:id/events', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const run = await readJsonFile(agentRunPath(context.workspaceDir, req.params.id), null);
+    if (!run) {
+      return res.status(404).json({ success: false, error: 'Agent run not found' });
+    }
+    const after = req.query.after === undefined ? null : Number(req.query.after);
+    const events = await loadAgentRunEvents(context.workspaceDir, req.params.id, Number.isFinite(after) ? after : null);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      run: redactSecrets(run),
+      events,
+    });
+  } catch (error) {
+    console.error('Failed to read Workspace Agent events:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/runs/:id/cancel', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const run = await cancelAgentRun(context, req.params.id, req.body?.reason || 'Canceled by user');
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      run: redactSecrets(run),
+    });
+  } catch (error) {
+    console.error('Failed to cancel Workspace Agent run:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agent/runs/:id/stream', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const run = await readJsonFile(agentRunPath(context.workspaceDir, req.params.id), null);
+    if (!run) {
+      return res.status(404).json({ success: false, error: 'Agent run not found' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('\n');
+
+    const after = req.query.after === undefined ? null : Number(req.query.after);
+    const existingEvents = await loadAgentRunEvents(context.workspaceDir, req.params.id, Number.isFinite(after) ? after : null);
+    existingEvents.forEach((event) => sendAgentSse(res, event));
+    const lastSeq = existingEvents.reduce((max, event) => Math.max(max, Number(event.seq || 0)), Number.isFinite(after) ? after : 0);
+
+    if (run.status === 'succeeded' || run.status === 'failed') {
+      res.end();
+      return;
+    }
+
+    const key = agentRunSseKey(context.workspaceDir, req.params.id);
+    if (!agentRunSseClients.has(key)) {
+      agentRunSseClients.set(key, new Map());
+    }
+    agentRunSseClients.get(key).set(res, { lastSeq });
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': heartbeat\n\n');
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      const clients = agentRunSseClients.get(key);
+      if (!clients) return;
+      clients.delete(res);
+      if (clients.size === 0) {
+        agentRunSseClients.delete(key);
+      }
+    });
+  } catch (error) {
+    console.error('Failed to stream Workspace Agent events:', error);
+    if (!res.headersSent) {
+      res.status(error.status || 500).json({ success: false, error: error.message });
+    } else {
+      res.end();
+    }
+  }
+});
+
+app.get('/api/agent/drafts/:id', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const draft = await loadAgentDraft(context.workspaceDir, req.params.id);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      draft: agentDraftPublic(draft),
+    });
+  } catch (error) {
+    console.error('Failed to read Workspace Agent draft:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/drafts/:id/validate', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const draft = await validateAgentWorkflowDraft(context, req.params.id);
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      draft,
+    });
+  } catch (error) {
+    console.error('Failed to validate Workspace Agent draft:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/drafts/:id/dismiss', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const draft = await dismissAgentWorkflowDraft(context, req.params.id, {
+      reason: req.body?.reason,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      draft,
+    });
+  } catch (error) {
+    console.error('Failed to dismiss Workspace Agent draft:', error);
+    res.status(error.code === 'ENOENT' ? 404 : (error.status || 500)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agent/drafts/:id/save', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const result = await saveAgentWorkflowDraft(context, req.params.id, {
+      confirmed: req.body?.confirmed === true,
+      relativePath: req.body?.relativePath,
+      workflowId: req.body?.workflowId,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      ...result,
+    });
+  } catch (error) {
+    console.error('Failed to save Workspace Agent draft:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message, code: error.code });
+  }
+});
+
+app.post('/api/agent/drafts/:id/run', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const result = await runAgentWorkflowDraft(context, req.params.id, {
+      confirmed: req.body?.confirmed === true,
+    });
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      ...result,
+    });
+  } catch (error) {
+    console.error('Failed to run Workspace Agent draft:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message, code: error.code });
+  }
+});
+
 app.post('/api/react-runs/start', async (req, res) => {
   try {
     const {
@@ -3435,16 +7164,26 @@ app.post('/api/react-runs/start', async (req, res) => {
       skills = [],
       skillDirs,
       maxSkillChars,
-      execBackend,
-      permissionPolicy,
-    } = req.body || {};
+	      execBackend,
+	      permissionPolicy,
+	      permissionAskTimeoutSeconds,
+	      mcpServers,
+	      mcpProfileName,
+	    } = req.body || {};
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
     const workspaceDir = context.workspaceDir;
+    const resolvedMcp = await resolveMcpServersForRequest(context, { mcpServers, mcpProfileName });
+    const normalizedMcpServers = resolvedMcp.mcpServers;
+    const mcpServerSummary = summarizeMcpServers(normalizedMcpServers);
 
     const extraEnv = {};
-    if (llm?.apiKey) {
-      extraEnv.MAZE_REACT_API_KEY = String(llm.apiKey);
-    }
+	    if (llm?.apiKey) {
+	      extraEnv.MAZE_REACT_API_KEY = String(llm.apiKey);
+	    }
+	    const askTimeout = Number(permissionAskTimeoutSeconds);
+	    if (Number.isFinite(askTimeout) && askTimeout > 0) {
+	      extraEnv.MAZE_AGENT_PERMISSION_ASK_TIMEOUT_SECONDS = String(Math.min(Math.max(askTimeout, 1), 600));
+	    }
 
     const started = await startReactWorkflowProcess(
       {
@@ -3464,14 +7203,115 @@ app.post('/api/react-runs/start', async (req, res) => {
         maxSkillChars,
         execBackend,
         permissionPolicy,
+        mcpServers: normalizedMcpServers,
+        mcpServerSummary,
+        mcpProfileName: resolvedMcp.profileName,
+        mcpProfileSummary: resolvedMcp.profileSummary,
       },
       extraEnv,
     );
 
-    res.json({ ...started, ...workspaceResponseFields(context) });
+    res.json({
+      ...started,
+      ...workspaceResponseFields(context),
+      mcpServers: mcpServerSummary,
+      mcpProfileName: resolvedMcp.profileName || undefined,
+      mcpProfile: resolvedMcp.profileSummary || undefined,
+    });
   } catch (error) {
     console.error('Failed to start ReAct workflow:', error);
-    res.status(500).json({ success: false, error: error.message });
+    const bridgePayload = error.bridgePayload || null;
+    res.status(mcpApiErrorStatus(error)).json({
+      success: false,
+      error: bridgePayload?.error || error.message,
+      runId: bridgePayload?.runId,
+      status: bridgePayload?.status,
+    });
+  }
+});
+
+app.post('/api/mcp/discover', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      mcpServers,
+      mcpProfileName,
+    } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const resolvedMcp = await resolveMcpServersForRequest(context, { mcpServers, mcpProfileName });
+    const normalizedMcpServers = resolvedMcp.mcpServers;
+    const mcpServerSummary = summarizeMcpServers(normalizedMcpServers);
+    const result = await runMcpDiscoveryProcess({ mcpServers: normalizedMcpServers });
+    if (!result.success) {
+      if (resolvedMcp.profileName) {
+        await updateMcpProfileLastTest(context.workspaceDir, resolvedMcp.profileName, {
+          status: 'failed',
+          testedAt: new Date().toISOString(),
+          serverCount: (result.servers || mcpServerSummary || []).length,
+          toolCount: 0,
+          tools: [],
+          error: result.error || 'MCP discovery failed',
+          errorType: result.errorType,
+        }).catch((updateError) => {
+          console.error('Failed to update MCP profile failed test status:', updateError);
+        });
+      }
+      res.status(400).json({
+        success: false,
+        error: result.error || 'MCP discovery failed',
+        errorType: result.errorType,
+        servers: result.servers || mcpServerSummary,
+        mcpProfileName: resolvedMcp.profileName || undefined,
+      });
+      return;
+    }
+    let updatedProfileSummary = resolvedMcp.profileSummary;
+    if (resolvedMcp.profileName) {
+      updatedProfileSummary = await updateMcpProfileLastTest(context.workspaceDir, resolvedMcp.profileName, {
+        status: 'ok',
+        testedAt: new Date().toISOString(),
+        serverCount: result.serverCount ?? mcpServerSummary.length,
+        toolCount: result.toolCount ?? (result.tools || []).length,
+        tools: summarizeMcpDiscoveredTools(result.tools || []),
+      }).catch((updateError) => {
+        console.error('Failed to update MCP profile test status:', updateError);
+        return resolvedMcp.profileSummary;
+      });
+    }
+    res.json({
+      success: true,
+      ...workspaceResponseFields(context),
+      servers: result.servers || mcpServerSummary,
+      tools: result.tools || [],
+      serverCount: result.serverCount ?? mcpServerSummary.length,
+      toolCount: result.toolCount ?? (result.tools || []).length,
+      mcpProfileName: resolvedMcp.profileName || undefined,
+      mcpProfile: updatedProfileSummary || undefined,
+    });
+  } catch (error) {
+    console.error('Failed to discover MCP tools:', error);
+    const requestedProfileName = req.body?.mcpProfileName ? safeMcpProfileName(req.body.mcpProfileName) : '';
+    if (requestedProfileName && error.status !== 404) {
+      try {
+        const context = await resolveWorkspaceContext({
+          workspaceId: req.body?.workspaceId,
+          workspaceDir: req.body?.workspaceDir,
+        });
+        await updateMcpProfileLastTest(context.workspaceDir, requestedProfileName, {
+          status: 'failed',
+          testedAt: new Date().toISOString(),
+          serverCount: null,
+          toolCount: 0,
+          tools: [],
+          error: error.message,
+          errorType: error.missingEnv ? 'missing_env' : undefined,
+        });
+      } catch (updateError) {
+        console.error('Failed to update MCP profile exception test status:', updateError);
+      }
+    }
+    res.status(mcpApiErrorStatus(error)).json({ success: false, error: error.message });
   }
 });
 
@@ -3545,19 +7385,39 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
       return res.status(400).json({ error: 'taskId and path are required' });
     }
 
-    const taskNode = Object.values(run.task_nodes || {}).find((node) => node.maze_task_id === taskId || node.node_id === taskId);
+    const taskNode = Object.values(run.task_nodes || {}).find((node) => (
+      node.maze_task_id === taskId
+      || node.task_id === taskId
+      || node.node_id === taskId
+      || node.id === taskId
+    ));
     const artifact = (taskNode?.artifacts || []).find((item) => item.path === artifactPath);
     if (!artifact) {
       return res.status(404).json({ error: 'Artifact not found' });
     }
 
-    const artifactsDir = path.resolve(staticRunDir(workspaceDir, req.params.runId), 'artifacts');
-    const fullPath = path.resolve(String(artifact.storage_path || ''));
-    if (!fullPath.startsWith(artifactsDir + path.sep)) {
-      return res.status(400).json({ error: 'Artifact path is outside this run' });
+    if (artifact.storage_path) {
+      const artifactsDir = path.resolve(staticRunDir(workspaceDir, req.params.runId), 'artifacts');
+      const fullPath = path.resolve(String(artifact.storage_path || ''));
+      if (!fullPath.startsWith(artifactsDir + path.sep)) {
+        return res.status(400).json({ error: 'Artifact path is outside this run' });
+      }
+
+      return res.download(fullPath, artifact.name || path.basename(fullPath));
     }
 
-    res.download(fullPath, artifact.name || path.basename(fullPath));
+    if (!artifact.sha256) {
+      return res.status(404).json({ error: 'Artifact storage path not found' });
+    }
+
+    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(artifact.sha256)}`);
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `Failed to download artifact: HTTP ${response.status}` });
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    res.setHeader('Content-Type', artifact.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(artifact.name || path.basename(artifact.path || 'artifact'))}"`);
+    res.send(data);
   } catch (error) {
     console.error('❌ 下载 static workflow artifact 失败:', error);
     res.status(statusForFileError(error)).json({ error: error.message });
@@ -3877,13 +7737,33 @@ app.post('/api/workflows/:id/run', async (req, res) => {
         if (!result.success) {
           console.error('❌ 工作流执行失败:', result.error);
           workflow.status = 'failed';
-          workflow.error = result.error;
+          workflow.error = compactAgentDiagnosticText(result.error || 'Workflow failed', 2000);
           workflows.set(id, workflow);
           
           await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
             type: 'workflow_failed',
             data: {
-              error: result.error,
+              error: workflow.error,
+              traceback: result.traceback,
+            },
+            timestamp: new Date().toISOString()
+          });
+          return;
+        }
+
+        const latestRunAfterPython = await loadStaticRun(workspaceDir, workflowRunId).catch(() => null);
+        if (latestRunAfterPython?.status === 'failed') {
+          console.error('❌ 工作流任务失败:', latestRunAfterPython.error);
+          workflow.status = 'failed';
+          workflow.error = compactAgentDiagnosticText(latestRunAfterPython.error || 'Workflow task failed', 2000);
+          workflow.lastRunId = workflowRunId;
+          workflow.mazeRunId = result.mazeRunId;
+          workflows.set(id, workflow);
+
+          await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
+            type: 'workflow_failed',
+            data: {
+              error: workflow.error,
               traceback: result.traceback,
             },
             timestamp: new Date().toISOString()
@@ -4051,17 +7931,28 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-server.listen(PORT, () => {
-  console.log('\n' + '='.repeat(60));
-  console.log('  🚀 Maze Playground Backend Server');
-  console.log('='.repeat(60));
-  console.log(`\n✅ HTTP Server:   http://localhost:${PORT}`);
-  console.log(`✅ API Endpoint:  http://localhost:${PORT}/api`);
-  console.log(`✅ WebSocket:     ws://localhost:${PORT}/ws`);
-  console.log(`✅ Health Check:  http://localhost:${PORT}/health`);
-  console.log(`✅ Python Bridge: ${PYTHON_BIN}`);
-  console.log('\n📡 等待前端连接...\n');
-});
+(async () => {
+  try {
+    const interrupted = await markInterruptedAgentRunsOnStartup();
+    if (interrupted > 0) {
+      console.log(`🧹 Marked ${interrupted} stale Workspace Agent run(s) as interrupted`);
+    }
+  } catch (error) {
+    console.error('Failed to mark stale Workspace Agent runs:', error);
+  }
+
+  server.listen(PORT, () => {
+    console.log('\n' + '='.repeat(60));
+    console.log('  🚀 Maze Playground Backend Server');
+    console.log('='.repeat(60));
+    console.log(`\n✅ HTTP Server:   http://localhost:${PORT}`);
+    console.log(`✅ API Endpoint:  http://localhost:${PORT}/api`);
+    console.log(`✅ WebSocket:     ws://localhost:${PORT}/ws`);
+    console.log(`✅ Health Check:  http://localhost:${PORT}/health`);
+    console.log(`✅ Python Bridge: ${PYTHON_BIN}`);
+    console.log('\n📡 等待前端连接...\n');
+  });
+})();
 
 // 优雅关闭
 process.on('SIGINT', () => {

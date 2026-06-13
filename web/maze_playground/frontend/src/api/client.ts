@@ -25,6 +25,123 @@ import type { LlmSettings } from '@/utils/llmSettings';
 
 const API_BASE = '/api';
 
+export interface McpServerConfig {
+  name: string;
+  transport?: 'stdio' | 'streamable_http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  timeout?: number;
+  tool_prefix?: string;
+}
+
+export interface McpProfileSummary {
+  name: string;
+  description?: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  serverCount: number;
+  toolCount?: number;
+  usesEnvRefs?: boolean;
+  envRefCount?: number;
+  envRefs?: string[];
+  lastTest?: {
+    status?: 'ok' | 'failed' | string | null;
+    testedAt?: string | null;
+    serverCount?: number | null;
+    toolCount?: number | null;
+    tools?: Array<Record<string, any>>;
+    error?: string;
+    errorType?: string;
+  } | null;
+  servers: Array<Record<string, any>>;
+  redactedMcpServers: McpServerConfig[];
+}
+
+export interface McpProfileExportBundle {
+  schema: string;
+  schema_version: number;
+  exportedAt: string;
+  name: string;
+  description?: string;
+  redacted?: boolean;
+  mcpServers: McpServerConfig[];
+  profile?: McpProfileSummary;
+}
+
+export interface WorkspaceAgentMessagePart {
+  type: 'text' | 'tool_call' | 'tool_result' | 'error' | string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, any>;
+  toolCallId?: string;
+  result?: any;
+  message?: string;
+}
+
+export interface WorkspaceAgentMessage {
+  id: string;
+  sessionId: string;
+  role: 'user' | 'assistant' | 'tool' | 'system' | string;
+  createdAt: string;
+  parts: WorkspaceAgentMessagePart[];
+}
+
+export interface WorkspaceAgentSession {
+  id: string;
+  title?: string;
+  createdAt: string;
+  updatedAt: string;
+  workspaceId?: string;
+  workspaceDir?: string;
+  messageCount?: number;
+  summary?: string;
+  compaction?: Record<string, any> | null;
+  metadata?: Record<string, any>;
+}
+
+export interface WorkspaceAgentDraft {
+  id: string;
+  status?: 'draft' | 'dismissed' | string;
+  revision?: number;
+  name: string;
+  relativePath: string;
+  description?: string;
+  workflow: {
+    name: string;
+    nodes: WorkflowNode[];
+    edges: WorkflowEdge[];
+  };
+  taskDefinitions?: Array<Record<string, any>>;
+  validation?: {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+    nodeCount?: number;
+    edgeCount?: number;
+    taskDefinitionCount?: number;
+    validatedAt?: string;
+  } | null;
+  saved?: Record<string, any> | null;
+  run?: Record<string, any> | null;
+  fixContext?: Record<string, any> | null;
+  dismissedAt?: string | null;
+  dismissedReason?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface WorkspaceAgentEvent {
+  seq: number;
+  type: string;
+  timestamp: string;
+  [key: string]: any;
+}
+
 export const api = {
   async createWorkspace(data?: {
     workspaceId?: string;
@@ -435,6 +552,18 @@ export const api = {
     return response.data;
   },
 
+  async decideDynamicPermissionRequest(
+    runId: string,
+    requestId: string,
+    data: { action: 'allow' | 'deny'; reason?: string },
+  ): Promise<{ success: boolean; runId: string; request: Record<string, any> }> {
+    const response = await axios.post(
+      `${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}/permission-requests/${encodeURIComponent(requestId)}/decision`,
+      data,
+    );
+    return response.data;
+  },
+
   async deleteDynamicRun(runId: string): Promise<{ success: boolean; runId: string; deleted: boolean }> {
     const response = await axios.delete(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}`);
     return response.data;
@@ -608,10 +737,13 @@ export const api = {
     timeoutSeconds?: number;
     taskTimeout?: number;
     skills?: string[];
-    skillDirs?: string[];
-    maxSkillChars?: number;
-    execBackend?: 'workspace_sandbox' | 'docker';
-    permissionPolicy?: Record<string, any>;
+	    skillDirs?: string[];
+	    maxSkillChars?: number;
+	    execBackend?: 'workspace_sandbox' | 'docker';
+	    permissionPolicy?: Record<string, any>;
+	    permissionAskTimeoutSeconds?: number;
+	    mcpServers?: McpServerConfig[];
+    mcpProfileName?: string;
     llm?: LlmSettings;
   }): Promise<{
     success: boolean;
@@ -621,9 +753,389 @@ export const api = {
     mode?: string;
     skills?: string[];
     execBackend?: string;
+    mcpServers?: Array<Record<string, any>>;
+    mcpProfileName?: string;
+    mcpProfile?: McpProfileSummary;
     eventTypes?: string[];
   }> {
     const response = await axios.post(`${API_BASE}/react-runs/start`, data);
+    return response.data;
+  },
+
+  async discoverMcpTools(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    mcpServers?: McpServerConfig[];
+    mcpProfileName?: string;
+  }): Promise<{
+    success: boolean;
+    servers: Array<Record<string, any>>;
+    tools: Array<Record<string, any>>;
+    serverCount: number;
+    toolCount: number;
+    mcpProfileName?: string;
+    mcpProfile?: McpProfileSummary;
+  }> {
+    const response = await axios.post(`${API_BASE}/mcp/discover`, data);
+    return response.data;
+  },
+
+  async listMcpProfiles(params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    profiles: McpProfileSummary[];
+  }> {
+    const response = await axios.get(`${API_BASE}/mcp/profiles`, { params });
+    return response.data;
+  },
+
+  async saveMcpProfile(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    name: string;
+    description?: string;
+    mcpServers: McpServerConfig[];
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    profile: McpProfileSummary;
+  }> {
+    const response = await axios.post(`${API_BASE}/mcp/profiles`, data);
+    return response.data;
+  },
+
+  async deleteMcpProfile(name: string, params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    profileName: string;
+  }> {
+    const response = await axios.delete(`${API_BASE}/mcp/profiles/${encodeURIComponent(name)}`, { params });
+    return response.data;
+  },
+
+  async copyMcpProfile(sourceName: string, data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    name: string;
+    description?: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    sourceProfileName: string;
+    profile: McpProfileSummary;
+  }> {
+    const response = await axios.post(`${API_BASE}/mcp/profiles/${encodeURIComponent(sourceName)}/copy`, data);
+    return response.data;
+  },
+
+  async exportMcpProfile(name: string, params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    export: McpProfileExportBundle;
+  }> {
+    const response = await axios.get(`${API_BASE}/mcp/profiles/${encodeURIComponent(name)}/export`, { params });
+    return response.data;
+  },
+
+  async importMcpProfile(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    name?: string;
+    description?: string;
+    mcpServers?: McpServerConfig[];
+    redactedMcpServers?: McpServerConfig[];
+    profile?: Record<string, any>;
+    export?: Record<string, any>;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    profile: McpProfileSummary;
+  }> {
+    const response = await axios.post(`${API_BASE}/mcp/profiles/import`, data);
+    return response.data;
+  },
+
+  async listAgentSessions(params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    sessions: WorkspaceAgentSession[];
+  }> {
+    const response = await axios.get(`${API_BASE}/agent/sessions`, { params });
+    return response.data;
+  },
+
+  async createAgentSession(data?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    title?: string;
+    metadata?: Record<string, any>;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    session: WorkspaceAgentSession;
+    messages: WorkspaceAgentMessage[];
+    drafts?: WorkspaceAgentDraft[];
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/sessions`, data || {});
+    return response.data;
+  },
+
+  async updateAgentSession(
+    sessionId: string,
+    data: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      title?: string;
+      metadata?: Record<string, any>;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    session: WorkspaceAgentSession;
+  }> {
+    const response = await axios.patch(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}`, data || {});
+    return response.data;
+  },
+
+  async deleteAgentSession(
+    sessionId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    deletedSessionId: string;
+    sessions: WorkspaceAgentSession[];
+  }> {
+    const response = await axios.delete(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}`, { params });
+    return response.data;
+  },
+
+  async exportAgentSession(
+    sessionId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    export: Record<string, any>;
+  }> {
+    const response = await axios.get(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}/export`, { params });
+    return response.data;
+  },
+
+  async getAgentMessages(
+    sessionId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    session: WorkspaceAgentSession;
+    messages: WorkspaceAgentMessage[];
+    drafts?: WorkspaceAgentDraft[];
+  }> {
+    const response = await axios.get(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { params });
+    return response.data;
+  },
+
+  async runWorkspaceAgent(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    sessionId?: string;
+    message: string;
+    title?: string;
+    llm: LlmSettings;
+    currentWorkflow?: Record<string, any>;
+    maxSteps?: number;
+    maxTokens?: number;
+    timeoutMs?: number;
+    async?: boolean;
+  }): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    session: WorkspaceAgentSession;
+    messages: WorkspaceAgentMessage[];
+    drafts?: WorkspaceAgentDraft[];
+    run: Record<string, any>;
+    events: WorkspaceAgentEvent[];
+    finalText?: string;
+    error?: string;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/runs`, data);
+    return response.data;
+  },
+
+  async getAgentRunEvents(
+    runId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      after?: number;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    run: Record<string, any>;
+    events: WorkspaceAgentEvent[];
+  }> {
+    const response = await axios.get(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events`, { params });
+    return response.data;
+  },
+
+  async cancelAgentRun(
+    runId: string,
+    data?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      reason?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    run: Record<string, any>;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}/cancel`, data || {});
+    return response.data;
+  },
+
+  getAgentRunStreamUrl(
+    runId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      after?: number;
+    },
+  ): string {
+    const query = new URLSearchParams();
+    if (params?.workspaceId) query.set('workspaceId', params.workspaceId);
+    if (params?.workspaceDir) query.set('workspaceDir', params.workspaceDir);
+    if (params?.after !== undefined) query.set('after', String(params.after));
+    const suffix = query.toString();
+    return `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/stream${suffix ? `?${suffix}` : ''}`;
+  },
+
+  async getAgentDraft(
+    draftId: string,
+    params?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    draft: WorkspaceAgentDraft;
+  }> {
+    const response = await axios.get(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}`, { params });
+    return response.data;
+  },
+
+  async validateAgentDraft(
+    draftId: string,
+    data?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    draft: WorkspaceAgentDraft;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}/validate`, data || {});
+    return response.data;
+  },
+
+  async dismissAgentDraft(
+    draftId: string,
+    data?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      reason?: string;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    draft: WorkspaceAgentDraft;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}/dismiss`, data || {});
+    return response.data;
+  },
+
+  async saveAgentDraft(
+    draftId: string,
+    data: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      confirmed: boolean;
+      relativePath?: string;
+      workflowId?: string | null;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    draft: WorkspaceAgentDraft;
+    workflow: Workflow;
+    relativePath: string;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}/save`, data);
+    return response.data;
+  },
+
+  async runAgentDraft(
+    draftId: string,
+    data: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      confirmed: boolean;
+    },
+  ): Promise<{
+    success: boolean;
+    workspaceId: string;
+    workspaceDir: string;
+    draft: WorkspaceAgentDraft;
+    workflow: Workflow;
+    run: StaticWorkflowRunSnapshot;
+    runId: string;
+    workflowId: string;
+  }> {
+    const response = await axios.post(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}/run`, data);
     return response.data;
   },
 
@@ -751,7 +1263,9 @@ export const api = {
 
           case 'run_update':
             callbacks.onRunUpdate?.(data);
-            callbacks.onTaskUpdate?.(data.event);
+            if (data.event) {
+              callbacks.onTaskUpdate?.(data.event);
+            }
             break;
 
           case 'workflow_running':

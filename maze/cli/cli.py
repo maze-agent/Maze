@@ -17,7 +17,7 @@ from maze.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
-async def _async_start_head(port: int, ray_head_port: int, strategy: str = "Default", playground: bool = False):
+async def _async_start_head(port: int, ray_head_port: int, strategy: str = "least-loaded", playground: bool = False):
   
     from maze.core.server import app as server_app, mapath
     use_predictor = strategy == "DAPS"
@@ -143,7 +143,7 @@ def stop_playground(processes):
             print(f"⚠️  Failed to stop {name}: {e}")
     print("✅ Playground closed")
 
-def start_head(port: int, ray_head_port: int, strategy: str = "Default", playground: bool = False):
+def start_head(port: int, ray_head_port: int, strategy: str = "least-loaded", playground: bool = False):
     asyncio.run(_async_start_head(port, ray_head_port, strategy, playground))
 
 def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10):
@@ -630,7 +630,7 @@ def main():
     start_group.add_argument("--worker", action="store_true", help="Start as worker node")
 
     start_parser.add_argument("--port", type=int, metavar="PORT", help="Port for head node (required if --head)",default=8000)
-    start_parser.add_argument("--strategy", metavar="STRATEGY", help="Strategy for task scheduling",default="Default")
+    start_parser.add_argument("--strategy", metavar="STRATEGY", help="Strategy for task scheduling",default="least-loaded")
     start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
     start_parser.add_argument("--playground", action="store_true", help="Start Maze Playground visual interface (only applicable to --head)")

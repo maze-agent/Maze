@@ -12,6 +12,7 @@ import re
 import ast
 import operator
 import tempfile
+from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
 
@@ -43,6 +44,7 @@ default_workspace_dir = os.path.abspath(os.path.expanduser(
 from maze.client.front.client import MaClient
 from maze.client.maze.client import MaClient as DynamicMaClient
 from maze.client.maze.agent_exec import run_agent_exec_code
+from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
 from maze.client.maze.agent_permissions import permission_error_payload
 from maze.client.maze.agent_sandbox import build_workspace_sandbox
 from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
@@ -583,6 +585,81 @@ def _string_list(value):
     return [str(value).strip()] if str(value).strip() else []
 
 
+def _mcp_server_summary(server):
+    if not isinstance(server, dict):
+        return {}
+    transport = str(server.get("transport") or "stdio")
+    summary = {
+        "name": str(server.get("name") or ""),
+        "transport": transport,
+        "tool_prefix": server.get("tool_prefix"),
+        "timeout": server.get("timeout"),
+        "has_env": bool(server.get("env")),
+        "has_headers": bool(server.get("headers")),
+    }
+    if transport == "stdio":
+        summary["command"] = str(server.get("command") or "")
+        summary["args_count"] = len(server.get("args") or []) if isinstance(server.get("args"), list) else 0
+        summary["cwd"] = str(server.get("cwd") or "") or None
+    elif server.get("url"):
+        parsed = urlsplit(str(server.get("url") or ""))
+        summary["url_scheme"] = parsed.scheme
+        summary["url_host"] = parsed.netloc
+    return summary
+
+
+def _mcp_tool_summary(tool):
+    input_schema = getattr(tool, "input_schema", None) or {}
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else {}
+    required = input_schema.get("required") if isinstance(input_schema, dict) else []
+    return {
+        "server": getattr(tool, "server_name", None),
+        "tool": getattr(tool, "tool_name", None),
+        "agent_tool": getattr(tool, "agent_tool_name", None),
+        "description": getattr(tool, "description", "") or "",
+        "input_schema": input_schema if isinstance(input_schema, dict) else {},
+        "inputs": sorted((properties or {}).keys()) if isinstance(properties, dict) else [],
+        "required_inputs": list(required or []) if isinstance(required, list) else [],
+    }
+
+
+def discover_mcp_tools(params):
+    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
+    if not isinstance(mcp_servers, list):
+        return {"success": False, "error": "mcpServers must be an array"}
+
+    manager = None
+    try:
+        manager, tools = discover_mcp_tools_blocking(configs=mcp_servers)
+        server_summary = [
+            summary
+            for summary in (_mcp_server_summary(server) for server in mcp_servers)
+            if summary
+        ]
+        tool_summary = [_mcp_tool_summary(tool) for tool in tools]
+        return {
+            "success": True,
+            "servers": server_summary,
+            "tools": tool_summary,
+            "serverCount": len(server_summary),
+            "toolCount": len(tool_summary),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "errorType": type(exc).__name__,
+            "servers": [
+                summary
+                for summary in (_mcp_server_summary(server) for server in mcp_servers)
+                if summary
+            ],
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        close_mcp_manager_blocking(manager)
+
+
 def _normalize_task_relative_path(relative_path):
     relative_path = (relative_path or "tasks/custom_task.py").replace("\\", "/").strip()
     relative_path = relative_path.lstrip("/")
@@ -838,14 +915,25 @@ def rename_workspace_task(workspace_dir, relative_path, old_function_name, new_n
 
 def _build_task_inputs(node_data, task_map):
     task_inputs = {}
-    for inp in node_data["inputs"]:
-        if inp["source"] == "user":
+    for inp in node_data.get("inputs", []):
+        source = inp.get("source")
+        if source == "user":
             task_inputs[inp["name"]] = inp.get("value", "")
-        elif inp["source"] == "task":
-            task_source = inp.get("taskSource")
-            if task_source:
-                source_node_id = task_source["taskId"]
-                output_key = task_source["outputKey"]
+        elif source in ("task", "node"):
+            task_source = inp.get("taskSource") or {}
+            source_node_id = (
+                task_source.get("taskId")
+                or task_source.get("nodeId")
+                or inp.get("taskId")
+                or inp.get("nodeId")
+            )
+            output_key = (
+                task_source.get("outputKey")
+                or task_source.get("outputName")
+                or inp.get("outputKey")
+                or inp.get("outputName")
+            )
+            if source_node_id and output_key:
                 if source_node_id in task_map:
                     source_task = task_map[source_node_id]
                     task_inputs[inp["name"]] = source_task.outputs[output_key]
@@ -914,6 +1002,7 @@ def build_and_run_workflow(
         task_map = {}  # node_id -> MaTask
         maze_task_to_node = {}
         node_lookup = {node.get("id"): node for node in nodes}
+        failed_progress = []
 
         def remember_task(node_id, ma_task):
             task_map[node_id] = ma_task
@@ -924,6 +1013,11 @@ def build_and_run_workflow(
             data = dict(event.get("data") or {})
             maze_task_id = data.get("task_id")
             node_id = maze_task_to_node.get(maze_task_id)
+            if event_type == "task_exception" or data.get("run_status") == "failed":
+                failed_progress.append({
+                    "type": event_type,
+                    "data": data,
+                })
 
             if static_run_id:
                 data["workflow_run_id"] = static_run_id
@@ -960,21 +1054,14 @@ def build_and_run_workflow(
                 else:
                     return {"success": False, "error": f"Unknown module: {module_name}"}
                 
-                # 构建输入字典
-                task_inputs = {}
-                for inp in node_data["inputs"]:
-                    if inp["source"] == "user":
-                        task_inputs[inp["name"]] = inp.get("value", "")
-                    elif inp["source"] == "task":
-                        task_source = inp.get("taskSource")
-                        if task_source:
-                            source_node_id = task_source["taskId"]
-                            output_key = task_source["outputKey"]
-                            if source_node_id in task_map:
-                                source_task = task_map[source_node_id]
-                                task_inputs[inp["name"]] = source_task.outputs[output_key]
-                            else:
-                                return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
+                try:
+                    task_inputs = _build_task_inputs(node_data, task_map)
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                    }
 
                 if module_name == "agentTools" and workflow_workspace_dir:
                     if not str(task_inputs.get("workspace_dir") or "").strip():
@@ -1046,21 +1133,14 @@ def build_and_run_workflow(
                     if not task_func:
                         return {"success": False, "error": "No @task decorated function found"}
                     
-                    # Build inputs
-                    task_inputs = {}
-                    for inp in node_data["inputs"]:
-                        if inp["source"] == "user":
-                            task_inputs[inp["name"]] = inp.get("value", "")
-                        elif inp["source"] == "task":
-                            task_source = inp.get("taskSource")
-                            if task_source:
-                                source_node_id = task_source["taskId"]
-                                output_key = task_source["outputKey"]
-                                if source_node_id in task_map:
-                                    source_task = task_map[source_node_id]
-                                    task_inputs[inp["name"]] = source_task.outputs[output_key]
-                                else:
-                                    return {"success": False, "error": f"Task dependency error: {source_node_id} not found"}
+                    try:
+                        task_inputs = _build_task_inputs(node_data, task_map)
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "error": str(e),
+                            "traceback": traceback.format_exc(),
+                        }
                     
                     # Add task
                     ma_task = workflow.add_task(task_func, inputs=task_inputs)
@@ -1111,6 +1191,22 @@ def build_and_run_workflow(
         print(f"[DEBUG] 获取运行结果 (run_id: {run_id})...", file=sys.stderr)
         results = workflow.get_results(run_id, verbose=True, progress_callback=emit_workflow_progress)
         print(f"[DEBUG] 结果: {results}", file=sys.stderr)
+        if failed_progress:
+            failure_data = failed_progress[-1].get("data") or {}
+            failure = failure_data.get("error") or failure_data.get("result") or failure_data
+            if isinstance(failure, dict):
+                failure_message = failure.get("message") or failure.get("error") or json.dumps(failure, ensure_ascii=False)
+                failure_traceback = failure.get("traceback")
+            else:
+                failure_message = str(failure)
+                failure_traceback = None
+            return {
+                "success": False,
+                "mazeRunId": run_id,
+                "error": failure_message or "Workflow task failed",
+                "traceback": failure_traceback,
+                "results": results,
+            }
         
         # Step 5: 清理（当前服务器不支持 cleanup endpoint，已降级）
         # print(f"[DEBUG] 清理工作流...", file=sys.stderr)
@@ -1151,6 +1247,18 @@ def run_react_workflow(params):
     has_explicit_skill_dirs = bool(skill_dirs)
     max_skill_chars = int(params.get("maxSkillChars") or params.get("max_skill_chars") or 12000)
     permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
+    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
+    mcp_profile_name = str(params.get("mcpProfileName") or params.get("mcp_profile_name") or "").strip()
+    mcp_profile_summary = params.get("mcpProfileSummary") or params.get("mcp_profile_summary")
+    if not isinstance(mcp_profile_summary, dict):
+        mcp_profile_summary = None
+    if not isinstance(mcp_servers, list):
+        mcp_servers = []
+    mcp_server_summary = [
+        summary
+        for summary in (_mcp_server_summary(server) for server in mcp_servers)
+        if summary
+    ]
     exec_backend = str(
         params.get("execBackend")
         or params.get("exec_backend")
@@ -1258,7 +1366,21 @@ def run_react_workflow(params):
             skill_dirs=skill_dirs,
             max_skill_chars=max_skill_chars,
             permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
+            mcp_servers=mcp_servers,
+            mcp_profile_name=mcp_profile_name or None,
+            mcp_profile=mcp_profile_summary,
         )
+        if mcp_profile_name:
+            try:
+                react.dynamic_run.emit_event(
+                    "agent_mcp_profile_selected",
+                    {
+                        "name": mcp_profile_name,
+                        "profile": mcp_profile_summary,
+                    },
+                )
+            except Exception:
+                pass
         emit_progress({
             "type": "react_run_created",
             "data": {
@@ -1272,6 +1394,10 @@ def run_react_workflow(params):
                 "max_steps": max_steps,
                 "timeout_seconds": timeout_seconds,
                 "task_timeout": task_timeout,
+                "mcp_servers": mcp_server_summary,
+                "mcp_server_count": len(mcp_server_summary),
+                "mcp_profile_name": mcp_profile_name or None,
+                "mcp_profile": mcp_profile_summary,
             },
         })
         answer = react.run(prompt)
@@ -1295,6 +1421,9 @@ def run_react_workflow(params):
             "status": status.get("status"),
             "skills": skill_names,
             "execBackend": exec_backend,
+            "mcpServers": mcp_server_summary,
+            "mcpProfileName": mcp_profile_name or None,
+            "mcpProfile": mcp_profile_summary,
             "maxSteps": max_steps,
             "timeoutSeconds": timeout_seconds,
             "taskTimeout": task_timeout,
@@ -1310,6 +1439,14 @@ def run_react_workflow(params):
             "error": str(e),
             "traceback": traceback.format_exc(),
         }
+        failed_run_id = getattr(e, "maze_run_id", None)
+        if failed_run_id:
+            response["runId"] = failed_run_id
+            try:
+                failed_run = DynamicMaClient(server_url="http://localhost:8000").get_dynamic_run(failed_run_id)
+                response["status"] = failed_run.get_status().get("status")
+            except Exception:
+                pass
         if react is not None:
             response["runId"] = react.run_id
             try:
@@ -1390,6 +1527,9 @@ def main():
 
         elif action == 'run_react_workflow':
             result = run_react_workflow(params)
+
+        elif action == 'discover_mcp_tools':
+            result = discover_mcp_tools(params)
         
         else:
             result = {"error": f"Unknown action: {action}"}

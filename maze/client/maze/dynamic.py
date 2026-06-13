@@ -256,6 +256,61 @@ class DynamicRun:
 
         return payload.get("event", {})
 
+    def patch_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        response = requests.patch(
+            f"{self.server_url}/dynamic_runs/{self.run_id}/metadata",
+            json={"metadata": metadata},
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to patch dynamic run metadata: {response.status_code}, {response.text}")
+
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise Exception(f"Failed to patch dynamic run metadata: {payload.get('message', 'Unknown error')}")
+
+        return payload.get("metadata", {})
+
+    def create_permission_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        response = requests.post(
+            f"{self.server_url}/dynamic_runs/{self.run_id}/permission_requests",
+            json={"request": request},
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to create permission request: {response.status_code}, {response.text}")
+
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise Exception(f"Failed to create permission request: {payload.get('message', 'Unknown error')}")
+
+        return payload.get("request", {})
+
+    def get_permission_request(self, request_id: str) -> Dict[str, Any]:
+        response = requests.get(
+            f"{self.server_url}/dynamic_runs/{self.run_id}/permission_requests/{request_id}",
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to get permission request: {response.status_code}, {response.text}")
+
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise Exception(f"Failed to get permission request: {payload.get('message', 'Unknown error')}")
+
+        return payload.get("request", {})
+
+    def decide_permission_request(self, request_id: str, action: str, reason: str | None = None) -> Dict[str, Any]:
+        response = requests.post(
+            f"{self.server_url}/dynamic_runs/{self.run_id}/permission_requests/{request_id}/decision",
+            json={"decision": {"action": action, "reason": reason or ""}},
+        )
+        if response.status_code != 200:
+            raise Exception(f"Failed to decide permission request: {response.status_code}, {response.text}")
+
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise Exception(f"Failed to decide permission request: {payload.get('message', 'Unknown error')}")
+
+        return payload.get("request", {})
+
     def wait_for_task(
         self,
         task: DynamicTaskInvocation | str,

@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import mimetypes
+import os
 import textwrap
 import time
 import uuid
@@ -374,6 +375,14 @@ class AgentToolRuntime:
             self.permission_policy = permission_policy
         else:
             self.permission_policy = AgentPermissionPolicy.from_dict(permission_policy)
+        self.permission_ask_timeout_seconds = max(
+            0.0,
+            float(os.environ.get("MAZE_AGENT_PERMISSION_ASK_TIMEOUT_SECONDS") or "0"),
+        )
+        self.permission_ask_poll_seconds = max(
+            0.1,
+            float(os.environ.get("MAZE_AGENT_PERMISSION_ASK_POLL_SECONDS") or "0.5"),
+        )
 
     def validate_tool_call(self, tool_name: str, args: Dict[str, Any] | None) -> AgentToolError | None:
         error = self.registry.validate_tool_call(tool_name, args)
@@ -823,11 +832,61 @@ class AgentToolRuntime:
             "args": args,
         })
         if decision.action == AgentPermissionAction.ASK:
+            request_id = f"perm-{uuid.uuid4()}"
+            request_payload = {
+                "request_id": request_id,
+                "tool": tool_name,
+                "permission": permission,
+                "target": target,
+                "policy_decision": decision.to_dict(),
+                "args": args,
+                "source": spec.source,
+                "status": "pending",
+                "timeout_seconds": self.permission_ask_timeout_seconds,
+            }
+            created_request = self._create_permission_request(request_payload)
             self._emit_best_effort("agent_permission_ask", {
+                "request_id": request_id,
                 "tool": tool_name,
                 "permission": decision.to_dict(),
                 "args": args,
+                "request": created_request or request_payload,
             })
+            resolved_request = self._wait_for_permission_request(request_id)
+            if resolved_request is not None:
+                resolved_action = str((resolved_request.get("decision") or {}).get("action") or "").strip().lower()
+                if resolved_action in {"allow", "deny"}:
+                    decision.allowed = resolved_action == "allow"
+                    decision.reason = f"user_{'allowed' if decision.allowed else 'denied'}"
+                    decision.details = {
+                        **decision.details,
+                        "permission_request": resolved_request,
+                    }
+            elif self.permission_ask_timeout_seconds > 0:
+                fallback_action = "allow" if decision.allowed else "deny"
+                fallback_request = self._decide_permission_request(
+                    request_id,
+                    fallback_action,
+                    reason=f"ask timeout fallback to {fallback_action}",
+                )
+                if fallback_request is not None:
+                    decision.details = {
+                        **decision.details,
+                        "permission_request": fallback_request,
+                    }
+                    decision.reason = f"ask_timeout_default_{fallback_action}"
+            elif created_request is not None:
+                fallback_action = "allow" if decision.allowed else "deny"
+                fallback_request = self._decide_permission_request(
+                    request_id,
+                    fallback_action,
+                    reason=f"ask default {fallback_action}",
+                )
+                if fallback_request is not None:
+                    decision.details = {
+                        **decision.details,
+                        "permission_request": fallback_request,
+                    }
         if decision.allowed:
             self._emit_best_effort("agent_permission_allowed", {
                 "tool": tool_name,
@@ -848,6 +907,35 @@ class AgentToolRuntime:
                 "permission": decision.to_dict(),
             },
         )
+
+    def _create_permission_request(self, request: Dict[str, Any]) -> Dict[str, Any] | None:
+        try:
+            return self.dynamic_run.create_permission_request(request)
+        except Exception:
+            return None
+
+    def _wait_for_permission_request(self, request_id: str) -> Dict[str, Any] | None:
+        if self.permission_ask_timeout_seconds <= 0:
+            return None
+        deadline = time.time() + self.permission_ask_timeout_seconds
+        while time.time() < deadline:
+            try:
+                request = self.dynamic_run.get_permission_request(request_id)
+            except Exception:
+                return None
+            status = str(request.get("status") or "").strip().lower()
+            if status in {"allowed", "denied"}:
+                return request
+            if status not in {"pending", ""}:
+                return None
+            time.sleep(self.permission_ask_poll_seconds)
+        return None
+
+    def _decide_permission_request(self, request_id: str, action: str, reason: str) -> Dict[str, Any] | None:
+        try:
+            return self.dynamic_run.decide_permission_request(request_id, action=action, reason=reason)
+        except Exception:
+            return None
 
     def _persist_truncated_output_artifacts(
         self,

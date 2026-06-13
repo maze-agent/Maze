@@ -79,6 +79,7 @@ class ReActWorkflow:
 
         llm_metadata = get_task_metadata(llm_task)
         self._llm_input_names = set(llm_metadata.inputs)
+        self._llm_input_types = dict(llm_metadata.data_types or {})
         self._llm_spec = self.dynamic_run.register_task_spec(
             llm_task,
             task_spec_id="react_llm_decision",
@@ -265,7 +266,7 @@ class ReActWorkflow:
             "prompt": prompt,
             "history": [self._step_snapshot(step) for step in self.steps],
             "tools": self.tool_specs,
-            "skills": self._build_skill_context(),
+            "skills": self._skills_input_for_llm(),
             "loaded_skills": self._loaded_skills_for_llm(),
             "available_skills": self._available_skills_summary(),
             "step": step_index,
@@ -276,6 +277,16 @@ class ReActWorkflow:
             for key, value in available.items()
             if key in self._llm_input_names
         }
+
+    def _skills_input_for_llm(self) -> Any:
+        data_type = str(self._llm_input_types.get("skills") or "").lower()
+        if "dict" in data_type or "mapping" in data_type:
+            return self._build_skill_context()
+        if "list" in data_type or "sequence" in data_type or "iterable" in data_type:
+            return self._loaded_skills_for_llm()
+        if data_type in {"", "str", "any"}:
+            return self._loaded_skills_for_llm()
+        return self._build_skill_context()
 
     def _build_skill_context(self) -> Dict[str, Any]:
         loaded_agent_skills = self._loaded_skills_for_llm()

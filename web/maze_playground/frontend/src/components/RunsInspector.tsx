@@ -52,6 +52,7 @@ import ReActRuntimeCanvas, {
   hasAgentTrace,
   type AgentTraceStep,
 } from './ReActRuntimeCanvas';
+import PendingActionCard from './PendingActionCard';
 
 const { Text, Title } = Typography;
 
@@ -145,6 +146,13 @@ function shortId(value?: string) {
 function formatTime(value?: number | null) {
   if (!value) return '-';
   return new Date(value * 1000).toLocaleString();
+}
+
+function formatIsoTime(value?: string | null) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
 }
 
 function formatBytes(value?: number | null) {
@@ -592,6 +600,7 @@ function adaptDynamicRun(run: UnifiedRunSnapshot): DynamicRunSnapshot {
     final_result: run.final_result || run.result_summary,
     cancel_reason: run.cancel_reason,
     failure_reason: run.failure_reason || run.error_summary,
+    metadata: run.metadata,
   };
 }
 
@@ -1123,10 +1132,11 @@ export default function RunsInspector({
         maxSteps: Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 4,
         maxTokens: Number.isFinite(maxTokensValue) && maxTokensValue > 0 ? maxTokensValue : undefined,
         timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
-        taskTimeout,
-        skills: selectedLoadedSkills.map((skill) => skill.name),
-        execBackend,
-        llm: mode === 'online'
+	        taskTimeout,
+	        skills: selectedLoadedSkills.map((skill) => skill.name),
+	        execBackend,
+	        permissionAskTimeoutSeconds: 120,
+	        llm: mode === 'online'
           ? {
               ...llmSettings,
               baseUrl: llmSettings.baseUrl.trim(),
@@ -1142,6 +1152,30 @@ export default function RunsInspector({
     } catch (error: any) {
       console.error('Failed to rerun ReAct workflow:', error);
       message.error(error.response?.data?.error || 'Failed to rerun ReAct workflow');
+    } finally {
+      setRunActionLoading(false);
+    }
+  };
+
+  const decidePermissionRequest = async (event: any, action: 'allow' | 'deny') => {
+    if (!selectedDynamicRun) return;
+    const request = event.request || {};
+    const requestId = event.request_id || request.request_id;
+    if (!requestId) {
+      message.warning('Permission request id is missing');
+      return;
+    }
+
+    setRunActionLoading(true);
+    try {
+      await api.decideDynamicPermissionRequest(selectedDynamicRun.run_id, requestId, {
+        action,
+        reason: `playground ${action}`,
+      });
+      message.success(`Permission ${action === 'allow' ? 'allowed' : 'denied'}`);
+      await loadDynamicRunDetails(selectedDynamicRun.run_id, true);
+    } catch (error: any) {
+      message.error(error.response?.data?.error || `Failed to ${action} permission request`);
     } finally {
       setRunActionLoading(false);
     }
@@ -1887,6 +1921,23 @@ export default function RunsInspector({
       return <Empty description="Select a dynamic run" />;
     }
 
+    const metadata = selectedDynamicRun.metadata || {};
+    const mcpProfile = metadata.mcp_profile || {};
+    const metadataMcpServers = Array.isArray(metadata.mcp_servers) ? metadata.mcp_servers : [];
+    const metadataMcpTools = Array.isArray(metadata.mcp_tools) ? metadata.mcp_tools : [];
+    const mcpProfileName = metadata.mcp_profile_name || mcpProfile.name;
+    const mcpServersForDisplay = metadataMcpServers.length > 0 ? metadataMcpServers : (agentTrace.mcp?.servers || []);
+    const mcpToolsForDisplay = metadataMcpTools.length > 0 ? metadataMcpTools : (agentTrace.mcp?.tools || []);
+    const mcpProfileError = agentTrace.mcp?.discoveryError
+      || agentTrace.mcp?.toolErrors?.[agentTrace.mcp.toolErrors.length - 1]?.error
+      || agentTrace.mcp?.toolErrors?.[agentTrace.mcp.toolErrors.length - 1]?.tool_result?.error;
+    const showMcpProfilePanel = Boolean(
+      mcpProfileName
+      || mcpServersForDisplay.length
+      || mcpToolsForDisplay.length
+      || mcpProfileError,
+    );
+
     return (
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space style={{ justifyContent: 'space-between', width: '100%' }} align="start">
@@ -1998,6 +2049,67 @@ export default function RunsInspector({
           skills: selectedLoadedSkills,
         })}
 
+        {showMcpProfilePanel && (
+          <div>
+            <Title level={5}>MCP Profile</Title>
+            <Space wrap style={{ marginBottom: 8 }}>
+              {mcpProfileName && <Tag color="purple">profile {String(mcpProfileName)}</Tag>}
+              <Tag color="magenta">{mcpServersForDisplay.length} server(s)</Tag>
+              <Tag color="blue">{mcpToolsForDisplay.length} discovered tool(s)</Tag>
+              {mcpProfile.lastTest?.status && (
+                <Tag color={mcpProfile.lastTest.status === 'ok' ? 'green' : 'red'}>
+                  last test {String(mcpProfile.lastTest.status)}
+                </Tag>
+              )}
+              {mcpProfile.lastTest?.testedAt && (
+                <Tag>{formatIsoTime(mcpProfile.lastTest.testedAt)}</Tag>
+              )}
+              {mcpProfile.usesEnvRefs && <Tag color="gold">{mcpProfile.envRefCount || 0} env ref(s)</Tag>}
+            </Space>
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="Using Profile" span={2}>
+                {mcpProfileName ? String(mcpProfileName) : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Description" span={2}>
+                {mcpProfile.description || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Servers" span={2}>
+                {mcpServersForDisplay.length > 0 ? (
+                  <Space wrap>
+                    {mcpServersForDisplay.map((server: any, index: number) => (
+                      <Tag key={`mcp-profile-server-${index}`} color="magenta">
+                        {server.name || 'mcp'} {server.transport || ''}
+                        {server.has_env ? ' env' : ''}
+                        {server.has_headers ? ' headers' : ''}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Discovered Tools" span={2}>
+                {mcpToolsForDisplay.length > 0 ? (
+                  <Space wrap>
+                    {mcpToolsForDisplay.map((tool: any, index: number) => (
+                      <Tag key={`mcp-profile-tool-${index}`} color="blue">
+                        {tool.agent_tool || tool.tool || 'tool'}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : '-'}
+              </Descriptions.Item>
+            </Descriptions>
+            {mcpProfileError && (
+              <Alert
+                style={{ marginTop: 8 }}
+                type="error"
+                showIcon
+                message={mcpProfileName ? `MCP profile "${mcpProfileName}" error` : 'MCP error'}
+                description={compactText(mcpProfileError, 300)}
+              />
+            )}
+          </div>
+        )}
+
         {renderLoadedSkills()}
 
         {renderRunLogs()}
@@ -2018,6 +2130,21 @@ export default function RunsInspector({
                 {Array.isArray(agentTrace.started.tools) && (
                   <Tag color="geekblue">{agentTrace.started.tools.length} tool(s)</Tag>
                 )}
+                {agentTrace.mcp?.servers?.length > 0 && (
+                  <Tag color="magenta">MCP servers {agentTrace.mcp.servers.length}</Tag>
+                )}
+                {agentTrace.mcp?.tools?.length > 0 && (
+                  <Tag color="blue">MCP tools {agentTrace.mcp.tools.length}</Tag>
+                )}
+                {Object.keys(agentTrace.mcp?.calls || {}).length > 0 && (
+                  <Tag color="purple">MCP calls {Object.values(agentTrace.mcp.calls).reduce((sum: number, count: any) => sum + Number(count || 0), 0)}</Tag>
+                )}
+                {agentTrace.mcp?.discoveryError && (
+                  <Tag color="red">MCP discovery failed</Tag>
+                )}
+                {agentTrace.mcp?.toolErrors?.length > 0 && (
+                  <Tag color="red">MCP errors {agentTrace.mcp.toolErrors.length}</Tag>
+                )}
                 {agentTrace.started.llm_task && (
                   <Tag color="cyan">LLM {String(agentTrace.started.llm_task)}</Tag>
                 )}
@@ -2031,6 +2158,123 @@ export default function RunsInspector({
                   <Tag color="orange">ask {agentTrace.permissions.agent_permission_ask}</Tag>
                 )}
               </Space>
+            )}
+
+            {(agentTrace.mcp?.servers?.length > 0 || agentTrace.mcp?.tools?.length > 0 || agentTrace.mcp?.discoveryError || agentTrace.mcp?.callEvents?.length > 0 || agentTrace.mcp?.toolErrors?.length > 0) && (
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary">MCP</Text>
+                <Space wrap style={{ marginTop: 6, display: 'flex' }}>
+                  {(agentTrace.mcp.servers || []).map((server: any, index: number) => (
+                    <Tag key={`mcp-server-${index}`} color="magenta">
+                      {server.name || 'mcp'} {server.transport || ''}
+                    </Tag>
+                  ))}
+                  {(agentTrace.mcp.tools || []).map((tool: any, index: number) => (
+                    <Tag key={`mcp-tool-${index}`} color="blue">
+                      {tool.agent_tool || tool.tool || 'tool'}
+                    </Tag>
+                  ))}
+                  {agentTrace.mcp.discoveryError && (
+                    <Text type="danger">{compactText(agentTrace.mcp.discoveryError, 180)}</Text>
+                  )}
+                </Space>
+                {agentTrace.mcp.callEvents?.length > 0 && (
+                  <List
+                    size="small"
+                    style={{ marginTop: 8 }}
+                    dataSource={agentTrace.mcp.callEvents.slice(-6)}
+                    renderItem={(event: any) => (
+                      <List.Item>
+                        <Space wrap>
+                          <Tag color={event.status === 'finished' ? 'green' : 'purple'}>{event.status}</Tag>
+                          <Tag>{event.server || 'mcp'}</Tag>
+                          <Tag color="blue">{event.tool || event.mcp_tool || 'tool'}</Tag>
+                          {event.timings?.tool_seconds !== undefined && <Tag>{event.timings.tool_seconds}s</Tag>}
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                )}
+                {agentTrace.mcp.toolErrors?.length > 0 && (
+                  <Alert
+                    style={{ marginTop: 8 }}
+                    type="error"
+                    showIcon
+                    message="MCP tool error"
+                    description={compactText(agentTrace.mcp.toolErrors[agentTrace.mcp.toolErrors.length - 1]?.error || agentTrace.mcp.toolErrors[agentTrace.mcp.toolErrors.length - 1]?.tool_result?.error, 240)}
+                  />
+                )}
+              </div>
+            )}
+
+            {agentTrace.permissionEvents?.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary">Permissions</Text>
+                <List
+                  size="small"
+                  style={{ marginTop: 6 }}
+                  dataSource={agentTrace.permissionEvents.slice(-8)}
+                  renderItem={(event: any) => {
+                    const request = event.request || event;
+                    const permission = event.permission || request.policy_decision || {};
+                    const action = permission.action || '';
+                    const requestStatus = request.status || '';
+                    const pendingRequestId = requestStatus === 'pending'
+                      ? (event.request_id || request.request_id)
+                      : '';
+                    const target = permission.target || request.target || '*';
+                    const toolName = event.tool || request.tool || 'tool';
+                    const permissionName = permission.permission || request.permission || 'permission';
+                    const color = requestStatus === 'allowed' || permission.allowed
+                      ? 'green'
+                      : requestStatus === 'pending' || action === 'ask'
+                        ? 'orange'
+                        : 'red';
+
+                    if (pendingRequestId) {
+                      return (
+                        <List.Item>
+                          <PendingActionCard
+                            title="Pending Action"
+                            actionLabel="Permission"
+                            actionColor="orange"
+                            subject={`${toolName} requests ${permissionName}`}
+                            description={`Target: ${target}`}
+                            tags={[
+                              <Tag color={color}>{event.type.replace('agent_permission_', '')}</Tag>,
+                              <Tag>{toolName}</Tag>,
+                              <Tag>{permissionName}</Tag>,
+                              <Tag>{target}</Tag>,
+                              requestStatus ? <Tag>{requestStatus}</Tag> : null,
+                              permission.pattern ? <Tag>rule {permission.pattern}</Tag> : null,
+                            ].filter(Boolean)}
+                            error={permission.reason && action !== 'ask' ? permission.reason : undefined}
+                            approveLabel="Allow"
+                            denyLabel="Deny"
+                            loading={runActionLoading}
+                            onApprove={() => decidePermissionRequest(event, 'allow')}
+                            onDeny={() => decidePermissionRequest(event, 'deny')}
+                          />
+                        </List.Item>
+                      );
+                    }
+
+                    return (
+                      <List.Item>
+                        <Space wrap>
+                          <Tag color={color}>{event.type.replace('agent_permission_', '')}</Tag>
+                          <Tag>{toolName}</Tag>
+                          <Tag>{permissionName}</Tag>
+                          <Tag>{target}</Tag>
+                          {requestStatus && <Tag>{requestStatus}</Tag>}
+                          {permission.pattern && <Tag>rule {permission.pattern}</Tag>}
+                          {permission.reason && <Text type="secondary">{permission.reason}</Text>}
+                        </Space>
+                      </List.Item>
+                    );
+                  }}
+                />
+              </div>
             )}
 
             {agentTrace.steps.length === 0 ? (

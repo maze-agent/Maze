@@ -390,6 +390,7 @@ export default function BuiltinTasksSidebar() {
   const [workspaceTaskScope, setWorkspaceTaskScope] = useState<'workflow' | 'all'>('all');
   const creatingWorkflowRef = useRef<Promise<string> | null>(null);
   const draggingWorkspaceRef = useRef(false);
+  const initializedWorkspaceDirRef = useRef('');
   const taskImportInputRef = useRef<HTMLInputElement | null>(null);
   const taskImportTargetRef = useRef<WorkspaceTaskMeta | null>(null);
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -397,15 +398,23 @@ export default function BuiltinTasksSidebar() {
   const fileUploadTargetPathRef = useRef('');
 
   useEffect(() => {
-    loadWorkspaceTasks();
-    loadWorkspaceWorkflows();
-    loadWorkspaceFiles();
-    loadWorkspaceSkills();
     loadSystemCatalog();
     if (builtinTasks.length === 0) {
       loadBuiltinTasks(false);
     }
   }, []);
+
+  useEffect(() => {
+    const activeWorkspaceDir = workspaceDir?.trim();
+    if (!activeWorkspaceDir || initializedWorkspaceDirRef.current === activeWorkspaceDir) {
+      return;
+    }
+    initializedWorkspaceDirRef.current = activeWorkspaceDir;
+    loadWorkspaceTasks(activeWorkspaceDir);
+    loadWorkspaceWorkflows(activeWorkspaceDir);
+    loadWorkspaceFiles(activeWorkspaceDir, '');
+    loadWorkspaceSkills(activeWorkspaceDir);
+  }, [workspaceDir]);
 
   useEffect(() => {
     if (!folderUploadInputRef.current) {
@@ -2657,39 +2666,47 @@ export default function BuiltinTasksSidebar() {
             />
           )}
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <Space size={6}>
+          <div className="workspace-workflows-header">
+            <div className="workspace-workflows-title">
               <h3 style={{ margin: 0 }}>Workflows</h3>
               <Tag color={showingWorkflowTasks ? 'purple' : 'blue'} style={{ margin: 0 }}>
                 {showingWorkflowTasks ? 'canvas' : 'service'}
               </Tag>
-            </Space>
-            <Space size={4}>
-              <Button
-                type="text"
-                size="small"
-                icon={<ReloadOutlined />}
-                onClick={() => loadWorkspaceWorkflows(workspaceInput || workspaceDir, true)}
-                loading={workflowLoading}
-              />
-              <Button
-                size="small"
-                icon={<DownloadOutlined />}
-                onClick={() => openCatalogImport('workflows')}
-              >
-                Library
-              </Button>
+            </div>
+            <div className="workspace-workflows-actions">
+              <Tooltip title="Refresh workflows">
+                <Button
+                  type="text"
+                  size="small"
+                  className="workspace-sidebar-icon-button"
+                  icon={<ReloadOutlined />}
+                  aria-label="Refresh workflows"
+                  onClick={() => loadWorkspaceWorkflows(workspaceInput || workspaceDir, true)}
+                  loading={workflowLoading}
+                />
+              </Tooltip>
+              <Tooltip title="Open workflow library">
+                <Button
+                  size="small"
+                  className="workspace-sidebar-icon-button"
+                  icon={<DownloadOutlined />}
+                  aria-label="Open workflow library"
+                  onClick={() => openCatalogImport('workflows')}
+                />
+              </Tooltip>
+              <Tooltip title="Save current workflow">
               <Button
                 type="primary"
                 size="small"
+                className="workspace-sidebar-icon-button"
                 icon={<SaveOutlined />}
+                aria-label="Save current workflow"
                 onClick={handleSaveWorkspaceWorkflow}
                 loading={savingWorkflow}
                 disabled={nodes.length === 0}
-              >
-                Save
-              </Button>
-            </Space>
+              />
+              </Tooltip>
+            </div>
           </div>
           <Space size={4} wrap style={{ marginBottom: 8 }}>
             {renderWorkflowSaveState()}

@@ -240,6 +240,7 @@ def _sensitive_path_patterns() -> List[str]:
         "*credential*",
         "*token*",
         "api_key*",
+        "mcp_profiles/*",
     ]
     nested = []
     for pattern in base:
