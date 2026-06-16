@@ -69,3 +69,4 @@ secrets.py
 *.tar.gz
 twine.log
 roadmap.md
+maze_platform_collaboration_review_zh.md
