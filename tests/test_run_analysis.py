@@ -1,4 +1,5 @@
-from maze.core.runs.analysis import build_run_digest
+from maze.core.runs.analysis import build_dag_design_digest, build_run_digest
+from maze.core.workflow.dag_spec import dag_spec_from_payload
 
 
 def _snapshot():
@@ -58,3 +59,26 @@ def test_build_run_digest_truncates_long_error():
     failed_error = digest["failed_tasks"][0]["error"]
     assert failed_error.endswith("...")
     assert len(failed_error) <= 403
+
+
+def test_build_dag_design_digest_structure():
+    spec = dag_spec_from_payload({
+        "name": "demo",
+        "nodes": [
+            {"id": "a", "code": "def a():\n    return {'x': 1}", "outputs": ["x"], "resources": {"gpu": 1},
+             "fallback": {"code": "def a():\n    return {'x': 1}", "resources": {"cpu": 1}}},
+            {"id": "b", "code": "def b(x):\n    return {'y': x}", "inputs": {"x": {"from": "a.x"}}, "outputs": ["y"]},
+            {"id": "c", "code": "def c():\n    return {'z': 1}", "outputs": ["z"]},
+        ],
+        "edges": [{"from": "a.x", "to": "b.x"}],
+    })
+    digest = build_dag_design_digest(spec)
+
+    assert digest["node_count"] == 3
+    assert digest["edge_count"] == 1
+    assert set(digest["roots"]) == {"a", "c"}
+    assert "b" in digest["leaves"]
+    assert digest["isolated"] == ["c"]
+    assert digest["max_depth"] == 2  # a -> b
+    assert digest["gpu_nodes"] == 1
+    assert digest["fallback_nodes"] == 1

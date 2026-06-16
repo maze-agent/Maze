@@ -17,6 +17,13 @@ from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
+from maze.core.runs.context_store import ContextStore
+from maze.core.runs.ops import (
+    ResumeError,
+    aggregate_agent_metrics,
+    build_resume_spec,
+    summarize_run_errors,
+)
 
 
 app = FastAPI()
@@ -32,6 +39,7 @@ app.add_middleware(
 
 mapath = MaPath()
 artifact_store = LocalCASArtifactStore()
+context_store = ContextStore()
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
@@ -380,6 +388,208 @@ async def analyze_run(run_id: str, req: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _resubmit_dag(req: Request, spec: Dict[str, Any], data: Dict[str, Any], extra_tags: List[str]):
+    """Shared helper for rerun/resume: build a DAG workflow and submit it."""
+    workflow_id = mapath.create_dag_workflow(spec)
+    run_config = spec.get("run") or {}
+    artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
+    file_context = data.get("file_context")
+    if file_context is None:
+        file_context = dag_file_context(
+            dag_spec_from_payload(spec),
+            artifact_base_url=_request_base_url(req),
+            artifact_mode=artifact_mode,
+        )
+    return workflow_id, file_context, run_config, artifact_mode
+
+
+@app.post("/runs/{run_id}/rerun")
+async def rerun_run(run_id: str, req: Request):
+    """C5: re-run a DAG run from scratch using its persisted dag_spec."""
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    spec = (snapshot.get("metadata") or {}).get("dag_spec")
+    if not spec:
+        raise HTTPException(status_code=400, detail="Only DAG runs (maze.workflow/v1) can be rerun through this endpoint")
+    try:
+        workflow_id, file_context, run_config, _ = _resubmit_dag(req, spec, data, ["dag", "rerun"])
+        file_context = await _worker_reachable_file_context(req, file_context)
+        metadata = {
+            **dict(spec.get("metadata") or {}),
+            **dict(data.get("metadata") or {}),
+            "run_kind": "dag",
+            "dag_spec": dag_spec_from_payload(spec),
+            "rerun_of": run_id,
+        }
+        tags = list(dict.fromkeys([*spec.get("tags", []), *data.get("tags", []), "dag", "rerun"]))
+        new_run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=run_config.get("timeout_seconds"),
+            tags=tags,
+            metadata=metadata,
+        )
+        return {"status": "success", "run_id": new_run_id, "workflow_id": workflow_id, "rerun_of": run_id}
+    except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, req: Request):
+    """C5: resume a DAG run, re-running only non-succeeded tasks."""
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    spec = (snapshot.get("metadata") or {}).get("dag_spec")
+    if not spec:
+        raise HTTPException(status_code=400, detail="Only DAG runs (maze.workflow/v1) can be resumed through this endpoint")
+    try:
+        resume_spec = build_resume_spec(spec, snapshot.get("task_nodes") or {})
+        workflow_id, file_context, run_config, _ = _resubmit_dag(req, resume_spec, data, ["dag", "resume"])
+        file_context = await _worker_reachable_file_context(req, file_context)
+        metadata = {
+            **dict(data.get("metadata") or {}),
+            "run_kind": "dag",
+            "dag_spec": dag_spec_from_payload(resume_spec),
+            "resumed_from": run_id,
+        }
+        tags = list(dict.fromkeys([*data.get("tags", []), "dag", "resume"]))
+        new_run_id = mapath.run_workflow(
+            workflow_id,
+            file_context=file_context,
+            timeout_seconds=run_config.get("timeout_seconds"),
+            tags=tags,
+            metadata=metadata,
+        )
+        return {"status": "success", "run_id": new_run_id, "workflow_id": workflow_id, "resumed_from": run_id}
+    except ResumeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/runs/{run_id}/errors")
+async def get_run_errors(run_id: str):
+    """C11: structured failure summary for fast error localization."""
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "success", **summarize_run_errors(snapshot)}
+
+
+@app.get("/v1/agents/metrics")
+async def get_agent_metrics(limit: int = 200):
+    """C7: aggregate per-task/agent performance across persisted runs."""
+    try:
+        snapshots = mapath.static_run_store.list_runs(summary=False)
+        if limit:
+            snapshots = snapshots[: max(0, int(limit))]
+        return {"status": "success", **aggregate_agent_metrics(snapshots)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/system")
+async def get_system_metrics():
+    """C9: head host/process resource metrics (best effort)."""
+    import os as _os
+    info: Dict[str, Any] = {"pid": _os.getpid()}
+    try:
+        info["cpu_count"] = _os.cpu_count()
+        info["loadavg"] = _os.getloadavg()
+    except Exception:
+        pass
+    try:
+        import psutil  # type: ignore
+        vm = psutil.virtual_memory()
+        proc = psutil.Process()
+        info["host"] = {
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "mem_total": vm.total,
+            "mem_available": vm.available,
+            "mem_percent": vm.percent,
+        }
+        info["process"] = {
+            "rss": proc.memory_info().rss,
+            "cpu_percent": proc.cpu_percent(interval=None),
+            "num_threads": proc.num_threads(),
+        }
+        info["psutil"] = True
+    except Exception:
+        info["psutil"] = False
+    return {"status": "success", "system": info}
+
+
+@app.post("/context/{namespace}/{key}")
+async def set_context(namespace: str, key: str, req: Request):
+    """C6: store a context value under a namespace/key."""
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    try:
+        record = context_store.set(namespace, key, data.get("value"))
+        return {"status": "success", **record}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/context/{namespace}/{key}")
+async def get_context(namespace: str, key: str):
+    try:
+        record = context_store.get(namespace, key)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"context not found: {namespace}/{key}")
+        return {"status": "success", **record}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/context/{namespace}")
+async def list_context(namespace: str):
+    try:
+        return {"status": "success", "namespace": namespace, "items": context_store.list(namespace)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/context/{namespace}/{key}")
+async def delete_context(namespace: str, key: str):
+    try:
+        deleted = context_store.delete(namespace, key)
+        return {"status": "success", "deleted": deleted}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/workflows/validate")
 async def validate_dag_workflow(req: Request):
     try:
@@ -388,6 +598,40 @@ async def validate_dag_workflow(req: Request):
         spec = dag_spec_from_payload(payload)
         return {"status": "success", "spec": spec}
     except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflows/review")
+async def review_dag_workflow(req: Request):
+    """C10(repurposed): ask an external LLM whether a DAG design is good (single call)."""
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    payload = data.get("spec", data)
+    try:
+        spec = dag_spec_from_payload(payload)
+    except DagSpecError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from maze.core.runs.analysis import review_dag_with_llm
+
+    try:
+        result = review_dag_with_llm(
+            spec,
+            base_url=data.get("base_url"),
+            model=data.get("model"),
+            api_key=data.get("api_key"),
+            api_key_env=data.get("api_key_env"),
+            config_path=data.get("config_path"),
+            system_prompt=data.get("system_prompt"),
+            temperature=data.get("temperature", 0),
+            max_tokens=data.get("max_tokens", 512),
+            timeout=data.get("timeout", 60),
+        )
+        return {"status": "success", **result}
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

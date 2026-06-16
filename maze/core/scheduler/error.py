@@ -24,6 +24,18 @@ def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+ERROR_STAGE_DEFAULTS = {
+    "user_code": "execution",
+    "resource_unavailable": "scheduling",
+    "node_lost": "scheduling",
+    "artifact_error": "artifact",
+    "timeout": "execution",
+    "scheduler_error": "scheduling",
+    "cancelled": "control",
+    "unknown": "unknown",
+}
+
+
 def make_error_envelope(
     error_type: str,
     message: str,
@@ -36,6 +48,7 @@ def make_error_envelope(
     attempt: int | None = None,
     timestamp: str | None = None,
     exception_type: str | None = None,
+    stage: str | None = None,
 ) -> Dict[str, Any]:
     if retryable is None:
         retryable = ERROR_RETRYABLE_DEFAULTS.get(error_type, False)
@@ -50,6 +63,7 @@ def make_error_envelope(
         "node_ip": node_ip,
         "attempt": attempt,
         "timestamp": timestamp or utc_timestamp(),
+        "stage": stage or ERROR_STAGE_DEFAULTS.get(error_type, "unknown"),
     }
     if exception_type:
         envelope["exception_type"] = exception_type

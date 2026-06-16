@@ -373,6 +373,41 @@ class MaClient:
             raise Exception(f"Failed to analyze run: {data.get('message', 'Unknown error')}")
         return data
 
+    def review_workflow_spec(
+        self,
+        spec: dict,
+        *,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_key_env: Optional[str] = None,
+        config_path: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0,
+        max_tokens: int = 512,
+        timeout: int = 60,
+    ) -> dict:
+        """Ask an external LLM whether a DAG design is good (single call)."""
+        payload = {
+            "spec": spec,
+            "base_url": base_url,
+            "model": model,
+            "api_key": api_key,
+            "api_key_env": api_key_env,
+            "config_path": config_path,
+            "system_prompt": system_prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        }
+        response = requests.post(f"{self.server_url}/workflows/review", json=payload)
+        if response.status_code != 200:
+            raise Exception(f"Failed to review workflow: {response.status_code}, {response.text}")
+        data = response.json()
+        if data.get("status") != "success":
+            raise Exception(f"Failed to review workflow: {data.get('message', 'Unknown error')}")
+        return data
+
     def validate_workflow_spec(self, spec: dict) -> dict:
         """
         Validate an external DAG workflow submit spec without running it.
