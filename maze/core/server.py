@@ -345,6 +345,41 @@ async def run_app(req: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/runs/{run_id}/analyze")
+async def analyze_run(run_id: str, req: Request):
+    """Summarize a run and ask an external LLM for optimization suggestions (single call)."""
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    try:
+        snapshot = mapath.get_static_run_snapshot(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    from maze.core.runs.analysis import analyze_run_with_llm
+
+    try:
+        result = analyze_run_with_llm(
+            snapshot,
+            base_url=data.get("base_url"),
+            model=data.get("model"),
+            api_key=data.get("api_key"),
+            api_key_env=data.get("api_key_env"),
+            config_path=data.get("config_path"),
+            system_prompt=data.get("system_prompt"),
+            temperature=data.get("temperature", 0),
+            max_tokens=data.get("max_tokens", 512),
+            timeout=data.get("timeout", 60),
+        )
+        return {"status": "success", **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/workflows/validate")
 async def validate_dag_workflow(req: Request):
     try:
