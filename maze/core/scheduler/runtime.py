@@ -108,6 +108,8 @@ class TaskRuntime():
         retry_backoff_seconds:float=0,
         retry_on:List[str]|None=None,
         timeout_seconds:float|None=None,
+        fallback:Dict|None=None,
+        fallback_policy:Dict|None=None,
     ):
         self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
@@ -122,6 +124,14 @@ class TaskRuntime():
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds or 0))
         self.retry_on = _normalize_retry_on(retry_on)
         self.timeout_seconds = None if timeout_seconds is None else float(timeout_seconds)
+
+        # Fallback (degradation) support: a backup implementation with lower
+        # resource requirements, used when the primary cannot be placed.
+        self.fallback = fallback
+        self.fallback_policy = fallback_policy or {}
+        self.variant = "primary"  # primary | fallback
+        self.degraded = False
+        self.first_pending_time: float | None = None
 
         self.object_ref = None
         self.result: None|Dict[Any, Any] = None
@@ -139,6 +149,28 @@ class TaskRuntime():
     
     def set_priority(self, priority):
         self.priority = priority
+
+    def can_degrade(self) -> bool:
+        if self.degraded or not self.fallback:
+            return False
+        return bool(self.fallback.get("code_str") or self.fallback.get("code_ser"))
+
+    def fallback_pending_timeout(self) -> float:
+        timeout = (self.fallback_policy or {}).get("pending_timeout_s")
+        return 10.0 if timeout is None else float(timeout)
+
+    def switch_to_fallback(self) -> None:
+        '''Swap the active implementation to the backup (lower-resource) one.'''
+        if not self.can_degrade():
+            return
+        self.code_str = self.fallback.get("code_str")
+        self.code_ser = self.fallback.get("code_ser")
+        if self.fallback.get("resources"):
+            self.resources = self.fallback["resources"]
+        self.variant = "fallback"
+        self.degraded = True
+        self.pending_reason = None
+        self.first_pending_time = None
 
     def set_task_status(self, status):
         self.status = status

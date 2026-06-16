@@ -24,6 +24,8 @@ class CodeTask():
         self.retry_backoff_seconds = 0
         self.retry_on = None
         self.timeout_seconds = None
+        self.fallback = None
+        self.fallback_policy = None
 
         self.completed = False
         
@@ -57,6 +59,8 @@ class CodeTask():
         retry_backoff_seconds:float=0,
         retry_on:list[str]|None=None,
         timeout_seconds:float|None=None,
+        fallback:Dict|None=None,
+        fallback_policy:Dict|None=None,
     ):
         '''save task info'''
         
@@ -70,6 +74,8 @@ class CodeTask():
         self.retry_backoff_seconds=retry_backoff_seconds or 0
         self.retry_on=retry_on
         self.timeout_seconds=timeout_seconds
+        self.fallback=fallback
+        self.fallback_policy=fallback_policy
     
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -87,6 +93,8 @@ class CodeTask():
             "retry_backoff_seconds":self.retry_backoff_seconds,
             "retry_on":self.retry_on,
             "timeout_seconds":self.timeout_seconds,
+            "fallback":self.fallback,
+            "fallback_policy":self.fallback_policy,
         }
 
 class LangGraphTask():

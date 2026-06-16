@@ -100,6 +100,8 @@ class StaticRun:
                 "pending_reason": None,
                 "schedule_decision": None,
                 "file_manifest": None,
+                "variant": "primary" if (task.fallback if hasattr(task, "fallback") else None) else None,
+                "degraded": False,
             }
 
     def _touch(self):
@@ -136,6 +138,9 @@ class StaticRun:
             "gpu_id": (node_info or {}).get("gpu_id"),
         }
         task["attempt"] = (node_info or {}).get("attempt") or task.get("attempt") or 1
+        if node_info is not None and "variant" in node_info:
+            task["variant"] = node_info.get("variant")
+            task["degraded"] = bool(node_info.get("degraded"))
         self._touch()
 
     def mark_task_pending(
@@ -175,11 +180,17 @@ class StaticRun:
         finished_at: float | None = None,
         duration_ms: int | None = None,
         node_id: str | None = None,
+        variant: str | None = None,
+        degraded: bool | None = None,
     ):
         task = self.task_nodes.get(task_id)
         if not task:
             return
         task["status"] = "succeeded"
+        if variant is not None:
+            task["variant"] = variant
+        if degraded is not None:
+            task["degraded"] = bool(degraded)
         if started_at is not None:
             task["started_time"] = started_at
         task["finished_time"] = finished_at or time.time()

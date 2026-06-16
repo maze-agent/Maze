@@ -1257,6 +1257,8 @@ class MaPath:
                                     finished_at=message_data.get("finished_at"),
                                     duration_ms=message_data.get("duration_ms"),
                                     node_id=message_data.get("node_id"),
+                                    variant=message_data.get("variant"),
+                                    degraded=message_data.get("degraded"),
                                 )
                                 message = self._record_static_event(submit_id, message)
 

@@ -17,6 +17,9 @@ class DagSpecError(ValueError):
 
 NODE_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")
 
+FALLBACK_TRIGGERS = {"resource_unavailable"}
+DEFAULT_FALLBACK_PENDING_TIMEOUT_S = 10.0
+
 
 def dag_spec_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload = _ensure_mapping(payload, "DAG spec")
@@ -81,6 +84,8 @@ def build_dag_workflow(workflow_id: str, spec: Dict[str, Any]) -> Workflow:
             retry_backoff_seconds=node.get("retry_backoff_seconds", 0),
             retry_on=node.get("retry_on"),
             timeout_seconds=node.get("timeout_seconds"),
+            fallback=node.get("fallback"),
+            fallback_policy=node.get("fallback_policy"),
         )
         workflow.add_task(node["id"], task)
 
@@ -135,6 +140,7 @@ def _normalize_node(raw: Any) -> Dict[str, Any]:
         raise DagSpecError(f"node {node_id} requires code_str/code or code_ser")
 
     outputs = _normalize_outputs(node.get("outputs"), node_id)
+    fallback = _normalize_fallback(node.get("fallback"), node_id, outputs)
     return {
         "id": node_id,
         "type": "code",
@@ -149,7 +155,51 @@ def _normalize_node(raw: Any) -> Dict[str, Any]:
         "retry_backoff_seconds": max(0.0, float(node.get("retry_backoff_seconds") or 0)),
         "retry_on": _optional_str_list(node.get("retry_on")),
         "timeout_seconds": _optional_float(node.get("timeout_seconds")),
+        "fallback": fallback,
+        "fallback_policy": _normalize_fallback_policy(node.get("fallback_policy"), node_id) if fallback else None,
         "metadata": dict(node.get("metadata") or {}),
+    }
+
+
+def _normalize_fallback(raw: Any, node_id: str, primary_outputs: List[Dict[str, str]]) -> Dict[str, Any] | None:
+    if raw is None:
+        return None
+    fallback = dict(_ensure_mapping(raw, f"node {node_id} fallback"))
+
+    code_str = fallback.get("code_str", fallback.get("code"))
+    code_ser = fallback.get("code_ser")
+    if not code_str and not code_ser:
+        raise DagSpecError(f"node {node_id} fallback requires code_str/code or code_ser")
+
+    # Backup implementation must keep the same output contract as the primary.
+    if "outputs" in fallback and fallback["outputs"] is not None:
+        fallback_outputs = _normalize_outputs(fallback.get("outputs"), node_id)
+        if [item["name"] for item in fallback_outputs] != [item["name"] for item in primary_outputs]:
+            raise DagSpecError(
+                f"node {node_id} fallback outputs must match primary outputs"
+            )
+
+    return {
+        "code_str": code_str,
+        "code_ser": code_ser,
+        "resources": _normalize_resources(fallback.get("resources")),
+    }
+
+
+def _normalize_fallback_policy(raw: Any, node_id: str) -> Dict[str, Any]:
+    policy = dict(_ensure_mapping(raw, f"node {node_id} fallback_policy")) if raw else {}
+    trigger = str(policy.get("trigger") or "resource_unavailable")
+    if trigger not in FALLBACK_TRIGGERS:
+        raise DagSpecError(
+            f"node {node_id} fallback_policy.trigger must be one of {sorted(FALLBACK_TRIGGERS)}"
+        )
+    timeout = policy.get("pending_timeout_s")
+    pending_timeout_s = (
+        DEFAULT_FALLBACK_PENDING_TIMEOUT_S if timeout is None else max(0.0, float(timeout))
+    )
+    return {
+        "trigger": trigger,
+        "pending_timeout_s": pending_timeout_s,
     }
 
 

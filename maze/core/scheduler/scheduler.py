@@ -18,6 +18,7 @@ import base64
 import cloudpickle
 import binascii
 import subprocess
+import traceback
 import multiprocessing as mp
 from queue import Queue
 from maze.core.scheduler.resource import SelectedNode
@@ -324,6 +325,8 @@ class Scheduler():
                                                                 retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
                                                                 retry_on=message_data.get('retry_on'),
                                                                 timeout_seconds=message_data.get('timeout_seconds'),
+                                                                fallback=message_data.get('fallback'),
+                                                                fallback_policy=message_data.get('fallback_policy'),
                                                                 )
                         priority =  message_data.get('priority', 0)
                         task_runtime.set_priority(priority)
@@ -481,49 +484,91 @@ class Scheduler():
                 self.task_queue.put(self.cur_ready_task, self.cur_ready_task.priority)
                 time.sleep(min(retry_delay, 1))
                 continue
-            self.lock.acquire()
-            self.cur_ready_task.set_task_status("ready")
-            self.workflow_manager.add_task(self.cur_ready_task)
 
-            #Get the node can run the task
-            selection = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
-            if selection:
-                selected_node = selection.selected_node
-                self.cur_ready_task.pending_reason = None
-                self.cur_ready_task.last_schedule_decision = selection.decision
-                #Run task
-                self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
+            # The lock is taken via a context manager and the whole body is
+            # wrapped so that an unexpected error can never (a) leave the lock
+            # held, deadlocking the scheduler, or (b) kill the submit thread and
+            # silently stop scheduling. On error the task is requeued.
+            requeue_pending = False
+            try:
+                with self.lock:
+                    self.cur_ready_task.set_task_status("ready")
+                    self.workflow_manager.add_task(self.cur_ready_task)
 
-                #Send message to main
-                message = {
-                    "type":"start_task",
-                    "data":{
-                        "workflow_id":self.cur_ready_task.workflow_id,
-                        "task_id":self.cur_ready_task.task_id,
-                        "node_ip":selected_node.node_ip,
-                        "node_id":selected_node.node_id,
-                        "gpu_id":selected_node.gpu_id,
-                        "attempt":self.cur_ready_task.attempt,
-                        "schedule_decision":selection.decision,
-                        "started_at": time.time(),
-                    }
-                }
-                serialized_message = json.dumps(message).encode('utf-8')
-                socket_to_main.send(serialized_message)
+                    #Get the node can run the task
+                    selection = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
+                    if selection:
+                        selected_node = selection.selected_node
+                        self.cur_ready_task.pending_reason = None
+                        self.cur_ready_task.last_schedule_decision = selection.decision
+                        #Run task
+                        self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
 
-                self.cur_ready_task = None
-                self.lock.release()
-            else:
-                previous_pending_reason = self.cur_ready_task.pending_reason
-                self.cur_ready_task.set_task_status("pending")
-                self.cur_ready_task.pending_reason = selection.decision.get("reason")
-                self.cur_ready_task.last_schedule_decision = selection.decision
-                if previous_pending_reason != self.cur_ready_task.pending_reason:
-                    self._send_task_pending(socket_to_main, self.cur_ready_task)
-                logger.debug("No node can run task %s: %s", self.cur_ready_task.task_id, self.cur_ready_task.pending_reason)
-                self.lock.release()
+                        #Send message to main
+                        message = {
+                            "type":"start_task",
+                            "data":{
+                                "workflow_id":self.cur_ready_task.workflow_id,
+                                "task_id":self.cur_ready_task.task_id,
+                                "node_ip":selected_node.node_ip,
+                                "node_id":selected_node.node_id,
+                                "gpu_id":selected_node.gpu_id,
+                                "attempt":self.cur_ready_task.attempt,
+                                "schedule_decision":selection.decision,
+                                "started_at": time.time(),
+                                "variant": getattr(self.cur_ready_task, "variant", "primary"),
+                                "degraded": getattr(self.cur_ready_task, "degraded", False),
+                            }
+                        }
+                        serialized_message = json.dumps(message).encode('utf-8')
+                        socket_to_main.send(serialized_message)
+                    else:
+                        previous_pending_reason = self.cur_ready_task.pending_reason
+                        self.cur_ready_task.set_task_status("pending")
+                        self.cur_ready_task.pending_reason = selection.decision.get("reason")
+                        self.cur_ready_task.last_schedule_decision = selection.decision
+                        if previous_pending_reason != self.cur_ready_task.pending_reason:
+                            self._send_task_pending(socket_to_main, self.cur_ready_task)
+                        logger.debug("No node can run task %s: %s", self.cur_ready_task.task_id, self.cur_ready_task.pending_reason)
+
+                        # Degrade to the fallback implementation if the primary cannot be
+                        # placed within the configured pending timeout (resource pressure).
+                        if self.cur_ready_task.can_degrade():
+                            now = time.time()
+                            if self.cur_ready_task.first_pending_time is None:
+                                self.cur_ready_task.first_pending_time = now
+                            elif now - self.cur_ready_task.first_pending_time >= self.cur_ready_task.fallback_pending_timeout():
+                                self.cur_ready_task.switch_to_fallback()
+                                logger.info("Task %s degraded to fallback variant", self.cur_ready_task.task_id)
+
+                        requeue_pending = True
+            except Exception as exc:
+                logger.error(
+                    "Submit loop error for task %s: %s",
+                    getattr(self.cur_ready_task, "task_id", None),
+                    traceback.format_exc(),
+                )
+                # Fail the task cleanly instead of requeuing forever (e.g. a task
+                # that asks for resources the scheduler can never satisfy). This
+                # also guarantees the lock is released (via the with block) so the
+                # scheduler never deadlocks on a poison task.
+                if self.cur_ready_task is not None:
+                    error = exception_to_error_envelope(
+                        "scheduler_error",
+                        exc,
+                        origin="scheduler",
+                        attempt=getattr(self.cur_ready_task, "attempt", 0),
+                    )
+                    try:
+                        self._send_task_exception(socket_to_main, self.cur_ready_task, error)
+                    except Exception:
+                        logger.error("Failed to report task exception: %s", traceback.format_exc())
+                requeue_pending = False
+
+            if requeue_pending and self.cur_ready_task is not None:
                 self.task_queue.put(self.cur_ready_task, self.cur_ready_task.priority)
                 time.sleep(1)
+            self.cur_ready_task = None
 
     def _supervisor_thread(self, port2:int):
         logger.info(f"Supervisor start")
@@ -598,6 +643,8 @@ class Scheduler():
                             ),
                             "attempt": finished_task.attempt,
                             "node_id": node_id,
+                            "variant": getattr(finished_task, "variant", "primary"),
+                            "degraded": getattr(finished_task, "degraded", False),
                         }
                         if started_at is not None:
                             message_data["started_at"] = started_at
