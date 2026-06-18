@@ -1,3 +1,2 @@
 mkdocs
 mkdocs-material
-fix: restore docs requirements for GitHub Pages build
