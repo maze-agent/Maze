@@ -88,18 +88,6 @@ function safeFileName(name, fallbackPrefix = 'workflow') {
   return `${fallbackPrefix}-${stamp}`;
 }
 
-function safeMcpProfileName(value) {
-  const safe = String(value || '')
-    .trim()
-    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
-  if (!safe) {
-    throw new Error('MCP profile name is required');
-  }
-  return safe;
-}
-
 function safeWorkspaceId(value, fallbackPrefix = 'ws') {
   const safe = String(value || '')
     .trim()
@@ -251,7 +239,6 @@ async function ensureWorkspacePolicy(workspaceDir) {
           '*credential*': 'deny',
           '*token*': 'deny',
           'api_key*': 'deny',
-          'mcp_profiles/*': 'deny',
         },
         write: {
           '*': 'ask',
@@ -261,10 +248,8 @@ async function ensureWorkspacePolicy(workspaceDir) {
           '*credential*': 'deny',
           '*token*': 'deny',
           'api_key*': 'deny',
-          'mcp_profiles/*': 'deny',
         },
         exec_code: { '*': 'ask', 'python *': 'allow', 'rm *': 'deny' },
-        mcp: { '*': 'ask' },
       },
     });
   }
@@ -280,7 +265,6 @@ async function ensureWorkspaceDirs(workspaceDir) {
   await fs.mkdir(path.join(resolved, 'tasks'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
-  await fs.mkdir(path.join(resolved, 'mcp_profiles'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_sessions'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_drafts'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_runs'), { recursive: true });
@@ -1108,14 +1092,6 @@ async function writeJsonAtomic(filePath, payload) {
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fs.writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
   await fs.rename(tmpPath, filePath);
-}
-
-function mcpProfilesDir(workspaceDir) {
-  return path.join(workspaceDir, 'mcp_profiles');
-}
-
-function mcpProfilePath(workspaceDir, name) {
-  return path.join(mcpProfilesDir(workspaceDir), `${safeMcpProfileName(name)}.json`);
 }
 
 function safeAgentId(value, fallbackPrefix = 'agent') {
@@ -3849,225 +3825,6 @@ async function runWorkspaceAgent(context, input = {}) {
   };
 }
 
-function redactMcpServerConfig(server) {
-  if (!server || typeof server !== 'object' || Array.isArray(server)) return {};
-  const redacted = { ...server };
-  if (redacted.env && typeof redacted.env === 'object' && !Array.isArray(redacted.env)) {
-    redacted.env = Object.fromEntries(Object.entries(redacted.env).map(([key, value]) => [
-      key,
-      mcpStringHasEnvRefs(value) ? String(value) : '<hidden>',
-    ]));
-  }
-  if (redacted.headers && typeof redacted.headers === 'object' && !Array.isArray(redacted.headers)) {
-    redacted.headers = Object.fromEntries(Object.entries(redacted.headers).map(([key, value]) => [
-      key,
-      mcpStringHasEnvRefs(value) ? String(value) : '<hidden>',
-    ]));
-  }
-  return redacted;
-}
-
-const MCP_ENV_REF_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
-
-function mcpStringHasEnvRefs(value) {
-  return typeof value === 'string' && /\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(value);
-}
-
-function collectMcpEnvRefs(value, refs = new Set()) {
-  if (typeof value === 'string') {
-    for (const match of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
-      refs.add(match[1]);
-    }
-    return refs;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectMcpEnvRefs(item, refs));
-    return refs;
-  }
-  if (value && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectMcpEnvRefs(item, refs));
-  }
-  return refs;
-}
-
-function expandMcpEnvRefsInString(value, { profileName = '', serverName = '', fieldName = '' } = {}) {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, envName) => {
-    if (process.env[envName] === undefined) {
-      const scope = [
-        profileName ? `profile "${profileName}"` : 'inline MCP config',
-        serverName ? `server "${serverName}"` : '',
-        fieldName ? `field "${fieldName}"` : '',
-      ].filter(Boolean).join(', ');
-      const error = new Error(`MCP env reference ${match} is not set${scope ? ` (${scope})` : ''}`);
-      error.status = 400;
-      error.missingEnv = envName;
-      throw error;
-    }
-    return process.env[envName];
-  });
-}
-
-function expandMcpEnvRefsInMap(mapValue, options = {}) {
-  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return mapValue;
-  return Object.fromEntries(Object.entries(mapValue).map(([key, value]) => [
-    key,
-    expandMcpEnvRefsInString(String(value ?? ''), { ...options, fieldName: `${options.fieldName || 'map'}.${key}` }),
-  ]));
-}
-
-function expandMcpServersEnvRefs(servers = [], { profileName = '' } = {}) {
-  return servers.map((server) => {
-    const serverName = String(server?.name || '');
-    return {
-      ...server,
-      env: expandMcpEnvRefsInMap(server.env, { profileName, serverName, fieldName: 'env' }),
-      headers: expandMcpEnvRefsInMap(server.headers, { profileName, serverName, fieldName: 'headers' }),
-    };
-  });
-}
-
-function mcpProfileEnvRefSummary(servers = []) {
-  const refs = collectMcpEnvRefs(servers);
-  return {
-    usesEnvRefs: refs.size > 0,
-    envRefCount: refs.size,
-    envRefs: Array.from(refs).sort(),
-  };
-}
-
-function summarizeMcpProfile(profile) {
-  const servers = Array.isArray(profile?.mcpServers) ? profile.mcpServers : [];
-  const envRefs = mcpProfileEnvRefSummary(servers);
-  const lastTest = profile?.lastTest && typeof profile.lastTest === 'object'
-    ? {
-        status: profile.lastTest.status || null,
-        testedAt: profile.lastTest.testedAt || null,
-        serverCount: profile.lastTest.serverCount ?? null,
-        toolCount: profile.lastTest.toolCount ?? null,
-        tools: Array.isArray(profile.lastTest.tools) ? profile.lastTest.tools : [],
-        error: profile.lastTest.error || undefined,
-        errorType: profile.lastTest.errorType || undefined,
-      }
-    : null;
-  return {
-    name: String(profile?.name || ''),
-    description: String(profile?.description || ''),
-    createdAt: profile?.createdAt || null,
-    updatedAt: profile?.updatedAt || null,
-    serverCount: servers.length,
-    toolCount: lastTest?.status === 'ok' ? Number(lastTest.toolCount || 0) : 0,
-    lastTest,
-    ...envRefs,
-    servers: summarizeMcpServers(servers),
-    redactedMcpServers: servers.map(redactMcpServerConfig),
-  };
-}
-
-async function loadMcpProfile(workspaceDir, name) {
-  const profileName = safeMcpProfileName(name);
-  const profile = await readJsonFile(mcpProfilePath(workspaceDir, profileName), null);
-  if (!profile) {
-    const error = new Error(`MCP profile not found: ${profileName}`);
-    error.status = 404;
-    throw error;
-  }
-  if (!Array.isArray(profile.mcpServers)) {
-    throw new Error(`MCP profile ${profileName} is missing mcpServers`);
-  }
-  return {
-    ...profile,
-    name: profileName,
-  };
-}
-
-async function listMcpProfiles(workspaceDir) {
-  const dir = mcpProfilesDir(workspaceDir);
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-  const profiles = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    try {
-      const profile = await readJsonFile(path.join(dir, entry.name), null);
-      if (profile) {
-        profiles.push(summarizeMcpProfile({
-          ...profile,
-          name: path.basename(entry.name, '.json'),
-        }));
-      }
-    } catch {
-      // Ignore malformed profile files in the list view.
-    }
-  }
-  profiles.sort((a, b) => a.name.localeCompare(b.name));
-  return profiles;
-}
-
-async function resolveMcpServersForRequest(context, { mcpServers, mcpProfileName } = {}) {
-  const profileName = mcpProfileName ? safeMcpProfileName(mcpProfileName) : '';
-  if (profileName) {
-    const profile = await loadMcpProfile(context.workspaceDir, profileName);
-    const normalized = validateMcpServers(profile.mcpServers);
-    const expanded = expandMcpServersEnvRefs(normalized, { profileName });
-    return {
-      mcpServers: expanded,
-      profileName,
-      profileSummary: summarizeMcpProfile({ ...profile, mcpServers: normalized }),
-    };
-  }
-  return {
-    mcpServers: expandMcpServersEnvRefs(validateMcpServers(mcpServers)),
-    profileName: '',
-    profileSummary: null,
-  };
-}
-
-function summarizeMcpDiscoveredTools(tools = []) {
-  if (!Array.isArray(tools)) return [];
-  return tools.slice(0, 80).map((tool) => ({
-    server: tool?.server || '',
-    tool: tool?.tool || '',
-    agent_tool: tool?.agent_tool || '',
-    description: String(tool?.description || '').slice(0, 300),
-    required_inputs: Array.isArray(tool?.required_inputs) ? tool.required_inputs.slice(0, 20) : [],
-  }));
-}
-
-async function updateMcpProfileLastTest(workspaceDir, profileName, lastTest) {
-  if (!profileName) return null;
-  const safeName = safeMcpProfileName(profileName);
-  const profile = await loadMcpProfile(workspaceDir, safeName);
-  const updated = {
-    ...profile,
-    updatedAt: profile.updatedAt || new Date().toISOString(),
-    lastTest,
-  };
-  await writeJsonAtomic(mcpProfilePath(workspaceDir, safeName), updated);
-  return summarizeMcpProfile(updated);
-}
-
-function buildMcpProfileExport(profile) {
-  return {
-    schema: 'maze_mcp_profile_export',
-    schema_version: 1,
-    exportedAt: new Date().toISOString(),
-    name: String(profile?.name || ''),
-    description: String(profile?.description || ''),
-    redacted: true,
-    mcpServers: (Array.isArray(profile?.mcpServers) ? profile.mcpServers : []).map(redactMcpServerConfig),
-    profile: summarizeMcpProfile(profile),
-  };
-}
-
-function rejectRedactedMcpPlaceholders(servers = []) {
-  const serialized = JSON.stringify(servers || []);
-  if (serialized.includes('"<hidden>"')) {
-    const error = new Error('Replace <hidden> values before importing this MCP profile');
-    error.status = 400;
-    throw error;
-  }
-}
-
 function sameJsonValue(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
@@ -4803,182 +4560,6 @@ function parseBridgeJsonOutput(output) {
     }
     throw new Error(`Failed to parse bridge JSON output: ${text}`);
   }
-}
-
-function runMcpDiscoveryProcess(params = {}) {
-  return new Promise((resolve, reject) => {
-    const bridgePath = path.join(__dirname, '../maze_bridge.py');
-    const python = spawn(PYTHON_BIN, [bridgePath, 'discover_mcp_tools', JSON.stringify(params)], {
-      env: {
-        ...process.env,
-        MAZE_WORKSPACE_ROOT_DIR: WORKSPACE_ROOT_DIR,
-        MAZE_WORKSPACES_DIR: WORKSPACES_DIR,
-        MAZE_DEFAULT_WORKSPACE_DIR: DEFAULT_WORKSPACE_DIR,
-        MAZE_SYSTEM_CATALOG_DIR: SYSTEM_CATALOG_DIR,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1',
-      },
-    });
-
-    let output = '';
-    let error = '';
-    python.stdout.setEncoding('utf8');
-    python.stderr.setEncoding('utf8');
-    python.stdout.on('data', (data) => {
-      output += data;
-    });
-    python.stderr.on('data', (data) => {
-      error += data;
-    });
-    python.on('close', (code) => {
-      try {
-        const result = parseBridgeJsonOutput(output);
-        if (code !== 0) {
-          reject(new Error(result.error || error || `MCP discovery process failed with code ${code}`));
-          return;
-        }
-        resolve(result);
-      } catch {
-        reject(new Error(error || `Failed to parse MCP discovery output: ${output}`));
-      }
-    });
-    python.on('error', reject);
-  });
-}
-
-const MCP_TRANSPORTS = new Set(['stdio', 'streamable_http', 'sse']);
-
-function sanitizeNamePart(value, fallback = 'mcp') {
-  const safe = String(value || '')
-    .trim()
-    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
-  return safe || fallback;
-}
-
-function normalizeStringList(value, fieldName) {
-  if (value === undefined || value === null || value === '') return [];
-  if (!Array.isArray(value)) {
-    throw new Error(`MCP ${fieldName} must be an array`);
-  }
-  return value.map((item) => String(item));
-}
-
-function normalizeStringMap(value, fieldName) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`MCP ${fieldName} must be an object`);
-  }
-  const result = {};
-  Object.entries(value).forEach(([key, entryValue]) => {
-    const normalizedKey = String(key || '').trim();
-    if (!normalizedKey) {
-      throw new Error(`MCP ${fieldName} contains an empty key`);
-    }
-    result[normalizedKey] = String(entryValue ?? '');
-  });
-  return result;
-}
-
-function normalizeMcpTimeout(value, serverLabel) {
-  if (value === undefined || value === null || value === '') return 30;
-  const timeout = Number(value);
-  if (!Number.isFinite(timeout)) {
-    throw new Error(`MCP server "${serverLabel}" timeout must be a number`);
-  }
-  return Math.min(Math.max(timeout, 1), 300);
-}
-
-function validateMcpServers(value) {
-  if (value === undefined || value === null || value === '') return [];
-  if (!Array.isArray(value)) {
-    throw new Error('mcpServers must be an array');
-  }
-  if (value.length > 8) {
-    throw new Error('mcpServers supports at most 8 servers per run');
-  }
-
-  return value.map((server, index) => {
-    if (!server || typeof server !== 'object' || Array.isArray(server)) {
-      throw new Error(`MCP server #${index + 1} must be an object`);
-    }
-
-    const transport = String(server.transport || 'stdio').trim();
-    if (!MCP_TRANSPORTS.has(transport)) {
-      throw new Error(`MCP server #${index + 1} has unsupported transport: ${transport}`);
-    }
-
-    const name = sanitizeNamePart(server.name || `mcp-${index + 1}`, `mcp-${index + 1}`);
-    const toolPrefix = server.tool_prefix || server.toolPrefix
-      ? sanitizeNamePart(server.tool_prefix || server.toolPrefix, name)
-      : undefined;
-    const timeout = normalizeMcpTimeout(server.timeout, name);
-    const normalized = {
-      name,
-      transport,
-      args: normalizeStringList(server.args, 'args'),
-      env: normalizeStringMap(server.env, 'env'),
-      cwd: server.cwd ? String(server.cwd) : undefined,
-      headers: normalizeStringMap(server.headers, 'headers'),
-      timeout,
-      tool_prefix: toolPrefix,
-    };
-
-    if (transport === 'stdio') {
-      const command = String(server.command || '').trim();
-      if (!command) {
-        throw new Error(`MCP stdio server "${name}" requires command`);
-      }
-      normalized.command = command;
-    } else {
-      const url = String(server.url || '').trim();
-      if (!url) {
-        throw new Error(`MCP ${transport} server "${name}" requires url`);
-      }
-      try {
-        const parsed = new URL(url);
-        if (!['http:', 'https:'].includes(parsed.protocol)) {
-          throw new Error('URL must use http or https');
-        }
-      } catch (error) {
-        throw new Error(`MCP ${transport} server "${name}" has invalid url: ${error.message}`);
-      }
-      normalized.url = url;
-    }
-
-    return normalized;
-  });
-}
-
-function summarizeMcpServers(servers = []) {
-  return servers.map((server) => {
-    const summary = {
-      name: server.name,
-      transport: server.transport,
-      tool_prefix: server.tool_prefix,
-      timeout: server.timeout,
-      has_env: Boolean(server.env && Object.keys(server.env).length),
-      has_headers: Boolean(server.headers && Object.keys(server.headers).length),
-    };
-    if (server.transport === 'stdio') {
-      summary.command = server.command;
-      summary.args_count = Array.isArray(server.args) ? server.args.length : 0;
-      summary.cwd = server.cwd || null;
-    } else if (server.url) {
-      const parsed = new URL(server.url);
-      summary.url_scheme = parsed.protocol.replace(':', '');
-      summary.url_host = parsed.host;
-    }
-    return summary;
-  });
-}
-
-function mcpApiErrorStatus(error) {
-  if (Number.isInteger(error?.status)) return error.status;
-  const message = String(error?.message || '');
-  if (message.startsWith('MCP ') || message.startsWith('mcpServers ')) return 400;
-  return 500;
 }
 
 // ========== WebSocket 辅助函数 ==========
