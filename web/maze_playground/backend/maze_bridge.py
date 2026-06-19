@@ -282,8 +282,6 @@ def _ensure_workspace_layout(resolved):
                         "api_key*": "deny",
                     },
                     "exec_code": {"*": "ask", "python *": "allow", "rm *": "deny"},
-                    "mcp": {"*": "ask"},
-                    "skill": {"*": "allow"},
                 },
             }, handle, ensure_ascii=False, indent=2)
             handle.write("\n")

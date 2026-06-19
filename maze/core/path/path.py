@@ -818,7 +818,7 @@ class MaPath:
     ):
         runs = []
         include_static = kind in (None, "static")
-        include_dynamic = kind in (None, "dynamic", "react", "agent")
+        include_dynamic = kind in (None, "dynamic")
 
         if include_static:
             static_runs = self.static_run_store.list_runs(summary=not detail)
@@ -830,11 +830,6 @@ class MaPath:
                 self._normalize_dynamic_run_snapshot(run) if detail else self._normalize_dynamic_run_summary(run)
                 for run in dynamic_runs
             ]
-            if kind in {"react", "agent"}:
-                normalized_dynamic = [
-                    run for run in normalized_dynamic
-                    if run.get("mode") == kind or run.get("run_type") == kind
-                ]
             runs.extend(normalized_dynamic)
 
         if status:
