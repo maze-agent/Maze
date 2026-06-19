@@ -44,7 +44,6 @@ default_workspace_dir = os.path.abspath(os.path.expanduser(
 from maze.client.front.client import MaClient
 from maze.client.maze.client import MaClient as DynamicMaClient
 from maze.client.maze.agent_exec import run_agent_exec_code
-from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
 from maze.client.maze.agent_permissions import permission_error_payload
 from maze.client.maze.agent_sandbox import build_workspace_sandbox
 from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
@@ -623,40 +622,15 @@ def _mcp_tool_summary(tool):
 
 
 def discover_mcp_tools(params):
-    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
-    if not isinstance(mcp_servers, list):
-        return {"success": False, "error": "mcpServers must be an array"}
-
-    manager = None
-    try:
-        manager, tools = discover_mcp_tools_blocking(configs=mcp_servers)
-        server_summary = [
-            summary
-            for summary in (_mcp_server_summary(server) for server in mcp_servers)
-            if summary
-        ]
-        tool_summary = [_mcp_tool_summary(tool) for tool in tools]
-        return {
-            "success": True,
-            "servers": server_summary,
-            "tools": tool_summary,
-            "serverCount": len(server_summary),
-            "toolCount": len(tool_summary),
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "errorType": type(exc).__name__,
-            "servers": [
-                summary
-                for summary in (_mcp_server_summary(server) for server in mcp_servers)
-                if summary
-            ],
-            "traceback": traceback.format_exc(),
-        }
-    finally:
-        close_mcp_manager_blocking(manager)
+    return {
+        "success": False,
+        "error": "MCP discovery is legacy and disabled in Maze Core Runtime.",
+        "legacy": True,
+        "servers": [],
+        "tools": [],
+        "serverCount": 0,
+        "toolCount": 0,
+    }
 
 
 def _normalize_task_relative_path(relative_path):
@@ -1227,18 +1201,7 @@ def run_react_workflow(params):
     workspace_manifest_version = params.get("workspaceManifestVersion") or params.get("workspace_manifest_version")
     skill_names = []
     permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
-    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
-    mcp_profile_name = str(params.get("mcpProfileName") or params.get("mcp_profile_name") or "").strip()
-    mcp_profile_summary = params.get("mcpProfileSummary") or params.get("mcp_profile_summary")
-    if not isinstance(mcp_profile_summary, dict):
-        mcp_profile_summary = None
-    if not isinstance(mcp_servers, list):
-        mcp_servers = []
-    mcp_server_summary = [
-        summary
-        for summary in (_mcp_server_summary(server) for server in mcp_servers)
-        if summary
-    ]
+    mcp_server_summary = []
     exec_backend = str(
         params.get("execBackend")
         or params.get("exec_backend")
@@ -1332,21 +1295,7 @@ def run_react_workflow(params):
             },
             workspace_dir=workspace_dir,
             permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
-            mcp_servers=mcp_servers,
-            mcp_profile_name=mcp_profile_name or None,
-            mcp_profile=mcp_profile_summary,
         )
-        if mcp_profile_name:
-            try:
-                react.dynamic_run.emit_event(
-                    "agent_mcp_profile_selected",
-                    {
-                        "name": mcp_profile_name,
-                        "profile": mcp_profile_summary,
-                    },
-                )
-            except Exception:
-                pass
         emit_progress({
             "type": "react_run_created",
             "data": {
@@ -1362,8 +1311,6 @@ def run_react_workflow(params):
                 "task_timeout": task_timeout,
                 "mcp_servers": mcp_server_summary,
                 "mcp_server_count": len(mcp_server_summary),
-                "mcp_profile_name": mcp_profile_name or None,
-                "mcp_profile": mcp_profile_summary,
             },
         })
         answer = react.run(prompt)
@@ -1388,8 +1335,6 @@ def run_react_workflow(params):
             "skills": skill_names,
             "execBackend": exec_backend,
             "mcpServers": mcp_server_summary,
-            "mcpProfileName": mcp_profile_name or None,
-            "mcpProfile": mcp_profile_summary,
             "maxSteps": max_steps,
             "timeoutSeconds": timeout_seconds,
             "taskTimeout": task_timeout,

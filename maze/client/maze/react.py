@@ -48,8 +48,6 @@ class ReActWorkflow:
         max_steps: int = 10,
         system_prompt: str | None = None,
         task_timeout: float | None = None,
-        mcp_manager: Any | None = None,
-        mcp_tools: List[Any] | None = None,
         permission_policy: AgentPermissionPolicy | Dict[str, Any] | None = None,
     ):
         if max_steps < 1:
@@ -60,7 +58,6 @@ class ReActWorkflow:
         self.max_steps = max_steps
         self.system_prompt = system_prompt
         self.task_timeout = task_timeout
-        self.mcp_manager = mcp_manager
         self.steps: List[ReActStep] = []
         self.tool_registry = AgentToolRegistry(dynamic_run)
         self.tool_runtime = AgentToolRuntime(
@@ -81,8 +78,6 @@ class ReActWorkflow:
 
         for tool in tools:
             self._register_tool(tool)
-        for mcp_tool in (mcp_tools or []):
-            self.tool_registry.register_mcp_tool(mcp_tool)
 
         if not self.tool_registry.specs:
             raise ValueError("ReActWorkflow requires at least one agent tool")
@@ -166,7 +161,6 @@ class ReActWorkflow:
                         "artifacts": artifacts,
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
-                    self._close_mcp()
                     return answer
 
                 repair = self._validate_tool_action(action)
@@ -198,7 +192,6 @@ class ReActWorkflow:
                 "elapsed_seconds": round(time.time() - run_started, 6),
             })
             self._cancel_if_active("ReAct workflow controller error")
-            self._close_mcp()
             raise
 
     def status(self) -> Dict[str, Any]:
@@ -208,10 +201,7 @@ class ReActWorkflow:
         return self.dynamic_run.get_events(after=after)
 
     def cancel(self, reason: str | None = None):
-        try:
-            return self.dynamic_run.cancel(reason)
-        finally:
-            self._close_mcp()
+        return self.dynamic_run.cancel(reason)
 
     def _register_tool(self, tool: Callable[..., Dict[str, Any]]):
         self.tool_registry.register_task_tool(tool)
@@ -478,14 +468,3 @@ class ReActWorkflow:
             self.dynamic_run.emit_event(event_type, data)
         except Exception:
             pass
-
-    def _close_mcp(self):
-        if self.mcp_manager is None:
-            return
-        try:
-            from maze.client.maze.agent_mcp import close_mcp_manager_blocking
-
-            close_mcp_manager_blocking(self.mcp_manager)
-        except Exception:
-            pass
-        self.mcp_manager = None

@@ -2,10 +2,8 @@ import requests
 import time
 import warnings
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
-from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
 from maze.client.maze.agent_permissions import AgentPermissionPolicy
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
@@ -122,10 +120,6 @@ class MaClient:
         file_context: Optional[dict] = None,
         workspace_dir: Optional[str] = None,
         artifact_mode: bool = False,
-        mcp_clients: Optional[list] = None,
-        mcp_servers: Optional[list[dict]] = None,
-        mcp_profile_name: Optional[str] = None,
-        mcp_profile: Optional[dict] = None,
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> AgentRun:
         """
@@ -147,39 +141,20 @@ class MaClient:
             file_context=file_context,
             workspace_dir=workspace_dir,
             artifact_mode=artifact_mode,
-            metadata=self._agent_run_metadata("agent", mcp_servers, mcp_profile_name, mcp_profile),
+            metadata={"run_type": "agent"},
         )
-        mcp_manager = None
         cancel_reason = "Agent creation failed"
         try:
-            try:
-                mcp_manager, mcp_tools = discover_mcp_tools_blocking(
-                    clients=mcp_clients,
-                    configs=mcp_servers,
-                )
-                self._patch_mcp_metadata("agent", dynamic_run, mcp_servers, mcp_tools, mcp_profile_name, mcp_profile)
-                self._emit_mcp_discovery_events(dynamic_run, mcp_servers, mcp_tools)
-            except Exception as exc:
-                cancel_reason = "MCP discovery failed"
-                self._emit_dynamic_run_event_best_effort(
-                    dynamic_run,
-                    "agent_mcp_discovery_failed",
-                    self._error_event_payload(exc),
-                )
-                raise
             return AgentRun(
                 dynamic_run=dynamic_run,
                 tools=tools,
                 planner=planner,
                 max_steps=max_steps,
                 task_timeout=task_timeout,
-                mcp_manager=mcp_manager,
-                mcp_tools=mcp_tools,
                 permission_policy=permission_policy,
             )
         except Exception as exc:
             setattr(exc, "maze_run_id", dynamic_run.run_id)
-            close_mcp_manager_blocking(mcp_manager)
             self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
             raise
 
@@ -194,10 +169,6 @@ class MaClient:
         file_context: Optional[dict] = None,
         workspace_dir: Optional[str] = None,
         artifact_mode: bool = False,
-        mcp_clients: Optional[list] = None,
-        mcp_servers: Optional[list[dict]] = None,
-        mcp_profile_name: Optional[str] = None,
-        mcp_profile: Optional[dict] = None,
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> ReActWorkflow:
         """
@@ -219,26 +190,10 @@ class MaClient:
             file_context=file_context,
             workspace_dir=workspace_dir,
             artifact_mode=artifact_mode,
-            metadata=self._agent_run_metadata("react", mcp_servers, mcp_profile_name, mcp_profile),
+            metadata={"run_type": "react"},
         )
-        mcp_manager = None
         cancel_reason = "ReAct workflow creation failed"
         try:
-            try:
-                mcp_manager, mcp_tools = discover_mcp_tools_blocking(
-                    clients=mcp_clients,
-                    configs=mcp_servers,
-                )
-                self._patch_mcp_metadata("react", dynamic_run, mcp_servers, mcp_tools, mcp_profile_name, mcp_profile)
-                self._emit_mcp_discovery_events(dynamic_run, mcp_servers, mcp_tools)
-            except Exception as exc:
-                cancel_reason = "MCP discovery failed"
-                self._emit_dynamic_run_event_best_effort(
-                    dynamic_run,
-                    "agent_mcp_discovery_failed",
-                    self._error_event_payload(exc),
-                )
-                raise
             return ReActWorkflow(
                 dynamic_run=dynamic_run,
                 llm_task=llm_task,
@@ -246,13 +201,10 @@ class MaClient:
                 max_steps=max_steps,
                 system_prompt=system_prompt,
                 task_timeout=task_timeout,
-                mcp_manager=mcp_manager,
-                mcp_tools=mcp_tools,
                 permission_policy=permission_policy,
             )
         except Exception as exc:
             setattr(exc, "maze_run_id", dynamic_run.run_id)
-            close_mcp_manager_blocking(mcp_manager)
             self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
             raise
 
@@ -377,101 +329,6 @@ class MaClient:
             dynamic_run.emit_event(event_type, data)
         except Exception:
             pass
-
-    def _agent_run_metadata(
-        self,
-        run_type: str,
-        mcp_servers: Optional[list[dict]],
-        mcp_profile_name: Optional[str] = None,
-        mcp_profile: Optional[dict] = None,
-    ) -> dict:
-        metadata = {"run_type": run_type}
-        servers = self._mcp_server_metadata(mcp_servers)
-        if servers:
-            metadata["mcp_servers"] = servers
-            metadata["mcp_server_count"] = len(servers)
-        profile_name = str(mcp_profile_name or "").strip()
-        if profile_name:
-            metadata["mcp_profile_name"] = profile_name
-            profile_summary = self._mcp_profile_metadata(mcp_profile)
-            if profile_summary:
-                metadata["mcp_profile"] = profile_summary
-        return metadata
-
-    def _mcp_server_metadata(self, mcp_servers: Optional[list[dict]]) -> list[dict]:
-        return [_sanitize_mcp_server_config(server) for server in (mcp_servers or []) if isinstance(server, dict)]
-
-    def _mcp_tool_metadata(self, mcp_tools: list) -> list[dict]:
-        return [
-            {
-                "server": getattr(tool, "server_name", None),
-                "tool": getattr(tool, "tool_name", None),
-                "agent_tool": getattr(tool, "agent_tool_name", None),
-                "description": getattr(tool, "description", "") or "",
-            }
-            for tool in (mcp_tools or [])
-        ]
-
-    def _mcp_profile_metadata(self, mcp_profile: Optional[dict]) -> dict:
-        if not isinstance(mcp_profile, dict):
-            return {}
-        summary = {}
-        for key in (
-            "name",
-            "description",
-            "updatedAt",
-            "serverCount",
-            "toolCount",
-            "usesEnvRefs",
-            "envRefCount",
-            "envRefs",
-            "lastTest",
-        ):
-            if key in mcp_profile:
-                summary[key] = mcp_profile.get(key)
-        servers = mcp_profile.get("servers")
-        if isinstance(servers, list):
-            summary["servers"] = [
-                dict(server)
-                for server in servers
-                if isinstance(server, dict)
-            ]
-        return summary
-
-    def _patch_mcp_metadata(
-        self,
-        run_type: str,
-        dynamic_run: DynamicRun,
-        mcp_servers: Optional[list[dict]],
-        mcp_tools: list,
-        mcp_profile_name: Optional[str] = None,
-        mcp_profile: Optional[dict] = None,
-    ) -> None:
-        tools = self._mcp_tool_metadata(mcp_tools)
-        metadata = self._agent_run_metadata(run_type, mcp_servers, mcp_profile_name, mcp_profile)
-        if tools:
-            metadata["mcp_tools"] = tools
-            metadata["mcp_tool_count"] = len(tools)
-        try:
-            dynamic_run.patch_metadata(metadata)
-        except Exception:
-            pass
-
-    def _emit_mcp_discovery_events(self, dynamic_run: DynamicRun, mcp_servers: Optional[list[dict]], mcp_tools: list) -> None:
-        servers = self._mcp_server_metadata(mcp_servers)
-        tools = self._mcp_tool_metadata(mcp_tools)
-        if servers:
-            self._emit_dynamic_run_event_best_effort(
-                dynamic_run,
-                "agent_mcp_servers_configured",
-                {"servers": servers, "server_count": len(servers)},
-            )
-        if tools:
-            self._emit_dynamic_run_event_best_effort(
-                dynamic_run,
-                "agent_mcp_tools_discovered",
-                {"tools": tools, "tool_count": len(tools)},
-            )
 
     def _cancel_dynamic_run_best_effort(self, dynamic_run: DynamicRun, reason: str) -> None:
         try:
@@ -838,26 +695,5 @@ class MaClient:
         )
         return completion.choices[0].text
 
-
-def _sanitize_mcp_server_config(server: dict) -> dict:
-    transport = str(server.get("transport") or "stdio")
-    url = str(server.get("url") or "").strip()
-    parsed_url = urlsplit(url) if url else None
-    summary = {
-        "name": str(server.get("name") or ""),
-        "transport": transport,
-        "tool_prefix": server.get("tool_prefix"),
-        "timeout": server.get("timeout"),
-        "has_env": bool(server.get("env")),
-        "has_headers": bool(server.get("headers")),
-    }
-    if transport == "stdio":
-        summary["command"] = str(server.get("command") or "")
-        summary["args_count"] = len(server.get("args") or []) if isinstance(server.get("args"), list) else 0
-        summary["cwd"] = str(server.get("cwd") or "") or None
-    elif parsed_url is not None:
-        summary["url_host"] = parsed_url.netloc
-        summary["url_scheme"] = parsed_url.scheme
-    return summary
 
         

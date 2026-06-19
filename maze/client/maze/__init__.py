@@ -25,7 +25,6 @@ __all__ = [
 for _legacy_module in (
     'agent',
     'agent_exec',
-    'agent_mcp',
     'agent_permissions',
     'agent_sandbox',
     'agent_tools',
