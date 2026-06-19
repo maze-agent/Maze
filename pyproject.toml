@@ -65,7 +65,6 @@ dependencies = [
     "aiohttp>=3.13.3",
     "openai>=2.15.0",
     "dashscope>=1.25.8",
-    "mcp>=1.25.0",
     "uv>=0.9.26"
 ]
 
@@ -84,7 +83,6 @@ Repository = "https://github.com/QinbinLi/Maze"
 
 [project.scripts]
 maze = "maze.cli.cli:main"
-maze-sandbox = "maze.cli.sandbox_cli:main"
 
 [tool.setuptools.package-dir]
 "" = "."

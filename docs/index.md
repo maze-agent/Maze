@@ -55,7 +55,7 @@ Maze = Core Runtime + Workflow Agent + Workflow Workbench
 -   :material-console:{ .lg .middle } **CLI**
 
     ---
-    `maze start --head | --worker`、`maze stop`、`maze-sandbox` 全部参数。
+    `maze start --head | --worker`、`maze stop` 全部参数。
 
     [→ 跳转](api_zh.md#三cli-命令)
 
