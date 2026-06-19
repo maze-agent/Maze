@@ -1,3 +1,10 @@
+"""Legacy HTTP MCP client.
+
+This module is not part of the Maze Core Runtime public boundary. It remains
+temporarily for compatibility and should move to an extension or be removed in
+a later purification phase.
+"""
+
 from typing import Any, Literal
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client

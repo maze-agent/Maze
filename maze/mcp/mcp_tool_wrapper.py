@@ -1,3 +1,10 @@
+"""Legacy MCP tool wrapper.
+
+This module is not part of the Maze Core Runtime public boundary. It remains
+temporarily for compatibility and should move to an extension or be removed in
+a later purification phase.
+"""
+
 from maze.mcp.base_client import BaseClient
 
 class McpTool:

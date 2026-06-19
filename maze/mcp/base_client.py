@@ -1,3 +1,10 @@
+"""Legacy MCP client base class.
+
+This module is not part of the Maze Core Runtime public boundary. It remains
+temporarily for compatibility and should move to an extension or be removed in
+a later purification phase.
+"""
+
 from abc import ABC
 from contextlib import AsyncExitStack
 from typing import List

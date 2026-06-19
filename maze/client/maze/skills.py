@@ -1,3 +1,10 @@
+"""Legacy Skills support for application-level agents.
+
+This module is not part of the Maze Core Runtime public boundary. It remains
+temporarily for compatibility and should move to an extension or be removed in
+a later purification phase.
+"""
+
 from __future__ import annotations
 
 import re
