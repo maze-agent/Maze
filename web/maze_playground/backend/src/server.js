@@ -202,7 +202,6 @@ async function ensureWorkspaceManifest(workspaceDir, options = {}) {
     files_dir: 'files',
     workflows_dir: 'workflows',
     tasks_dir: 'tasks',
-    skills_dir: 'skills',
     runs_dir: 'runs',
     policy_path: 'policies/sandbox_policy.json',
     imports: [],
@@ -266,7 +265,6 @@ async function ensureWorkspacePolicy(workspaceDir) {
         },
         exec_code: { '*': 'ask', 'python *': 'allow', 'rm *': 'deny' },
         mcp: { '*': 'ask' },
-        skill: { '*': 'allow' },
       },
     });
   }
@@ -282,7 +280,6 @@ async function ensureWorkspaceDirs(workspaceDir) {
   await fs.mkdir(path.join(resolved, 'tasks'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
-  await fs.mkdir(path.join(resolved, 'skills'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'mcp_profiles'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_sessions'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_drafts'), { recursive: true });
@@ -352,7 +349,7 @@ async function createWorkspace({ workspaceId, name, mode } = {}) {
 }
 
 async function ensureSystemCatalogDirs() {
-  for (const name of ['workflows', 'tasks', 'skills']) {
+  for (const name of ['workflows', 'tasks']) {
     await fs.mkdir(path.join(SYSTEM_CATALOG_DIR, name), { recursive: true });
   }
 }
@@ -444,25 +441,13 @@ function parseMarkdownFrontmatter(raw) {
 }
 
 async function catalogItemMetadata(type, fullPath, entry) {
-  if (type === 'skills' && entry.isDirectory()) {
-    const skillPath = path.join(fullPath, 'SKILL.md');
-    const raw = await fs.readFile(skillPath, 'utf-8').catch(() => '');
-    const frontmatter = parseMarkdownFrontmatter(raw);
-    return {
-      description: frontmatter.description || '',
-      tags: Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
-    };
-  }
-
   if (type === 'workflows' && entry.isFile() && entry.name.endsWith('.json')) {
     try {
       const payload = JSON.parse(await fs.readFile(fullPath, 'utf-8'));
       const workflow = payload?.workflow || payload || {};
-      const recommendedSkills = workflow.recommendedSkills || payload.recommendedSkills || workflow.skills || [];
       return {
         description: workflow.description || payload.description || '',
         tags: Array.isArray(workflow.tags || payload.tags) ? (workflow.tags || payload.tags) : [],
-        recommendedSkills: Array.isArray(recommendedSkills) ? recommendedSkills.map(String) : [],
       };
     } catch {
       return {};
@@ -5033,7 +5018,7 @@ async function recordAndBroadcastStaticRun(workflow, workspaceDir, runId, event)
 
 function catalogTypeDir(type) {
   const normalized = String(type || '').trim().toLowerCase();
-  if (!['workflows', 'tasks', 'skills'].includes(normalized)) {
+  if (!['workflows', 'tasks'].includes(normalized)) {
     throw new Error(`Unsupported system catalog type: ${type}`);
   }
   return { type: normalized, dir: path.join(SYSTEM_CATALOG_DIR, normalized) };
@@ -5094,14 +5079,6 @@ async function copyCatalogItemToWorkspace({ workspaceDir, type, sourceId, target
     const target = resolveTaskDefinitionFile(workspaceDir, targetPath || path.basename(normalizedSourceId));
     resolvedTargetPath = target.fullPath;
     targetRelativePath = target.relativePath;
-  } else {
-    const skillName = safeWorkspaceId(targetPath || path.basename(normalizedSourceId), path.basename(normalizedSourceId));
-    targetRelativePath = path.posix.join('skills', skillName);
-    resolvedTargetPath = path.resolve(workspaceDir, targetRelativePath);
-    const skillsDir = path.resolve(workspaceDir, 'skills');
-    if (!resolvedTargetPath.startsWith(skillsDir + path.sep)) {
-      throw new Error('Skill import target must stay inside workspace skills directory');
-    }
   }
 
   await fs.mkdir(path.dirname(resolvedTargetPath), { recursive: true });
@@ -5182,7 +5159,7 @@ app.get('/api/system-catalog', async (req, res) => {
   try {
     await ensureSystemCatalogDirs();
     const requestedType = req.query.type ? String(req.query.type) : '';
-    const types = requestedType ? [requestedType] : ['workflows', 'tasks', 'skills'];
+    const types = requestedType ? [requestedType] : ['workflows', 'tasks'];
     const catalog = {};
     for (const type of types) {
       const { type: normalizedType } = catalogTypeDir(type);
@@ -5303,28 +5280,6 @@ app.get('/api/workspace-tasks', async (req, res) => {
     res.json({ ...result, ...workspaceResponseFields(context) });
   } catch (error) {
     console.error('❌ 获取工作区任务失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 1.1b 获取工作目录 skills 列表
-app.get('/api/workspace-skills', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const workspaceDir = context.workspaceDir;
-    console.log(`📚 扫描工作目录 Skills: ${workspaceDir}`);
-
-    const result = await callPython('list_workspace_skills', { workspaceDir });
-
-    if (result.error) {
-      console.error('❌ 扫描工作目录 Skills 失败:', result.error);
-      return res.status(400).json({ error: result.error, traceback: result.traceback, errors: result.errors || [] });
-    }
-
-    console.log(`✅ 成功获取 ${(result.skills || []).length} 个工作区 Skill`);
-    res.json({ ...result, ...workspaceResponseFields(context) });
-  } catch (error) {
-    console.error('❌ 获取工作区 Skills 失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
