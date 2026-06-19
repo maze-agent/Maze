@@ -12,7 +12,6 @@ import re
 import ast
 import operator
 import tempfile
-from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
 
@@ -478,7 +477,7 @@ def _workspace_id_to_dir(workspace_id):
 
 def _ensure_workspace_layout(resolved):
     os.makedirs(resolved, exist_ok=True)
-    for name in ("files", "workflows", "tasks", "skills", "policies", "runs"):
+    for name in ("files", "workflows", "tasks", "policies", "runs"):
         os.makedirs(os.path.join(resolved, name), exist_ok=True)
 
     manifest_path = os.path.join(resolved, "workspace.json")
@@ -501,7 +500,6 @@ def _ensure_workspace_layout(resolved):
                 "files_dir": "files",
                 "workflows_dir": "workflows",
                 "tasks_dir": "tasks",
-                "skills_dir": "skills",
                 "runs_dir": "runs",
                 "policy_path": "policies/sandbox_policy.json",
                 "imports": [],
@@ -581,56 +579,6 @@ def _string_list(value):
     if isinstance(value, (list, tuple, set)):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()] if str(value).strip() else []
-
-
-def _mcp_server_summary(server):
-    if not isinstance(server, dict):
-        return {}
-    transport = str(server.get("transport") or "stdio")
-    summary = {
-        "name": str(server.get("name") or ""),
-        "transport": transport,
-        "tool_prefix": server.get("tool_prefix"),
-        "timeout": server.get("timeout"),
-        "has_env": bool(server.get("env")),
-        "has_headers": bool(server.get("headers")),
-    }
-    if transport == "stdio":
-        summary["command"] = str(server.get("command") or "")
-        summary["args_count"] = len(server.get("args") or []) if isinstance(server.get("args"), list) else 0
-        summary["cwd"] = str(server.get("cwd") or "") or None
-    elif server.get("url"):
-        parsed = urlsplit(str(server.get("url") or ""))
-        summary["url_scheme"] = parsed.scheme
-        summary["url_host"] = parsed.netloc
-    return summary
-
-
-def _mcp_tool_summary(tool):
-    input_schema = getattr(tool, "input_schema", None) or {}
-    properties = input_schema.get("properties") if isinstance(input_schema, dict) else {}
-    required = input_schema.get("required") if isinstance(input_schema, dict) else []
-    return {
-        "server": getattr(tool, "server_name", None),
-        "tool": getattr(tool, "tool_name", None),
-        "agent_tool": getattr(tool, "agent_tool_name", None),
-        "description": getattr(tool, "description", "") or "",
-        "input_schema": input_schema if isinstance(input_schema, dict) else {},
-        "inputs": sorted((properties or {}).keys()) if isinstance(properties, dict) else [],
-        "required_inputs": list(required or []) if isinstance(required, list) else [],
-    }
-
-
-def discover_mcp_tools(params):
-    return {
-        "success": False,
-        "error": "MCP discovery is legacy and disabled in Maze Core Runtime.",
-        "legacy": True,
-        "servers": [],
-        "tools": [],
-        "serverCount": 0,
-        "toolCount": 0,
-    }
 
 
 def _normalize_task_relative_path(relative_path):
@@ -731,23 +679,6 @@ def get_workspace_tasks(workspace_dir):
         "tasksDir": tasks_dir,
         "tasks": tasks,
         "errors": errors,
-    }
-
-
-def list_workspace_skills(workspace_dir):
-    """Legacy Skills endpoint. Skills are no longer part of Maze mainline."""
-    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
-    if error:
-        return error
-
-    skills_dir = os.path.join(workspace_dir, "skills")
-    return {
-        "success": True,
-        "workspaceDir": workspace_dir,
-        "skillsDir": skills_dir,
-        "skills": [],
-        "errors": [],
-        "legacy": True,
     }
 
 
@@ -1199,9 +1130,7 @@ def run_react_workflow(params):
     workspace_id = str(params.get("workspaceId") or params.get("workspace_id") or "").strip()
     workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or "").strip()
     workspace_manifest_version = params.get("workspaceManifestVersion") or params.get("workspace_manifest_version")
-    skill_names = []
     permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
-    mcp_server_summary = []
     exec_backend = str(
         params.get("execBackend")
         or params.get("exec_backend")
@@ -1304,13 +1233,10 @@ def run_react_workflow(params):
                 "workspace_id": workspace_id,
                 "workspace_dir": workspace_dir,
                 "workspace_manifest_version": workspace_manifest_version,
-                "skills": skill_names,
                 "exec_backend": exec_backend,
                 "max_steps": max_steps,
                 "timeout_seconds": timeout_seconds,
                 "task_timeout": task_timeout,
-                "mcp_servers": mcp_server_summary,
-                "mcp_server_count": len(mcp_server_summary),
             },
         })
         answer = react.run(prompt)
@@ -1332,9 +1258,7 @@ def run_react_workflow(params):
             "workspaceManifestVersion": workspace_manifest_version,
             "answer": answer,
             "status": status.get("status"),
-            "skills": skill_names,
             "execBackend": exec_backend,
-            "mcpServers": mcp_server_summary,
             "maxSteps": max_steps,
             "timeoutSeconds": timeout_seconds,
             "taskTimeout": task_timeout,
@@ -1391,9 +1315,6 @@ def main():
         elif action == 'get_workspace_tasks':
             result = get_workspace_tasks(params.get('workspaceDir', ''))
 
-        elif action == 'list_workspace_skills':
-            result = list_workspace_skills(params.get('workspaceDir', ''))
-
         elif action == 'save_workspace_task':
             result = save_workspace_task(
                 params.get('workspaceDir', ''),
@@ -1439,9 +1360,6 @@ def main():
         elif action == 'run_react_workflow':
             result = run_react_workflow(params)
 
-        elif action == 'discover_mcp_tools':
-            result = discover_mcp_tools(params)
-        
         else:
             result = {"error": f"Unknown action: {action}"}
     

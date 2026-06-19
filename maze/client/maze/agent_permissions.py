@@ -95,8 +95,6 @@ class AgentPermissionPolicy:
         rules.extend([
             AgentPermissionRule.from_value("exec_code", "*", "allow"),
             AgentPermissionRule.from_value("external_directory", "*", "deny"),
-            AgentPermissionRule.from_value("mcp", "*", "ask"),
-            AgentPermissionRule.from_value("skill", "*", "allow"),
         ])
         return cls(rules)
 
@@ -247,7 +245,6 @@ def _sensitive_path_patterns() -> List[str]:
         "*credential*",
         "*token*",
         "api_key*",
-        "mcp_profiles/*",
     ]
     nested = []
     for pattern in base:

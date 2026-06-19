@@ -160,12 +160,6 @@ class AgentToolCallResult:
         }
 
 
-@dataclass
-class AgentToolLocalInvocation:
-    task_id: str
-    task_name: str
-
-
 class AgentToolRegistry:
     def __init__(self, dynamic_run: DynamicRun):
         self.dynamic_run = dynamic_run
@@ -1067,58 +1061,4 @@ def _permission_target_for_tool(spec: AgentToolSpec, args: Dict[str, Any]) -> tu
         code = str(args.get("code") or "").strip()
         first_line = code.splitlines()[0] if code else ""
         return "exec_code", f"python {first_line}".strip()
-    if spec.source == "mcp":
-        return "mcp", spec.name
-    if spec.source == "skill":
-        return "skill", str(args.get("name") or spec.name)
     return None, ""
-
-
-def _mcp_error_message(result: Dict[str, Any]) -> str:
-    content = result.get("content") or []
-    for item in content:
-        if isinstance(item, dict) and item.get("text"):
-            return str(item["text"])
-    if result.get("structured_content"):
-        return json.dumps(result["structured_content"], ensure_ascii=False)
-    return "MCP tool returned an error"
-
-
-def _mcp_content_attachments(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    attachments = []
-    for item in result.get("content") or []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") in {"image", "audio", "resource", "resource_link"}:
-            attachments.append(item)
-    return attachments
-
-
-def _skill_event_payload(skill: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": skill.get("name"),
-        "description": skill.get("description"),
-        "resources": skill.get("resources") or [],
-        "metadata": skill.get("metadata") or {},
-        "truncated": bool(skill.get("truncated")),
-        "original_chars": skill.get("original_chars"),
-        "returned_chars": skill.get("returned_chars"),
-    }
-
-
-def _skill_exception_payload(exc: Exception) -> Dict[str, Any]:
-    if hasattr(exc, "to_dict"):
-        payload = exc.to_dict()
-        details = payload.get("details") if isinstance(payload, dict) else {}
-        return {
-            "error_type": payload.get("error_type", type(exc).__name__),
-            "message": payload.get("message", str(exc)),
-            "repairable": bool(payload.get("repairable", True)),
-            "details": details or {},
-        }
-    return {
-        "error_type": type(exc).__name__,
-        "message": str(exc),
-        "repairable": True,
-        "details": {},
-    }
