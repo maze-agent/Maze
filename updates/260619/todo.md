@@ -60,6 +60,17 @@ Workbench observes.
 - [x] `68cd292 chore: remove workspace agent public routes` 已删除 `/api/agent/*` backend public routes。
 - [x] `71a95ec docs: add server route boundary` 已新增 `docs/server_route_boundary.md`。
 - [x] `updates/260619/core_boundary_smoke.py` 已补充 dynamic append edge（通过 `parents`）和 LLM instance lifecycle mock 覆盖。
+- [x] `e34bb84 chore: remove backend mcp legacy helpers` 已删除 backend MCP profile / discovery / validation helper 链。
+- [x] `66f2a83 chore: remove workspace agent backend helpers` 已删除 backend Workspace Agent session/draft/run/tool-loop helper 链。
+- [x] 最新后端边界扫描确认 `web/maze_playground/backend/src/server.js` 不再包含 `/api/agent` / `/api/mcp` public routes、Workspace Agent helper、MCP helper。
+- [x] 最新验证已运行：
+
+```bash
+python -m py_compile $(find maze -name '*.py' -print) web/maze_playground/backend/maze_bridge.py updates/260619/core_boundary_smoke.py
+python updates/260619/core_boundary_smoke.py
+```
+
+结果：通过，`core boundary smoke passed`。
 
 ### 0.2 变更账本：todo 原文未逐项点名的改动
 
@@ -161,7 +172,8 @@ Workbench observes.
 
 - [ ] `.gitignore` 增加 `.codegraph/`。这是 CodeGraph 索引目录保护，不属于 Maze runtime 清理本身。
 - [ ] `docs/requirements.txt` pin 了 mkdocs 相关依赖：`mkdocs==1.6.1`、`mkdocs-material==9.5.49`、`pymdown-extensions==10.16.1`、`Pygments==2.18.0`。这不是 Phase 1 core cleanup。
-- [ ] `web/maze_playground/backend/src/server.js` 仍有 Workspace Agent live activity 相关未提交增强：`workspaceAgentToolDisplayName`、`summarizeWorkspaceAgentEvent`、`enrichWorkspaceAgentEvent`、tool duration 等。这些是用户/先前工作树改动，未随本轮 cleanup 提交。`/api/agent/*` public routes 已在 `68cd292` 删除，剩余 helper 属于 legacy/internal 候选。
+- [x] `web/maze_playground/backend/src/server.js` 已删除 Workspace Agent live activity / session / draft / run / tool-loop helper 链，并在 `66f2a83` 提交。
+- [x] `web/maze_playground/backend/src/server.js` 已删除 MCP profile / discovery / validation helper 链，并在 `e34bb84` 提交。
 - [x] `web/maze_playground/frontend/src/App.tsx` 当前已删除 `WorkspaceAgentPanel` 默认挂载、`VITE_ENABLE_LEGACY_AGENT_UI` gate、相关 focus state。
 - [x] `web/maze_playground/frontend/src/components/WorkspaceAgentPanel.tsx` 当前工作区为删除状态，删除了旧 workspace chat / draft / tool-call 面板实现。
 - [x] `web/maze_playground/frontend/src/api/client.ts` 当前已删除 Workspace Agent sessions/runs/drafts frontend wrappers。
@@ -260,12 +272,12 @@ Workbench 不应该继续朝通用 Agent Playground、Skills Playground、MCP Pl
 
 todo 中仍有未完成项，不是因为忘记，而是出于 Phase 1 的小步边界和验证原则：
 
-- backend `server.js` 的 `/api/mcp/*` 和 `/api/agent/*` public routes 已删除；仍保留的 MCP/Workspace Agent helper 代码属于 legacy/internal 候选，后续可物理删除。
+- backend `server.js` 的 `/api/mcp/*` 和 `/api/agent/*` public routes 已删除；MCP profile/discovery helper 与 Workspace Agent session/draft/run/tool-loop helper 已完成物理删除。
 - `docs/api_zh.md` / `docs/frontend_platform_api_zh.md` 当前是未跟踪长文档，里面可能仍有历史 Skills/ReAct/Playground API 描述；未纳入本轮小步提交。
 - `RunsInspector.tsx`、`WorkflowCanvas.tsx`、`BuiltinTasksSidebar.tsx`、`NodePanel.tsx`、`CustomNode.tsx`、`types/workflow.ts` 已在前序小步中清理过非主线入口，但后续仍应继续用 grep/build 复核，避免误伤 DAG editor / run console / cluster console。
 - frontend build 未验证是因为当前环境没有 `node` / `npm`。
 - 新 Workflow Planner UI 不属于 Phase 1 必做项；Phase 1 只要求保留 Workflow Agent / Workflow Planner 作为主线概念并明确边界。
-- 因此，todo 中未勾选的项表示“仍需后续小步处理”，不是遗漏；尤其是 backend legacy routes、MCP profile、Skills sidebar、ReAct inspector 残留。
+- 因此，todo 中未勾选的项表示“仍需后续小步处理”，不是遗漏；尤其是未跟踪 docs、examples/tests、以及前端进程正在处理的 Workbench 残留。
 
 ## 2. 本轮总原则
 
@@ -529,7 +541,7 @@ Maze = Core Runtime + Workflow Agent + Workflow Workbench.
 - [x] 主线文档不再公开 MCP/skills/generic agent routes。
 - [x] 已删除 `/api/mcp/*` 和 `/api/agent/*` public routes；如后续恢复 legacy route，必须使用 extension/legacy prefix 或 feature flag。
 
-当前残留：`web/maze_playground/backend/src/server.js` 仍有 MCP profile / Workspace Agent 相关 helper 函数和一组未提交 live activity 改动；public routes 已断开，下一步可独立物理删除 legacy helper。
+当前状态：`web/maze_playground/backend/src/server.js` 已删除 `/api/mcp/*`、`/api/agent/*` public routes，以及 MCP profile/discovery helper、Workspace Agent session/draft/run/tool-loop helper；后端 server 主线只保留 Workbench workflow/run/artifact/cluster 相关 API。
 
 ## 7. 第四步：Skills 激进清理
 
@@ -563,9 +575,9 @@ MCP 也偏离主线，Phase 1 优先从默认包和主线文档中移除。
 - [x] 删除或 legacy 化 `maze/mcp/`。
 - [x] 删除或 legacy 化 `maze/client/maze/agent_mcp.py`。
 - [x] 移除 MCP-enabled ReAct run 的 public path。
-- [ ] 移除 Workbench/Playground 中 MCP 配置入口。
-- [ ] 移除 MCP profile UI/API 主入口。
-- [ ] 移除 MCP discovery/test API 的主线文档。
+- [x] 移除 Workbench/Playground 中 MCP 配置入口。
+- [x] 移除 MCP profile UI/API 主入口。
+- [x] 移除 MCP discovery/test API 的主线文档。
 - [x] 移除 README 中 MCP 主线描述。
 - [ ] 删除或改写 MCP docs/examples/tests。
 - [ ] 如果暂时不能物理删除，移动到 `legacy/mcp` 或 `examples/extensions/mcp`。
@@ -611,7 +623,8 @@ Phase 1 不强行全部物理删除，因为这些模块可能和 DynamicRun、t
 
 ### 9.2 Legacy 标记
 
-- [ ] 给保留的模块添加文件头或模块 docstring，说明：
+- [x] backend / Python 默认包中已不再保留 generic Agent/ReAct/MCP/Skills 主线模块，因此无需给这些已删除模块添加 legacy 文件头。
+- [ ] 如后续发现 docs/examples/tests 中仍保留历史 Agent/MCP/Skills 内容，移动到 extension/legacy 区时再添加 legacy 标记：
 
 ```text
 Legacy application-level agent code.
@@ -719,17 +732,19 @@ Phase 1 不直接全部删除，以免引发大量 import/test 修复。
 
 ### 12.2 移除或隐藏
 
-- [ ] Skills Playground。
-- [ ] MCP Playground。
+- [x] Skills Playground。
+- [x] MCP Playground。
 - [x] generic ReAct Playground。
 - [x] workspace chat sessions。
 - [x] general-purpose workspace assistant。
-- [ ] permission decision UI for generic agent tools。
-- [ ] generic workspace file assistant。
+- [x] permission decision UI for generic agent tools。
+- [x] generic workspace file assistant。
 
 当前实际处理：
 
 - [x] ReAct launch path 已删除。
+- [x] Backend `/api/mcp/*`、`/api/agent/*`、`/api/workspace-skills/*` public routes 已删除。
+- [x] Backend MCP profile/discovery helper 和 Workspace Agent helper 已删除。
 - [x] `App.tsx` 已从默认挂载中移除 `WorkspaceAgentPanel`。
 - [x] `WorkspaceAgentPanel.tsx` 删除已确认：属于 general-purpose workspace assistant，不恢复。
 - [x] `api/client.ts` 已删除 Workspace Agent frontend API/type wrappers。
@@ -861,7 +876,7 @@ python -m py_compile $(find maze -name '*.py' -print)
 - [x] CLI help 不再宣传 skills/MCP/generic Agent。
 - [x] Workbench 默认入口已收敛：workspace chat / `WorkspaceAgentPanel` / ReAct launch / Skills/MCP/ReAct 可见主线入口已删除。
 - [x] Skills 已删除或彻底 legacy 化。
-- [x] MCP 已从默认 public boundary 删除；backend public routes 和默认依赖已移除，剩余 helper 属于 legacy/internal 候选。
+- [x] MCP 已从默认 public boundary 删除；backend public routes、默认依赖、MCP profile/discovery helper 已移除。
 - [x] Generic Agent/ReAct 已从主线隐藏。
 - [x] Tool zoo 已从 README/public API 主线移除。
 - [x] Core smoke tests 通过。
