@@ -2,7 +2,6 @@ import axios from 'axios';
 import type {
   BuiltinTaskMeta,
   WorkspaceTasksResponse,
-  WorkspaceSkillsResponse,
   WorkspaceContextResponse,
   WorkspaceFilesResponse,
   WorkspaceWorkflowsResponse,
@@ -23,53 +22,6 @@ import type {
 import type { LlmSettings } from '@/utils/llmSettings';
 
 const API_BASE = '/api';
-
-export interface McpServerConfig {
-  name: string;
-  transport?: 'stdio' | 'streamable_http' | 'sse';
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  url?: string;
-  headers?: Record<string, string>;
-  timeout?: number;
-  tool_prefix?: string;
-}
-
-export interface McpProfileSummary {
-  name: string;
-  description?: string;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-  serverCount: number;
-  toolCount?: number;
-  usesEnvRefs?: boolean;
-  envRefCount?: number;
-  envRefs?: string[];
-  lastTest?: {
-    status?: 'ok' | 'failed' | string | null;
-    testedAt?: string | null;
-    serverCount?: number | null;
-    toolCount?: number | null;
-    tools?: Array<Record<string, any>>;
-    error?: string;
-    errorType?: string;
-  } | null;
-  servers: Array<Record<string, any>>;
-  redactedMcpServers: McpServerConfig[];
-}
-
-export interface McpProfileExportBundle {
-  schema: string;
-  schema_version: number;
-  exportedAt: string;
-  name: string;
-  description?: string;
-  redacted?: boolean;
-  mcpServers: McpServerConfig[];
-  profile?: McpProfileSummary;
-}
 
 export const api = {
   async createWorkspace(data?: {
@@ -94,7 +46,7 @@ export const api = {
     return response.data;
   },
 
-  async getSystemCatalog(type?: 'workflows' | 'tasks' | 'skills'): Promise<SystemCatalogResponse> {
+  async getSystemCatalog(type?: 'workflows' | 'tasks'): Promise<SystemCatalogResponse> {
     const response = await axios.get(`${API_BASE}/system-catalog`, {
       params: type ? { type } : undefined,
     });
@@ -104,7 +56,7 @@ export const api = {
   async importSystemCatalogItem(data: {
     workspaceId?: string;
     workspaceDir?: string;
-    type: 'workflows' | 'tasks' | 'skills';
+    type: 'workflows' | 'tasks';
     sourceId: string;
     targetPath?: string;
   }): Promise<any> {
@@ -121,13 +73,6 @@ export const api = {
   // Get workspace tasks from <workspaceDir>/tasks
   async getWorkspaceTasks(workspaceDir?: string): Promise<WorkspaceTasksResponse> {
     const response = await axios.get(`${API_BASE}/workspace-tasks`, {
-      params: workspaceDir ? { workspaceDir } : undefined,
-    });
-    return response.data;
-  },
-
-  async getWorkspaceSkills(workspaceDir?: string): Promise<WorkspaceSkillsResponse> {
-    const response = await axios.get(`${API_BASE}/workspace-skills`, {
       params: workspaceDir ? { workspaceDir } : undefined,
     });
     return response.data;
@@ -653,114 +598,6 @@ export const api = {
 
   async getClusterQueues(): Promise<ClusterQueuesResponse> {
     const response = await axios.get(`${API_BASE}/cluster/queues`);
-    return response.data;
-  },
-
-  async discoverMcpTools(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    mcpServers?: McpServerConfig[];
-    mcpProfileName?: string;
-  }): Promise<{
-    success: boolean;
-    servers: Array<Record<string, any>>;
-    tools: Array<Record<string, any>>;
-    serverCount: number;
-    toolCount: number;
-    mcpProfileName?: string;
-    mcpProfile?: McpProfileSummary;
-  }> {
-    const response = await axios.post(`${API_BASE}/mcp/discover`, data);
-    return response.data;
-  },
-
-  async listMcpProfiles(params?: {
-    workspaceId?: string;
-    workspaceDir?: string;
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    profiles: McpProfileSummary[];
-  }> {
-    const response = await axios.get(`${API_BASE}/mcp/profiles`, { params });
-    return response.data;
-  },
-
-  async saveMcpProfile(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    name: string;
-    description?: string;
-    mcpServers: McpServerConfig[];
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    profile: McpProfileSummary;
-  }> {
-    const response = await axios.post(`${API_BASE}/mcp/profiles`, data);
-    return response.data;
-  },
-
-  async deleteMcpProfile(name: string, params?: {
-    workspaceId?: string;
-    workspaceDir?: string;
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    profileName: string;
-  }> {
-    const response = await axios.delete(`${API_BASE}/mcp/profiles/${encodeURIComponent(name)}`, { params });
-    return response.data;
-  },
-
-  async copyMcpProfile(sourceName: string, data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    name: string;
-    description?: string;
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    sourceProfileName: string;
-    profile: McpProfileSummary;
-  }> {
-    const response = await axios.post(`${API_BASE}/mcp/profiles/${encodeURIComponent(sourceName)}/copy`, data);
-    return response.data;
-  },
-
-  async exportMcpProfile(name: string, params?: {
-    workspaceId?: string;
-    workspaceDir?: string;
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    export: McpProfileExportBundle;
-  }> {
-    const response = await axios.get(`${API_BASE}/mcp/profiles/${encodeURIComponent(name)}/export`, { params });
-    return response.data;
-  },
-
-  async importMcpProfile(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    name?: string;
-    description?: string;
-    mcpServers?: McpServerConfig[];
-    redactedMcpServers?: McpServerConfig[];
-    profile?: Record<string, any>;
-    export?: Record<string, any>;
-  }): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    profile: McpProfileSummary;
-  }> {
-    const response = await axios.post(`${API_BASE}/mcp/profiles/import`, data);
     return response.data;
   },
 

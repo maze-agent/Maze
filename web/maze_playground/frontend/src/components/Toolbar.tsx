@@ -476,9 +476,9 @@ export default function Toolbar({ onOpenRuns, onOpenClusterResources }: ToolbarP
       }
     }
 
-    const agentNodes = nodes.filter((node) => node.data.category === 'agent');
-    if (agentNodes.length > 0) {
-      message.warning('Legacy Agent/ReAct workflows were removed from Maze core. Use WorkflowSpec / WorkflowPatch tasks instead.');
+    const legacyNodes = nodes.filter((node) => !['builtin', 'custom', 'workspace'].includes(String(node.data.category)));
+    if (legacyNodes.length > 0) {
+      message.warning('This workflow contains legacy non-runtime nodes. Replace them with Maze-native task nodes before running.');
       return;
     }
 

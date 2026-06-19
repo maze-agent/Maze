@@ -24,7 +24,6 @@ function App() {
   const latestWorkflowFingerprintRef = useRef('');
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
-  const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
   const {
     workflowId,
@@ -358,10 +357,7 @@ function App() {
           {workspaceReady && workspaceDir ? <BuiltinTasksSidebar /> : null}
           
           <div style={{ flex: 1, position: 'relative' }}>
-            <WorkflowCanvas
-              activeDynamicRunId={activeDynamicRunId}
-              onOpenRuns={() => setRunsOpen(true)}
-            />
+            <WorkflowCanvas />
           </div>
           
           <NodePanel />

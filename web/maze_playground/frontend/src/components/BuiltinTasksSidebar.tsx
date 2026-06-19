@@ -12,7 +12,6 @@ import {
   AppstoreAddOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  PartitionOutlined,
   PlusOutlined,
   ReloadOutlined,
   SaveOutlined,
@@ -22,21 +21,18 @@ import {
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import { defaultReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   BuiltinTaskMeta,
   LocalWorkspaceFileMeta,
   WorkflowNode,
   SystemCatalogItem,
   WorkspaceFileMeta,
-  WorkspaceSkillMeta,
   WorkspaceTaskMeta,
   WorkspaceWorkflowMeta,
 } from '@/types/workflow';
 import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
 
 const { Text, Paragraph } = Typography;
-const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 type BuiltinWorkflowExample = {
   key: string;
@@ -44,73 +40,13 @@ type BuiltinWorkflowExample = {
   description: string;
   tags: string[];
   color: string;
-  kind: 'react' | 'distributed-smoke' | 'workspace-task';
-  recommendedSkills?: string[];
-  reactMode?: 'local' | 'online';
-  prompt?: string;
-  maxSteps?: number;
-  maxTokens?: number;
+  kind: 'distributed-smoke' | 'workspace-task';
   taskSourceId?: string;
   taskRelativePath?: string;
   workflowName?: string;
 };
 
 const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
-  {
-    key: 'json-canvas-agent',
-    name: 'JSON Canvas Agent',
-    description: 'Creates an Obsidian JSON Canvas map and saves a .canvas artifact.',
-    tags: ['agent', '.canvas', 'artifact'],
-    color: '#13a8a8',
-    kind: 'react',
-    reactMode: 'online',
-    recommendedSkills: ['json-canvas'],
-    maxSteps: 5,
-    maxTokens: 4096,
-    prompt: [
-      'Create a JSON Canvas file about "Maze workflow workspace design".',
-      'Use the json-canvas skill guidance.',
-      'Call write_file to save it as examples/maze-workspace.canvas.',
-      'The file must be valid JSON Canvas with at least 5 text nodes and 4 edges.',
-      'Finish with the artifact path and a short summary.',
-    ].join(' '),
-  },
-  {
-    key: 'debugging-agent',
-    name: 'Debugging Agent',
-    description: 'Turns a failure log into a root cause report using systematic debugging.',
-    tags: ['agent', 'debug', 'report'],
-    color: '#d46b08',
-    kind: 'react',
-    reactMode: 'online',
-    recommendedSkills: ['systematic-debugging'],
-    maxSteps: 5,
-    maxTokens: 4096,
-    prompt: [
-      'Use the systematic-debugging skill to analyze this failing test log:',
-      '"TypeError: Cannot read properties of undefined (reading tasks) at WorkflowCanvas.tsx:412 after importing a workflow template."',
-      'Create a concise root cause report with evidence, likely source, and next diagnostic action.',
-      'Call write_file to save the report as reports/root-cause.md, then finish with the path.',
-    ].join(' '),
-  },
-  {
-    key: 'slack-gif-agent',
-    name: 'Slack GIF Agent',
-    description: 'Builds a Slack-ready animated GIF artifact from a short idea.',
-    tags: ['agent', 'GIF', 'creative'],
-    color: '#eb2f96',
-    kind: 'react',
-    reactMode: 'online',
-    recommendedSkills: ['slack-gif-creator'],
-    maxSteps: 6,
-    maxTokens: 4096,
-    prompt: [
-      'Create a polished 128x128 Slack emoji GIF of a tiny rocket drawing a check mark.',
-      'Use the slack-gif-creator skill constraints.',
-      'Call exec_code with Python/PIL code that writes examples/rocket-check.gif.',
-      'Finish with the artifact path and validation notes.',
-    ].join(' '),
-  },
   {
     key: 'distributed-smoke',
     name: 'Distributed GPU Smoke',
@@ -130,27 +66,6 @@ const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
     taskSourceId: 'file_sandbox_demo.py',
     taskRelativePath: 'tasks/examples/file_sandbox_demo.py',
     workflowName: 'File Sandbox Demo',
-  },
-];
-
-const SKILL_PACKS = [
-  {
-    key: 'engineering',
-    name: 'Engineering Pack',
-    description: 'Debugging, tests, web app checks, and MCP building.',
-    skills: ['systematic-debugging', 'test-driven-development', 'webapp-testing', 'mcp-builder'],
-  },
-  {
-    key: 'creative',
-    name: 'Creative Pack',
-    description: 'Algorithmic visuals and Slack GIF creation.',
-    skills: ['algorithmic-art', 'slack-gif-creator'],
-  },
-  {
-    key: 'knowledge',
-    name: 'Knowledge Pack',
-    description: 'Obsidian-friendly canvas and markdown workflows.',
-    skills: ['json-canvas', 'obsidian-markdown'],
   },
 ];
 
@@ -228,21 +143,6 @@ function formatFileSize(size?: number | null) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function compactSkillDescription(skill: WorkspaceSkillMeta) {
-  const value = String(skill.description || '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!value) return 'No summary available';
-  return value.length > 180 ? `${value.slice(0, 177).trim()}...` : value;
-}
-
-function shortSkillPath(pathValue?: string) {
-  if (!pathValue) return '';
-  const parts = pathValue.replace(/\\/g, '/').split('/').filter(Boolean);
-  if (parts.length <= 2) return pathValue;
-  return parts.slice(-2).join('/');
 }
 
 async function fileToBase64(file: File) {
@@ -335,25 +235,17 @@ export default function BuiltinTasksSidebar() {
     selectNode,
     clearRunResults,
   } = useWorkflowStore();
-  const visibleWorkflowExamples = useMemo(
-    () => BUILTIN_WORKFLOW_EXAMPLES.filter((item) => ENABLE_LEGACY_AGENT_UI || item.kind !== 'react'),
-    [],
-  );
-
   const [builtinLoading, setBuiltinLoading] = useState(false);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [filesLoading, setFilesLoading] = useState(false);
-  const [skillsLoading, setSkillsLoading] = useState(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
-  const [catalogItems, setCatalogItems] = useState<Record<'workflows' | 'tasks' | 'skills', SystemCatalogItem[]>>({
+  const [catalogItems, setCatalogItems] = useState<Record<'workflows' | 'tasks', SystemCatalogItem[]>>({
     workflows: [],
     tasks: [],
-    skills: [],
   });
   const [importingCatalogKey, setImportingCatalogKey] = useState<string | null>(null);
-  const [catalogImportType, setCatalogImportType] = useState<'workflows' | 'tasks' | 'skills' | null>(null);
-  const [importingSkillPackKey, setImportingSkillPackKey] = useState<string | null>(null);
+  const [catalogImportType, setCatalogImportType] = useState<'workflows' | 'tasks' | null>(null);
   const [importingExampleKey, setImportingExampleKey] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
@@ -373,11 +265,8 @@ export default function BuiltinTasksSidebar() {
   const [workspaceInput, setWorkspaceInput] = useState(workspaceDir);
   const [workspaceErrors, setWorkspaceErrors] = useState<Array<{ relativePath: string; error: string }>>([]);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileMeta[]>([]);
-  const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkillMeta[]>([]);
-  const [workspaceSkillErrors, setWorkspaceSkillErrors] = useState<Array<{ error: string; traceback?: string }>>([]);
   const [workspaceFilesPath, setWorkspaceFilesPath] = useState('');
   const [previewFile, setPreviewFile] = useState<{ path: string; content: string } | null>(null);
-  const [previewSkill, setPreviewSkill] = useState<WorkspaceSkillMeta | null>(null);
   const [fileDropActive, setFileDropActive] = useState(false);
   const [syncingLocalWorkspace, setSyncingLocalWorkspace] = useState(false);
   const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
@@ -418,7 +307,6 @@ export default function BuiltinTasksSidebar() {
     loadWorkspaceTasks(activeWorkspaceDir);
     loadWorkspaceWorkflows(activeWorkspaceDir);
     loadWorkspaceFiles(activeWorkspaceDir, '');
-    loadWorkspaceSkills(activeWorkspaceDir);
   }, [workspaceDir]);
 
   useEffect(() => {
@@ -524,7 +412,6 @@ export default function BuiltinTasksSidebar() {
       setCatalogItems({
         workflows: result.catalog.workflows || [],
         tasks: result.catalog.tasks || [],
-        skills: result.catalog.skills || [],
       });
       if (showSuccess) {
         message.success('System catalog refreshed');
@@ -543,7 +430,7 @@ export default function BuiltinTasksSidebar() {
     const key = `${item.type}:${item.id}`;
     setImportingCatalogKey(key);
     try {
-      const type = item.type as 'workflows' | 'tasks' | 'skills';
+      const type = item.type as 'workflows' | 'tasks';
       const result = await api.importSystemCatalogItem({
         workspaceId: workspaceId || undefined,
         workspaceDir: workspaceDir || undefined,
@@ -556,24 +443,8 @@ export default function BuiltinTasksSidebar() {
 
       if (type === 'workflows') {
         await loadWorkspaceWorkflows(result.workspaceDir);
-        const recommendedSkills = item.recommendedSkills || [];
-        const missingRecommended = recommendedSkills.filter((skillName) => !workspaceSkillNames().has(skillName));
-        if (missingRecommended.length > 0) {
-          Modal.confirm({
-            title: 'Import recommended skills?',
-            content: `${item.name} recommends: ${missingRecommended.join(', ')}`,
-            okText: 'Import Skills',
-            cancelText: 'Skip',
-            onOk: async () => {
-              await importRecommendedSkills(missingRecommended);
-              message.success('Recommended skills imported');
-            },
-          });
-        }
       } else if (type === 'tasks') {
         await loadWorkspaceTasks(result.workspaceDir);
-      } else {
-        await loadWorkspaceSkills(result.workspaceDir);
       }
       message.success(`Imported ${item.name}`);
       setCatalogImportType(null);
@@ -586,7 +457,7 @@ export default function BuiltinTasksSidebar() {
   };
 
   const importSystemCatalogItem = async (
-    type: 'workflows' | 'tasks' | 'skills',
+    type: 'workflows' | 'tasks',
     sourceId: string,
     targetPath?: string,
   ) => {
@@ -601,63 +472,6 @@ export default function BuiltinTasksSidebar() {
     setWorkspaceDir(result.workspaceDir);
     setWorkspaceInput(result.workspaceDir);
     return result;
-  };
-
-  const workspaceSkillNames = () => new Set(workspaceSkills.map((skill) => skill.name));
-
-  const importRecommendedSkills = async (skillNames: string[] = []) => {
-    const uniqueSkills = Array.from(new Set(skillNames.filter(Boolean)));
-    if (uniqueSkills.length === 0) {
-      return [];
-    }
-
-    let knownSkills = workspaceSkillNames();
-    const missing = uniqueSkills.filter((skillName) => !knownSkills.has(skillName));
-    if (missing.length === 0) {
-      return [];
-    }
-
-    let catalogSkills = catalogItems.skills || [];
-    if (catalogSkills.length === 0) {
-      const catalog = await loadSystemCatalog(false);
-      catalogSkills = catalog.catalog.skills || [];
-    }
-    const availableCatalogSkills = new Set(catalogSkills.map((item) => item.id));
-    const unknown = missing.filter((skillName) => !availableCatalogSkills.has(skillName));
-    const importable = missing.filter((skillName) => availableCatalogSkills.has(skillName));
-
-    if (unknown.length > 0) {
-      message.warning(`Missing built-in skill(s): ${unknown.join(', ')}`);
-    }
-    if (importable.length === 0) {
-      return [];
-    }
-
-    const imported: string[] = [];
-    for (const skillName of importable) {
-      await importSystemCatalogItem('skills', skillName, skillName);
-      imported.push(skillName);
-    }
-    const refreshed = await loadWorkspaceSkills();
-    knownSkills = new Set((refreshed.skills || []).map((skill) => skill.name));
-    return imported.filter((skillName) => knownSkills.has(skillName));
-  };
-
-  const importSkillPack = async (pack: typeof SKILL_PACKS[number]) => {
-    setImportingSkillPackKey(pack.key);
-    try {
-      const imported = await importRecommendedSkills(pack.skills);
-      if (imported.length > 0) {
-        message.success(`Imported ${pack.name}`);
-      } else {
-        message.info(`${pack.name} is already available`);
-      }
-    } catch (error: any) {
-      console.error('Failed to import skill pack:', error);
-      message.error(error.response?.data?.error || 'Failed to import skill pack');
-    } finally {
-      setImportingSkillPackKey(null);
-    }
   };
 
   const loadWorkspaceTasks = async (dir?: string, showSuccess = false) => {
@@ -741,39 +555,11 @@ export default function BuiltinTasksSidebar() {
     }
   };
 
-  const loadWorkspaceSkills = async (dir?: string, showSuccess = false) => {
-    setSkillsLoading(true);
-    try {
-      const normalizedDir = dir?.trim() || undefined;
-      const result = await api.getWorkspaceSkills(normalizedDir);
-      setWorkspaceContext(result);
-      setWorkspaceDir(result.workspaceDir);
-      setWorkspaceInput(result.workspaceDir);
-      setWorkspaceSkills(result.skills || []);
-      setWorkspaceSkillErrors(result.errors || []);
-
-      if ((result.errors || []).length > 0) {
-        message.warning('Some skills could not be loaded');
-      } else if (showSuccess) {
-        message.success('Skills refreshed');
-      }
-
-      return result;
-    } catch (error: any) {
-      console.error('Failed to load skills:', error);
-      message.error(error.response?.data?.error || 'Failed to load skills');
-      throw error;
-    } finally {
-      setSkillsLoading(false);
-    }
-  };
-
   const handleChangeWorkspace = async (dir: string) => {
     try {
       const tasksResult = await loadWorkspaceTasks(dir);
       await loadWorkspaceWorkflows(tasksResult.workspaceDir);
       await loadWorkspaceFiles(tasksResult.workspaceDir, '');
-      await loadWorkspaceSkills(tasksResult.workspaceDir);
       setCurrentWorkspaceWorkflowPath(null);
       message.success('Workspace loaded');
     } catch (error) {
@@ -1862,23 +1648,6 @@ export default function BuiltinTasksSidebar() {
     event.dataTransfer.effectAllowed = 'move';
   };
 
-  const onDragStartReAct = (event: React.DragEvent, template?: BuiltinWorkflowExample) => {
-    event.dataTransfer.setData('application/reactflow', JSON.stringify({
-      type: 'agent-react',
-      task: {
-        label: template?.name || 'ReAct Workflow',
-        prompt: template?.prompt,
-        reactMode: template?.reactMode || 'local',
-        maxSteps: template?.maxSteps,
-        maxTokens: template?.maxTokens,
-        taskTimeout: defaultReactTaskTimeout(template?.reactMode || 'local'),
-        skills: template?.recommendedSkills || [],
-        recommendedSkills: template?.recommendedSkills || [],
-      },
-    }));
-    event.dataTransfer.effectAllowed = 'move';
-  };
-
   const onDragStartDistributedSmoke = (event: React.DragEvent) => {
     event.dataTransfer.setData('application/reactflow', JSON.stringify({
       type: 'workflow-distributed-smoke',
@@ -1890,9 +1659,7 @@ export default function BuiltinTasksSidebar() {
   };
 
   const onDragStartWorkflowExample = (event: React.DragEvent, template: BuiltinWorkflowExample) => {
-    if (template.kind === 'react') {
-      onDragStartReAct(event, template);
-    } else if (template.kind === 'distributed-smoke') {
+    if (template.kind === 'distributed-smoke') {
       onDragStartDistributedSmoke(event);
     } else {
       event.dataTransfer.setData('application/reactflow', JSON.stringify({
@@ -1936,42 +1703,6 @@ export default function BuiltinTasksSidebar() {
       setNewTaskOpen(false);
     }
     message.success(`${task.displayName} added to canvas`);
-  };
-
-  const addReactTemplateToCanvas = async (template: BuiltinWorkflowExample = BUILTIN_WORKFLOW_EXAMPLES[0]) => {
-    await ensureWorkflow();
-    const importedSkills = await importRecommendedSkills(template.recommendedSkills || []);
-    if (template.workflowName || template.name) {
-      setWorkflowName(template.workflowName || template.name);
-    }
-    const newNode: WorkflowNode = {
-      id: `node-${Date.now()}`,
-      type: 'taskNode',
-      position: getDefaultPosition(),
-      data: {
-        category: 'agent',
-        nodeType: 'task',
-        label: template.name || 'ReAct Workflow',
-        agentKind: 'react',
-        reactMode: template.reactMode || 'local',
-        prompt: template.prompt || 'Use the calculator to compute 18 * 7, then give the final answer.',
-        maxSteps: template.maxSteps || 4,
-        maxTokens: template.maxTokens || 2048,
-        taskTimeout: defaultReactTaskTimeout(template.reactMode || 'local'),
-        skills: template.recommendedSkills || [],
-        recommendedSkills: template.recommendedSkills || [],
-        inputs: [],
-        outputs: [{ name: 'answer', dataType: 'any' }],
-        configured: true,
-      },
-    };
-
-    addNode(newNode);
-    selectNode(newNode);
-    setCatalogImportType(null);
-    message.success(importedSkills.length > 0
-      ? `${template.name} added with ${importedSkills.length} skill(s)`
-      : `${template.name} added`);
   };
 
   const addDistributedSmokeTemplateToCanvas = async (template?: BuiltinWorkflowExample) => {
@@ -2052,9 +1783,7 @@ export default function BuiltinTasksSidebar() {
   const addWorkflowExampleToCanvas = async (template: BuiltinWorkflowExample) => {
     setImportingExampleKey(template.key);
     try {
-      if (template.kind === 'react') {
-        await addReactTemplateToCanvas(template);
-      } else if (template.kind === 'distributed-smoke') {
+      if (template.kind === 'distributed-smoke') {
         await addDistributedSmokeTemplateToCanvas(template);
       } else {
         await addWorkspaceExampleTaskToCanvas(template);
@@ -2168,19 +1897,9 @@ export default function BuiltinTasksSidebar() {
           <Tag>{node.data.taskPath}</Tag>
         </div>
       )}
-      {node.data.prompt && (
-        <Paragraph
-          type="secondary"
-          ellipsis={{ rows: 3, tooltip: node.data.prompt }}
-          style={{ fontSize: '12px', marginBottom: '8px' }}
-        >
-          {node.data.prompt}
-        </Paragraph>
-      )}
       <Space size={[4, 4]} wrap style={{ marginBottom: '8px' }}>
         <Tag color="geekblue">Inputs {node.data.inputs.length}</Tag>
         <Tag color="cyan">Outputs {node.data.outputs.length}</Tag>
-        {node.data.reactMode && <Tag color="purple">{node.data.reactMode}</Tag>}
       </Space>
       <div>
         <Text type="secondary">In: </Text>
@@ -2223,14 +1942,10 @@ export default function BuiltinTasksSidebar() {
       ? builtinTasks.find((task) => `${task.module}.${task.functionRef}` === node.data.taskRef)
       : null;
     const matchedTask = workspaceTask || builtinTask;
-    const icon = node.data.category === 'agent'
-      ? <PartitionOutlined style={{ color: '#722ed1' }} />
-      : node.data.category === 'workspace'
+    const icon = node.data.category === 'workspace'
         ? <CodeOutlined style={{ color: '#722ed1' }} />
         : <ThunderboltOutlined style={{ color: '#1677ff' }} />;
-    const categoryColor = node.data.category === 'agent'
-      ? 'purple'
-      : node.data.category === 'workspace'
+    const categoryColor = node.data.category === 'workspace'
         ? 'geekblue'
         : 'blue';
 
@@ -2268,7 +1983,6 @@ export default function BuiltinTasksSidebar() {
         <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
           <Tag color={categoryColor}>{node.data.category}</Tag>
           <Tag>canvas</Tag>
-          {node.data.agentKind && <Tag>{node.data.agentKind}</Tag>}
         </Space>
         {matchedTask ? (
           node.data.category === 'workspace'
@@ -2302,7 +2016,7 @@ export default function BuiltinTasksSidebar() {
         </Space>
         <List
           size="small"
-          dataSource={visibleWorkflowExamples}
+          dataSource={BUILTIN_WORKFLOW_EXAMPLES}
           renderItem={(template) => (
             <List.Item
               className="workspace-file-row"
@@ -2323,7 +2037,7 @@ export default function BuiltinTasksSidebar() {
               ]}
             >
               <List.Item.Meta
-                avatar={<PartitionOutlined style={{ color: template.color }} />}
+                avatar={<AppstoreAddOutlined style={{ color: template.color }} />}
                 title={<Text strong>{template.name}</Text>}
                 description={
                   <Space direction="vertical" size={4}>
@@ -2333,11 +2047,6 @@ export default function BuiltinTasksSidebar() {
                     <Space size={4} wrap>
                       {template.tags.map((tag) => (
                         <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
-                      ))}
-                      {(template.recommendedSkills || []).map((skillName) => (
-                        <Tag key={skillName} color="green" style={{ margin: 0 }}>
-                          skill:{skillName}
-                        </Tag>
                       ))}
                     </Space>
                   </Space>
@@ -2435,78 +2144,13 @@ export default function BuiltinTasksSidebar() {
     </div>
   );
 
-  const renderSkillPacks = () => (
-    <div>
-      {!ENABLE_LEGACY_AGENT_UI ? (
-        <Alert
-          type="info"
-          showIcon
-          message="Legacy skill packs are hidden"
-          description="Skills are no longer part of the Maze Workbench public boundary. Set VITE_ENABLE_LEGACY_AGENT_UI=1 to inspect legacy packs."
-        />
-      ) : (
-      <>
-      <Space align="center" size={6} style={{ marginBottom: 8 }}>
-        <Text strong>Skill Packs</Text>
-        <Tag color="green" style={{ margin: 0 }}>one-click import</Tag>
-      </Space>
-      <List
-        size="small"
-        dataSource={SKILL_PACKS}
-        renderItem={(pack) => {
-          const availableCount = pack.skills.filter((skillName) => workspaceSkillNames().has(skillName)).length;
-          return (
-            <List.Item
-              className="workspace-file-row"
-              actions={[
-                <Button
-                  key="import"
-                  type="primary"
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  loading={importingSkillPackKey === pack.key}
-                  onClick={() => importSkillPack(pack)}
-                >
-                  Import
-                </Button>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={<AppstoreAddOutlined style={{ color: '#389e0d' }} />}
-                title={<Text strong>{pack.name}</Text>}
-                description={
-                  <Space direction="vertical" size={4}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {pack.description}
-                    </Text>
-                    <Space size={4} wrap>
-                      <Tag color={availableCount === pack.skills.length ? 'green' : 'default'} style={{ margin: 0 }}>
-                        {availableCount}/{pack.skills.length} available
-                      </Tag>
-                      {pack.skills.map((skillName) => (
-                        <Tag key={skillName} style={{ margin: 0 }}>{skillName}</Tag>
-                      ))}
-                    </Space>
-                  </Space>
-                }
-              />
-            </List.Item>
-          );
-        }}
-      />
-      </>
-      )}
-    </div>
-  );
-
-  const renderCatalogList = (type: 'workflows' | 'tasks' | 'skills') => {
-    const items = type === 'skills' && !ENABLE_LEGACY_AGENT_UI ? [] : (catalogItems[type] || []);
+  const renderCatalogList = (type: 'workflows' | 'tasks') => {
+    const items = catalogItems[type] || [];
 
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         {type === 'workflows' && renderBuiltinWorkflowTemplates()}
         {type === 'tasks' && renderBuiltinTaskTemplates()}
-        {type === 'skills' && renderSkillPacks()}
 
         <div>
           <Space align="center" size={6} style={{ marginBottom: 8 }}>
@@ -2557,11 +2201,6 @@ export default function BuiltinTasksSidebar() {
                             {(item.tags || []).map((tag) => (
                               <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
                             ))}
-                            {(item.recommendedSkills || []).map((skillName) => (
-                              <Tag key={skillName} color="green" style={{ margin: 0 }}>
-                                skill:{skillName}
-                              </Tag>
-                            ))}
                             {item.updatedAt && (
                               <Text type="secondary" style={{ fontSize: '11px' }}>
                                 {formatUpdatedAt(item.updatedAt)}
@@ -2581,13 +2220,13 @@ export default function BuiltinTasksSidebar() {
     );
   };
 
-  const openCatalogImport = (type: 'workflows' | 'tasks' | 'skills') => {
+  const openCatalogImport = (type: 'workflows' | 'tasks') => {
     setCatalogImportType(type);
     void loadSystemCatalog(false);
   };
 
   const catalogImportTitle = catalogImportType
-    ? `Import ${catalogImportType === 'skills' ? 'Skills' : catalogImportType === 'tasks' ? 'Tasks' : 'Workflows'}`
+    ? `Import ${catalogImportType === 'tasks' ? 'Tasks' : 'Workflows'}`
     : 'Import';
 
   const toggleButton = (
@@ -3120,101 +2759,6 @@ export default function BuiltinTasksSidebar() {
             />
           </div>
 
-          <Divider />
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <Space size={6}>
-              <h3 style={{ margin: 0 }}>Skills</h3>
-              <Tag color="blue" style={{ margin: 0 }}>service</Tag>
-            </Space>
-            <Space size={4}>
-              <Button
-                type="text"
-                size="small"
-                icon={<ReloadOutlined />}
-                onClick={() => loadWorkspaceSkills(workspaceInput || workspaceDir, true)}
-                loading={skillsLoading}
-              />
-              <Button
-                size="small"
-                icon={<DownloadOutlined />}
-                onClick={() => openCatalogImport('skills')}
-              >
-                Library
-              </Button>
-            </Space>
-          </div>
-          {workspaceSkillErrors.length > 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: '8px' }}
-              message={`${workspaceSkillErrors.length} skill${workspaceSkillErrors.length > 1 ? 's' : ''} failed to load`}
-            />
-          )}
-          {workspaceSkills.length === 0 ? (
-            <Empty description="No skills" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button size="small" icon={<DownloadOutlined />} onClick={() => openCatalogImport('skills')}>
-                Open Library
-              </Button>
-            </Empty>
-          ) : (
-            <List
-              size="small"
-              loading={skillsLoading}
-              dataSource={workspaceSkills}
-              renderItem={(skill) => {
-                const skillSummary = compactSkillDescription(skill);
-                const compactPath = shortSkillPath(skill.path);
-
-                return (
-                  <List.Item
-                    className="workspace-file-row"
-                    actions={[
-                      <Tooltip key="preview" title="Preview">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<EyeOutlined />}
-                          onClick={() => setPreviewSkill(skill)}
-                        />
-                      </Tooltip>,
-                    ]}
-                  >
-                    <List.Item.Meta
-                      avatar={<AppstoreAddOutlined style={{ color: '#722ed1' }} />}
-                      title={
-                        <Text style={{ fontSize: '13px', maxWidth: '190px' }} ellipsis={{ tooltip: skill.name }}>
-                          {skill.name}
-                        </Text>
-                      }
-                      description={
-                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                          <Paragraph
-                            type="secondary"
-                            ellipsis={{ rows: 2 }}
-                            style={{ fontSize: '11px', marginBottom: 0, lineHeight: 1.35 }}
-                          >
-                            {skillSummary}
-                          </Paragraph>
-                          <Space size={4} wrap>
-                            <Tag color="purple" style={{ margin: 0 }}>skill</Tag>
-                            {skill.resources && skill.resources.length > 0 && (
-                              <Tag style={{ margin: 0 }}>{skill.resources.length} resource(s)</Tag>
-                            )}
-                            {compactPath && (
-                              <Tag style={{ margin: 0 }}>{compactPath}</Tag>
-                            )}
-                          </Space>
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                );
-              }}
-            />
-          )}
-
         </div>
       )}
       </div>
@@ -3256,7 +2800,7 @@ export default function BuiltinTasksSidebar() {
               placeholder="/root/data/Maze/workspace"
             />
             <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
-              Service-side workspace for workflows, tasks, skills, files, and run artifacts.
+              Service-side workspace for workflows, tasks, files, and run artifacts.
             </Text>
           </div>
 
@@ -3553,88 +3097,6 @@ export default function BuiltinTasksSidebar() {
         >
           {previewFile?.content}
         </pre>
-      </Modal>
-
-      <Modal
-        title={previewSkill?.name || 'Skill'}
-        open={!!previewSkill}
-        onCancel={() => setPreviewSkill(null)}
-        footer={[
-          <Button key="close" onClick={() => setPreviewSkill(null)}>
-            Close
-          </Button>,
-        ]}
-        width={720}
-        destroyOnClose
-      >
-        {previewSkill && (
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Space size={4} wrap>
-              <Tag color="purple">workspace</Tag>
-              {previewSkill.truncated && <Tag color="orange">truncated</Tag>}
-              {previewSkill.resources && previewSkill.resources.length > 0 && (
-                <Tag color="geekblue">{previewSkill.resources.length} resource(s)</Tag>
-              )}
-              {previewSkill.original_chars !== undefined && (
-                <Tag>{previewSkill.returned_chars || 0}/{previewSkill.original_chars} chars</Tag>
-              )}
-            </Space>
-
-            {previewSkill.description && (
-              <Paragraph style={{ marginBottom: 0 }}>
-                {previewSkill.description}
-              </Paragraph>
-            )}
-
-            {previewSkill.path && (
-              <Text copyable={{ text: previewSkill.path }} type="secondary" style={{ fontSize: 12 }}>
-                {previewSkill.path}
-              </Text>
-            )}
-
-            {previewSkill.resources && previewSkill.resources.length > 0 && (
-              <div>
-                <Text strong>Resources</Text>
-                <pre
-                  style={{
-                    marginTop: 6,
-                    maxHeight: 180,
-                    overflow: 'auto',
-                    background: '#f5f5f5',
-                    padding: 12,
-                    borderRadius: 4,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontSize: 12,
-                  }}
-                >
-                  {JSON.stringify(previewSkill.resources, null, 2)}
-                </pre>
-              </div>
-            )}
-
-            {previewSkill.metadata && Object.keys(previewSkill.metadata).length > 0 && (
-              <div>
-                <Text strong>Metadata</Text>
-                <pre
-                  style={{
-                    marginTop: 6,
-                    maxHeight: 220,
-                    overflow: 'auto',
-                    background: '#f5f5f5',
-                    padding: 12,
-                    borderRadius: 4,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontSize: 12,
-                  }}
-                >
-                  {JSON.stringify(previewSkill.metadata, null, 2)}
-                </pre>
-              </div>
-            )}
-          </Space>
-        )}
       </Modal>
 
       <Modal
