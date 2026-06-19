@@ -37,7 +37,7 @@
 
 - **Workflow Agent**
 
-  Maze's built-in authoring direction is limited to producing or repairing Maze-native `WorkflowSpec`, `WorkflowPatch`, `TaskSpec`, and resource annotations. It is not a general-purpose chat or tool-calling agent.
+  Maze keeps Workflow Agent / Workflow Planner as a mainline concept, but only as a workflow authoring layer. It produces or repairs Maze-native `WorkflowSpec`, `WorkflowPatch`, `TaskSpec`, and `ResourceSpec`; it does not execute tools, call MCP, load skills, or run workspace chat.
 
 - **Workflow Workbench**
 
@@ -279,6 +279,8 @@ maze start --head --port HEAD_PORT --playground
 ```
 
 The Workbench should stay focused on DAG visualization, manual workflow editing, `WorkflowSpec` validation, submit/retry/cancel controls, task placement, worker/node state, queue reasons, run timelines, logs, and artifacts.
+
+Phase 1 removes the legacy Workspace Agent panel because it was a general-purpose workspace assistant. That is not the same as removing Workflow Agent. A future Workbench can add a `WorkflowPlannerPanel`, but it must stay limited to WorkflowSpec / WorkflowPatch / TaskSpec / ResourceSpec authoring and must not restore the old WorkspaceAgentPanel behavior.
 
 The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, and app runs. Run detail rendering is hardened against malformed event payloads, failed snapshots are preserved instead of being overwritten by later completion events, and artifact download/promotion can fall back to content-addressed storage when a static artifact lacks a direct storage path.
 

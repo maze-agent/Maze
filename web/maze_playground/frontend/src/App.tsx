@@ -9,12 +9,10 @@ import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
-import WorkspaceAgentPanel from './components/WorkspaceAgentPanel';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
-const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 function workflowDraftFingerprint(name: string, nodes: any[], edges: any[]) {
   return JSON.stringify({ name, nodes, edges });
@@ -26,11 +24,8 @@ function App() {
   const latestWorkflowFingerprintRef = useRef('');
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
-  const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
-  const [staticRunFocusId, setStaticRunFocusId] = useState<string | null>(null);
   const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
-  const [workspaceAgentOpen, setWorkspaceAgentOpen] = useState(true);
   const {
     workflowId,
     workflowName,
@@ -370,29 +365,12 @@ function App() {
           </div>
           
           <NodePanel />
-          {ENABLE_LEGACY_AGENT_UI && workspaceReady && workspaceDir ? (
-            <WorkspaceAgentPanel
-              open={workspaceAgentOpen}
-              workspaceReady={workspaceReady}
-              onToggle={() => setWorkspaceAgentOpen((value) => !value)}
-              onOpenRuns={(runId) => {
-                if (runId) {
-                  setActiveDynamicRunId(null);
-                  setDynamicRunFocusId(null);
-                  setStaticRunFocusId(runId);
-                }
-                setRunsOpen(true);
-              }}
-            />
-          ) : null}
         </div>
         
         <ResultsModal />
         <RunsInspector
           open={runsOpen}
           onClose={() => setRunsOpen(false)}
-          focusDynamicRunId={dynamicRunFocusId}
-          focusStaticRunId={staticRunFocusId}
         />
         <ClusterResourcesDrawer
           open={clusterResourcesOpen}

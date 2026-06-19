@@ -31,8 +31,10 @@ Maze = Core Runtime + Workflow Agent + Workflow Workbench
 ```
 
 - **Core Runtime**：负责静态/动态 DAG 的校验、调度、执行、资源管理、Worker、日志、artifact 和失败恢复。
-- **Workflow Agent**：只负责生成或修复 `WorkflowSpec` / `WorkflowPatch`，不直接执行工具，不做通用聊天 Agent。
+- **Workflow Agent / Workflow Planner**：只负责生成或修复 `WorkflowSpec` / `WorkflowPatch` / `TaskSpec` / `ResourceSpec`，不直接执行工具，不调 MCP，不加载 skills，不做 workspace chat。
 - **Workflow Workbench**：负责 DAG 可视化、人工编辑、task placement、资源/队列/日志/artifact 可视化。
+
+Phase 1 删除的是旧 `WorkspaceAgentPanel`，不是 Workflow Agent。未来可以新增 `WorkflowPlannerPanel`，但它只能输出 Maze-native workflow/patch/spec 结构，不能恢复通用 Workspace Agent。
 
 本站点提供 Maze 的 **完整中文 API 文档**，按以下层级组织：
 

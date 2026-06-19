@@ -30,11 +30,14 @@ Dynamic workflow means runtime append-only DAG expansion. New tasks, edges, and 
 
 Workflow Agent is an authoring helper, not a general chat or tool-calling agent.
 
+Deleting the legacy Workspace Agent does not delete Workflow Agent. Workspace Agent was a general-purpose workspace assistant with chat sessions, tool execution, workspace file operations, MCP/skills history, and app-host behavior. Workflow Agent / Workflow Planner remains a Maze mainline concept, but only as a narrow planning layer.
+
 It may:
 
 - Generate `TaskSpec` and task code.
 - Generate static `WorkflowSpec` DAGs.
 - Generate `WorkflowPatch` objects from runtime results.
+- Generate or refine `ResourceSpec` annotations.
 - Repair invalid workflow specs or patches from validation errors.
 - Suggest task resources, dependencies, retry policy, timeout policy, and artifact policy.
 
@@ -43,6 +46,7 @@ It must not:
 - Execute tools directly.
 - Call MCP directly.
 - Load skills as an application framework.
+- Run workspace chat.
 - Maintain long-term chat memory.
 - Bypass the scheduler.
 - Run an open-ended ReAct or generic agent loop as a Maze core feature.
@@ -75,6 +79,16 @@ It should focus on:
 
 It is not a general Agent playground, Skills playground, MCP playground, workspace chat, or code assistant product.
 
+The legacy `WorkspaceAgentPanel` must not be restored as the Workbench main path. A future `WorkflowPlannerPanel` is allowed only if it emits Maze-native `WorkflowSpec`, `WorkflowPatch`, `TaskSpec`, or `ResourceSpec` for Core validation and scheduler execution.
+
+Workbench must continue to preserve these runtime surfaces:
+
+- DAG editor.
+- Run console.
+- Cluster, resource, queue, and task placement views.
+- Worker/node health.
+- Run timelines, logs, and artifacts.
+
 ## Non-Goals
 
 Maze Core does not aim to provide:
@@ -88,4 +102,3 @@ Maze Core does not aim to provide:
 - General-purpose code-agent execution.
 
 Application-level integrations can live as examples, extensions, or legacy modules, but they should not appear in the default README, public imports, CLI help, or Workbench first-run path.
-
