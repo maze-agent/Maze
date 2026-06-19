@@ -28,11 +28,9 @@ for _legacy_module in (
     'agent_mcp',
     'agent_permissions',
     'agent_sandbox',
-    'agent_skills',
     'agent_tools',
     'react',
     'react_llm',
-    'skills',
 ):
     globals().pop(_legacy_module, None)
 del _legacy_module

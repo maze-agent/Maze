@@ -15,12 +15,6 @@ from maze.client.maze.decorator import get_task_metadata
 from maze.client.maze.dynamic import DynamicRun, DynamicTaskInvocation, DynamicTaskSpec
 from maze.client.maze.agent_tools import AgentToolRegistry, AgentToolRuntime
 from maze.client.maze.agent_permissions import AgentPermissionPolicy
-from maze.client.maze.skills import (
-    SkillSpec,
-    build_skill_catalog,
-    build_skill_reader_tool,
-    normalize_skills,
-)
 
 
 @dataclass
@@ -53,13 +47,9 @@ class ReActWorkflow:
         tools: List[Callable[..., Dict[str, Any]]],
         max_steps: int = 10,
         system_prompt: str | None = None,
-        skills: List[SkillSpec | str] | None = None,
-        progressive_skills: bool = True,
-        skill_reader_max_chars: int = 12000,
         task_timeout: float | None = None,
         mcp_manager: Any | None = None,
         mcp_tools: List[Any] | None = None,
-        skill_registry: Any | None = None,
         permission_policy: AgentPermissionPolicy | Dict[str, Any] | None = None,
     ):
         if max_steps < 1:
@@ -71,10 +61,6 @@ class ReActWorkflow:
         self.system_prompt = system_prompt
         self.task_timeout = task_timeout
         self.mcp_manager = mcp_manager
-        self.skill_registry = skill_registry
-        self._initial_skill_events_emitted = False
-        self.skills = normalize_skills(skills)
-        self.progressive_skills = progressive_skills
         self.steps: List[ReActStep] = []
         self.tool_registry = AgentToolRegistry(dynamic_run)
         self.tool_runtime = AgentToolRuntime(
@@ -93,16 +79,10 @@ class ReActWorkflow:
             task_name=llm_metadata.func_name,
         )
 
-        all_tools = list(tools)
-        if self.skills and self.progressive_skills:
-            all_tools.append(build_skill_reader_tool(self.skills, max_chars=skill_reader_max_chars))
-
-        for tool in all_tools:
+        for tool in tools:
             self._register_tool(tool)
         for mcp_tool in (mcp_tools or []):
             self.tool_registry.register_mcp_tool(mcp_tool)
-        if self.skill_registry is not None:
-            self.tool_registry.register_skill_loader(self.skill_registry)
 
         if not self.tool_registry.specs:
             raise ValueError("ReActWorkflow requires at least one agent tool")
@@ -111,8 +91,6 @@ class ReActWorkflow:
         self._registered_tools: Dict[str, DynamicTaskSpec] = self.tool_registry.task_specs
         self._available_tools = self.tool_registry.available_tool_names()
 
-        self.skill_catalog = build_skill_catalog(self.skills)
-
     @property
     def run_id(self) -> str:
         return self.dynamic_run.run_id
@@ -120,7 +98,6 @@ class ReActWorkflow:
     def run(self, prompt: str) -> Any:
         run_started = time.time()
         try:
-            self._emit_loaded_skill_events_once(mode="react")
             self.dynamic_run.emit_event("agent_run_started", {
                 "mode": "react",
                 "prompt": prompt,
@@ -128,10 +105,6 @@ class ReActWorkflow:
                 "task_timeout": self.task_timeout,
                 "llm_task": self._llm_spec.task_name,
                 "tools": self._available_tools,
-                "skills": self._loaded_skills_for_llm(),
-                "available_skills": self._available_skills_summary(),
-                "skill_catalog": sorted(self.skill_catalog),
-                "progressive_skills": self.progressive_skills,
                 "tool_harness": "agent_tool_runtime_v1",
             })
 
@@ -181,7 +154,6 @@ class ReActWorkflow:
                         "task_timeout": self.task_timeout,
                         "timings": timings,
                         "artifacts": artifacts,
-                        "skills": self._loaded_skills_for_llm(),
                     })
                     self.dynamic_run.finalize({
                         "mode": "react",
@@ -192,7 +164,6 @@ class ReActWorkflow:
                         "step_count": len(self.steps),
                         "timings": timings,
                         "artifacts": artifacts,
-                        "skills": self._loaded_skills_for_llm(),
                         "steps": [self._step_snapshot(step) for step in self.steps],
                     })
                     self._close_mcp()
@@ -273,9 +244,6 @@ class ReActWorkflow:
             "prompt": prompt,
             "history": [self._step_snapshot(step) for step in self.steps],
             "tools": self.tool_specs,
-            "skills": self._skills_input_for_llm(),
-            "loaded_skills": self._loaded_skills_for_llm(),
-            "available_skills": self._available_skills_summary(),
             "step": step_index,
             "system_prompt": self.system_prompt,
         }
@@ -284,59 +252,6 @@ class ReActWorkflow:
             for key, value in available.items()
             if key in self._llm_input_names
         }
-
-    def _skills_input_for_llm(self) -> Any:
-        data_type = str(self._llm_input_types.get("skills") or "").lower()
-        if "dict" in data_type or "mapping" in data_type:
-            return self._build_skill_context()
-        if "list" in data_type or "sequence" in data_type or "iterable" in data_type:
-            return self._loaded_skills_for_llm()
-        if data_type in {"", "str", "any"}:
-            return self._loaded_skills_for_llm()
-        return self._build_skill_context()
-
-    def _build_skill_context(self) -> Dict[str, Any]:
-        loaded_agent_skills = self._loaded_skills_for_llm()
-        available_agent_skills = self._available_skills_summary()
-        if not self.skills and not loaded_agent_skills and not available_agent_skills:
-            return {}
-
-        context: Dict[str, Any] = {}
-        if self.skills:
-            context.update({
-                "catalog": self.skill_catalog,
-                "progressive_disclosure": self.progressive_skills,
-            })
-        if self.skills and self.progressive_skills:
-            context["instructions"] = (
-                "Use the skill catalog to decide whether a skill is relevant. "
-                "Do not assume details that are not in the catalog. When more "
-                "skill instructions are needed, call read_skill_file with "
-                "skill_name and file_name such as SKILL.md, reference.md, or examples.md."
-            )
-        elif self.skills:
-            context["instructions"] = "Full SKILL.md bodies are provided below."
-            context["details"] = {
-                skill.name: {
-                    "description": skill.description,
-                    "body": skill.body,
-                    "files": skill.list_files(),
-                }
-                for skill in self.skills
-            }
-        if loaded_agent_skills:
-            context["loaded_agent_skills"] = loaded_agent_skills
-        if available_agent_skills:
-            context["available_agent_skills"] = available_agent_skills
-            agent_skill_instruction = (
-                "Agent skills listed in available_agent_skills can be loaded with "
-                "the load_skill tool when their instructions are relevant."
-            )
-            if context.get("instructions"):
-                context["instructions"] = f"{context['instructions']} {agent_skill_instruction}"
-            else:
-                context["instructions"] = agent_skill_instruction
-        return context
 
     def _parse_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         action = decision.get("action", decision)
@@ -563,27 +478,6 @@ class ReActWorkflow:
             self.dynamic_run.emit_event(event_type, data)
         except Exception:
             pass
-
-    def _loaded_skills_for_llm(self) -> List[Dict[str, Any]]:
-        if self.skill_registry is None:
-            return []
-        return self.skill_registry.loaded_for_llm()
-
-    def _available_skills_summary(self) -> List[Dict[str, Any]]:
-        if self.skill_registry is None:
-            return []
-        return self.skill_registry.list_skills()
-
-    def _emit_loaded_skill_events_once(self, mode: str):
-        if self._initial_skill_events_emitted or self.skill_registry is None:
-            return
-        self._initial_skill_events_emitted = True
-        for skill in self.skill_registry.loaded_events():
-            self._emit_best_effort("agent_skill_loaded", {
-                "mode": mode,
-                "skill": skill,
-                "source": "initial",
-            })
 
     def _close_mcp(self):
         if self.mcp_manager is None:

@@ -49,7 +49,6 @@ from maze.client.maze.agent_permissions import permission_error_payload
 from maze.client.maze.agent_sandbox import build_workspace_sandbox
 from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
 from maze.client.maze.react_llm import create_openai_react_llm_task
-from maze.client.maze.agent_skills import AgentSkillRegistry
 from maze import task, get_task_metadata
 from maze.client.front.builtin import agentTools, distributedSmoke
 import inspect
@@ -762,36 +761,20 @@ def get_workspace_tasks(workspace_dir):
 
 
 def list_workspace_skills(workspace_dir):
-    """Scan <workspace>/skills and return Maze agent skill metadata."""
+    """Legacy Skills endpoint. Skills are no longer part of Maze mainline."""
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
     if error:
         return error
 
     skills_dir = os.path.join(workspace_dir, "skills")
-    os.makedirs(skills_dir, exist_ok=True)
-
-    try:
-        registry = AgentSkillRegistry([skills_dir])
-        return {
-            "success": True,
-            "workspaceDir": workspace_dir,
-            "skillsDir": skills_dir,
-            "skills": registry.list_skills(),
-            "errors": [],
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "workspaceDir": workspace_dir,
-            "skillsDir": skills_dir,
-            "skills": [],
-            "errors": [{
-                "error": str(e),
-                "traceback": traceback.format_exc(),
-            }],
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-        }
+    return {
+        "success": True,
+        "workspaceDir": workspace_dir,
+        "skillsDir": skills_dir,
+        "skills": [],
+        "errors": [],
+        "legacy": True,
+    }
 
 
 def save_workspace_task(workspace_dir, relative_path, code, parse=True):
@@ -1242,10 +1225,7 @@ def run_react_workflow(params):
     workspace_id = str(params.get("workspaceId") or params.get("workspace_id") or "").strip()
     workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or "").strip()
     workspace_manifest_version = params.get("workspaceManifestVersion") or params.get("workspace_manifest_version")
-    skill_names = _string_list(params.get("skills") or [])
-    skill_dirs = _string_list(params.get("skillDirs") or params.get("skill_dirs") or [])
-    has_explicit_skill_dirs = bool(skill_dirs)
-    max_skill_chars = int(params.get("maxSkillChars") or params.get("max_skill_chars") or 12000)
+    skill_names = []
     permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
     mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
     mcp_profile_name = str(params.get("mcpProfileName") or params.get("mcp_profile_name") or "").strip()
@@ -1279,17 +1259,6 @@ def run_react_workflow(params):
             return {"success": False, "error": workspace_error["error"]}
         workspace_id = workspace_id or os.path.basename(workspace_dir.rstrip(os.sep))
         os.makedirs(os.path.join(workspace_dir, "files"), exist_ok=True)
-        if not skill_dirs:
-            skill_dirs = [os.path.join(workspace_dir, "skills")]
-        skill_dirs = [
-            os.path.abspath(os.path.expanduser(skill_dir))
-            if os.path.isabs(skill_dir)
-            else os.path.abspath(os.path.join(workspace_dir, skill_dir))
-            for skill_dir in skill_dirs
-        ]
-        if not has_explicit_skill_dirs:
-            os.makedirs(skill_dirs[0], exist_ok=True)
-
         client = DynamicMaClient(server_url="http://localhost:8000")
         workspace_tools = build_react_workspace_tools(
             workspace_dir,
@@ -1362,9 +1331,6 @@ def run_react_workflow(params):
                 "workspace_manifest_version": workspace_manifest_version,
             },
             workspace_dir=workspace_dir,
-            agent_skills=skill_names,
-            skill_dirs=skill_dirs,
-            max_skill_chars=max_skill_chars,
             permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
             mcp_servers=mcp_servers,
             mcp_profile_name=mcp_profile_name or None,

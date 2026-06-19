@@ -40,8 +40,6 @@ class AgentContext:
 
     prompt: str
     tool_specs: Dict[str, Dict[str, Any]]
-    skills: List[Dict[str, Any]] = field(default_factory=list)
-    available_skills: List[Dict[str, Any]] = field(default_factory=list)
     steps: List[AgentStep] = field(default_factory=list)
 
     @property
@@ -70,7 +68,6 @@ class AgentRun:
         task_timeout: float | None = None,
         mcp_manager: Any | None = None,
         mcp_tools: List[Any] | None = None,
-        skill_registry: Any | None = None,
         permission_policy: AgentPermissionPolicy | Dict[str, Any] | None = None,
     ):
         if max_steps < 1:
@@ -81,8 +78,6 @@ class AgentRun:
         self.max_steps = max_steps
         self.task_timeout = task_timeout
         self.mcp_manager = mcp_manager
-        self.skill_registry = skill_registry
-        self._initial_skill_events_emitted = False
         self.steps: List[AgentStep] = []
         self.tool_registry = AgentToolRegistry(dynamic_run)
         self.tool_runtime = AgentToolRuntime(
@@ -96,8 +91,6 @@ class AgentRun:
             self._register_tool(tool)
         for mcp_tool in (mcp_tools or []):
             self.tool_registry.register_mcp_tool(mcp_tool)
-        if self.skill_registry is not None:
-            self.tool_registry.register_skill_loader(self.skill_registry)
 
         if not self.tool_registry.specs:
             raise ValueError("AgentRun requires at least one agent tool")
@@ -115,25 +108,18 @@ class AgentRun:
         context = AgentContext(
             prompt=prompt,
             tool_specs=self.tool_specs,
-            skills=self._loaded_skills_for_llm(),
-            available_skills=self._available_skills_summary(),
             steps=self.steps,
         )
 
         try:
-            self._emit_loaded_skill_events_once(mode="agent")
             self.dynamic_run.emit_event("agent_run_started", {
                 "prompt": prompt,
                 "max_steps": self.max_steps,
                 "task_timeout": self.task_timeout,
                 "tools": self._available_tools,
-                "skills": self._loaded_skills_for_llm(),
-                "available_skills": self._available_skills_summary(),
                 "tool_harness": "agent_tool_runtime_v1",
             })
             for step_index in range(1, self.max_steps + 1):
-                context.skills = self._loaded_skills_for_llm()
-                context.available_skills = self._available_skills_summary()
                 action = self._next_action(context)
                 if "final" in action:
                     final_result = action["final"]
@@ -145,7 +131,6 @@ class AgentRun:
                         "stop_reason": "final",
                         "max_steps": self.max_steps,
                         "task_timeout": self.task_timeout,
-                        "skills": self._loaded_skills_for_llm(),
                         "timings": {
                             "total_seconds": round(total_seconds, 6),
                             "task_seconds": round(sum(
@@ -161,7 +146,6 @@ class AgentRun:
                         "max_steps": self.max_steps,
                         "task_timeout": self.task_timeout,
                         "step_count": len(self.steps),
-                        "skills": self._loaded_skills_for_llm(),
                         "timings": {
                             "total_seconds": round(total_seconds, 6),
                             "task_seconds": round(sum(
@@ -325,27 +309,6 @@ class AgentRun:
             self.dynamic_run.emit_event(event_type, data)
         except Exception:
             pass
-
-    def _loaded_skills_for_llm(self) -> List[Dict[str, Any]]:
-        if self.skill_registry is None:
-            return []
-        return self.skill_registry.loaded_for_llm()
-
-    def _available_skills_summary(self) -> List[Dict[str, Any]]:
-        if self.skill_registry is None:
-            return []
-        return self.skill_registry.list_skills()
-
-    def _emit_loaded_skill_events_once(self, mode: str):
-        if self._initial_skill_events_emitted or self.skill_registry is None:
-            return
-        self._initial_skill_events_emitted = True
-        for skill in self.skill_registry.loaded_events():
-            self._emit_best_effort("agent_skill_loaded", {
-                "mode": mode,
-                "skill": skill,
-                "source": "initial",
-            })
 
     def _close_mcp(self):
         if self.mcp_manager is None:

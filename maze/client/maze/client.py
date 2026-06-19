@@ -7,10 +7,8 @@ from typing import Callable, Optional
 from maze.client.maze.agent import AgentPlanner, AgentRun
 from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
 from maze.client.maze.agent_permissions import AgentPermissionPolicy
-from maze.client.maze.agent_skills import create_skill_registry
 from maze.client.maze.dynamic import DynamicRun
 from maze.client.maze.react import ReActWorkflow
-from maze.client.maze.skills import SkillSpec
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import WorkflowDefinition
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -128,9 +126,6 @@ class MaClient:
         mcp_servers: Optional[list[dict]] = None,
         mcp_profile_name: Optional[str] = None,
         mcp_profile: Optional[dict] = None,
-        skills: Optional[list[str]] = None,
-        skill_dirs: Optional[list[str]] = None,
-        max_skill_chars: int = 12000,
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> AgentRun:
         """
@@ -155,23 +150,8 @@ class MaClient:
             metadata=self._agent_run_metadata("agent", mcp_servers, mcp_profile_name, mcp_profile),
         )
         mcp_manager = None
-        skill_registry = None
         cancel_reason = "Agent creation failed"
         try:
-            try:
-                skill_registry = create_skill_registry(
-                    skills=skills,
-                    skill_dirs=skill_dirs,
-                    max_instruction_chars=max_skill_chars,
-                )
-            except Exception as exc:
-                cancel_reason = "Skill loading failed"
-                self._emit_dynamic_run_event_best_effort(
-                    dynamic_run,
-                    "agent_skill_load_failed",
-                    self._error_event_payload(exc),
-                )
-                raise
             try:
                 mcp_manager, mcp_tools = discover_mcp_tools_blocking(
                     clients=mcp_clients,
@@ -195,7 +175,6 @@ class MaClient:
                 task_timeout=task_timeout,
                 mcp_manager=mcp_manager,
                 mcp_tools=mcp_tools,
-                skill_registry=skill_registry,
                 permission_policy=permission_policy,
             )
         except Exception as exc:
@@ -210,9 +189,6 @@ class MaClient:
         tools: list[Callable],
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
-        skills: Optional[list[SkillSpec | str]] = None,
-        progressive_skills: bool = True,
-        skill_reader_max_chars: int = 12000,
         timeout_seconds: Optional[int] = None,
         task_timeout: Optional[float] = None,
         file_context: Optional[dict] = None,
@@ -222,9 +198,6 @@ class MaClient:
         mcp_servers: Optional[list[dict]] = None,
         mcp_profile_name: Optional[str] = None,
         mcp_profile: Optional[dict] = None,
-        agent_skills: Optional[list[str]] = None,
-        skill_dirs: Optional[list[str]] = None,
-        max_skill_chars: int = 12000,
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> ReActWorkflow:
         """
@@ -248,31 +221,9 @@ class MaClient:
             artifact_mode=artifact_mode,
             metadata=self._agent_run_metadata("react", mcp_servers, mcp_profile_name, mcp_profile),
         )
-        react_skills = skills
-        registry_skill_names = agent_skills
-        if registry_skill_names is None and skill_dirs and skills:
-            string_skills = [item for item in skills if isinstance(item, str)]
-            if len(string_skills) == len(skills) and not any(Path(item).expanduser().exists() for item in string_skills):
-                registry_skill_names = [str(item) for item in string_skills]
-                react_skills = None
         mcp_manager = None
-        skill_registry = None
         cancel_reason = "ReAct workflow creation failed"
         try:
-            try:
-                skill_registry = create_skill_registry(
-                    skills=registry_skill_names,
-                    skill_dirs=skill_dirs,
-                    max_instruction_chars=max_skill_chars,
-                )
-            except Exception as exc:
-                cancel_reason = "Skill loading failed"
-                self._emit_dynamic_run_event_best_effort(
-                    dynamic_run,
-                    "agent_skill_load_failed",
-                    self._error_event_payload(exc),
-                )
-                raise
             try:
                 mcp_manager, mcp_tools = discover_mcp_tools_blocking(
                     clients=mcp_clients,
@@ -294,13 +245,9 @@ class MaClient:
                 tools=tools,
                 max_steps=max_steps,
                 system_prompt=system_prompt,
-                skills=react_skills,
-                progressive_skills=progressive_skills,
-                skill_reader_max_chars=skill_reader_max_chars,
                 task_timeout=task_timeout,
                 mcp_manager=mcp_manager,
                 mcp_tools=mcp_tools,
-                skill_registry=skill_registry,
                 permission_policy=permission_policy,
             )
         except Exception as exc:

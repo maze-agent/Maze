@@ -239,26 +239,6 @@ class AgentToolRegistry:
         self._specs[tool_name] = spec
         return spec
 
-    def register_skill_loader(self, skill_registry: Any) -> AgentToolSpec:
-        tool_name = "load_skill"
-        if tool_name in self._specs:
-            raise ValueError(f"Duplicate agent tool name: {tool_name}")
-
-        spec = AgentToolSpec(
-            name=tool_name,
-            description="Load a local Maze skill into the current agent context.",
-            inputs=["name"],
-            required_inputs=["name"],
-            outputs=["skill", "loaded_skills"],
-            data_types={"name": "str"},
-            resources=dict(DEFAULT_CALLABLE_RESOURCES),
-            task_spec=None,
-            source="skill",
-            handler=skill_registry,
-        )
-        self._specs[tool_name] = spec
-        return spec
-
     def register_callable_tool(
         self,
         tool: Callable[..., Dict[str, Any]],
