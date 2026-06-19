@@ -50,9 +50,10 @@ theme:
         icon: material/weather-night
         name: 切换到浅色模式
 
-# nav:
-  # - 首页: index.md
-  # - API 文档: api_zh.md
+nav:
+  - 首页: index.md
+  - Maze 边界: maze_boundary.md
+  - API 文档: api_zh.md
 
 markdown_extensions:
   - abbr

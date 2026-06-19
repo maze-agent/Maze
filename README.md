@@ -10,44 +10,38 @@
 </p>
 
 
-## 📰 News
+## News
 
 
-- **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
-- **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
-- **2026-06**: Maze Playground ReAct workflows now expose a single `Task Timeout` control. Maze uses it for ReAct task waits, `exec_code` subprocess defaults, and an automatically derived run-level timeout, so users do not need to tune several timeout knobs.
+- **2026-06**: Maze began its Core Purification work to reset the public boundary around Core Runtime, Workflow Agent, and Workflow Workbench.
+- **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Workbench `Runs` console.
 - **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.
 - **2026-05**: Maze added a content-addressed artifact store for non-shared distributed file execution. Workspace inputs and task outputs can now move through `maze://artifacts/sha256/...` references instead of relying on a shared filesystem path.
-- **2026-05**: Online ReAct runs now expose `Max Tokens`, compact long tool observations, and treat malformed LLM JSON as repairable agent observations instead of failing the DynamicRun directly.
-- **2026-05**: Maze now includes a thin ReAct workflow template on top of DynamicRun, with LLM decisions, tool calls, repair observations, workspace file/code tools, and agent traces recorded as Maze events.
 - **2026-05**: We support dynamic workflows with runtime `append_task`, lifecycle events, persisted run history, and developer inspection.
-- **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
-- **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
-- **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
 
 <br>
 
 
-## 🌟 Why Maze?
-- **Task-level**
+## Why Maze?
+- **Core Runtime**
 
-  Maze enables fine-grained, task-level management, enhancing system flexibility and composability while supporting task parallelism to significantly improve the end-to-end performance of agent workflows.
+  Maze executes static and dynamically expanded DAGs as resource-annotated tasks on distributed workers.
 
-- **Resource Management**
+- **Resource-Aware Scheduling**
 
-  Maze supports resource allocation for workflow tasks, effectively preventing resource contention both among parallel tasks within a single workflow and across multiple concurrently executing workflows.
+  Maze tracks CPU, memory, GPU, GPU memory, worker health, queue state, and task placement so workflows can be deployed on heterogeneous clusters.
 
-- **Application Operations**
+- **Runtime Operations**
 
-  Maze records durable run/task snapshots, lifecycle events, structured task errors, logs, artifacts, retries, timeouts, cancellation, and queue state so applications can query and recover runs without depending on a single live WebSocket stream.
+  Maze records durable run/task snapshots, lifecycle events, structured task errors, logs, artifacts, retries, timeouts, cancellation, and queue state so applications can query and recover runs without depending on a single live stream.
 
-- **Distributed Deployment**
+- **Workflow Agent**
 
-  Maze supports not only standalone but also distributed deployment, allowing you to build highly available and scalable Maze clusters to meet the demands of large-scale concurrency and high-performance computing.
+  Maze's built-in authoring direction is limited to producing or repairing Maze-native `WorkflowSpec`, `WorkflowPatch`, `TaskSpec`, and resource annotations. It is not a general-purpose chat or tool-calling agent.
 
-- **Multi-Agent Support**
+- **Workflow Workbench**
 
-  Maze can serve as a runtime backend for other agent frameworks. For example, it allows LangGraph to be seamlessly migrated to Maze and automatically gain task-level parallelism without modifying original logic. [**Example**](https://github.com/QinbinLi/Maze/tree/develop/examples/financial_risk_workflow)
+  Maze Workbench is the visual control surface for DAG editing, run inspection, task placement, resource/queue diagnostics, logs, and artifacts.
 
 <br>
 
@@ -157,55 +151,6 @@ run.finalize({"status": "done"})
 print(run.status())
 ```
 
-### ReAct Agent Workflow
-
-```python
-from maze import MaClient, task
-
-
-@task
-def decide(prompt: str, history: list, tools: dict, step: int):
-    if not history:
-        return {"action": {"tool": "multiply", "args": {"a": 18, "b": 7}}}
-    result = history[-1]["observation"]["result"]["result"]
-    return {"action": {"final": f"The answer is {result}."}}
-
-
-@task
-def multiply(a: int, b: int):
-    return {"result": a * b}
-
-
-client = MaClient("http://localhost:8000")
-react = client.create_react_workflow(
-    llm_task=decide,
-    tools=[multiply],
-    max_steps=3,
-)
-answer = react.run("Use the calculator to compute 18 * 7.")
-print(answer)
-```
-
-ReAct workflows keep both LLM decisions and tools as Maze tasks, so the distributed task graph and the agent trace stay in the same DynamicRun history. See [examples/react_workflow](./examples/react_workflow/README.md) for a local repair demo and an OpenAI-compatible LLM demo.
-
-ReAct also supports Claude/Cursor-style skills as progressive instruction packages. Skills keep their standard `SKILL.md` format and teach the agent how to use tools that are already registered:
-
-```python
-from maze import MaClient, load_skill
-
-skills = [load_skill("./skills/data-analysis")]
-
-react = client.create_react_workflow(
-    llm_task=decide,
-    tools=[read_file, write_file, exec_code],
-    skills=skills,
-)
-```
-
-Maze initially exposes only a compact skill catalog to the decision task. When more detail is needed, the ReAct controller can call the automatically registered `read_skill_file(skill_name, file_name)` tool to read `SKILL.md`, `reference.md`, `examples.md`, or other files inside that skill directory.
-
-In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
-
 For distributed runs without shared storage, Maze can register workspace inputs and task outputs in a content-addressed artifact store. Workers download required files before task execution and upload changed files after execution; manifests use stable artifact references such as `maze://artifacts/sha256/<hash>` instead of machine-local paths. A workflow can enable the head HTTP artifact store with:
 
 ```python
@@ -267,7 +212,7 @@ Each app run is recorded in the unified run history with lifecycle events, place
 
 ### Run Observability and Operations
 
-Static workflows, DynamicRuns, ReAct workflows, and application spec runs share the same operational surface. A run snapshot includes lifecycle state, timing, progress, result/error summaries, task state, placement, and artifacts. Task failures use a structured error envelope with fields such as `error_type`, `message`, `retryable`, `origin`, `node_id`, `node_ip`, `attempt`, and `traceback`.
+Static workflows, DynamicRuns, and application spec runs share the same operational surface. A run snapshot includes lifecycle state, timing, progress, result/error summaries, task state, placement, and artifacts. Task failures use a structured error envelope with fields such as `error_type`, `message`, `retryable`, `origin`, `node_id`, `node_ip`, `attempt`, and `traceback`.
 
 You can configure task-level reliability directly on the decorator:
 
@@ -327,19 +272,15 @@ maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
 
 
 
-## 🖥️ Maze Playground
-Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, using MCP tools, collaborating with a built-in Workspace Agent, and inspecting static, dynamic, ReAct, and app runs in one `Runs` console. You can start the playground with the following command option.
+## Maze Workbench
+Maze Workbench supports building workflows through a drag-and-drop interface and inspecting static, dynamic, and app runs in one `Runs` console. It is the visual control surface for workflow construction and distributed runtime observability, not a general-purpose Agent playground. You can start it with the following command option.
 ```
 maze start --head --port HEAD_PORT --playground
 ```
 
-The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include `Max Tokens`; ReAct nodes and the ReAct run modal include `Task Timeout`, which controls both per-task waits and the default `Exec Code` subprocess timeout while Maze derives the run-level safety timeout automatically. Long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
+The Workbench should stay focused on DAG visualization, manual workflow editing, `WorkflowSpec` validation, submit/retry/cancel controls, task placement, worker/node state, queue reasons, run timelines, logs, and artifacts.
 
-ReAct runs can connect to MCP servers from the run modal. Users can paste JSON MCP configuration, test server discovery before starting an LLM run, save reusable workspace MCP profiles, and run with a saved profile without sending hidden environment variables or headers back through the frontend. Run metadata, progress events, API responses, and Agent Trace views keep MCP server summaries, discovered tools, tool calls, tool errors, discovery failures, and permission decisions visible while redacting secrets.
-
-The Workspace Agent panel helps turn user intent into workflow progress inside the current workspace. It can inspect workspace inventory, read task and workflow files, create or update safe workflow drafts, validate drafts, save or run drafts after confirmation, inspect failed runs, create repair drafts from failures, and promote run artifacts into workspace files for downstream workflows. Agent sessions are persisted and can be created, selected, renamed, exported, or deleted from the panel.
-
-The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs. Run detail rendering is hardened against malformed event payloads, failed snapshots are preserved instead of being overwritten by later completion events, and artifact download/promotion can fall back to content-addressed storage when a static artifact lacks a direct storage path.
+The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, and app runs. Run detail rendering is hardened against malformed event payloads, failed snapshots are preserved instead of being overwritten by later completion events, and artifact download/promotion can fall back to content-addressed storage when a static artifact lacks a direct storage path.
 
 The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons.
 
