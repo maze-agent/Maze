@@ -1,5 +1,6 @@
 import requests
 import time
+import warnings
 from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Callable, Optional
@@ -133,11 +134,18 @@ class MaClient:
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> AgentRun:
         """
-        Create a minimal agent runtime backed by a DynamicRun.
+        Legacy application-level agent runtime backed by a DynamicRun.
 
-        The planner returns either {"tool": name, "args": {...}} to execute a
-        registered @task tool, or {"final": value} to finish the run.
+        This method is not part of the Maze Core Runtime public boundary.
+        It remains temporarily for compatibility and should move to an
+        extension or be removed in a later purification phase.
         """
+        warnings.warn(
+            "MaClient.create_agent_run is legacy application-level agent API "
+            "and is not part of the Maze Core Runtime public boundary.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps,
             timeout_seconds=timeout_seconds,
@@ -220,14 +228,18 @@ class MaClient:
         permission_policy: AgentPermissionPolicy | dict | None = None,
     ) -> ReActWorkflow:
         """
-        Create a ReAct workflow template backed by a DynamicRun.
+        Legacy ReAct workflow template backed by a DynamicRun.
 
-        Both the decision node and selected tools execute as Maze tasks.
-        Skills are Claude/Cursor-style instruction packages. They teach the
-        ReAct controller how to use already-registered tools; they do not add
-        executable tools except for the optional read_skill_file helper used
-        for progressive disclosure.
+        This method is not part of the Maze Core Runtime public boundary.
+        It remains temporarily for compatibility and should move to an
+        extension or be removed in a later purification phase.
         """
+        warnings.warn(
+            "MaClient.create_react_workflow is legacy ReAct application API "
+            "and is not part of the Maze Core Runtime public boundary.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         dynamic_run = self.create_dynamic_run(
             max_tasks=max_steps * 2,
             timeout_seconds=timeout_seconds,
