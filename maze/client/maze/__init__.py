@@ -23,13 +23,9 @@ __all__ = [
 ]
 
 for _legacy_module in (
-    'agent',
     'agent_exec',
     'agent_permissions',
     'agent_sandbox',
-    'agent_tools',
-    'react',
-    'react_llm',
 ):
     globals().pop(_legacy_module, None)
 del _legacy_module

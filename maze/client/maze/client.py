@@ -1,12 +1,8 @@
 import requests
 import time
-import warnings
 from pathlib import Path
-from typing import Callable, Optional
-from maze.client.maze.agent import AgentPlanner, AgentRun
-from maze.client.maze.agent_permissions import AgentPermissionPolicy
+from typing import Optional
 from maze.client.maze.dynamic import DynamicRun
-from maze.client.maze.react import ReActWorkflow
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import WorkflowDefinition
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -109,104 +105,6 @@ class MaClient:
             raise Exception(f"Failed to create dynamic run: {data.get('message', 'Unknown error')}")
 
         raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
-
-    def create_agent_run(
-        self,
-        tools: list[Callable],
-        planner: AgentPlanner,
-        max_steps: int = 10,
-        timeout_seconds: Optional[int] = None,
-        task_timeout: Optional[float] = None,
-        file_context: Optional[dict] = None,
-        workspace_dir: Optional[str] = None,
-        artifact_mode: bool = False,
-        permission_policy: AgentPermissionPolicy | dict | None = None,
-    ) -> AgentRun:
-        """
-        Legacy application-level agent runtime backed by a DynamicRun.
-
-        This method is not part of the Maze Core Runtime public boundary.
-        It remains temporarily for compatibility and should move to an
-        extension or be removed in a later purification phase.
-        """
-        warnings.warn(
-            "MaClient.create_agent_run is legacy application-level agent API "
-            "and is not part of the Maze Core Runtime public boundary.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        dynamic_run = self.create_dynamic_run(
-            max_tasks=max_steps,
-            timeout_seconds=timeout_seconds,
-            file_context=file_context,
-            workspace_dir=workspace_dir,
-            artifact_mode=artifact_mode,
-            metadata={"run_type": "agent"},
-        )
-        cancel_reason = "Agent creation failed"
-        try:
-            return AgentRun(
-                dynamic_run=dynamic_run,
-                tools=tools,
-                planner=planner,
-                max_steps=max_steps,
-                task_timeout=task_timeout,
-                permission_policy=permission_policy,
-            )
-        except Exception as exc:
-            setattr(exc, "maze_run_id", dynamic_run.run_id)
-            self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
-            raise
-
-    def create_react_workflow(
-        self,
-        llm_task: Callable,
-        tools: list[Callable],
-        max_steps: int = 10,
-        system_prompt: Optional[str] = None,
-        timeout_seconds: Optional[int] = None,
-        task_timeout: Optional[float] = None,
-        file_context: Optional[dict] = None,
-        workspace_dir: Optional[str] = None,
-        artifact_mode: bool = False,
-        permission_policy: AgentPermissionPolicy | dict | None = None,
-    ) -> ReActWorkflow:
-        """
-        Legacy ReAct workflow template backed by a DynamicRun.
-
-        This method is not part of the Maze Core Runtime public boundary.
-        It remains temporarily for compatibility and should move to an
-        extension or be removed in a later purification phase.
-        """
-        warnings.warn(
-            "MaClient.create_react_workflow is legacy ReAct application API "
-            "and is not part of the Maze Core Runtime public boundary.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        dynamic_run = self.create_dynamic_run(
-            max_tasks=max_steps * 2,
-            timeout_seconds=timeout_seconds,
-            file_context=file_context,
-            workspace_dir=workspace_dir,
-            artifact_mode=artifact_mode,
-            metadata={"run_type": "react"},
-        )
-        cancel_reason = "ReAct workflow creation failed"
-        try:
-            return ReActWorkflow(
-                dynamic_run=dynamic_run,
-                llm_task=llm_task,
-                tools=tools,
-                max_steps=max_steps,
-                system_prompt=system_prompt,
-                task_timeout=task_timeout,
-                permission_policy=permission_policy,
-            )
-        except Exception as exc:
-            setattr(exc, "maze_run_id", dynamic_run.run_id)
-            self._cancel_dynamic_run_best_effort(dynamic_run, cancel_reason)
-            raise
 
     def get_dynamic_run(self, run_id: str) -> DynamicRun:
         return DynamicRun(run_id, self.server_url)
@@ -315,28 +213,6 @@ class MaClient:
             }
         return context
 
-    def _error_event_payload(self, exc: Exception) -> dict:
-        return {
-            "error": {
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-                "repairable": False,
-            }
-        }
-
-    def _emit_dynamic_run_event_best_effort(self, dynamic_run: DynamicRun, event_type: str, data: dict) -> None:
-        try:
-            dynamic_run.emit_event(event_type, data)
-        except Exception:
-            pass
-
-    def _cancel_dynamic_run_best_effort(self, dynamic_run: DynamicRun, reason: str) -> None:
-        try:
-            status = dynamic_run.get_status().get("status")
-            if status not in {"finalized", "failed", "canceled", "timed_out", "interrupted"}:
-                dynamic_run.cancel(reason)
-        except Exception:
-            pass
     def list_dynamic_runs(
         self,
         status: Optional[str] = None,
