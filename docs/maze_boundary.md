@@ -89,6 +89,14 @@ Workbench must continue to preserve these runtime surfaces:
 - Worker/node health.
 - Run timelines, logs, and artifacts.
 
+## Server Routes
+
+The public server route boundary is documented in [server_route_boundary.md](server_route_boundary.md).
+
+Mainline server routes should serve workflow authoring, workflow execution, run/task/event/log/artifact inspection, dynamic DAG expansion, cluster resources, queue diagnostics, and Worker health.
+
+Skills routes, MCP routes, Workspace Agent routes, generic ReAct run hosts, and workspace chat routes are outside the Phase 1 public boundary.
+
 ## Non-Goals
 
 Maze Core does not aim to provide:

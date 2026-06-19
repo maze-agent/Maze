@@ -14,6 +14,7 @@ hide:
 
 [开始阅读 API 文档 →](api_zh.md){ .md-button .md-button--primary }
 [Maze 边界 →](maze_boundary.md){ .md-button }
+[Server Route 边界 →](server_route_boundary.md){ .md-button }
 [GitHub 仓库](https://github.com/maze-agent/Maze){ .md-button }
 
 </div>
@@ -35,6 +36,8 @@ Maze = Core Runtime + Workflow Agent + Workflow Workbench
 - **Workflow Workbench**：负责 DAG 可视化、人工编辑、task placement、资源/队列/日志/artifact 可视化。
 
 Phase 1 删除的是旧 `WorkspaceAgentPanel`，不是 Workflow Agent。未来可以新增 `WorkflowPlannerPanel`，但它只能输出 Maze-native workflow/patch/spec 结构，不能恢复通用 Workspace Agent。
+
+Server route 边界见：[server_route_boundary.md](server_route_boundary.md)。Workbench 后端公开主线只保留 workflow、run、artifact、cluster/resource/queue、task authoring 相关 route；Skills/MCP/Workspace Agent routes 不属于主线 public boundary。
 
 本站点提供 Maze 的 **完整中文 API 文档**，按以下层级组织：
 
