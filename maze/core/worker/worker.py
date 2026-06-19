@@ -6,7 +6,7 @@ import logging
 import requests
 import socket
 from maze.utils.utils import collect_gpu_info
-from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
+from maze.core.worker.capabilities import detect_worker_execution_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ class Worker():
     @staticmethod
     def _register_worker(addr: str):
         current_node_id, current_node_ip, resources = Worker._current_node_resources()
-        capabilities = detect_agent_sandbox_capabilities()
+        capabilities = detect_worker_execution_capabilities()
         response = Worker._send_post_request(
             url=f"http://{addr}/start_worker",
             data={

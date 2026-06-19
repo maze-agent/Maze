@@ -6,7 +6,7 @@ from typing import Any,List,Dict
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.scheduler.runtime import SelectedNode
-from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
+from maze.core.worker.capabilities import detect_worker_execution_capabilities
 from maze.utils.utils import collect_gpu_info
 
 logger = logging.getLogger(__name__)
@@ -192,7 +192,7 @@ class ResourceManager():
                         self.head_node_ip,
                         head_node_resource,
                         head_node_resource,
-                        detect_agent_sandbox_capabilities(),
+                        detect_worker_execution_capabilities(),
                     )
                     self.running_task_counts.setdefault(self.head_node_id, 0)
                     return
