@@ -8,6 +8,7 @@ import { loadLlmSettings } from '@/utils/llmSettings';
 import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 
 const { Text } = Typography;
+const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 function joinWorkspacePath(base: string, name: string) {
   return [base, name].filter(Boolean).join('/');
@@ -482,6 +483,10 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
 
     const agentNodes = nodes.filter((node) => node.data.category === 'agent');
     if (agentNodes.length > 0) {
+      if (!ENABLE_LEGACY_AGENT_UI) {
+        message.warning('Legacy Agent/ReAct workflows are hidden by default. Set VITE_ENABLE_LEGACY_AGENT_UI=1 to run them.');
+        return;
+      }
       if (agentNodes.length > 1 || nodes.length > 1 || edges.length > 0) {
         message.warning('Run one ReAct workflow node at a time. Mixed static and agent workflows are not supported yet.');
         return;
@@ -639,12 +644,14 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
       </Space>
 
       <Space>
-        <Button
-          icon={<ThunderboltOutlined />}
-          onClick={onOpenReactRunner}
-        >
-          ReAct
-        </Button>
+        {ENABLE_LEGACY_AGENT_UI ? (
+          <Button
+            icon={<ThunderboltOutlined />}
+            onClick={onOpenReactRunner}
+          >
+            ReAct
+          </Button>
+        ) : null}
 
         <Button
           icon={<HistoryOutlined />}

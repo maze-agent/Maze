@@ -36,6 +36,7 @@ import type {
 import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
 
 const { Text, Paragraph } = Typography;
+const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 type BuiltinWorkflowExample = {
   key: string;
@@ -334,6 +335,10 @@ export default function BuiltinTasksSidebar() {
     selectNode,
     clearRunResults,
   } = useWorkflowStore();
+  const visibleWorkflowExamples = useMemo(
+    () => BUILTIN_WORKFLOW_EXAMPLES.filter((item) => ENABLE_LEGACY_AGENT_UI || item.kind !== 'react'),
+    [],
+  );
 
   const [builtinLoading, setBuiltinLoading] = useState(false);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -2297,7 +2302,7 @@ export default function BuiltinTasksSidebar() {
         </Space>
         <List
           size="small"
-          dataSource={BUILTIN_WORKFLOW_EXAMPLES}
+          dataSource={visibleWorkflowExamples}
           renderItem={(template) => (
             <List.Item
               className="workspace-file-row"
@@ -2432,6 +2437,15 @@ export default function BuiltinTasksSidebar() {
 
   const renderSkillPacks = () => (
     <div>
+      {!ENABLE_LEGACY_AGENT_UI ? (
+        <Alert
+          type="info"
+          showIcon
+          message="Legacy skill packs are hidden"
+          description="Skills are no longer part of the Maze Workbench public boundary. Set VITE_ENABLE_LEGACY_AGENT_UI=1 to inspect legacy packs."
+        />
+      ) : (
+      <>
       <Space align="center" size={6} style={{ marginBottom: 8 }}>
         <Text strong>Skill Packs</Text>
         <Tag color="green" style={{ margin: 0 }}>one-click import</Tag>
@@ -2480,11 +2494,13 @@ export default function BuiltinTasksSidebar() {
           );
         }}
       />
+      </>
+      )}
     </div>
   );
 
   const renderCatalogList = (type: 'workflows' | 'tasks' | 'skills') => {
-    const items = catalogItems[type] || [];
+    const items = type === 'skills' && !ENABLE_LEGACY_AGENT_UI ? [] : (catalogItems[type] || []);
 
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>

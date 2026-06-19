@@ -15,6 +15,7 @@ import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
+const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 function workflowDraftFingerprint(name: string, nodes: any[], edges: any[]) {
   return JSON.stringify({ name, nodes, edges });
@@ -357,7 +358,7 @@ function App() {
       <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
         <Toolbar
           onOpenRuns={() => setRunsOpen(true)}
-          onOpenReactRunner={() => setReactRunnerOpen(true)}
+          onOpenReactRunner={ENABLE_LEGACY_AGENT_UI ? () => setReactRunnerOpen(true) : undefined}
           onOpenClusterResources={() => setClusterResourcesOpen(true)}
           onReactRunStarted={(runId) => {
             setActiveDynamicRunId(runId);
@@ -377,7 +378,7 @@ function App() {
           </div>
           
           <NodePanel />
-          {workspaceReady && workspaceDir ? (
+          {ENABLE_LEGACY_AGENT_UI && workspaceReady && workspaceDir ? (
             <WorkspaceAgentPanel
               open={workspaceAgentOpen}
               workspaceReady={workspaceReady}
@@ -401,15 +402,17 @@ function App() {
           focusDynamicRunId={dynamicRunFocusId}
           focusStaticRunId={staticRunFocusId}
         />
-        <ReActRunModal
-          open={reactRunnerOpen}
-          onClose={() => setReactRunnerOpen(false)}
-          onCompleted={(runId) => {
-            setActiveDynamicRunId(runId);
-            setDynamicRunFocusId(runId);
-            setStaticRunFocusId(null);
-          }}
-        />
+        {ENABLE_LEGACY_AGENT_UI ? (
+          <ReActRunModal
+            open={reactRunnerOpen}
+            onClose={() => setReactRunnerOpen(false)}
+            onCompleted={(runId) => {
+              setActiveDynamicRunId(runId);
+              setDynamicRunFocusId(runId);
+              setStaticRunFocusId(null);
+            }}
+          />
+        ) : null}
         <ClusterResourcesDrawer
           open={clusterResourcesOpen}
           onClose={() => setClusterResourcesOpen(false)}
