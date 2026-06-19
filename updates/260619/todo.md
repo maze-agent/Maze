@@ -56,6 +56,10 @@ Workbench observes.
 - [x] README / docs / `docs/maze_boundary.md` 已补充边界修正：删除的是 Workspace Agent，不是 Workflow Agent。
 - [x] 已新增 `updates/260619/core_boundary_smoke.py` 覆盖 Core boundary smoke。
 - [x] 已运行 `python updates/260619/core_boundary_smoke.py`，通过。
+- [x] `919c8ae chore: remove backend mcp public routes` 已删除 `/api/mcp/*` backend public routes。
+- [x] `68cd292 chore: remove workspace agent public routes` 已删除 `/api/agent/*` backend public routes。
+- [x] `71a95ec docs: add server route boundary` 已新增 `docs/server_route_boundary.md`。
+- [x] `updates/260619/core_boundary_smoke.py` 已补充 dynamic append edge（通过 `parents`）和 LLM instance lifecycle mock 覆盖。
 
 ### 0.2 变更账本：todo 原文未逐项点名的改动
 
@@ -157,7 +161,7 @@ Workbench observes.
 
 - [ ] `.gitignore` 增加 `.codegraph/`。这是 CodeGraph 索引目录保护，不属于 Maze runtime 清理本身。
 - [ ] `docs/requirements.txt` pin 了 mkdocs 相关依赖：`mkdocs==1.6.1`、`mkdocs-material==9.5.49`、`pymdown-extensions==10.16.1`、`Pygments==2.18.0`。这不是 Phase 1 core cleanup。
-- [ ] `web/maze_playground/backend/src/server.js` 有 Workspace Agent live activity 相关未提交增强：`workspaceAgentToolDisplayName`、`summarizeWorkspaceAgentEvent`、`enrichWorkspaceAgentEvent`、tool duration 等。这些是用户/先前工作树改动，不应作为本轮 cleanup 一起提交，除非明确决定 legacy 化或删除 Workspace Agent backend。
+- [ ] `web/maze_playground/backend/src/server.js` 仍有 Workspace Agent live activity 相关未提交增强：`workspaceAgentToolDisplayName`、`summarizeWorkspaceAgentEvent`、`enrichWorkspaceAgentEvent`、tool duration 等。这些是用户/先前工作树改动，未随本轮 cleanup 提交。`/api/agent/*` public routes 已在 `68cd292` 删除，剩余 helper 属于 legacy/internal 候选。
 - [x] `web/maze_playground/frontend/src/App.tsx` 当前已删除 `WorkspaceAgentPanel` 默认挂载、`VITE_ENABLE_LEGACY_AGENT_UI` gate、相关 focus state。
 - [x] `web/maze_playground/frontend/src/components/WorkspaceAgentPanel.tsx` 当前工作区为删除状态，删除了旧 workspace chat / draft / tool-call 面板实现。
 - [x] `web/maze_playground/frontend/src/api/client.ts` 当前已删除 Workspace Agent sessions/runs/drafts frontend wrappers。
@@ -256,9 +260,9 @@ Workbench 不应该继续朝通用 Agent Playground、Skills Playground、MCP Pl
 
 todo 中仍有未完成项，不是因为忘记，而是出于 Phase 1 的小步边界和验证原则：
 
-- backend `server.js` 仍有 Workspace Agent / MCP / skills route 残留，因为该文件同时有用户/先前工作树的 live activity 改动，本轮不盲目 stage 或大删。
-- MCP profile backend routes 和部分 Workbench MCP 展示还未完全物理删除，下一步应独立小 commit 清理。
-- `RunsInspector.tsx`、`WorkflowCanvas.tsx`、`BuiltinTasksSidebar.tsx`、`NodePanel.tsx`、`CustomNode.tsx`、`types/workflow.ts` 仍可能有 ReAct/agent/skills/MCP 类型或展示残留，需要继续按小步删除，避免误伤 DAG editor / run console / cluster console。
+- backend `server.js` 的 `/api/mcp/*` 和 `/api/agent/*` public routes 已删除；仍保留的 MCP/Workspace Agent helper 代码属于 legacy/internal 候选，后续可物理删除。
+- `docs/api_zh.md` / `docs/frontend_platform_api_zh.md` 当前是未跟踪长文档，里面可能仍有历史 Skills/ReAct/Playground API 描述；未纳入本轮小步提交。
+- `RunsInspector.tsx`、`WorkflowCanvas.tsx`、`BuiltinTasksSidebar.tsx`、`NodePanel.tsx`、`CustomNode.tsx`、`types/workflow.ts` 已在前序小步中清理过非主线入口，但后续仍应继续用 grep/build 复核，避免误伤 DAG editor / run console / cluster console。
 - frontend build 未验证是因为当前环境没有 `node` / `npm`。
 - 新 Workflow Planner UI 不属于 Phase 1 必做项；Phase 1 只要求保留 Workflow Agent / Workflow Planner 作为主线概念并明确边界。
 - 因此，todo 中未勾选的项表示“仍需后续小步处理”，不是遗漏；尤其是 backend legacy routes、MCP profile、Skills sidebar、ReAct inspector 残留。
@@ -522,10 +526,10 @@ Maze = Core Runtime + Workflow Agent + Workflow Workbench.
 ### 6.5 Server routes
 
 - [x] 不优先删除 route，先检查是否被 Workbench/Core 使用。
-- [ ] 主线文档不再公开 MCP/skills/generic agent routes。
-- [ ] 如保留 legacy route，考虑加 legacy prefix 或 feature flag。
+- [x] 主线文档不再公开 MCP/skills/generic agent routes。
+- [x] 已删除 `/api/mcp/*` 和 `/api/agent/*` public routes；如后续恢复 legacy route，必须使用 extension/legacy prefix 或 feature flag。
 
-当前残留：`web/maze_playground/backend/src/server.js` 仍有 MCP profile、workspace skills、workspace agent session/draft/run routes，下一步应从 Workbench 主入口断开后再小步删除或 legacy 化。
+当前残留：`web/maze_playground/backend/src/server.js` 仍有 MCP profile / Workspace Agent 相关 helper 函数和一组未提交 live activity 改动；public routes 已断开，下一步可独立物理删除 legacy helper。
 
 ## 7. 第四步：Skills 激进清理
 
@@ -602,8 +606,8 @@ Phase 1 不强行全部物理删除，因为这些模块可能和 DynamicRun、t
 - [x] 已删除 `maze/client/maze/agent_sandbox.py`。
 - [x] 已删除 Workbench `ReActRunModal.tsx` 和 `/api/react-runs/start` launch path。
 - [x] Workbench `WorkspaceAgentPanel` 删除已确认：它属于 general-purpose workspace assistant，不恢复。
-- [ ] backend `server.js` 仍有 workspace agent session/draft/run routes，下一步小步处理。
-- [ ] Workbench 仍有 Skills/MCP/ReAct inspector/sidebar 残留，下一步按文件小步清理。
+- [x] backend `server.js` 已删除 workspace agent session/draft/run public routes。
+- [x] Workbench 默认入口已删除 Skills/MCP/ReAct/Workspace Agent 可见主线入口；后续仍需 build 验证。
 
 ### 9.2 Legacy 标记
 
@@ -730,7 +734,8 @@ Phase 1 不直接全部删除，以免引发大量 import/test 修复。
 - [x] `WorkspaceAgentPanel.tsx` 删除已确认：属于 general-purpose workspace assistant，不恢复。
 - [x] `api/client.ts` 已删除 Workspace Agent frontend API/type wrappers。
 - [x] `index.css` 已删除 Workspace Agent 专属样式。
-- [ ] `RunsInspector.tsx` / `WorkflowCanvas.tsx` / `BuiltinTasksSidebar.tsx` / `NodePanel.tsx` / `CustomNode.tsx` / `types/workflow.ts` 仍有 ReAct/agent/skills/MCP 残留显示或类型，需继续小步删除。
+- [x] `RunsInspector.tsx` / `WorkflowCanvas.tsx` / `BuiltinTasksSidebar.tsx` / `NodePanel.tsx` / `CustomNode.tsx` / `types/workflow.ts` 已完成一轮非主线入口清理。
+- [ ] frontend build 未验证，原因是当前环境缺 `node` / `npm`。
 
 ### 12.3 命名收敛
 
@@ -757,14 +762,14 @@ Phase 1 不直接全部删除，以免引发大量 import/test 修复。
 
 - [x] static workflow validate / submit / run。
 - [x] dynamic run append task。
-- [ ] dynamic run append sub-DAG 或 append edge，如果已有对应能力。
+- [x] dynamic run append edge：当前 Core 通过 `append_dynamic_task(..., parents=[...])` 表达 runtime edge，已在 smoke 中覆盖。
 - [x] task resource annotation。
 - [x] cluster resources endpoint。
 - [x] cluster queues endpoint。
 - [x] worker registration / heartbeat / basic execution。
 - [x] run state / task state / events。
 - [x] logs / artifact capture。
-- [ ] local LLM / inference instance lifecycle，如当前仓库已有相关测试或 mock。
+- [x] local LLM / inference instance lifecycle：已用 mock actor 覆盖 `LlmInstanceManager.start_llm_instance()` / `stop_llm_instance()` 状态记录与释放。
 
 当前已完成的最小验证：
 
@@ -793,13 +798,14 @@ grep -RIn "from maze\.sandbox\|import maze\.sandbox\|maze\.sandbox\|from maze\.t
 Core smoke 覆盖：
 
 - static DAG spec validate / build / run snapshot。
-- dynamic run append task / event / scheduler message。
+- dynamic run append task / append edge / event / scheduler message。
 - task resource annotation 和 timeout annotation。
 - cluster resources / queues message surface。
 - worker registration message surface。
 - worker capability detection。
 - run/task state snapshot。
 - logs / artifact capture via worker file context manifest。
+- local LLM / inference instance lifecycle mock。
 
 删除 `maze/sandbox` 后的 worker-side 能力检查：
 
@@ -841,7 +847,7 @@ python -m py_compile $(find maze -name '*.py' -print)
 - [x] 不新增复杂功能。
 - [x] 不为了删除非主线代码而破坏 Core Runtime。
 - [x] 不把 Workflow Agent 做成通用 Agent。
-- [ ] 不让 Workbench 继续朝通用 Agent Playground 发展。
+- [x] 不让 Workbench 继续朝通用 Agent Playground 发展。
 - [x] 不删除 task execution isolation / logs / artifacts / timeout / worker execution 控制。
 
 ## 15. Phase 1 验收标准
@@ -853,9 +859,9 @@ python -m py_compile $(find maze -name '*.py' -print)
 - [x] `import maze` 不再暴露 skills/MCP/generic Agent/ReAct 主线符号。
 - [x] `maze.client.maze` 不再暴露 skills/MCP/generic Agent/ReAct 主线符号。
 - [x] CLI help 不再宣传 skills/MCP/generic Agent。
-- [ ] Workbench 默认入口仍需继续收敛：workspace chat / `WorkspaceAgentPanel` 和 ReAct launch 已删除；Skills/MCP/ReAct inspector/sidebar 残留尚待下一小步清理。
+- [x] Workbench 默认入口已收敛：workspace chat / `WorkspaceAgentPanel` / ReAct launch / Skills/MCP/ReAct 可见主线入口已删除。
 - [x] Skills 已删除或彻底 legacy 化。
-- [ ] MCP 已删除或彻底 legacy 化。
+- [x] MCP 已从默认 public boundary 删除；backend public routes 和默认依赖已移除，剩余 helper 属于 legacy/internal 候选。
 - [x] Generic Agent/ReAct 已从主线隐藏。
 - [x] Tool zoo 已从 README/public API 主线移除。
 - [x] Core smoke tests 通过。

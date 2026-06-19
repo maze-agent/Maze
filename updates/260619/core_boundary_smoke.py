@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from maze.core.files.lineage import TASK_RESULT_ENVELOPE, run_task_with_file_context
 from maze.core.path.path import MaPath
+from maze.core.scheduler import llm_instance
+from maze.core.scheduler.llm_instance import LlmInstanceManager
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.worker.capabilities import detect_worker_execution_capabilities
 from maze.core.workflow.dag_spec import build_dag_workflow, dag_spec_from_payload
@@ -86,6 +89,25 @@ async def dynamic_append_smoke() -> None:
     assert snapshot["task_specs"]["dyn-echo"]["timeout_seconds"] == 5
     assert any(event["type"] == "append_task" for event in events)
     assert any(message["type"] == "run_task" for message in sent_messages)
+
+    child, child_idempotent = await mapath.append_dynamic_task(
+        run_id,
+        task_spec_payload={
+            "task_spec_id": "dyn-child",
+            "task_name": "dyn_child",
+            "code_str": code_returning("    return {'child': True}"),
+            "outputs": [{"name": "child"}],
+            "resources": {"cpu": 1, "cpu_mem": 32, "gpu": 0, "gpu_mem": 0},
+        },
+        parents=[task.task_id],
+        request_id="append-child",
+    )
+    snapshot = await mapath.get_dynamic_run_snapshot(run_id)
+    assert not child_idempotent
+    assert child.task_id in snapshot["task_nodes"]
+    assert snapshot["task_nodes"][child.task_id]["parents"] == [task.task_id]
+    assert {"source": task.task_id, "target": child.task_id} in snapshot["graph"]["edges"]
+    assert child.task_id in snapshot["tasks"]["pending"]
 
 
 async def cluster_api_shape_smoke() -> None:
@@ -170,12 +192,75 @@ def artifact_and_log_surface_smoke() -> None:
         assert "logs/maze-command.stdout" in paths
 
 
+def llm_instance_lifecycle_smoke() -> None:
+    class FakeRemoteCall:
+        def __init__(self, value=None):
+            self.value = value
+
+    class FakeRemoteMethod:
+        def __init__(self, value=None):
+            self.calls = 0
+            self.value = value
+
+        def remote(self, *args, **kwargs):
+            self.calls += 1
+            return FakeRemoteCall(self.value)
+
+    class FakeActor:
+        def __init__(self):
+            self.start_server = FakeRemoteMethod(True)
+            self.get_port = FakeRemoteMethod("8123")
+            self.stop_server = FakeRemoteMethod(None)
+
+    class FakeActorOptions:
+        def __init__(self, actor):
+            self.actor = actor
+
+        def remote(self, **kwargs):
+            self.kwargs = kwargs
+            return self.actor
+
+    class FakeLLMServerActor:
+        actor = FakeActor()
+        options_kwargs = None
+
+        @classmethod
+        def options(cls, **kwargs):
+            cls.options_kwargs = kwargs
+            return FakeActorOptions(cls.actor)
+
+    def fake_ray_get(value):
+        return value.value if isinstance(value, FakeRemoteCall) else value
+
+    manager = LlmInstanceManager()
+    node_id = "0" * 56
+    with (
+        patch.object(llm_instance, "LLMServerActor", FakeLLMServerActor),
+        patch.object(llm_instance.ray, "get", fake_ray_get),
+    ):
+        port = manager.start_llm_instance(
+            instance_id="llm-smoke",
+            model="mock-model",
+            node_ip="127.0.0.1",
+            node_id=node_id,
+            gpu_id=0,
+            resources={"cpu": 1, "cpu_mem": 1024, "gpu": 1, "gpu_mem": 4096},
+        )
+        assert port == "8123"
+        assert manager.id_to_instance_addr["llm-smoke"] == "127.0.0.1:8123"
+        assert manager.get_instance_resource_detail("llm-smoke")["node_id"] == node_id
+        manager.stop_llm_instance("llm-smoke")
+        assert "llm-smoke" not in manager.id_to_instance_actor
+        assert FakeLLMServerActor.actor.stop_server.calls == 1
+
+
 def main() -> None:
     static_workflow_smoke()
     asyncio.run(dynamic_append_smoke())
     asyncio.run(cluster_api_shape_smoke())
     worker_execution_controls_smoke()
     artifact_and_log_surface_smoke()
+    llm_instance_lifecycle_smoke()
     print("core boundary smoke passed")
 
 
