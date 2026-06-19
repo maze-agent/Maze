@@ -231,22 +231,7 @@ def _infer_dynamic_run_mode(snapshot: Dict[str, Any]) -> str:
     if isinstance(final_result, dict) and final_result.get("mode"):
         return str(final_result["mode"])
 
-    task_specs = snapshot.get("task_specs") or {}
-    if isinstance(task_specs, dict) and "react_llm_decision" in task_specs:
-        return "react"
-
-    for event_type in ("agent_run_started", "react_llm_decision"):
-        if _event_type_seen(snapshot, event_type):
-            return "react" if event_type.startswith("react_") else "agent"
-
     return "dynamic"
-
-
-def _event_type_seen(snapshot: Dict[str, Any], event_type: str) -> bool:
-    # Run summaries are intentionally derived from run.json only. This helper
-    # exists as a future hook for event-indexed summaries without changing the
-    # public summary shape.
-    return False
 
 
 def _final_result_summary(final_result: Any) -> Any:
