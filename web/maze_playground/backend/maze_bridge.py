@@ -41,7 +41,7 @@ default_workspace_dir = os.path.abspath(os.path.expanduser(
 from maze.client.front.client import MaClient
 from maze.client.maze.client import MaClient as DynamicMaClient
 from maze import task, get_task_metadata
-from maze.client.front.builtin import agentTools, distributedSmoke
+from maze.client.front.builtin import distributedSmoke
 import inspect
 import importlib
 import importlib.util
@@ -49,7 +49,7 @@ import hashlib
 
 def get_builtin_tasks():
     """获取所有内置任务的元数据"""
-    builtin_modules = [agentTools, distributedSmoke]
+    builtin_modules = [distributedSmoke]
     tasks = []
     
     for module in builtin_modules:
@@ -684,9 +684,7 @@ def build_and_run_workflow(
                 module_name, func_name = task_ref.split(".")
                 
                 # 动态导入模块和函数
-                if module_name == "agentTools":
-                    task_func = getattr(agentTools, func_name)
-                elif module_name == "distributedSmoke":
+                if module_name == "distributedSmoke":
                     task_func = getattr(distributedSmoke, func_name)
                 else:
                     return {"success": False, "error": f"Unknown module: {module_name}"}
@@ -700,10 +698,6 @@ def build_and_run_workflow(
                         "traceback": traceback.format_exc(),
                     }
 
-                if module_name == "agentTools" and workflow_workspace_dir:
-                    if not str(task_inputs.get("workspace_dir") or "").strip():
-                        task_inputs["workspace_dir"] = workflow_workspace_dir
-                
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)
                 ma_task = workflow.add_task(task_func, inputs=task_inputs)

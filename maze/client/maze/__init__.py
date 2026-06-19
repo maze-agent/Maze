@@ -21,11 +21,3 @@ __all__ = [
     'TaskInvocation',
     'OutputRef',
 ]
-
-for _legacy_module in (
-    'agent_exec',
-    'agent_permissions',
-    'agent_sandbox',
-):
-    globals().pop(_legacy_module, None)
-del _legacy_module
