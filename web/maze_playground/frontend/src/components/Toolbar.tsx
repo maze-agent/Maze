@@ -1,14 +1,11 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Button, Input, Space, Tag, Typography, message } from 'antd';
-import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
+import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, UploadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { LocalWorkspaceFileMeta, TaskDefinition, WorkflowNode } from '@/types/workflow';
-import { loadLlmSettings } from '@/utils/llmSettings';
-import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 
 const { Text } = Typography;
-const ENABLE_LEGACY_AGENT_UI = (import.meta as any).env?.VITE_ENABLE_LEGACY_AGENT_UI === '1';
 
 function joinWorkspacePath(base: string, name: string) {
   return [base, name].filter(Boolean).join('/');
@@ -92,12 +89,10 @@ async function getFileFromLocalWorkspace(directoryHandle: any, relativePath: str
 
 interface ToolbarProps {
   onOpenRuns?: () => void;
-  onOpenReactRunner?: () => void;
-  onReactRunStarted?: (runId: string) => void;
   onOpenClusterResources?: () => void;
 }
 
-export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStarted, onOpenClusterResources }: ToolbarProps) {
+export default function Toolbar({ onOpenRuns, onOpenClusterResources }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -483,60 +478,7 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
 
     const agentNodes = nodes.filter((node) => node.data.category === 'agent');
     if (agentNodes.length > 0) {
-      if (!ENABLE_LEGACY_AGENT_UI) {
-        message.warning('Legacy Agent/ReAct workflows are hidden by default. Set VITE_ENABLE_LEGACY_AGENT_UI=1 to run them.');
-        return;
-      }
-      if (agentNodes.length > 1 || nodes.length > 1 || edges.length > 0) {
-        message.warning('Run one ReAct workflow node at a time. Mixed static and agent workflows are not supported yet.');
-        return;
-      }
-
-      const agentNode = agentNodes[0];
-      if (agentNode.data.agentKind !== 'react') {
-        message.warning('Unsupported agent workflow');
-        return;
-      }
-
-      const prompt = (agentNode.data.prompt || '').trim();
-      if (!prompt) {
-        message.warning('Please configure a ReAct prompt');
-        return;
-      }
-
-      const mode = agentNode.data.reactMode || 'local';
-      const settings = loadLlmSettings();
-      if (mode === 'online' && (!settings.baseUrl.trim() || !settings.model.trim() || !settings.apiKey.trim())) {
-        message.warning('Please configure online LLM settings first');
-        return;
-      }
-
-      setIsRunning(true);
-      try {
-        await hydrateMissingLocalWorkspaceFiles();
-        const maxSteps = agentNode.data.maxSteps || 4;
-        const taskTimeout = normalizeReactTaskTimeout(agentNode.data.taskTimeout, mode);
-        const started = await api.startReactRun({
-          mode,
-          prompt,
-          workspaceId: workspaceId || undefined,
-          workspaceDir: workspaceDir || undefined,
-          maxSteps,
-          maxTokens: agentNode.data.maxTokens || 2048,
-          timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
-          taskTimeout,
-          skills: agentNode.data.skills || [],
-          execBackend: agentNode.data.execBackend || 'workspace_sandbox',
-          llm: mode === 'online' ? settings : undefined,
-        });
-        message.success(`ReAct run started: ${started.runId.slice(0, 8)}...`);
-        onReactRunStarted?.(started.runId);
-      } catch (error: any) {
-        console.error('Failed to run ReAct workflow:', error);
-        message.error(error.response?.data?.error || 'Failed to run ReAct workflow');
-      } finally {
-        setIsRunning(false);
-      }
+      message.warning('Legacy Agent/ReAct workflows were removed from Maze core. Use WorkflowSpec / WorkflowPatch tasks instead.');
       return;
     }
 
@@ -644,15 +586,6 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
       </Space>
 
       <Space>
-        {ENABLE_LEGACY_AGENT_UI ? (
-          <Button
-            icon={<ThunderboltOutlined />}
-            onClick={onOpenReactRunner}
-          >
-            ReAct
-          </Button>
-        ) : null}
-
         <Button
           icon={<HistoryOutlined />}
           onClick={onOpenRuns}

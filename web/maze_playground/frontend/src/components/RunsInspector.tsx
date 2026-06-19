@@ -23,14 +23,12 @@ import {
   EyeOutlined,
   HistoryOutlined,
   InboxOutlined,
-  PlayCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
   StopOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   DynamicRunEvent,
   DynamicRunSnapshot,
@@ -45,7 +43,6 @@ import type {
   UnifiedRunTaskSnapshot,
   WorkspaceSkillMeta,
 } from '@/types/workflow';
-import { loadLlmSettings } from '@/utils/llmSettings';
 import ReActRuntimeCanvas, {
   buildAgentTrace,
   formatJson,
@@ -1090,73 +1087,6 @@ export default function RunsInspector({
     }
   };
 
-  const rerunSelectedDynamicReactRun = async () => {
-    if (!selectedDynamicRun) return;
-
-    const started = agentTrace.started || {};
-    const prompt = String(started.prompt || '').trim();
-    if (!prompt) {
-      message.warning('The selected ReAct run does not include its original prompt');
-      return;
-    }
-
-    const mode = inferReactRerunMode(agentTrace.started, selectedDynamicRun);
-    const maxSteps = Number(started.max_steps || selectedDynamicRun.final_result?.max_steps || 4);
-    const maxTokensValue = Number(started.max_tokens || selectedDynamicRun.final_result?.max_tokens || 0);
-    const taskTimeout = normalizeReactTaskTimeout(
-      started.task_timeout || selectedDynamicRun.final_result?.task_timeout,
-      mode,
-    );
-    const sandboxes = collectSandboxSummary(selectedDynamicTaskNodes, dynamicEvents, selectedDynamicRun);
-    const execBackend = (
-      sandboxes.find((value) => value === 'workspace_sandbox' || value === 'docker')
-      || selectedDynamicRun.final_result?.exec_backend
-      || 'workspace_sandbox'
-    ) as 'workspace_sandbox' | 'docker';
-
-    const llmSettings = loadLlmSettings();
-    if (mode === 'online') {
-      if (!llmSettings.baseUrl.trim() || !llmSettings.model.trim() || !llmSettings.apiKey.trim()) {
-        message.warning('Please configure online LLM settings first');
-        return;
-      }
-    }
-
-    setRunActionLoading(true);
-    try {
-      const result = await api.startReactRun({
-        mode,
-        prompt,
-        workspaceId: workspaceId || undefined,
-        workspaceDir: workspaceDir || undefined,
-        maxSteps: Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 4,
-        maxTokens: Number.isFinite(maxTokensValue) && maxTokensValue > 0 ? maxTokensValue : undefined,
-        timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
-	        taskTimeout,
-	        skills: selectedLoadedSkills.map((skill) => skill.name),
-	        execBackend,
-	        permissionAskTimeoutSeconds: 120,
-	        llm: mode === 'online'
-          ? {
-              ...llmSettings,
-              baseUrl: llmSettings.baseUrl.trim(),
-              model: llmSettings.model.trim(),
-            }
-          : undefined,
-      });
-
-      message.success(`ReAct rerun started: ${result.runId.slice(0, 8)}...`);
-      await loadRuns(true);
-      setSelectedRunKey(`dynamic:${result.runId}`);
-      await loadDynamicRunDetails(result.runId, true);
-    } catch (error: any) {
-      console.error('Failed to rerun ReAct workflow:', error);
-      message.error(error.response?.data?.error || 'Failed to rerun ReAct workflow');
-    } finally {
-      setRunActionLoading(false);
-    }
-  };
-
   const decidePermissionRequest = async (event: any, action: 'allow' | 'deny') => {
     if (!selectedDynamicRun) return;
     const request = event.request || {};
@@ -1958,16 +1888,6 @@ export default function RunsInspector({
             >
               Refresh
             </Button>
-            {(getRunMode(selectedDynamicRun) === 'react' || showAgentTrace) && (
-              <Button
-                icon={<PlayCircleOutlined />}
-                onClick={rerunSelectedDynamicReactRun}
-                loading={runActionLoading}
-                disabled={!agentTrace.started?.prompt}
-              >
-                Rerun
-              </Button>
-            )}
             {!dynamicTerminalStatuses.has(selectedDynamicRun.status) && (
               <Popconfirm
                 title="Cancel this run?"

@@ -727,41 +727,6 @@ export const api = {
     return response.data;
   },
 
-  async startReactRun(data: {
-    mode: 'local' | 'online';
-    prompt: string;
-    workspaceId?: string;
-    workspaceDir?: string;
-    maxSteps?: number;
-    maxTokens?: number;
-    timeoutSeconds?: number;
-    taskTimeout?: number;
-    skills?: string[];
-	    skillDirs?: string[];
-	    maxSkillChars?: number;
-	    execBackend?: 'workspace_sandbox' | 'docker';
-	    permissionPolicy?: Record<string, any>;
-	    permissionAskTimeoutSeconds?: number;
-	    mcpServers?: McpServerConfig[];
-    mcpProfileName?: string;
-    llm?: LlmSettings;
-  }): Promise<{
-    success: boolean;
-    runId: string;
-    answer?: any;
-    status: string;
-    mode?: string;
-    skills?: string[];
-    execBackend?: string;
-    mcpServers?: Array<Record<string, any>>;
-    mcpProfileName?: string;
-    mcpProfile?: McpProfileSummary;
-    eventTypes?: string[];
-  }> {
-    const response = await axios.post(`${API_BASE}/react-runs/start`, data);
-    return response.data;
-  },
-
   async discoverMcpTools(data: {
     workspaceId?: string;
     workspaceDir?: string;

@@ -8,7 +8,6 @@ import WorkflowCanvas from './components/WorkflowCanvas';
 import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
-import ReActRunModal from './components/ReActRunModal';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import WorkspaceAgentPanel from './components/WorkspaceAgentPanel';
 import { api } from './api/client';
@@ -30,7 +29,6 @@ function App() {
   const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
   const [staticRunFocusId, setStaticRunFocusId] = useState<string | null>(null);
   const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
-  const [reactRunnerOpen, setReactRunnerOpen] = useState(false);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
   const [workspaceAgentOpen, setWorkspaceAgentOpen] = useState(true);
   const {
@@ -358,13 +356,7 @@ function App() {
       <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
         <Toolbar
           onOpenRuns={() => setRunsOpen(true)}
-          onOpenReactRunner={ENABLE_LEGACY_AGENT_UI ? () => setReactRunnerOpen(true) : undefined}
           onOpenClusterResources={() => setClusterResourcesOpen(true)}
-          onReactRunStarted={(runId) => {
-            setActiveDynamicRunId(runId);
-            setDynamicRunFocusId(runId);
-            setStaticRunFocusId(null);
-          }}
         />
         
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
@@ -402,17 +394,6 @@ function App() {
           focusDynamicRunId={dynamicRunFocusId}
           focusStaticRunId={staticRunFocusId}
         />
-        {ENABLE_LEGACY_AGENT_UI ? (
-          <ReActRunModal
-            open={reactRunnerOpen}
-            onClose={() => setReactRunnerOpen(false)}
-            onCompleted={(runId) => {
-              setActiveDynamicRunId(runId);
-              setDynamicRunFocusId(runId);
-              setStaticRunFocusId(null);
-            }}
-          />
-        ) : null}
         <ClusterResourcesDrawer
           open={clusterResourcesOpen}
           onClose={() => setClusterResourcesOpen(false)}
