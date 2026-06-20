@@ -1,2 +1,7 @@
-mkdocs
-mkdocs-material
+# Documentation build dependencies for mkdocs.yml.
+# Runtime/package dependencies live in ../pyproject.toml.
+mkdocs==1.6.1
+mkdocs-material==9.5.49
+Markdown==3.7
+pymdown-extensions==10.16.1
+Pygments==2.18.0

@@ -29,8 +29,8 @@ const activeAgentRuns = new Map();
 const agentRunSseClients = new Map();
 const localWorkspaceManifests = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
-const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspace'));
-const WORKSPACES_DIR = path.resolve(process.env.MAZE_WORKSPACES_DIR || path.join(WORKSPACE_ROOT_DIR, 'workspaces'));
+const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_ROOT_DIR || process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspaces'));
+const WORKSPACES_DIR = path.resolve(process.env.MAZE_WORKSPACES_DIR || WORKSPACE_ROOT_DIR);
 const DEFAULT_WORKSPACE_ID = process.env.MAZE_DEFAULT_WORKSPACE_ID || 'default';
 const DEFAULT_WORKSPACE_DIR = path.join(WORKSPACES_DIR, DEFAULT_WORKSPACE_ID);
 const LEGACY_WORKSPACE_DIR = WORKSPACE_ROOT_DIR;
@@ -39,6 +39,7 @@ const MAZE_CORE_URL = process.env.MAZE_CORE_URL || 'http://localhost:8000';
 const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled', 'interrupted']);
 const staticRunWriteQueues = new Map();
 const recoveredStaticRunWorkspaces = new Set();
+const workspaceTasksCache = new Map();
 
 function getPythonBin() {
   if (process.env.PYTHON_BIN) {
@@ -72,6 +73,47 @@ const PYTHON_BIN = getPythonBin();
 
 function toPosixPath(filePath) {
   return filePath.split(path.sep).join('/');
+}
+
+async function workspaceTasksSignature(workspaceDir) {
+  const tasksDir = path.join(workspaceDir, 'tasks');
+  const files = [];
+
+  async function walk(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error) => {
+      if (error?.code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.py') || entry.name.startsWith('__')) {
+        continue;
+      }
+
+      const stat = await fs.stat(fullPath);
+      files.push([
+        toPosixPath(path.relative(workspaceDir, fullPath)),
+        stat.mtimeMs,
+        stat.size,
+      ].join(':'));
+    }
+  }
+
+  await walk(tasksDir);
+  return files.sort().join('|');
+}
+
+function clearWorkspaceTasksCache(workspaceDir) {
+  if (workspaceDir) {
+    workspaceTasksCache.delete(path.resolve(workspaceDir));
+  }
 }
 
 function safeFileName(name, fallbackPrefix = 'workflow') {
@@ -110,6 +152,17 @@ function safeWorkspaceId(value, fallbackPrefix = 'ws') {
   return safe || `${fallbackPrefix}-${Date.now().toString(36)}`;
 }
 
+function normalizeWorkspaceRef(value) {
+  const normalized = path.posix.normalize(String(value || '').trim().replace(/^\/+/, ''));
+  if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized === '..' || normalized.includes('/../')) {
+    throw new Error('Workspace reference must stay inside the workspaces directory');
+  }
+  return normalized
+    .split('/')
+    .map((part) => safeWorkspaceId(part, DEFAULT_WORKSPACE_ID))
+    .join('/');
+}
+
 function isWindowsDrivePath(value) {
   return /^[a-zA-Z]:[\\/]/.test(String(value || '').trim());
 }
@@ -129,7 +182,7 @@ function workspaceIdFromDir(workspaceDir) {
   const resolved = path.resolve(workspaceDir);
   const relative = path.relative(WORKSPACES_DIR, resolved);
   if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
-    return safeWorkspaceId(relative.split(path.sep)[0], DEFAULT_WORKSPACE_ID);
+    return safeWorkspaceId(relative, DEFAULT_WORKSPACE_ID);
   }
   if (resolved === LEGACY_WORKSPACE_DIR) {
     return 'legacy';
@@ -144,8 +197,8 @@ function resolveWorkspaceDirInput(input = '') {
     return DEFAULT_WORKSPACE_DIR;
   }
 
-  if (!raw.includes('/') && !path.isAbsolute(raw)) {
-    return path.join(WORKSPACES_DIR, safeWorkspaceId(raw, DEFAULT_WORKSPACE_ID));
+  if (!path.isAbsolute(raw)) {
+    return path.join(WORKSPACES_DIR, raw.includes('/') ? normalizeWorkspaceRef(raw) : safeWorkspaceId(raw, DEFAULT_WORKSPACE_ID));
   }
 
   const resolved = path.resolve(raw);
@@ -2921,6 +2974,18 @@ function findStaticRunArtifact(run, { taskId, artifactPath } = {}) {
   return null;
 }
 
+function staticRunStorageRoots(workspaceDir, runId) {
+  const roots = [];
+  for (const runsDir of staticRunSearchDirs(workspaceDir)) {
+    roots.push(path.resolve(runsDir, runId));
+  }
+  roots.push(
+    path.resolve(workspaceDir, 'runs'),
+    path.resolve(workspaceDir, 'workflow_runs'),
+  );
+  return Array.from(new Set(roots));
+}
+
 async function promoteArtifactIntoWorkspace(context, input = {}) {
   const {
     targetPath,
@@ -5179,6 +5244,15 @@ async function listCatalogItems(type) {
     if (entry.name.startsWith('.')) {
       continue;
     }
+    if (entry.name === '__pycache__' || entry.name.startsWith('__')) {
+      continue;
+    }
+    if (normalizedType === 'tasks' && (!entry.isFile() || !entry.name.endsWith('.py'))) {
+      continue;
+    }
+    if (normalizedType === 'workflows' && (!entry.isFile() || !entry.name.endsWith('.json'))) {
+      continue;
+    }
     const fullPath = path.join(dir, entry.name);
     const stat = await fs.stat(fullPath);
     const metadata = await catalogItemMetadata(normalizedType, fullPath, entry);
@@ -5349,6 +5423,62 @@ app.post('/api/system-catalog/import', async (req, res) => {
   }
 });
 
+app.post('/api/system-catalog/workflows/load', async (req, res) => {
+  try {
+    const {
+      workspaceId,
+      workspaceDir: requestedWorkspaceDir,
+      sourceId,
+    } = req.body || {};
+
+    if (!sourceId) {
+      return res.status(400).json({ error: 'sourceId is required' });
+    }
+
+    await ensureSystemCatalogDirs();
+    const { sourceId: normalizedSourceId, sourcePath } = resolveCatalogSource('workflows', sourceId);
+    const raw = await fs.readFile(sourcePath, 'utf-8');
+    const payload = JSON.parse(raw);
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const workspaceDir = context.workspaceDir;
+    const workflow = normalizeWorkflowPayload(payload);
+    const importResult = await importTaskDefinitions(workspaceDir, workflow.includedTasks, workflow.name);
+    workflow.nodes = await hydrateWorkspaceWorkflowNodes(
+      workflow.nodes,
+      workspaceDir,
+      workflow.includedTasks,
+      importResult.taskPathMap,
+    );
+
+    let manifest = context.manifest;
+    if (importResult.imported.length > 0 || importResult.remapped.length > 0) {
+      manifest = await recordWorkspaceMutation(workspaceDir, 'system_workflow_template_loaded', {
+        source_id: normalizedSourceId,
+        workflow_name: workflow.name,
+        imported_count: importResult.imported.length,
+        remapped_count: importResult.remapped.length,
+      });
+    }
+
+    res.json({
+      success: true,
+      workspaceId: manifest.workspace_id,
+      workspaceDir,
+      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
+      sourceId: normalizedSourceId,
+      workflow,
+      importedTaskDefinitions: {
+        imported: importResult.imported,
+        skipped: importResult.skipped,
+        remapped: importResult.remapped,
+      },
+    });
+  } catch (error) {
+    console.error('❌ 加载 system workflow 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/workspace-policy', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
@@ -5421,6 +5551,15 @@ app.get('/api/workspace-tasks', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
     const workspaceDir = context.workspaceDir;
+    const cacheKey = path.resolve(workspaceDir);
+    const signature = await workspaceTasksSignature(workspaceDir);
+    const cached = workspaceTasksCache.get(cacheKey);
+
+    if (cached?.signature === signature) {
+      res.json({ ...cached.result, ...workspaceResponseFields(context) });
+      return;
+    }
+
     console.log(`📁 扫描工作目录任务: ${workspaceDir}`);
 
     const result = await callPython('get_workspace_tasks', { workspaceDir });
@@ -5431,6 +5570,7 @@ app.get('/api/workspace-tasks', async (req, res) => {
     }
 
     console.log(`✅ 成功获取 ${result.tasks.length} 个工作区任务`);
+    workspaceTasksCache.set(cacheKey, { signature, result });
     res.json({ ...result, ...workspaceResponseFields(context) });
   } catch (error) {
     console.error('❌ 获取工作区任务失败:', error);
@@ -5491,6 +5631,7 @@ app.post('/api/workspace-tasks', async (req, res) => {
       return res.status(400).json({ error: result.error, traceback: result.traceback });
     }
 
+    clearWorkspaceTasksCache(workspaceDir);
     console.log('✅ 工作区任务保存成功');
     const manifest = await recordWorkspaceMutation(workspaceDir, 'task_saved', {
       path: result.relativePath || relativePath,
@@ -5533,6 +5674,7 @@ app.delete('/api/workspace-tasks', async (req, res) => {
       return res.status(400).json({ error: result.error, traceback: result.traceback });
     }
 
+    clearWorkspaceTasksCache(workspaceDir);
     console.log('✅ 工作区任务删除成功');
     const manifest = await recordWorkspaceMutation(workspaceDir, 'task_deleted', {
       path: result.relativePath || relativePath,
@@ -5579,6 +5721,7 @@ app.patch('/api/workspace-tasks/rename', async (req, res) => {
       return res.status(400).json({ error: result.error, traceback: result.traceback });
     }
 
+    clearWorkspaceTasksCache(workspaceDir);
     console.log('✅ 工作区任务重命名成功');
     const manifest = await recordWorkspaceMutation(workspaceDir, 'task_renamed', {
       path: result.relativePath || relativePath,
@@ -6473,8 +6616,9 @@ app.get('/api/artifacts/sha256/:sha256', async (req, res) => {
       return res.status(response.status).send(message || `Maze core request failed: ${response.status}`);
     }
     const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${req.params.sha256}"`);
+    res.setHeader('Content-Disposition', `${disposition}; filename="${req.params.sha256}"`);
     const buffer = Buffer.from(await response.arrayBuffer());
     res.send(buffer);
   } catch (error) {
@@ -7385,25 +7529,25 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
       return res.status(400).json({ error: 'taskId and path are required' });
     }
 
-    const taskNode = Object.values(run.task_nodes || {}).find((node) => (
-      node.maze_task_id === taskId
-      || node.task_id === taskId
-      || node.node_id === taskId
-      || node.id === taskId
-    ));
-    const artifact = (taskNode?.artifacts || []).find((item) => item.path === artifactPath);
+    const located = findStaticRunArtifact(run, { taskId, artifactPath });
+    const artifact = located?.artifact || null;
     if (!artifact) {
       return res.status(404).json({ error: 'Artifact not found' });
     }
 
     if (artifact.storage_path) {
-      const artifactsDir = path.resolve(staticRunDir(workspaceDir, req.params.runId), 'artifacts');
       const fullPath = path.resolve(String(artifact.storage_path || ''));
-      if (!fullPath.startsWith(artifactsDir + path.sep)) {
+      const allowed = staticRunStorageRoots(workspaceDir, req.params.runId).some((root) => (
+        fullPath === root || fullPath.startsWith(root + path.sep)
+      ));
+      if (!allowed) {
         return res.status(400).json({ error: 'Artifact path is outside this run' });
       }
 
-      return res.download(fullPath, artifact.name || path.basename(fullPath));
+      const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
+      res.setHeader('Content-Type', artifact.mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(artifact.name || path.basename(fullPath))}"`);
+      return res.sendFile(fullPath);
     }
 
     if (!artifact.sha256) {
@@ -7415,8 +7559,9 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
       return res.status(response.status).json({ error: `Failed to download artifact: HTTP ${response.status}` });
     }
     const data = Buffer.from(await response.arrayBuffer());
+    const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
     res.setHeader('Content-Type', artifact.mime || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(artifact.name || path.basename(artifact.path || 'artifact'))}"`);
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(artifact.name || path.basename(artifact.path || 'artifact'))}"`);
     res.send(data);
   } catch (error) {
     console.error('❌ 下载 static workflow artifact 失败:', error);
@@ -7556,34 +7701,24 @@ app.post('/api/workflows', async (req, res) => {
     const { name = 'Untitled Workflow' } = req.body;
     
     console.log(`📝 创建工作流: ${workflowId}`);
-    
-    // 调用 Python 创建 Maze 工作流
-    const result = await callPython('create_workflow', {
-      workflowId,
-      serverUrl: 'http://localhost:8000'
-    });
-    
-    if (!result.success) {
-      console.error('❌ 创建 Maze 工作流失败:', result.error);
-      return res.status(500).json({ error: result.error, traceback: result.traceback });
-    }
+    const mazeWorkflowId = 'will-be-created-on-run';
     
     // 保存工作流信息
     workflows.set(workflowId, {
       id: workflowId,
       name,
-      mazeWorkflowId: result.mazeWorkflowId,
+      mazeWorkflowId,
       nodes: [],
       edges: [],
       createdAt: new Date().toISOString(),
       status: 'created'
     });
     
-    console.log(`✅ 工作流创建成功 (Maze ID: ${result.mazeWorkflowId})`);
+    console.log(`✅ 工作流创建成功 (Maze ID: ${mazeWorkflowId})`);
     res.json({ 
       workflowId, 
       name,
-      mazeWorkflowId: result.mazeWorkflowId
+      mazeWorkflowId
     });
   } catch (error) {
     console.error('❌ 创建工作流失败:', error);

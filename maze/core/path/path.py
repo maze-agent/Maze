@@ -284,6 +284,7 @@ class MaPath:
             tags=tags,
             metadata=metadata,
         )
+        static_run.submitted_time = submit_workflow.graph.graph["submission_time"]
         self.static_runs[submit_id] = static_run
         self._persist_static_run(submit_id)
         self.global_metrics.on_run_submitted(submit_id)

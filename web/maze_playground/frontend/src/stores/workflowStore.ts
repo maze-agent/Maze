@@ -250,7 +250,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     runResults: [...state.runResults, result],
   })),
   
-  clearRunResults: () => set({ runResults: [] }),
+  clearRunResults: () => set({ runResults: [], selectedRunId: null }),
 
   setActiveRun: (run) => set((state) => {
     if (!run) {

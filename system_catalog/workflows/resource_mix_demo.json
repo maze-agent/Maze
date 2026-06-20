@@ -1,0 +1,1206 @@
+{
+  "schema": "maze-playground-bundle",
+  "version": 3,
+  "description": "Complex demo workflow mixing CPU analysis, GPU-declared vector probing, and file I/O artifacts for an uploaded .txt corpus.",
+  "tags": [
+    "demo",
+    "CPU",
+    "GPU",
+    "I/O",
+    "artifact"
+  ],
+  "workflow": {
+    "name": "Resource Mix CPU GPU IO Demo",
+    "description": "Complex demo workflow mixing CPU analysis, GPU-declared vector probing, and file I/O artifacts for an uploaded .txt corpus.",
+    "tags": [
+      "demo",
+      "CPU",
+      "GPU",
+      "I/O",
+      "artifact"
+    ],
+    "sourceWorkflowId": "system-resource-mix-demo",
+    "nodes": [
+      {
+        "id": "node-load-text",
+        "type": "taskNode",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "I/O Load Uploaded Text",
+          "taskPath": "tasks/resource_mix_load_text.py",
+          "functionName": "resource_mix_load_text",
+          "inputs": [
+            {
+              "name": "input_path",
+              "dataType": "str",
+              "source": "user",
+              "value": "questions.txt"
+            },
+            {
+              "name": "fallback_text",
+              "dataType": "str",
+              "source": "user",
+              "value": "Maze resource mix demo\n\nQuestion: How should a distributed workflow balance CPU parsing, GPU ranking, and file I/O?\nObservation: CPU tasks build deterministic text statistics and section graphs.\nObservation: GPU tasks run vector-style scoring and fall back safely when CUDA is unavailable.\nObservation: I/O tasks turn intermediate state into inspectable artifacts."
+            }
+          ],
+          "outputs": [
+            {
+              "name": "corpus",
+              "dataType": "any"
+            },
+            {
+              "name": "source_path",
+              "dataType": "any"
+            },
+            {
+              "name": "line_count",
+              "dataType": "any"
+            },
+            {
+              "name": "byte_count",
+              "dataType": "any"
+            },
+            {
+              "name": "created_sample",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-split-sections",
+        "type": "taskNode",
+        "position": {
+          "x": 390,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "CPU Split Sections",
+          "taskPath": "tasks/resource_mix_split_sections.py",
+          "functionName": "resource_mix_split_sections",
+          "inputs": [
+            {
+              "name": "corpus",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-load-text",
+                "outputKey": "corpus"
+              }
+            },
+            {
+              "name": "max_sections",
+              "dataType": "str",
+              "source": "user",
+              "value": "7"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "sections",
+              "dataType": "any"
+            },
+            {
+              "name": "section_count",
+              "dataType": "any"
+            },
+            {
+              "name": "section_titles",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 128,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-write-section-files",
+        "type": "taskNode",
+        "position": {
+          "x": 720,
+          "y": 50
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "I/O Materialize Sections",
+          "taskPath": "tasks/resource_mix_write_section_files.py",
+          "functionName": "resource_mix_write_section_files",
+          "inputs": [
+            {
+              "name": "sections",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-split-sections",
+                "outputKey": "sections"
+              }
+            },
+            {
+              "name": "output_dir",
+              "dataType": "str",
+              "source": "user",
+              "value": "resource_mix_demo/sections"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "section_paths",
+              "dataType": "any"
+            },
+            {
+              "name": "section_manifest_path",
+              "dataType": "any"
+            },
+            {
+              "name": "section_file_count",
+              "dataType": "any"
+            },
+            {
+              "name": "section_total_bytes",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 192,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-token-stats",
+        "type": "taskNode",
+        "position": {
+          "x": 720,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "CPU Token Statistics",
+          "taskPath": "tasks/resource_mix_cpu_token_stats.py",
+          "functionName": "resource_mix_cpu_token_stats",
+          "inputs": [
+            {
+              "name": "corpus",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-load-text",
+                "outputKey": "corpus"
+              }
+            },
+            {
+              "name": "sections",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-split-sections",
+                "outputKey": "sections"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "token_stats",
+              "dataType": "any"
+            },
+            {
+              "name": "top_terms",
+              "dataType": "any"
+            },
+            {
+              "name": "section_density",
+              "dataType": "any"
+            },
+            {
+              "name": "keyword_scores",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 2,
+            "cpu_mem": 512,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-section-graph",
+        "type": "taskNode",
+        "position": {
+          "x": 1050,
+          "y": 160
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "CPU Section Graph",
+          "taskPath": "tasks/resource_mix_cpu_section_graph.py",
+          "functionName": "resource_mix_cpu_section_graph",
+          "inputs": [
+            {
+              "name": "sections",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-split-sections",
+                "outputKey": "sections"
+              }
+            },
+            {
+              "name": "top_terms",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-token-stats",
+                "outputKey": "top_terms"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "graph_stats",
+              "dataType": "any"
+            },
+            {
+              "name": "ranked_sections",
+              "dataType": "any"
+            },
+            {
+              "name": "graph_edges",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 2,
+            "cpu_mem": 512,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-gpu-probe",
+        "type": "taskNode",
+        "position": {
+          "x": 1050,
+          "y": 360
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "GPU Embedding Probe",
+          "taskPath": "tasks/resource_mix_gpu_embedding_probe.py",
+          "functionName": "resource_mix_gpu_embedding_probe",
+          "inputs": [
+            {
+              "name": "sections",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-split-sections",
+                "outputKey": "sections"
+              }
+            },
+            {
+              "name": "top_terms",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-token-stats",
+                "outputKey": "top_terms"
+              }
+            },
+            {
+              "name": "vector_width",
+              "dataType": "str",
+              "source": "user",
+              "value": "128"
+            },
+            {
+              "name": "rounds",
+              "dataType": "str",
+              "source": "user",
+              "value": "120"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "embedding_summary",
+              "dataType": "any"
+            },
+            {
+              "name": "accelerator",
+              "dataType": "any"
+            },
+            {
+              "name": "embedding_checksum",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 512,
+            "gpu": 1,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-merge-signals",
+        "type": "taskNode",
+        "position": {
+          "x": 1380,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "CPU Merge Signals",
+          "taskPath": "tasks/resource_mix_merge_signals.py",
+          "functionName": "resource_mix_merge_signals",
+          "inputs": [
+            {
+              "name": "token_stats",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-token-stats",
+                "outputKey": "token_stats"
+              }
+            },
+            {
+              "name": "keyword_scores",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-token-stats",
+                "outputKey": "keyword_scores"
+              }
+            },
+            {
+              "name": "graph_stats",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-section-graph",
+                "outputKey": "graph_stats"
+              }
+            },
+            {
+              "name": "ranked_sections",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-section-graph",
+                "outputKey": "ranked_sections"
+              }
+            },
+            {
+              "name": "embedding_summary",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-gpu-probe",
+                "outputKey": "embedding_summary"
+              }
+            },
+            {
+              "name": "section_file_count",
+              "dataType": "int",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-write-section-files",
+                "outputKey": "section_file_count"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "scorecard",
+              "dataType": "any"
+            },
+            {
+              "name": "routing_plan",
+              "dataType": "any"
+            },
+            {
+              "name": "findings",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 256,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-quality-gate",
+        "type": "taskNode",
+        "position": {
+          "x": 1710,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "CPU Quality Gate",
+          "taskPath": "tasks/resource_mix_quality_gate.py",
+          "functionName": "resource_mix_quality_gate",
+          "inputs": [
+            {
+              "name": "scorecard",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-merge-signals",
+                "outputKey": "scorecard"
+              }
+            },
+            {
+              "name": "findings",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-merge-signals",
+                "outputKey": "findings"
+              }
+            },
+            {
+              "name": "graph_stats",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-section-graph",
+                "outputKey": "graph_stats"
+              }
+            },
+            {
+              "name": "embedding_summary",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-gpu-probe",
+                "outputKey": "embedding_summary"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "quality_gate",
+              "dataType": "any"
+            },
+            {
+              "name": "quality_notes",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 192,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      },
+      {
+        "id": "node-final-report",
+        "type": "taskNode",
+        "position": {
+          "x": 2040,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "I/O Write Final Report",
+          "taskPath": "tasks/resource_mix_write_final_report.py",
+          "functionName": "resource_mix_write_final_report",
+          "inputs": [
+            {
+              "name": "source_path",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-load-text",
+                "outputKey": "source_path"
+              }
+            },
+            {
+              "name": "token_stats",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-token-stats",
+                "outputKey": "token_stats"
+              }
+            },
+            {
+              "name": "graph_stats",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-section-graph",
+                "outputKey": "graph_stats"
+              }
+            },
+            {
+              "name": "embedding_summary",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-gpu-probe",
+                "outputKey": "embedding_summary"
+              }
+            },
+            {
+              "name": "scorecard",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-merge-signals",
+                "outputKey": "scorecard"
+              }
+            },
+            {
+              "name": "routing_plan",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-merge-signals",
+                "outputKey": "routing_plan"
+              }
+            },
+            {
+              "name": "quality_gate",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-quality-gate",
+                "outputKey": "quality_gate"
+              }
+            },
+            {
+              "name": "quality_notes",
+              "dataType": "list",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-quality-gate",
+                "outputKey": "quality_notes"
+              }
+            },
+            {
+              "name": "section_manifest_path",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "node-write-section-files",
+                "outputKey": "section_manifest_path"
+              }
+            },
+            {
+              "name": "output_path",
+              "dataType": "str",
+              "source": "user",
+              "value": "resource_mix_demo/final_report.md"
+            },
+            {
+              "name": "summary_path",
+              "dataType": "str",
+              "source": "user",
+              "value": "resource_mix_demo/summary.json"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "report_path",
+              "dataType": "any"
+            },
+            {
+              "name": "summary_json_path",
+              "dataType": "any"
+            },
+            {
+              "name": "report_preview",
+              "dataType": "any"
+            },
+            {
+              "name": "artifact_paths",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu": 1,
+            "cpu_mem": 256,
+            "gpu": 0,
+            "gpu_mem": 0
+          },
+          "configured": true
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-load-split",
+        "source": "node-load-text",
+        "target": "node-split-sections"
+      },
+      {
+        "id": "edge-split-files",
+        "source": "node-split-sections",
+        "target": "node-write-section-files"
+      },
+      {
+        "id": "edge-load-token",
+        "source": "node-load-text",
+        "target": "node-token-stats"
+      },
+      {
+        "id": "edge-split-token",
+        "source": "node-split-sections",
+        "target": "node-token-stats"
+      },
+      {
+        "id": "edge-split-graph",
+        "source": "node-split-sections",
+        "target": "node-section-graph"
+      },
+      {
+        "id": "edge-token-graph",
+        "source": "node-token-stats",
+        "target": "node-section-graph"
+      },
+      {
+        "id": "edge-split-gpu",
+        "source": "node-split-sections",
+        "target": "node-gpu-probe"
+      },
+      {
+        "id": "edge-token-gpu",
+        "source": "node-token-stats",
+        "target": "node-gpu-probe"
+      },
+      {
+        "id": "edge-files-merge",
+        "source": "node-write-section-files",
+        "target": "node-merge-signals"
+      },
+      {
+        "id": "edge-token-merge",
+        "source": "node-token-stats",
+        "target": "node-merge-signals"
+      },
+      {
+        "id": "edge-graph-merge",
+        "source": "node-section-graph",
+        "target": "node-merge-signals"
+      },
+      {
+        "id": "edge-gpu-merge",
+        "source": "node-gpu-probe",
+        "target": "node-merge-signals"
+      },
+      {
+        "id": "edge-merge-quality",
+        "source": "node-merge-signals",
+        "target": "node-quality-gate"
+      },
+      {
+        "id": "edge-graph-quality",
+        "source": "node-section-graph",
+        "target": "node-quality-gate"
+      },
+      {
+        "id": "edge-gpu-quality",
+        "source": "node-gpu-probe",
+        "target": "node-quality-gate"
+      },
+      {
+        "id": "edge-load-final",
+        "source": "node-load-text",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-files-final",
+        "source": "node-write-section-files",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-token-final",
+        "source": "node-token-stats",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-graph-final",
+        "source": "node-section-graph",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-gpu-final",
+        "source": "node-gpu-probe",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-merge-final",
+        "source": "node-merge-signals",
+        "target": "node-final-report"
+      },
+      {
+        "id": "edge-quality-final",
+        "source": "node-quality-gate",
+        "target": "node-final-report"
+      }
+    ]
+  },
+  "includedTasks": [
+    {
+      "relativePath": "tasks/resource_mix_load_text.py",
+      "functionName": "resource_mix_load_text",
+      "displayName": "I/O Load Uploaded Text",
+      "inputs": [
+        {
+          "name": "input_path",
+          "dataType": "str"
+        },
+        {
+          "name": "fallback_text",
+          "dataType": "str"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "corpus",
+          "dataType": "any"
+        },
+        {
+          "name": "source_path",
+          "dataType": "any"
+        },
+        {
+          "name": "line_count",
+          "dataType": "any"
+        },
+        {
+          "name": "byte_count",
+          "dataType": "any"
+        },
+        {
+          "name": "created_sample",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 128,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "from pathlib import Path\n\nfrom maze import task\n\n\nSAMPLE_TEXT = \"\"\"\nMaze resource mix demo\n\nQuestion: How should a distributed workflow balance CPU parsing, GPU ranking, and file I/O?\nObservation: CPU tasks are good at deterministic text statistics and graph scoring.\nObservation: GPU tasks are useful for vector-style scoring even when this demo falls back to CPU math.\nObservation: I/O tasks should turn intermediate state into artifacts that later tasks can inspect.\n\nQuestion: What should the final report show?\nAnswer: It should show the source text, token signals, section graph, accelerator mode, and artifact paths.\nAnswer: It should be safe to run even when the uploaded .txt file is missing.\n\"\"\"\n\n\ndef _pick_text_file(input_path: str) -> Path | None:\n    configured = Path(input_path or \"questions.txt\")\n    if configured.is_file():\n        return configured\n\n    txt_files = [\n        path\n        for path in sorted(Path(\".\").rglob(\"*.txt\"))\n        if path.is_file() and \"resource_mix_demo\" not in path.parts\n    ]\n    return txt_files[0] if txt_files else None\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_load_text(input_path: str = \"questions.txt\", fallback_text: str = SAMPLE_TEXT):\n    \"\"\"Read an uploaded text file, or create a deterministic sample when none exists.\"\"\"\n    source = _pick_text_file(input_path)\n    created_sample = False\n\n    if source is None:\n        source = Path(input_path or \"questions.txt\")\n        source.parent.mkdir(parents=True, exist_ok=True)\n        source.write_text(fallback_text.strip() + \"\\n\", encoding=\"utf-8\")\n        created_sample = True\n\n    text = source.read_text(encoding=\"utf-8\", errors=\"replace\")\n    lines = text.splitlines()\n\n    return {\n        \"corpus\": text,\n        \"source_path\": source.as_posix(),\n        \"line_count\": len(lines),\n        \"byte_count\": len(text.encode(\"utf-8\")),\n        \"created_sample\": created_sample,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_split_sections.py",
+      "functionName": "resource_mix_split_sections",
+      "displayName": "CPU Split Sections",
+      "inputs": [
+        {
+          "name": "corpus",
+          "dataType": "str"
+        },
+        {
+          "name": "max_sections",
+          "dataType": "str"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "sections",
+          "dataType": "any"
+        },
+        {
+          "name": "section_count",
+          "dataType": "any"
+        },
+        {
+          "name": "section_titles",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 128,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "from maze import task\n\n\ndef _section_title(text: str, index: int) -> str:\n    for line in text.splitlines():\n        cleaned = line.strip(\" #:-\")\n        if cleaned:\n            return cleaned[:72]\n    return f\"Section {index}\"\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 128, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_split_sections(corpus: str = \"\", max_sections: str = \"7\"):\n    \"\"\"Split the corpus into bounded sections for parallel downstream work.\"\"\"\n    try:\n        limit = max(2, min(12, int(max_sections)))\n    except Exception:\n        limit = 7\n\n    paragraphs = [part.strip() for part in corpus.split(\"\\n\\n\") if part.strip()]\n    if len(paragraphs) < 2:\n        lines = [line.strip() for line in corpus.splitlines() if line.strip()]\n        paragraphs = [\"\\n\".join(lines[i:i + 4]) for i in range(0, len(lines), 4)]\n    if not paragraphs:\n        paragraphs = [\"empty corpus\"]\n\n    selected = paragraphs[:limit]\n    sections = []\n    for index, text in enumerate(selected, start=1):\n        sections.append({\n            \"id\": f\"s{index:02d}\",\n            \"title\": _section_title(text, index),\n            \"text\": text,\n            \"char_count\": len(text),\n            \"line_count\": len(text.splitlines()) or 1,\n        })\n\n    return {\n        \"sections\": sections,\n        \"section_count\": len(sections),\n        \"section_titles\": [section[\"title\"] for section in sections],\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_write_section_files.py",
+      "functionName": "resource_mix_write_section_files",
+      "displayName": "I/O Materialize Sections",
+      "inputs": [
+        {
+          "name": "sections",
+          "dataType": "list"
+        },
+        {
+          "name": "output_dir",
+          "dataType": "str"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "section_paths",
+          "dataType": "any"
+        },
+        {
+          "name": "section_manifest_path",
+          "dataType": "any"
+        },
+        {
+          "name": "section_file_count",
+          "dataType": "any"
+        },
+        {
+          "name": "section_total_bytes",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 192,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 192, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_write_section_files(sections: list = None, output_dir: str = \"resource_mix_demo/sections\"):\n    \"\"\"Write section text files and a manifest artifact.\"\"\"\n    sections = sections or []\n    root = Path(output_dir)\n    root.mkdir(parents=True, exist_ok=True)\n\n    files = []\n    total_bytes = 0\n    for index, section in enumerate(sections, start=1):\n        path = root / f\"{index:02d}_{section.get('id', f's{index:02d}')}.txt\"\n        text = section.get(\"text\", \"\")\n        path.write_text(text, encoding=\"utf-8\")\n        size = len(text.encode(\"utf-8\"))\n        total_bytes += size\n        files.append({\n            \"path\": path.as_posix(),\n            \"title\": section.get(\"title\", path.stem),\n            \"bytes\": size,\n        })\n\n    manifest_path = root / \"manifest.json\"\n    manifest_path.write_text(json.dumps({\n        \"section_count\": len(files),\n        \"total_bytes\": total_bytes,\n        \"files\": files,\n    }, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"section_paths\": [item[\"path\"] for item in files],\n        \"section_manifest_path\": manifest_path.as_posix(),\n        \"section_file_count\": len(files),\n        \"section_total_bytes\": total_bytes,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_cpu_token_stats.py",
+      "functionName": "resource_mix_cpu_token_stats",
+      "displayName": "CPU Token Statistics",
+      "inputs": [
+        {
+          "name": "corpus",
+          "dataType": "str"
+        },
+        {
+          "name": "sections",
+          "dataType": "list"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "token_stats",
+          "dataType": "any"
+        },
+        {
+          "name": "top_terms",
+          "dataType": "any"
+        },
+        {
+          "name": "section_density",
+          "dataType": "any"
+        },
+        {
+          "name": "keyword_scores",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 2,
+        "cpu_mem": 512,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "import math\nimport re\nfrom collections import Counter\n\nfrom maze import task\n\n\nSTOP_WORDS = {\n    \"a\", \"an\", \"and\", \"are\", \"as\", \"at\", \"be\", \"by\", \"for\", \"from\", \"how\",\n    \"in\", \"into\", \"is\", \"it\", \"of\", \"on\", \"or\", \"should\", \"that\", \"the\",\n    \"this\", \"to\", \"what\", \"when\", \"with\",\n}\n\n\ndef _tokens(text: str) -> list[str]:\n    return [\n        token\n        for token in re.findall(r\"[A-Za-z][A-Za-z0-9_'-]*\", text.lower())\n        if token not in STOP_WORDS and len(token) > 2\n    ]\n\n\n@task(resources={\"cpu\": 2, \"cpu_mem\": 512, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_cpu_token_stats(corpus: str = \"\", sections: list = None):\n    \"\"\"Compute CPU-heavy token counts and per-section densities.\"\"\"\n    sections = sections or []\n    tokens = _tokens(corpus)\n    counts = Counter(tokens)\n    top_terms = [\n        {\"term\": term, \"count\": count}\n        for term, count in counts.most_common(12)\n    ]\n\n    densities = []\n    for section in sections:\n        section_tokens = _tokens(section.get(\"text\", \"\"))\n        char_count = max(1, section.get(\"char_count\") or len(section.get(\"text\", \"\")) or 1)\n        densities.append({\n            \"section_id\": section.get(\"id\"),\n            \"title\": section.get(\"title\"),\n            \"token_count\": len(section_tokens),\n            \"density\": round(len(section_tokens) / math.sqrt(char_count), 4),\n        })\n\n    keyword_scores = {\n        \"cpu\": counts.get(\"cpu\", 0),\n        \"gpu\": counts.get(\"gpu\", 0),\n        \"io\": counts.get(\"io\", 0) + counts.get(\"file\", 0) + counts.get(\"artifact\", 0),\n        \"workflow\": counts.get(\"workflow\", 0) + counts.get(\"task\", 0),\n    }\n\n    return {\n        \"token_stats\": {\n            \"total_tokens\": len(tokens),\n            \"unique_tokens\": len(counts),\n            \"lexical_diversity\": round(len(counts) / max(1, len(tokens)), 4),\n            \"keyword_scores\": keyword_scores,\n        },\n        \"top_terms\": top_terms,\n        \"section_density\": densities,\n        \"keyword_scores\": keyword_scores,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_cpu_section_graph.py",
+      "functionName": "resource_mix_cpu_section_graph",
+      "displayName": "CPU Section Graph",
+      "inputs": [
+        {
+          "name": "sections",
+          "dataType": "list"
+        },
+        {
+          "name": "top_terms",
+          "dataType": "list"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "graph_stats",
+          "dataType": "any"
+        },
+        {
+          "name": "ranked_sections",
+          "dataType": "any"
+        },
+        {
+          "name": "graph_edges",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 2,
+        "cpu_mem": 512,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "import re\n\nfrom maze import task\n\n\ndef _tokens(text: str) -> set[str]:\n    return set(re.findall(r\"[A-Za-z][A-Za-z0-9_'-]*\", text.lower()))\n\n\n@task(resources={\"cpu\": 2, \"cpu_mem\": 512, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_cpu_section_graph(sections: list = None, top_terms: list = None):\n    \"\"\"Build a section similarity graph and rank the most connected sections.\"\"\"\n    sections = sections or []\n    important_terms = {item.get(\"term\") for item in (top_terms or []) if item.get(\"term\")}\n    token_sets = {\n        section.get(\"id\", f\"s{index:02d}\"): _tokens(section.get(\"text\", \"\"))\n        for index, section in enumerate(sections, start=1)\n    }\n\n    edges = []\n    for left_index, left in enumerate(sections):\n        left_id = left.get(\"id\", f\"s{left_index + 1:02d}\")\n        for right in sections[left_index + 1:]:\n            right_id = right.get(\"id\")\n            overlap = token_sets[left_id] & token_sets.get(right_id, set())\n            if important_terms:\n                overlap = overlap | ((token_sets[left_id] & important_terms) & (token_sets.get(right_id, set()) & important_terms))\n            union_size = max(1, len(token_sets[left_id] | token_sets.get(right_id, set())))\n            weight = round(len(overlap) / union_size, 4)\n            if weight > 0:\n                edges.append({\n                    \"source\": left_id,\n                    \"target\": right_id,\n                    \"weight\": weight,\n                    \"shared_terms\": sorted(overlap)[:8],\n                })\n\n    degree = {section.get(\"id\", f\"s{index:02d}\"): 0.0 for index, section in enumerate(sections, start=1)}\n    for edge in edges:\n        degree[edge[\"source\"]] = degree.get(edge[\"source\"], 0.0) + edge[\"weight\"]\n        degree[edge[\"target\"]] = degree.get(edge[\"target\"], 0.0) + edge[\"weight\"]\n\n    ranked_sections = sorted([\n        {\n            \"section_id\": section.get(\"id\", f\"s{index:02d}\"),\n            \"title\": section.get(\"title\", \"\"),\n            \"score\": round(degree.get(section.get(\"id\", f\"s{index:02d}\"), 0.0) + section.get(\"char_count\", 0) / 1000, 4),\n        }\n        for index, section in enumerate(sections, start=1)\n    ], key=lambda item: item[\"score\"], reverse=True)\n\n    return {\n        \"graph_stats\": {\n            \"node_count\": len(sections),\n            \"edge_count\": len(edges),\n            \"max_rank_score\": ranked_sections[0][\"score\"] if ranked_sections else 0,\n        },\n        \"ranked_sections\": ranked_sections,\n        \"graph_edges\": edges,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_gpu_embedding_probe.py",
+      "functionName": "resource_mix_gpu_embedding_probe",
+      "displayName": "GPU Embedding Probe",
+      "inputs": [
+        {
+          "name": "sections",
+          "dataType": "list"
+        },
+        {
+          "name": "top_terms",
+          "dataType": "list"
+        },
+        {
+          "name": "vector_width",
+          "dataType": "str"
+        },
+        {
+          "name": "rounds",
+          "dataType": "str"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "embedding_summary",
+          "dataType": "any"
+        },
+        {
+          "name": "accelerator",
+          "dataType": "any"
+        },
+        {
+          "name": "embedding_checksum",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 512,
+        "gpu": 1,
+        "gpu_mem": 0
+      },
+      "code": "import hashlib\nimport math\nimport os\nimport time\n\nfrom maze import task\n\n\ndef _section_seed(section: dict, terms: list[dict]) -> float:\n    text = section.get(\"text\", \"\") + \" \" + \" \".join(item.get(\"term\", \"\") for item in terms)\n    digest = hashlib.sha256(text.encode(\"utf-8\", errors=\"replace\")).hexdigest()\n    return int(digest[:8], 16) / 0xFFFFFFFF\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 512, \"gpu\": 1, \"gpu_mem\": 0}, timeout_seconds=180)\ndef resource_mix_gpu_embedding_probe(sections: list = None, top_terms: list = None, vector_width: str = \"128\", rounds: str = \"120\"):\n    \"\"\"Run a GPU-declared vector probe, falling back to deterministic CPU math if CUDA is unavailable.\"\"\"\n    sections = sections or []\n    top_terms = top_terms or []\n    width = max(16, min(512, int(vector_width or 128)))\n    loops = max(20, min(500, int(rounds or 120)))\n    started = time.time()\n    accelerator = \"cpu-fallback\"\n    device_name = \"python-math\"\n    checksum_source = []\n\n    try:\n        import torch\n\n        if torch.cuda.is_available():\n            accelerator = \"cuda\"\n            device = torch.device(\"cuda\")\n            device_name = torch.cuda.get_device_name(device)\n            rows = max(1, len(sections))\n            base = torch.arange(rows * width, dtype=torch.float32, device=device).reshape(rows, width)\n            seed = torch.tensor([_section_seed(section, top_terms) for section in sections] or [0.5], device=device)\n            values = base / (width + 1) + seed.reshape(-1, 1)\n            for _ in range(loops):\n                values = torch.sin(values) * 0.73 + torch.cos(values * 0.37)\n            reduced = values.mean(dim=1).detach().cpu().tolist()\n            checksum_source = [round(float(item), 6) for item in reduced]\n    except Exception as exc:\n        device_name = f\"python-math ({type(exc).__name__})\"\n\n    if not checksum_source:\n        for section in sections or [{\"text\": \"\"}]:\n            seed = _section_seed(section, top_terms)\n            value = seed\n            for index in range(width * loops // 16):\n                value = math.sin(value + index * 0.013) * 0.73 + math.cos(value * 0.37)\n            checksum_source.append(round(value, 6))\n\n    checksum = hashlib.sha256(repr(checksum_source).encode(\"utf-8\")).hexdigest()[:16]\n\n    return {\n        \"embedding_summary\": {\n            \"accelerator\": accelerator,\n            \"device_name\": device_name,\n            \"cuda_visible_devices\": os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"\"),\n            \"section_vectors\": len(checksum_source),\n            \"vector_width\": width,\n            \"rounds\": loops,\n            \"elapsed_ms\": int((time.time() - started) * 1000),\n            \"checksum\": checksum,\n        },\n        \"accelerator\": accelerator,\n        \"embedding_checksum\": checksum,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_merge_signals.py",
+      "functionName": "resource_mix_merge_signals",
+      "displayName": "CPU Merge Signals",
+      "inputs": [
+        {
+          "name": "token_stats",
+          "dataType": "dict"
+        },
+        {
+          "name": "keyword_scores",
+          "dataType": "dict"
+        },
+        {
+          "name": "graph_stats",
+          "dataType": "dict"
+        },
+        {
+          "name": "ranked_sections",
+          "dataType": "list"
+        },
+        {
+          "name": "embedding_summary",
+          "dataType": "dict"
+        },
+        {
+          "name": "section_file_count",
+          "dataType": "int"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "scorecard",
+          "dataType": "any"
+        },
+        {
+          "name": "routing_plan",
+          "dataType": "any"
+        },
+        {
+          "name": "findings",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 256,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "from maze import task\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 256, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_merge_signals(\n    token_stats: dict = None,\n    keyword_scores: dict = None,\n    graph_stats: dict = None,\n    ranked_sections: list = None,\n    embedding_summary: dict = None,\n    section_file_count: int = 0,\n):\n    \"\"\"Merge CPU, GPU, and I/O signals into a compact scorecard.\"\"\"\n    token_stats = token_stats or {}\n    keyword_scores = keyword_scores or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    ranked_sections = ranked_sections or []\n\n    cpu_signal = token_stats.get(\"unique_tokens\", 0) + graph_stats.get(\"edge_count\", 0) * 3\n    gpu_signal = 10 if embedding_summary.get(\"accelerator\") == \"cuda\" else 4\n    io_signal = int(section_file_count or 0) * 2\n    total_score = cpu_signal + gpu_signal + io_signal\n\n    routing_plan = [\n        {\"lane\": \"I/O\", \"reason\": \"load text, materialize section files, and write final artifacts\", \"weight\": io_signal},\n        {\"lane\": \"CPU\", \"reason\": \"token statistics, section graph, and deterministic quality gates\", \"weight\": cpu_signal},\n        {\"lane\": \"GPU\", \"reason\": \"vector-style section embedding probe with CPU fallback\", \"weight\": gpu_signal},\n    ]\n    routing_plan.sort(key=lambda item: item[\"weight\"], reverse=True)\n\n    top_section = ranked_sections[0] if ranked_sections else {\"section_id\": None, \"title\": \"n/a\", \"score\": 0}\n    findings = [\n        f\"Top section: {top_section.get('title')} ({top_section.get('section_id')})\",\n        f\"Top lane: {routing_plan[0]['lane']}\",\n        f\"Keyword balance: CPU={keyword_scores.get('cpu', 0)}, GPU={keyword_scores.get('gpu', 0)}, IO={keyword_scores.get('io', 0)}\",\n    ]\n\n    return {\n        \"scorecard\": {\n            \"total_score\": total_score,\n            \"cpu_signal\": cpu_signal,\n            \"gpu_signal\": gpu_signal,\n            \"io_signal\": io_signal,\n            \"accelerator\": embedding_summary.get(\"accelerator\", \"unknown\"),\n        },\n        \"routing_plan\": routing_plan,\n        \"findings\": findings,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_quality_gate.py",
+      "functionName": "resource_mix_quality_gate",
+      "displayName": "CPU Quality Gate",
+      "inputs": [
+        {
+          "name": "scorecard",
+          "dataType": "dict"
+        },
+        {
+          "name": "findings",
+          "dataType": "list"
+        },
+        {
+          "name": "graph_stats",
+          "dataType": "dict"
+        },
+        {
+          "name": "embedding_summary",
+          "dataType": "dict"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "quality_gate",
+          "dataType": "any"
+        },
+        {
+          "name": "quality_notes",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 192,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "from maze import task\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 192, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_quality_gate(scorecard: dict = None, findings: list = None, graph_stats: dict = None, embedding_summary: dict = None):\n    \"\"\"Apply a deterministic quality gate before the report task runs.\"\"\"\n    scorecard = scorecard or {}\n    findings = findings or []\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n\n    checks = [\n        {\"name\": \"has_tokens\", \"passed\": scorecard.get(\"cpu_signal\", 0) > 0},\n        {\"name\": \"has_artifacts\", \"passed\": scorecard.get(\"io_signal\", 0) > 0},\n        {\"name\": \"has_embedding_checksum\", \"passed\": bool(embedding_summary.get(\"checksum\"))},\n        {\"name\": \"graph_built\", \"passed\": graph_stats.get(\"node_count\", 0) > 0},\n    ]\n    passed = sum(1 for check in checks if check[\"passed\"])\n    decision = \"pass\" if passed == len(checks) else \"review\"\n    notes = list(findings)\n    if decision != \"pass\":\n        notes.append(\"One or more demo checks require review.\")\n\n    return {\n        \"quality_gate\": {\n            \"decision\": decision,\n            \"passed\": passed,\n            \"total\": len(checks),\n            \"checks\": checks,\n        },\n        \"quality_notes\": notes,\n    }\n",
+      "type": "workspace"
+    },
+    {
+      "relativePath": "tasks/resource_mix_write_final_report.py",
+      "functionName": "resource_mix_write_final_report",
+      "displayName": "I/O Write Final Report",
+      "inputs": [
+        {
+          "name": "source_path",
+          "dataType": "str"
+        },
+        {
+          "name": "token_stats",
+          "dataType": "dict"
+        },
+        {
+          "name": "graph_stats",
+          "dataType": "dict"
+        },
+        {
+          "name": "embedding_summary",
+          "dataType": "dict"
+        },
+        {
+          "name": "scorecard",
+          "dataType": "dict"
+        },
+        {
+          "name": "routing_plan",
+          "dataType": "list"
+        },
+        {
+          "name": "quality_gate",
+          "dataType": "dict"
+        },
+        {
+          "name": "quality_notes",
+          "dataType": "list"
+        },
+        {
+          "name": "section_manifest_path",
+          "dataType": "str"
+        },
+        {
+          "name": "output_path",
+          "dataType": "str"
+        },
+        {
+          "name": "summary_path",
+          "dataType": "str"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "report_path",
+          "dataType": "any"
+        },
+        {
+          "name": "summary_json_path",
+          "dataType": "any"
+        },
+        {
+          "name": "report_preview",
+          "dataType": "any"
+        },
+        {
+          "name": "artifact_paths",
+          "dataType": "any"
+        }
+      ],
+      "resources": {
+        "cpu": 1,
+        "cpu_mem": 256,
+        "gpu": 0,
+        "gpu_mem": 0
+      },
+      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(resources={\"cpu\": 1, \"cpu_mem\": 256, \"gpu\": 0, \"gpu_mem\": 0})\ndef resource_mix_write_final_report(\n    source_path: str = \"\",\n    token_stats: dict = None,\n    graph_stats: dict = None,\n    embedding_summary: dict = None,\n    scorecard: dict = None,\n    routing_plan: list = None,\n    quality_gate: dict = None,\n    quality_notes: list = None,\n    section_manifest_path: str = \"\",\n    output_path: str = \"resource_mix_demo/final_report.md\",\n    summary_path: str = \"resource_mix_demo/summary.json\",\n):\n    \"\"\"Write the final Markdown and JSON artifacts for the resource mix demo.\"\"\"\n    token_stats = token_stats or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    scorecard = scorecard or {}\n    routing_plan = routing_plan or []\n    quality_gate = quality_gate or {}\n    quality_notes = quality_notes or []\n\n    manifest = {}\n    manifest_file = Path(section_manifest_path) if section_manifest_path else None\n    if manifest_file and manifest_file.exists():\n        manifest = json.loads(manifest_file.read_text(encoding=\"utf-8\"))\n\n    output = Path(output_path)\n    output.parent.mkdir(parents=True, exist_ok=True)\n    summary = Path(summary_path)\n    summary.parent.mkdir(parents=True, exist_ok=True)\n\n    report_lines = [\n        \"# Maze Resource Mix Demo Report\",\n        \"\",\n        f\"- Source text: `{source_path}`\",\n        f\"- Quality gate: `{quality_gate.get('decision', 'unknown')}` ({quality_gate.get('passed', 0)}/{quality_gate.get('total', 0)})\",\n        f\"- Accelerator: `{embedding_summary.get('accelerator', 'unknown')}` on `{embedding_summary.get('device_name', 'unknown')}`\",\n        f\"- Total score: `{scorecard.get('total_score', 0)}`\",\n        \"\",\n        \"## Routing Plan\",\n        \"\",\n    ]\n    for item in routing_plan:\n        report_lines.append(f\"- **{item.get('lane')}**: {item.get('reason')} (weight={item.get('weight')})\")\n\n    report_lines.extend([\n        \"\",\n        \"## Signals\",\n        \"\",\n        f\"- Tokens: {token_stats.get('total_tokens', 0)} total, {token_stats.get('unique_tokens', 0)} unique\",\n        f\"- Graph: {graph_stats.get('node_count', 0)} nodes, {graph_stats.get('edge_count', 0)} edges\",\n        f\"- Section files: {manifest.get('section_count', 0)}\",\n        \"\",\n        \"## Notes\",\n        \"\",\n    ])\n    report_lines.extend(f\"- {note}\" for note in quality_notes)\n\n    payload = {\n        \"source_path\": source_path,\n        \"token_stats\": token_stats,\n        \"graph_stats\": graph_stats,\n        \"embedding_summary\": embedding_summary,\n        \"scorecard\": scorecard,\n        \"routing_plan\": routing_plan,\n        \"quality_gate\": quality_gate,\n        \"section_manifest\": manifest,\n        \"artifacts\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n\n    report = \"\\n\".join(report_lines) + \"\\n\"\n    output.write_text(report, encoding=\"utf-8\")\n    summary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"report_path\": output.as_posix(),\n        \"summary_json_path\": summary.as_posix(),\n        \"report_preview\": report[:900],\n        \"artifact_paths\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n",
+      "type": "workspace"
+    }
+  ]
+}

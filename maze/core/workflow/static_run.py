@@ -60,6 +60,7 @@ class StaticRun:
         self.tags = list(tags or [])
         self.metadata = dict(metadata or {})
         self.created_time = time.time()
+        self.submitted_time = None
         self.updated_time = self.created_time
         self.started_time = None
         self.finished_time = None
@@ -301,6 +302,7 @@ class StaticRun:
             "tags": self.tags,
             "metadata": self.metadata,
             "created_time": self.created_time,
+            "submitted_time": self.submitted_time,
             "updated_time": self.updated_time,
             "started_time": self.started_time,
             "finished_time": self.finished_time,
@@ -531,6 +533,7 @@ def static_run_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "tags": snapshot.get("tags") or [],
         "metadata": snapshot.get("metadata") or {},
         "created_time": snapshot.get("created_time"),
+        "submitted_time": snapshot.get("submitted_time"),
         "updated_time": snapshot.get("updated_time"),
         "started_time": snapshot.get("started_time"),
         "finished_time": snapshot.get("finished_time"),

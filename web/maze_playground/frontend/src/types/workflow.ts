@@ -423,6 +423,8 @@ export interface StaticWorkflowRunSnapshot {
   workspace_manifest_version?: number | null;
   status: StaticWorkflowRunStatus;
   created_time?: number;
+  submitted_time?: number | null;
+  started_time?: number | null;
   updated_time?: number;
   finished_time?: number | null;
   task_counts?: Record<string, number>;

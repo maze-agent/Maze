@@ -1,4 +1,4 @@
-<h2 align="center"><img src="./assets/imgs/image.png" style="height:1em; width:auto; vertical-align:middle"/> Maze: A Distributed Framework for LLM Agents</h2>
+<h2 align="center"><img src="./docs/assets/logo.png" style="height:1em; width:auto; vertical-align:middle"/> Maze: A Distributed Framework for LLM Agents</h2>
 
 <p align="center">
     <a href="https://mazeagent.net/">
@@ -24,6 +24,16 @@
 - **2026-05**: Maze Playground now supports user workspaces, including file upload, download, preview, task-side file processing, and run artifact downloads.
 - **2026-05**: Maze Playground can generate workspace tasks from natural-language prompts through OpenAI-compatible LLM APIs.
 - **2026-01**: We support the sandbox feature! [**Docs**](https://github.com/QinbinLi/Maze/tree/develop/examples/sandbox)
+
+## Latest Update Summary
+
+This update focuses on making Maze Workbench a clearer, more complete surface for building and operating distributed workflows:
+
+- Added a system-catalog **Resource Mix CPU/GPU/I/O Demo** workflow that exercises CPU parsing, GPU-style scoring, file I/O, artifact generation, quality checks, and final report writing.
+- Updated Workbench workflow discovery so system workflows can be loaded directly from `View all workflows` without copying template workflow files into the active workspace.
+- Improved run artifact handling across the Task Inspector and Runs console: `maze://...` artifact records now resolve to HTTP-backed open/download actions, including artifacts recorded through task file manifests.
+- Refined the Task Inspector artifact layout so produced files, paths, sizes, timestamps, task IDs, and actions are easier to scan in the right-side panel.
+- Refreshed the README Workbench section with current local screenshots for workflow design, run inspection, and cluster resources, replacing the older remote video links.
 
 <br>
 
@@ -341,18 +351,25 @@ The Workspace Agent panel helps turn user intent into workflow progress inside t
 
 The `Runs` console uses the unified run APIs to show history, run detail, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, ReAct, and app runs. Run detail rendering is hardened against malformed event payloads, failed snapshots are preserved instead of being overwritten by later completion events, and artifact download/promotion can fall back to content-addressed storage when a static artifact lacks a direct storage path.
 
-The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons.
+The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
 
-Here are two videos showing the process of using built-in tasks and uploading user-defined tasks in Maze Playground. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
+### Workflow Design
 
+Maze Workbench gives workflow authors a DAG-first editor with task libraries, input management, validation, run submission, and live workflow summaries in one workspace.
 
-### Builtin Task Workflow
-![Design Workflow Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/builtin_task.png)  
-[Design Workflow Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/builtin_task.mp4)
+![Maze Workbench workflow design](./docs/imgs/workbench/maze_resource_mix_demo.png)
 
-### User Defined Task Workflow
-![Check Result Screenshot](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.png)  
-[Check Result Video](https://meeting-agent1.oss-cn-beijing.aliyuncs.com/userdef_task.mp4)
+### Run Inspection
+
+The unified `Runs` console keeps completed and active runs inspectable after submission, including run evidence, placement, events, logs, and produced artifacts.
+
+![Maze Workbench run inspection](./docs/imgs/workbench/maze_runs.png)
+
+### Cluster Resources
+
+The `Cluster` view shows registered workers, scheduler-visible CPU/GPU capacity, sandbox capabilities, queue state, and placement readiness.
+
+![Maze Workbench cluster resources](./docs/imgs/workbench/maze_cluster_resources.png)
 
 ## Acknowledgement
 We thank contributors from Huazhong University of Science and Technology, Huawei, and other institutions for their support and contributions to this project.

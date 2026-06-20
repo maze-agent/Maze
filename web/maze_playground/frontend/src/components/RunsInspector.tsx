@@ -38,7 +38,6 @@ import type {
   RunArtifact,
   RunLogLine,
   StaticWorkflowRunEvent,
-  StaticWorkflowRunNode,
   StaticWorkflowRunSnapshot,
   StaticWorkflowRunStatus,
   UnifiedRunSnapshot,
@@ -479,79 +478,10 @@ function completedCount(counts?: Record<string, number>) {
   return Number(counts?.completed || counts?.succeeded || 0);
 }
 
-function staticTaskStatus(status?: string): StaticWorkflowRunNode['status'] {
-  if (status === 'succeeded') return 'completed';
-  if (status === 'cancelled') return 'canceled';
-  return (status || 'pending') as StaticWorkflowRunNode['status'];
-}
-
 function dynamicTaskStatus(status?: string) {
   if (status === 'succeeded') return 'completed';
   if (status === 'queued') return 'submitted';
   return status || 'pending';
-}
-
-function adaptStaticRun(run: UnifiedRunSnapshot): StaticWorkflowRunSnapshot {
-  const taskNodes = Object.fromEntries(
-    Object.entries(run.task_nodes || {}).map(([taskId, task]: [string, UnifiedRunTaskSnapshot]) => {
-      const selectedNode = task.selected_node || {};
-      return [
-        taskId,
-        {
-          node_id: taskId,
-          task_name: task.task_name,
-          label: task.task_name,
-          status: staticTaskStatus(task.status),
-          created_time: task.created_time,
-          started_time: task.started_time,
-          finished_time: task.finished_time,
-          result_summary: task.result_summary,
-          error: task.error || task.last_error,
-          last_error: task.last_error,
-          pending_reason: task.pending_reason,
-          retry_wait_seconds: task.retry_wait_seconds,
-          next_eligible_time: task.next_eligible_time,
-          timeout_seconds: task.timeout_seconds,
-          maze_task_id: task.task_id,
-          node_ip: selectedNode.node_ip,
-          node_id_runtime: selectedNode.node_id,
-          gpu_id: selectedNode.gpu_id,
-          duration_seconds: task.duration_seconds,
-          resources: task.resources,
-          schedule_decision: task.schedule_decision,
-          file_manifest: task.file_manifest,
-          artifacts: task.file_manifest?.files || [],
-        },
-      ];
-    }),
-  );
-
-  return {
-    schema: 'static_workflow_run',
-    schema_version: run.schema_version || 1,
-    kind: 'static',
-    run_id: run.run_id,
-    workflow_id: run.workflow_id || run.run_id,
-    workflow_name: String(run.metadata?.workflow_name || run.workflow_id || 'Workflow Run'),
-    status: (run.status === 'cancelled' ? 'canceled' : run.status) as StaticWorkflowRunStatus,
-    created_time: run.created_time,
-    updated_time: run.updated_time,
-    finished_time: run.finished_time,
-    task_counts: run.task_counts,
-    task_nodes: taskNodes,
-    graph: run.graph,
-    events: {
-      count: run.event_count || 0,
-      last_seq: run.last_event_seq || 0,
-    },
-    final_result: run.result_summary,
-    result_summary: run.result_summary,
-    error: run.error_summary,
-    error_summary: run.error_summary,
-    maze_run_id: run.run_id,
-    metadata: run.metadata,
-    tags: run.tags,
-  };
 }
 
 async function loadRunArtifacts(runId: string): Promise<RunArtifact[]> {
@@ -562,6 +492,18 @@ async function loadRunArtifacts(runId: string): Promise<RunArtifact[]> {
     console.warn('Failed to load run artifacts:', error);
     return [];
   }
+}
+
+function collectStaticRunArtifacts(run: StaticWorkflowRunSnapshot): RunArtifact[] {
+  return Object.entries(run.task_nodes || {}).flatMap(([taskId, node]) => {
+    const artifacts = node.artifacts || node.file_manifest?.files || [];
+    return artifacts.map((artifact: RunArtifact) => ({
+      ...artifact,
+      run_id: artifact.run_id || run.run_id,
+      task_id: artifact.task_id || artifact.producer_task_id || taskId,
+      producer_task_id: artifact.producer_task_id || artifact.task_id || taskId,
+    }));
+  });
 }
 
 function adaptDynamicRun(run: UnifiedRunSnapshot): DynamicRunSnapshot {
@@ -757,12 +699,12 @@ export default function RunsInspector({
   const {
     workspaceId,
     workspaceDir,
-    staticRuns,
-    setStaticRuns,
     upsertStaticRun,
     setStaticRunEvents,
     removeStaticRun,
+    openRunViewer,
   } = useWorkflowStore();
+  const [inspectorStaticRuns, setInspectorStaticRuns] = useState<StaticWorkflowRunSnapshot[]>([]);
   const [dynamicRuns, setDynamicRuns] = useState<DynamicRunSnapshot[]>([]);
   const [selectedRunKey, setSelectedRunKey] = useState<string | null>(null);
   const [selectedStaticRun, setSelectedStaticRun] = useState<StaticWorkflowRunSnapshot | null>(null);
@@ -775,15 +717,12 @@ export default function RunsInspector({
   const [filterText, setFilterText] = useState('');
   const [loading, setLoading] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
-  const [cleanupLoading, setCleanupLoading] = useState(false);
-  const [staticCleanupLoading, setStaticCleanupLoading] = useState(false);
-  const [artifactCleanupLoading, setArtifactCleanupLoading] = useState(false);
   const [runActionLoading, setRunActionLoading] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreviewState | null>(null);
   const [promotingArtifactKey, setPromotingArtifactKey] = useState<string | null>(null);
 
   const runItems = useMemo<RunItem[]>(() => {
-    const staticItems: RunItem[] = staticRuns.map((run) => ({
+    const staticItems: RunItem[] = inspectorStaticRuns.map((run) => ({
       kind: 'static',
       id: run.run_id,
       createdTime: run.created_time,
@@ -804,7 +743,7 @@ export default function RunsInspector({
     return [...staticItems, ...dynamicItems].sort((a, b) => (
       (b.updatedTime || b.createdTime || 0) - (a.updatedTime || a.createdTime || 0)
     ));
-  }, [dynamicRuns, staticRuns]);
+  }, [dynamicRuns, inspectorStaticRuns]);
 
   const filteredRunItems = useMemo(() => {
     const query = filterText.trim().toLowerCase();
@@ -851,10 +790,13 @@ export default function RunsInspector({
     }
 
     try {
-      const result = await api.getRuns({ limit: 100, detail: false });
-      const runs = result.runs || [];
-      setStaticRuns(runs.filter((run) => run.kind === 'static').map((run) => adaptStaticRun(run)));
-      setDynamicRuns(runs.filter((run) => run.kind !== 'static').map((run) => adaptDynamicRun(run)));
+      const result = await api.getStaticWorkflowRuns({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || undefined,
+        limit: 100,
+      });
+      setInspectorStaticRuns(result.runs || []);
+      setDynamicRuns([]);
     } catch (error: any) {
       console.error('Failed to load runs:', error);
       if (!silent) {
@@ -865,7 +807,7 @@ export default function RunsInspector({
         setLoading(false);
       }
     }
-  }, [setStaticRuns]);
+  }, [workspaceDir, workspaceId]);
 
   const loadStaticRunDetails = useCallback(async (runId: string, silent = false) => {
     if (!silent) {
@@ -873,21 +815,20 @@ export default function RunsInspector({
     }
 
     try {
-      const [runResult, eventResult, artifacts, logResult] = await Promise.all([
-        api.getRun(runId),
-        api.getRunEvents(runId),
-        loadRunArtifacts(runId),
-        api.getRunLogs(runId, { tail: 500 }),
+      const [runResult, eventResult] = await Promise.all([
+        api.getStaticWorkflowRun(runId, workspaceDir || undefined, workspaceId || undefined),
+        api.getStaticWorkflowRunEvents(runId, workspaceDir || undefined, workspaceId || undefined),
       ]);
-      const adaptedRun = adaptStaticRun(runResult.run);
+      const adaptedRun = runResult.run;
       setSelectedStaticRun(adaptedRun);
       setStaticEvents((eventResult.events || []) as StaticWorkflowRunEvent[]);
-      setSelectedRunArtifacts(artifacts);
-      setSelectedRunLogs((logResult.lines || []) as RunLogLine[]);
+      setSelectedRunArtifacts(collectStaticRunArtifacts(adaptedRun));
+      setSelectedRunLogs([]);
       setSelectedDynamicRun(null);
       setDynamicEvents([]);
       upsertStaticRun(adaptedRun);
       setStaticRunEvents(runId, (eventResult.events || []) as StaticWorkflowRunEvent[]);
+      openRunViewer(runId);
     } catch (error: any) {
       console.error('Failed to open workflow run:', error);
       setSelectedRunArtifacts([]);
@@ -900,7 +841,7 @@ export default function RunsInspector({
         setDetailsLoading(false);
       }
     }
-  }, [setStaticRunEvents, upsertStaticRun]);
+  }, [openRunViewer, setStaticRunEvents, upsertStaticRun, workspaceDir, workspaceId]);
 
   const loadDynamicRunDetails = useCallback(async (runId: string, silent = false) => {
     if (!silent) {
@@ -979,77 +920,6 @@ export default function RunsInspector({
     } catch (error: any) {
       console.error('Failed to delete run:', error);
       message.error(error.response?.data?.error || 'Failed to delete run');
-    }
-  };
-
-  const runDryCleanup = async () => {
-    setCleanupLoading(true);
-    try {
-      const result = await api.cleanupDynamicRuns({
-        statuses: ['finalized', 'failed', 'canceled', 'timed_out', 'interrupted'],
-        older_than_days: 7,
-        dry_run: true,
-      });
-      message.info(`Dynamic cleanup dry run matched ${result.cleanup?.matched_count || 0} run(s)`);
-    } catch (error: any) {
-      console.error('Failed to run cleanup dry run:', error);
-      message.error(error.response?.data?.error || 'Failed to run dynamic cleanup dry run');
-    } finally {
-      setCleanupLoading(false);
-    }
-  };
-
-  const cleanupStaticRuns = async (dryRun: boolean) => {
-    setStaticCleanupLoading(true);
-    try {
-      const result = await api.cleanupStaticWorkflowRuns({
-        workspaceId: workspaceId || undefined,
-        workspaceDir: workspaceDir || undefined,
-        statuses: ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted'],
-        older_than_days: 7,
-        keep_latest: 100,
-        dry_run: dryRun,
-      });
-      const cleanup = result.cleanup || {};
-      if (dryRun) {
-        message.info(`Static cleanup dry run matched ${cleanup.matched_count || 0} run(s)`);
-      } else {
-        message.success(`Deleted ${cleanup.deleted_count || 0} old static run(s)`);
-        setSelectedRunKey(null);
-        setSelectedStaticRun(null);
-        setSelectedRunArtifacts([]);
-        setSelectedRunLogs([]);
-        setStaticEvents([]);
-        await loadRuns(true);
-      }
-    } catch (error: any) {
-      console.error('Failed to clean up static runs:', error);
-      message.error(error.response?.data?.error || 'Failed to clean up static runs');
-    } finally {
-      setStaticCleanupLoading(false);
-    }
-  };
-
-  const cleanupArtifacts = async (dryRun: boolean) => {
-    setArtifactCleanupLoading(true);
-    try {
-      const result = await api.cleanupArtifacts({
-        workspaceId: workspaceId || undefined,
-        workspaceDir: workspaceDir || undefined,
-        older_than_days: 7,
-        dry_run: dryRun,
-      });
-      const cleanup = result.cleanup || {};
-      if (dryRun) {
-        message.info(`Artifact cleanup dry run matched ${cleanup.matched_count || 0} orphan artifact(s)`);
-      } else {
-        message.success(`Deleted ${cleanup.deleted_count || 0} orphan artifact(s)`);
-      }
-    } catch (error: any) {
-      console.error('Failed to clean up artifacts:', error);
-      message.error(error.response?.data?.error || 'Failed to clean up artifacts');
-    } finally {
-      setArtifactCleanupLoading(false);
     }
   };
 
@@ -2506,37 +2376,6 @@ export default function RunsInspector({
             <Button icon={<ReloadOutlined />} onClick={() => loadRuns()} loading={loading}>
               Refresh
             </Button>
-            <Button onClick={runDryCleanup} loading={cleanupLoading}>
-              Dynamic Dry Run
-            </Button>
-            <Button onClick={() => cleanupStaticRuns(true)} loading={staticCleanupLoading}>
-              Static Dry Run
-            </Button>
-            <Button onClick={() => cleanupArtifacts(true)} loading={artifactCleanupLoading}>
-              Artifact Dry Run
-            </Button>
-            <Popconfirm
-              title="Delete old static runs?"
-              description="Deletes terminal static runs older than 7 days while keeping the latest 100."
-              okText="Delete"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => cleanupStaticRuns(false)}
-            >
-              <Button danger icon={<DeleteOutlined />} loading={staticCleanupLoading}>
-                Clean Static Runs
-              </Button>
-            </Popconfirm>
-            <Popconfirm
-              title="Delete orphan artifacts?"
-              description="Deletes CAS artifacts older than 7 days that are not referenced by any service workspace run."
-              okText="Delete"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => cleanupArtifacts(false)}
-            >
-              <Button danger icon={<DeleteOutlined />} loading={artifactCleanupLoading}>
-                Clean Artifacts
-              </Button>
-            </Popconfirm>
           </Space>
         }
       >
