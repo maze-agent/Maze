@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Modal, Button, message, Alert, Spin, Space, Typography } from 'antd';
+import { Modal, Button, message, Alert, Spin, Space, Typography, Input, Segmented } from 'antd';
 import { CodeOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
+import { loadLlmSettings } from '@/utils/llmSettings';
 import type { WorkflowNode } from '@/types/workflow';
 
 const { Text } = Typography;
@@ -19,6 +20,10 @@ export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEdit
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'failed'>('idle');
+  const [editMode, setEditMode] = useState<'manual' | 'ai'>('manual');
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiNotes, setAiNotes] = useState('');
+  const [generating, setGenerating] = useState(false);
   const lastSavedCodeRef = useRef('');
 
   const isWorkspaceTask = node.data.category === 'workspace';
@@ -30,6 +35,9 @@ export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEdit
       const currentCode = node.data.customCode || '';
       setCode(currentCode);
       setParseError(null);
+      setEditMode('manual');
+      setAiPrompt('');
+      setAiNotes('');
       lastSavedCodeRef.current = currentCode;
       setSaveState(isWorkspaceTask ? 'saved' : 'idle');
     }
@@ -167,6 +175,53 @@ def my_custom_task(text: str = ""):
     setParseError(null);
   };
 
+  const handleGenerateWithAi = async () => {
+    const instruction = aiPrompt.trim();
+    if (!instruction) {
+      message.warning('Describe how the task should change');
+      return;
+    }
+
+    const settings = loadLlmSettings();
+    if (!settings.model) {
+      message.warning('Please configure an LLM model first');
+      return;
+    }
+
+    setGenerating(true);
+    setParseError(null);
+    setAiNotes('');
+    try {
+      const description = [
+        `Edit this Maze workspace task according to the user request.`,
+        `Task name: ${node.data.functionName || node.data.label || 'workspace_task'}`,
+        targetTaskPath ? `Task file: ${targetTaskPath}` : '',
+        `User request: ${instruction}`,
+        `Keep the result as a single Python @task function. Return a dict. Preserve compatible inputs/outputs unless the request says otherwise.`,
+        `Current code:\n${code || defaultCode}`,
+      ].filter(Boolean).join('\n\n');
+
+      const generated = await api.generateWorkspaceTask({
+        ...settings,
+        description,
+        taskName: node.data.functionName || node.data.label,
+        relativePath: targetTaskPath,
+      });
+
+      setCode(generated.code);
+      setAiNotes([
+        generated.notes || '',
+        ...(generated.warnings || []),
+      ].filter(Boolean).join('\n'));
+      message.success('AI generated an updated task draft');
+    } catch (error: any) {
+      console.error('Failed to edit task with AI:', error);
+      message.error(error.response?.data?.error || 'Failed to edit task with AI');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const renderSaveState = () => {
     if (!isWorkspaceTask) {
       return null;
@@ -236,6 +291,40 @@ def my_custom_task(text: str = ""):
             }
             type="info"
             showIcon
+          />
+        )}
+
+        <Segmented
+          value={editMode}
+          onChange={(value) => setEditMode(value as 'manual' | 'ai')}
+          options={[
+            { label: 'Manual', value: 'manual' },
+            { label: 'Edit with AI', value: 'ai' },
+          ]}
+        />
+
+        {editMode === 'ai' && (
+          <Alert
+            type="info"
+            showIcon
+            message="Edit with AI"
+            description={(
+              <Space direction="vertical" style={{ width: '100%' }} size="small">
+                <Text type="secondary">
+                  Describe the change. The generated code will replace the editor draft, then you can review and Parse & Save.
+                </Text>
+                <Input.TextArea
+                  value={aiPrompt}
+                  onChange={(event) => setAiPrompt(event.target.value)}
+                  placeholder="Example: read input.csv, compute missing values per column, and write reports/missing_values.json"
+                  autoSize={{ minRows: 3, maxRows: 6 }}
+                />
+                <Button type="primary" loading={generating} onClick={handleGenerateWithAi}>
+                  Generate update
+                </Button>
+                {aiNotes && <Text type="secondary" style={{ whiteSpace: 'pre-wrap' }}>{aiNotes}</Text>}
+              </Space>
+            )}
           />
         )}
 

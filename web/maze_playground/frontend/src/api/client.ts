@@ -183,6 +183,31 @@ export const api = {
     return response.data;
   },
 
+  async loadSystemWorkflow(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    sourceId: string;
+  }): Promise<{
+    success: boolean;
+    workspaceId?: string;
+    workspaceDir: string;
+    workspaceManifestVersion?: number;
+    sourceId: string;
+    workflow: {
+      name: string;
+      nodes: WorkflowNode[];
+      edges: WorkflowEdge[];
+    };
+    importedTaskDefinitions?: {
+      imported: Array<{ relativePath: string }>;
+      skipped: Array<{ relativePath: string; reason: string }>;
+      remapped?: Array<{ from: string; to: string; reason: string }>;
+    };
+  }> {
+    const response = await axios.post(`${API_BASE}/system-catalog/workflows/load`, data);
+    return response.data;
+  },
+
   // Get builtin tasks list
   async getBuiltinTasks(): Promise<BuiltinTaskMeta[]> {
     const response = await axios.get(`${API_BASE}/builtin-tasks`);

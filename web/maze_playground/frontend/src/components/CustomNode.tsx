@@ -1,26 +1,168 @@
 import { KeyboardEvent, useEffect, useState } from 'react';
 import { Handle, Position } from 'reactflow';
-import { Card, Input, Spin, Tag, Tooltip } from 'antd';
-import { CheckCircleOutlined, CloseCircleOutlined, CodeOutlined, PartitionOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { Card, Input, Tag, Tooltip } from 'antd';
+import {
+  CheckCircleFilled,
+  ClockCircleOutlined,
+  CloseCircleFilled,
+  CodeOutlined,
+  CloudServerOutlined,
+  DatabaseOutlined,
+  FileDoneOutlined,
+  LoadingOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
+
+type TaskKind = 'cpu' | 'gpu' | 'io' | 'llm';
+
+const taskKindStyles: Record<TaskKind, {
+  label: string;
+  color: string;
+  border: string;
+  background: string;
+  iconColor: string;
+}> = {
+  cpu: {
+    label: 'CPU',
+    color: '#0958d9',
+    border: '#1677ff',
+    background: '#f0f7ff',
+    iconColor: '#1677ff',
+  },
+  gpu: {
+    label: 'GPU',
+    color: '#6d28d9',
+    border: '#7c3aed',
+    background: '#f5f3ff',
+    iconColor: '#7c3aed',
+  },
+  io: {
+    label: 'I/O',
+    color: '#047857',
+    border: '#10b981',
+    background: '#f0fdf4',
+    iconColor: '#059669',
+  },
+  llm: {
+    label: 'LLM',
+    color: '#4338ca',
+    border: '#6366f1',
+    background: '#eef2ff',
+    iconColor: '#4f46e5',
+  },
+};
+
+function taskKind(data: any): TaskKind {
+  const resources = data.resources || {};
+  const label = [
+    data.label,
+    data.taskRef,
+    data.taskPath,
+    data.functionName,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (Number(resources.gpu || 0) > 0 || Number(resources.gpu_mem || 0) > 0 || label.includes('gpu') || label.includes('cuda')) {
+    return 'gpu';
+  }
+  if (label.includes('llm') || label.includes('model') || label.includes('inference') || label.includes('embed')) {
+    return 'llm';
+  }
+  if (label.includes('file') || label.includes('io') || label.includes('input') || label.includes('artifact') || label.includes('sandbox')) {
+    return 'io';
+  }
+  return 'cpu';
+}
+
+function taskKindIcon(kind: TaskKind) {
+  if (kind === 'gpu') return <ThunderboltOutlined />;
+  if (kind === 'io') return <DatabaseOutlined />;
+  return <CodeOutlined />;
+}
+
+function normalizedStatus(runStatus?: string, isConfigured = true) {
+  const status = String(runStatus || '').toLowerCase();
+  if (!isConfigured) return 'unconfigured';
+  if (status === 'completed' || status === 'succeeded' || status === 'success') return 'succeeded';
+  if (status === 'running') return 'running';
+  if (status === 'queued' || status === 'pending' || status === 'created') return 'queued';
+  if (status === 'failed' || status === 'error') return 'failed';
+  if (status === 'interrupted' || status === 'timed_out' || status === 'cancelled' || status === 'canceled') return 'failed';
+  return '';
+}
+
+function statusLabel(status: string) {
+  if (status === 'running') return 'Running';
+  if (status === 'queued') return 'Queued';
+  if (status === 'failed') return 'Failed';
+  if (status === 'unconfigured') return 'Unconfigured';
+  return '';
+}
+
+function statusColor(status: string) {
+  if (status === 'running') return 'processing';
+  if (status === 'queued') return 'warning';
+  if (status === 'failed') return 'error';
+  if (status === 'unconfigured') return 'default';
+  return 'default';
+}
+
+function placementText(runState: any, runtimeNodeIp?: string, runtimeNodeId?: string, runtimeGpuId?: string | number | null) {
+  const resources = runState?.resources || runState?.schedule_decision?.requested_resources;
+  const resourceText = resources
+    ? Object.entries(resources)
+      .filter(([, value]) => value !== undefined && value !== null && value !== 0)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join(', ')
+    : '';
+  return [
+    runtimeNodeIp ? `IP: ${runtimeNodeIp}` : null,
+    runtimeNodeId ? `Node: ${runtimeNodeId}` : null,
+    runtimeGpuId !== null && runtimeGpuId !== undefined ? `GPU: ${runtimeGpuId}` : null,
+    resourceText ? `Resources: ${resourceText}` : null,
+  ].filter(Boolean).join('\n') || 'No placement yet';
+}
+
+function hasVisibleResult(result: any) {
+  if (result === undefined || result === null) return false;
+  if (typeof result === 'string' && result.trim().toLowerCase() === 'null') return false;
+  return true;
+}
+
+function outputText(runState: any, artifactCount: number) {
+  const result = runState?.result_summary;
+  const artifacts = runState?.artifacts || [];
+  const parts = [];
+  if (hasVisibleResult(result)) {
+    parts.push(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+  }
+  if (artifactCount > 0) {
+    parts.push(`Artifacts: ${artifactCount}`);
+    artifacts.slice(0, 3).forEach((artifact: any) => {
+      parts.push(`- ${artifact.name || artifact.path || artifact.uri || artifact.id || 'artifact'}`);
+    });
+  }
+  return parts.join('\n') || 'No outputs yet';
+}
 
 export default function CustomNode({ id, data, selected }: any) {
   const { updateNode } = useWorkflowStore();
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(data.label || '');
-  const isCustom = data.category === 'custom';
-  const isWorkspace = data.category === 'workspace';
-  const isAgent = data.category === 'agent';
-  const isCodeTask = isCustom || isWorkspace;
   const isConfigured = data.configured;
+  const kind = taskKind(data);
+  const kindStyle = taskKindStyles[kind];
   const runState = data.runState;
   const runStatus = data.runStatus === 'interrupted' && runState?.status === 'running'
     ? 'interrupted'
     : runState?.status;
+  const status = normalizedStatus(runStatus, isConfigured);
   const artifactCount = runState?.artifacts?.length || 0;
   const runtimeNodeIp = runState?.node_ip || runState?.nodeIp;
   const runtimeNodeId = runState?.node_id_runtime || runState?.node_id || runState?.nodeId;
   const runtimeGpuId = runState?.gpu_id ?? runState?.gpuId;
+  const hasPlacement = Boolean(runtimeNodeIp || runtimeNodeId);
+  const hasOutput = hasVisibleResult(runState?.result_summary) || artifactCount > 0;
 
   useEffect(() => {
     if (!editingLabel) {
@@ -52,61 +194,36 @@ export default function CustomNode({ id, data, selected }: any) {
     }
   };
   
-  const getBorderColor = () => {
-    if (selected) return '#faad14';
-    if (runStatus === 'running') return '#1677ff';
-    if (runStatus === 'completed') return '#52c41a';
-    if (runStatus === 'failed') return '#ff4d4f';
-    if (runStatus === 'interrupted') return '#fa8c16';
-    if (isAgent) {
-      return '#722ed1';
+  const statusIcon = () => {
+    if (status === 'succeeded') {
+      return <CheckCircleFilled style={{ color: '#22c55e', fontSize: 16 }} />;
     }
-    if (isCodeTask) {
-      return isConfigured ? '#722ed1' : '#d9d9d9';
+    if (status === 'running') {
+      return <LoadingOutlined spin style={{ color: '#1677ff', fontSize: 16 }} />;
     }
-    return isConfigured ? '#52c41a' : '#d9d9d9';
-  };
-  
-  const getBackgroundGradient = () => {
-    if (runStatus === 'running') {
-      return 'linear-gradient(135deg, #e6f4ff 0%, #ffffff 100%)';
+    if (status === 'queued') {
+      return <ClockCircleOutlined style={{ color: '#d97706', fontSize: 16 }} />;
     }
-    if (runStatus === 'completed') {
-      return 'linear-gradient(135deg, #f6ffed 0%, #ffffff 100%)';
+    if (status === 'failed') {
+      return <CloseCircleFilled style={{ color: '#ef4444', fontSize: 16 }} />;
     }
-    if (runStatus === 'failed') {
-      return 'linear-gradient(135deg, #fff2f0 0%, #ffffff 100%)';
-    }
-    if (runStatus === 'interrupted') {
-      return 'linear-gradient(135deg, #fff7e6 0%, #ffffff 100%)';
-    }
-    if (isAgent) {
-      return 'linear-gradient(135deg, #f9f0ff 0%, #ffffff 100%)';
-    }
-    if (isCodeTask && isConfigured) {
-      return 'linear-gradient(135deg, #f5f0ff 0%, #fafafa 100%)';
-    }
-    return 'white';
+    return null;
   };
 
-  const getRunStatusTagColor = () => {
-    if (runStatus === 'completed') return 'success';
-    if (runStatus === 'failed') return 'error';
-    if (runStatus === 'running') return 'processing';
-    if (runStatus === 'interrupted') return 'orange';
-    return 'default';
-  };
+  const statusTooltip = status === 'succeeded' ? 'Succeeded' : statusLabel(status);
   
   return (
     <Card
       size="small"
       style={{
-        minWidth: '200px',
+        width: '244px',
         borderWidth: '2px',
-        borderColor: getBorderColor(),
-        boxShadow: selected ? '0 0 0 2px rgba(250, 173, 20, 0.2)' : undefined,
-        background: getBackgroundGradient(),
+        borderColor: kindStyle.border,
+        boxShadow: selected ? '0 0 0 2px rgba(245, 158, 11, 0.22)' : undefined,
+        background: `linear-gradient(135deg, ${kindStyle.background} 0%, #ffffff 72%)`,
+        borderRadius: 8,
       }}
+      bodyStyle={{ padding: 14 }}
     >
       <Handle 
         type="target" 
@@ -120,18 +237,10 @@ export default function CustomNode({ id, data, selected }: any) {
       />
       
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-          {isAgent ? (
-            <PartitionOutlined style={{ color: '#722ed1' }} />
-          ) : isCodeTask ? (
-            <CodeOutlined style={{ color: '#722ed1' }} />
-          ) : (
-            <ThunderboltOutlined style={{ color: '#1890ff' }} />
-          )}
-          {runStatus === 'running' && <Spin size="small" />}
-          {runStatus === 'completed' && <CheckCircleOutlined style={{ color: '#52c41a' }} />}
-          {runStatus === 'failed' && <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
-          {runStatus === 'interrupted' && <CloseCircleOutlined style={{ color: '#fa8c16' }} />}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+          <span style={{ color: kindStyle.iconColor, lineHeight: '20px', paddingTop: 1 }}>
+            {taskKindIcon(kind)}
+          </span>
           {editingLabel ? (
             <Input
               autoFocus
@@ -142,7 +251,7 @@ export default function CustomNode({ id, data, selected }: any) {
               onKeyDown={handleLabelKeyDown}
               onClick={(event) => event.stopPropagation()}
               onMouseDown={(event) => event.stopPropagation()}
-              style={{ width: '150px' }}
+              style={{ width: 150 }}
             />
           ) : (
             <strong
@@ -153,9 +262,11 @@ export default function CustomNode({ id, data, selected }: any) {
               }}
               onMouseDown={(event) => event.stopPropagation()}
               style={{
-                fontSize: '14px',
+                flex: 1,
+                fontSize: 15,
+                lineHeight: '20px',
                 cursor: 'text',
-                maxWidth: '150px',
+                maxWidth: 165,
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -164,65 +275,66 @@ export default function CustomNode({ id, data, selected }: any) {
               {data.label}
             </strong>
           )}
+          <Tooltip title={statusTooltip}>
+            <span style={{ width: 18, height: 20, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+              {statusIcon()}
+            </span>
+          </Tooltip>
         </div>
         
-        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-          {isAgent ? (
-            <Tag color="purple" style={{ margin: 0 }}>agent</Tag>
-          ) : isCodeTask ? (
-            <Tag color="purple" style={{ margin: 0 }}>{isWorkspace ? 'workspace' : 'custom'}</Tag>
-          ) : (
-            <Tag color="blue" style={{ margin: 0 }}>task</Tag>
-          )}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+          <Tag
+            style={{
+              margin: 0,
+              color: kindStyle.color,
+              borderColor: kindStyle.border,
+              background: '#fff',
+              fontWeight: 600,
+            }}
+          >
+            {kindStyle.label}
+          </Tag>
           {!isConfigured && (
-            <Tag color="warning" style={{ margin: 0 }}>unconfigured</Tag>
+            <Tag color="warning" style={{ margin: 0 }}>Unconfigured</Tag>
           )}
-          {runStatus && (
+          {status && status !== 'succeeded' && status !== 'unconfigured' && (
             <Tag
-              color={getRunStatusTagColor()}
+              color={statusColor(status)}
               style={{ margin: 0 }}
             >
-              {runStatus}
+              {statusLabel(status)}
             </Tag>
           )}
         </div>
         
         {isConfigured && (
-          <div style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
-            <div>Inputs: {data.inputs?.length || 0}</div>
-            <div>Outputs: {data.outputs?.length || 0}</div>
-            {isAgent && (
-              <div>{data.reactMode === 'online' ? 'Online LLM' : 'Local Demo'}</div>
-            )}
-            {isAgent && data.skills && data.skills.length > 0 && (
-              <div>Skills: {data.skills.length}</div>
-            )}
-            {runtimeNodeIp && (
-              <Tooltip title={`node_id: ${runtimeNodeId || '-'}${runtimeGpuId !== null && runtimeGpuId !== undefined ? `, gpu: ${runtimeGpuId}` : ''}`}>
-                <div style={{ color: '#0958d9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  Host: {runtimeNodeIp}{runtimeGpuId !== null && runtimeGpuId !== undefined ? ` / GPU ${runtimeGpuId}` : ''}
-                </div>
-              </Tooltip>
-            )}
-            {runState?.result_summary !== undefined && runStatus === 'completed' && (
-              <Tooltip title={typeof runState.result_summary === 'string' ? runState.result_summary : JSON.stringify(runState.result_summary)}>
-                <div style={{ color: '#389e0d', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  Result ready
-                </div>
-              </Tooltip>
-            )}
-            {artifactCount > 0 && (
-              <div style={{ color: '#0958d9', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                Files: {artifactCount}
-              </div>
-            )}
-            {runState?.error && (
-              <Tooltip title={String(runState.error)}>
-                <div style={{ color: '#cf1322', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  Error
-                </div>
-              </Tooltip>
-            )}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12, color: '#64748b' }}>
+            <span style={{ whiteSpace: 'nowrap' }}>
+              Inputs {data.inputs?.length || 0} · Outputs {data.outputs?.length || 0}
+            </span>
+            <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+              {hasPlacement && (
+                <Tooltip
+                  placement="top"
+                  title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{placementText(runState, runtimeNodeIp, runtimeNodeId, runtimeGpuId)}</pre>}
+                >
+                  <CloudServerOutlined style={{ color: '#2563eb', fontSize: 15 }} />
+                </Tooltip>
+              )}
+              {hasOutput && (
+                <Tooltip
+                  placement="top"
+                  title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap', maxWidth: 260 }}>{outputText(runState, artifactCount)}</pre>}
+                >
+                  <FileDoneOutlined style={{ color: '#16a34a', fontSize: 15 }} />
+                </Tooltip>
+              )}
+              {runState?.error && (
+                <Tooltip title={String(runState.error)}>
+                  <CloseCircleFilled style={{ color: '#ef4444', fontSize: 15 }} />
+                </Tooltip>
+              )}
+            </span>
           </div>
         )}
       </div>

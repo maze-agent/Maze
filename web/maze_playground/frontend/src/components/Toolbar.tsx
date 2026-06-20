@@ -1,102 +1,26 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Button, Input, Space, Tag, Typography, message } from 'antd';
-import { ClusterOutlined, DownloadOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined, ProjectOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons';
+import { Button, Dropdown, Input, Segmented, Tag, Typography, message } from 'antd';
+import {
+  CheckOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  MoreOutlined,
+  PlayCircleOutlined,
+  ProjectOutlined,
+  SaveOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { LocalWorkspaceFileMeta, TaskDefinition, WorkflowNode } from '@/types/workflow';
-import { loadLlmSettings } from '@/utils/llmSettings';
-import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
+import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
 
 const { Text } = Typography;
 
-function joinWorkspacePath(base: string, name: string) {
-  return [base, name].filter(Boolean).join('/');
-}
-
-function normalizeLocalRelativePath(path: string) {
-  return path
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((part) => part && part !== '.' && part !== '..')
-    .join('/');
-}
-
-async function fileToBase64(file: File) {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-  return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-}
-
-async function collectLocalWorkspaceFiles(
-  directoryHandle: any,
-  basePath = '',
-): Promise<LocalWorkspaceFileMeta[]> {
-  const files: LocalWorkspaceFileMeta[] = [];
-
-  for await (const [name, handle] of directoryHandle.entries()) {
-    const relativePath = normalizeLocalRelativePath(joinWorkspacePath(basePath, name));
-    if (!relativePath) {
-      continue;
-    }
-    if (handle.kind === 'directory') {
-      files.push({
-        name,
-        relativePath,
-        type: 'directory',
-        size: null,
-        updatedAt: null,
-      });
-      files.push(...await collectLocalWorkspaceFiles(handle, relativePath));
-    } else if (handle.kind === 'file') {
-      const file = await handle.getFile();
-      files.push({
-        name,
-        relativePath,
-        type: 'file',
-        size: file.size,
-        updatedAt: new Date(file.lastModified).toISOString(),
-      });
-    }
-  }
-
-  return files;
-}
-
-async function getFileFromLocalWorkspace(directoryHandle: any, relativePath: string): Promise<File | null> {
-  const normalizedPath = normalizeLocalRelativePath(relativePath);
-  if (directoryHandle?.kind === 'fileMap') {
-    return directoryHandle.filesByPath?.get(normalizedPath) || null;
-  }
-
-  const parts = normalizedPath.split('/').filter(Boolean);
-  if (parts.length === 0) {
-    return null;
-  }
-
-  let handle = directoryHandle;
-  for (let index = 0; index < parts.length; index += 1) {
-    const part = parts[index];
-    if (index === parts.length - 1) {
-      const fileHandle = await handle.getFileHandle(part);
-      return fileHandle.getFile();
-    }
-    handle = await handle.getDirectoryHandle(part);
-  }
-  return null;
-}
-
 interface ToolbarProps {
-  onOpenRuns?: () => void;
-  onOpenReactRunner?: () => void;
-  onReactRunStarted?: (runId: string) => void;
   onOpenClusterResources?: () => void;
 }
 
-export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStarted, onOpenClusterResources }: ToolbarProps) {
+export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -105,10 +29,6 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     workspaceDir,
     workspaceTasks,
     currentWorkspaceWorkflowPath,
-    localWorkspaceId,
-    localWorkspaceName,
-    localWorkspaceHandle,
-    localWorkspaceFiles,
     nodes, 
     edges, 
     isRunning,
@@ -122,34 +42,24 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     setWorkspaceDir,
     setWorkspaceContext,
     setWorkspaceTasks,
-    setLocalWorkspaceFiles,
     selectNode,
     setCurrentWorkspaceWorkflowPath,
     setWorkspaceWorkflows,
+    clearRunResults,
     setIsRunning,
     setActiveRun,
-    clearRunResults,
   } = useWorkflowStore();
   const [editingWorkflowName, setEditingWorkflowName] = useState(false);
   const [workflowNameDraft, setWorkflowNameDraft] = useState(workflowName);
+  const [validatingWorkflow, setValidatingWorkflow] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [runningWorkflow, setRunningWorkflow] = useState(false);
 
   useEffect(() => {
     if (!editingWorkflowName) {
       setWorkflowNameDraft(workflowName);
     }
   }, [workflowName, editingWorkflowName]);
-
-  const handleCreateWorkflow = async () => {
-    try {
-      const { workflowId: newId } = await api.createWorkflow(workflowName);
-      setWorkflowId(newId);
-      setCurrentWorkspaceWorkflowPath(null);
-      message.success('Workflow created successfully');
-    } catch (error) {
-      console.error('Failed to create workflow:', error);
-      message.error('Failed to create workflow');
-    }
-  };
 
   const refreshWorkspaceWorkflows = async () => {
     if (!workspaceDir) {
@@ -298,77 +208,6 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     return Array.from(definitions.values());
   };
 
-  const refreshLocalWorkspaceManifest = async () => {
-    if (!localWorkspaceId || !localWorkspaceName || !localWorkspaceHandle) {
-      return localWorkspaceFiles;
-    }
-
-    let files = localWorkspaceFiles;
-    if (localWorkspaceHandle.kind === 'fileMap') {
-      files = Array.from<[string, File]>(localWorkspaceHandle.filesByPath.entries()).map(([relativePath, file]) => ({
-        name: file.name,
-        relativePath,
-        type: 'file' as const,
-        size: file.size,
-        updatedAt: new Date(file.lastModified).toISOString(),
-      })).filter((file) => file.relativePath);
-    } else {
-      files = await collectLocalWorkspaceFiles(localWorkspaceHandle);
-    }
-
-    const version = Date.now().toString();
-    await api.updateLocalWorkspaceManifest(localWorkspaceId, {
-      displayName: localWorkspaceName,
-      version,
-      files,
-    });
-    setLocalWorkspaceFiles(files, version);
-    return files;
-  };
-
-  const hydrateMissingLocalWorkspaceFiles = async () => {
-    if (!localWorkspaceId || !localWorkspaceName || !localWorkspaceHandle) {
-      return;
-    }
-
-    const files = await refreshLocalWorkspaceManifest();
-    const localFilePaths = files
-      .filter((file) => file.type === 'file')
-      .map((file) => file.relativePath);
-    if (localFilePaths.length === 0) {
-      return;
-    }
-
-    const missingResult = await api.getMissingWorkspaceFiles({
-      workspaceId: workspaceId || undefined,
-      workspaceDir: workspaceDir || undefined,
-      paths: localFilePaths,
-    });
-    if (!missingResult.missing.length) {
-      message.info('Local file cache is already available in Workspace Files');
-      return;
-    }
-
-    const hideLoading = message.loading(`Hydrating ${missingResult.missing.length} local file${missingResult.missing.length === 1 ? '' : 's'} into file sandbox...`, 0);
-    try {
-      for (const relativePath of missingResult.missing) {
-        const file = await getFileFromLocalWorkspace(localWorkspaceHandle, relativePath);
-        if (!file) {
-          throw new Error(`Local file is no longer available: ${relativePath}`);
-        }
-        await api.uploadWorkspaceFile({
-          workspaceId: workspaceId || undefined,
-          workspaceDir: missingResult.workspaceDir,
-          relativePath,
-          contentBase64: await fileToBase64(file),
-        });
-      }
-      message.success(`Hydrated ${missingResult.missing.length} local file${missingResult.missing.length === 1 ? '' : 's'} into file sandbox`);
-    } finally {
-      hideLoading();
-    }
-  };
-
   const handleExportWorkflow = () => {
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before exporting');
@@ -461,99 +300,130 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     }
   };
 
-  const handleRunWorkflow = async () => {
+  const handleSaveWorkflow = async () => {
     if (nodes.length === 0) {
-      message.warning('Please add at least one task node');
+      message.warning('Please add at least one task node before saving');
       return;
     }
 
-    let activeWorkflowId = workflowId;
-    if (!activeWorkflowId) {
-      try {
+    setSavingWorkflow(true);
+    try {
+      let activeWorkflowId = workflowId;
+      if (!activeWorkflowId) {
         const created = await api.createWorkflow(workflowName);
         activeWorkflowId = created.workflowId;
         setWorkflowId(created.workflowId);
-      } catch (error) {
-        console.error('Failed to create workflow before run:', error);
-        message.error('Failed to create workflow before run');
-        return;
       }
+
+      const saved = await api.saveWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: workspaceDir || (await api.getWorkspaceWorkflows()).workspaceDir,
+        relativePath: currentWorkspaceWorkflowPath,
+        name: workflowName,
+        workflowId: activeWorkflowId,
+        nodes,
+        edges,
+      });
+      await api.saveWorkflow(activeWorkflowId, {
+        name: workflowName,
+        nodes: saved.workflow.nodes,
+        edges: saved.workflow.edges,
+      });
+      setWorkspaceContext(saved);
+      setWorkspaceDir(saved.workspaceDir);
+      setCurrentWorkspaceWorkflowPath(saved.relativePath);
+      const workflowsResult = await api.getWorkspaceWorkflows(saved.workspaceDir);
+      setWorkspaceWorkflows(workflowsResult.workflows || []);
+      message.success(`Workflow saved to ${saved.relativePath}`);
+    } catch (error: any) {
+      console.error('Failed to save workflow:', error);
+      message.error(error.response?.data?.error || 'Failed to save workflow');
+    } finally {
+      setSavingWorkflow(false);
     }
+  };
 
-    const agentNodes = nodes.filter((node) => node.data.category === 'agent');
-    if (agentNodes.length > 0) {
-      if (agentNodes.length > 1 || nodes.length > 1 || edges.length > 0) {
-        message.warning('Run one ReAct workflow node at a time. Mixed static and agent workflows are not supported yet.');
-        return;
-      }
-
-      const agentNode = agentNodes[0];
-      if (agentNode.data.agentKind !== 'react') {
-        message.warning('Unsupported agent workflow');
-        return;
-      }
-
-      const prompt = (agentNode.data.prompt || '').trim();
-      if (!prompt) {
-        message.warning('Please configure a ReAct prompt');
-        return;
-      }
-
-      const mode = agentNode.data.reactMode || 'local';
-      const settings = loadLlmSettings();
-      if (mode === 'online' && (!settings.baseUrl.trim() || !settings.model.trim() || !settings.apiKey.trim())) {
-        message.warning('Please configure online LLM settings first');
-        return;
-      }
-
-      setIsRunning(true);
-      try {
-        await hydrateMissingLocalWorkspaceFiles();
-        const maxSteps = agentNode.data.maxSteps || 4;
-        const taskTimeout = normalizeReactTaskTimeout(agentNode.data.taskTimeout, mode);
-        const started = await api.startReactRun({
-          mode,
-          prompt,
-          workspaceId: workspaceId || undefined,
-          workspaceDir: workspaceDir || undefined,
-          maxSteps,
-          maxTokens: agentNode.data.maxTokens || 2048,
-          timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
-          taskTimeout,
-          skills: agentNode.data.skills || [],
-          execBackend: agentNode.data.execBackend || 'workspace_sandbox',
-          llm: mode === 'online' ? settings : undefined,
-        });
-        message.success(`ReAct run started: ${started.runId.slice(0, 8)}...`);
-        onReactRunStarted?.(started.runId);
-      } catch (error: any) {
-        console.error('Failed to run ReAct workflow:', error);
-        message.error(error.response?.data?.error || 'Failed to run ReAct workflow');
-      } finally {
-        setIsRunning(false);
-      }
-      return;
-    }
-
-    const unconfiguredNodes = nodes.filter(n => !n.data.configured);
-    if (unconfiguredNodes.length > 0) {
-      message.warning('Some nodes are not configured, please configure all nodes first');
-      return;
-    }
-
+  const handleValidateWorkflow = async () => {
+    setValidatingWorkflow(true);
     try {
+      if (nodes.length === 0) {
+        message.warning('Workflow needs at least one task node');
+        return;
+      }
+      const unconfiguredNodes = nodes.filter((node) => !node.data.configured);
+      if (unconfiguredNodes.length > 0) {
+        message.warning(`${unconfiguredNodes.length} task node${unconfiguredNodes.length === 1 ? '' : 's'} need configuration`);
+        return;
+      }
+      const missingTaskBindings = nodes.flatMap((node) => (
+        node.data.inputs
+          .filter((input) => input.source === 'task' && (!input.taskSource?.taskId || !input.taskSource?.outputKey))
+          .map((input) => `${node.data.label}.${input.name}`)
+      ));
+      if (missingTaskBindings.length > 0) {
+        message.warning(`Missing task input binding: ${missingTaskBindings[0]}`);
+        return;
+      }
+      message.success('Workflow structure validated');
+    } finally {
+      setValidatingWorkflow(false);
+    }
+  };
+
+  const handleRunWorkflow = async () => {
+    if (nodes.length === 0) {
+      message.warning('Please add at least one task node before running');
+      return;
+    }
+
+    const unconfiguredNodes = nodes.filter((node) => !node.data.configured);
+    if (unconfiguredNodes.length > 0) {
+      message.warning(`${unconfiguredNodes.length} task node${unconfiguredNodes.length === 1 ? '' : 's'} need configuration`);
+      return;
+    }
+
+    setRunningWorkflow(true);
+    try {
+      let activeWorkflowId = workflowId;
+      if (!activeWorkflowId) {
+        const created = await api.createWorkflow(workflowName);
+        activeWorkflowId = created.workflowId;
+        setWorkflowId(created.workflowId);
+      }
+
+      const activeWorkspaceDir = workspaceDir || (await api.getWorkspaceWorkflows()).workspaceDir;
+      const saved = await api.saveWorkspaceWorkflow({
+        workspaceId: workspaceId || undefined,
+        workspaceDir: activeWorkspaceDir,
+        relativePath: currentWorkspaceWorkflowPath,
+        name: workflowName,
+        workflowId: activeWorkflowId,
+        nodes,
+        edges,
+      });
+
+      await api.saveWorkflow(activeWorkflowId, {
+        name: workflowName,
+        nodes: saved.workflow.nodes,
+        edges: saved.workflow.edges,
+      });
+
+      setWorkspaceContext(saved);
+      setWorkspaceDir(saved.workspaceDir);
+      setCurrentWorkspaceWorkflowPath(saved.relativePath);
+      const workflowsResult = await api.getWorkspaceWorkflows(saved.workspaceDir);
+      setWorkspaceWorkflows(workflowsResult.workflows || []);
+
       setIsRunning(true);
-      await api.saveWorkflow(activeWorkflowId, { name: workflowName, nodes, edges });
-      await hydrateMissingLocalWorkspaceFiles();
-      clearRunResults();
-      const started = await api.runWorkflow(activeWorkflowId, workspaceDir || undefined, workspaceId || undefined);
-      setActiveRun(started.run);
-      message.info('Workflow started running');
-      
-    } catch (error) {
+      const result = await api.runWorkflow(activeWorkflowId, saved.workspaceDir, workspaceId || undefined);
+      setActiveRun(result.run);
+      message.success(`Workflow run started: ${result.runId}`);
+    } catch (error: any) {
       console.error('Failed to run workflow:', error);
-      message.error('Failed to run workflow');
       setIsRunning(false);
+      message.error(error.response?.data?.error || error.message || 'Failed to run workflow');
+    } finally {
+      setRunningWorkflow(false);
     }
   };
 
@@ -588,26 +458,40 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
     );
   };
 
+  const workflowStatusTag = () => {
+    if (isRunning) {
+      return <Tag color="processing">Running</Tag>;
+    }
+    return saveStateTag();
+  };
+
+  const moreMenuItems = [
+    {
+      key: 'import',
+      icon: <UploadOutlined />,
+      label: 'Import workflow',
+      disabled: isRunning,
+    },
+    {
+      key: 'export',
+      icon: <DownloadOutlined />,
+      label: 'Export workflow',
+      disabled: isRunning || nodes.length === 0,
+    },
+  ];
+
   return (
     <div
-      style={{
-        height: '60px',
-        borderBottom: '1px solid #f0f0f0',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 24px',
-        background: '#fff',
-      }}
+      className="workbench-toolbar"
     >
-      <Space size="large" style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <ProjectOutlined style={{ fontSize: '24px', color: '#1890ff' }} />
-          <Text strong style={{ fontSize: '16px' }}>
-            Maze Workflow Playground
+      <div className="workbench-toolbar-left">
+        <div className="workbench-brand">
+          <ProjectOutlined className="workbench-brand-icon" />
+          <Text strong className="workbench-brand-text">
+            Maze Workbench
           </Text>
         </div>
-        
+
         {editingWorkflowName ? (
           <Input
             autoFocus
@@ -616,49 +500,43 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
             onChange={(event) => setWorkflowNameDraft(event.target.value)}
             onBlur={commitWorkflowName}
             onKeyDown={handleWorkflowNameKeyDown}
-            style={{ width: '260px' }}
+            className="workbench-workflow-name-input"
           />
         ) : (
-          <Text
-            type="secondary"
+          <button
+            type="button"
+            className="workbench-workflow-name"
             onClick={() => setEditingWorkflowName(true)}
             title="Click to rename workflow"
-            style={{
-              fontSize: '14px',
-              cursor: 'text',
-              maxWidth: '360px',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-            }}
           >
-            {workflowName}{workflowId ? ` (${workflowId.substring(0, 8)}...)` : ''}
-          </Text>
+            <span>{workflowName}</span>
+            <EditOutlined />
+          </button>
         )}
-        {saveStateTag()}
-      </Space>
+      </div>
 
-      <Space>
-        <Button
-          icon={<ThunderboltOutlined />}
-          onClick={onOpenReactRunner}
-        >
-          ReAct
-        </Button>
+      <Segmented
+        className="workbench-topbar-modes"
+        value="Design"
+        options={[
+          {
+            value: 'Design',
+            label: <span className="workbench-topbar-mode-option">Design</span>,
+          },
+          {
+            value: 'Cluster',
+            label: <span className="workbench-topbar-mode-option">Cluster</span>,
+          },
+        ]}
+        onChange={(value) => {
+          if (value === 'Cluster') {
+            onOpenClusterResources?.();
+          }
+        }}
+      />
 
-        <Button
-          icon={<HistoryOutlined />}
-          onClick={onOpenRuns}
-        >
-          Runs
-        </Button>
-
-        <Button
-          icon={<ClusterOutlined />}
-          onClick={onOpenClusterResources}
-        >
-          Cluster
-        </Button>
+      <div className="workbench-toolbar-right">
+        {workflowStatusTag()}
 
         <input
           ref={importInputRef}
@@ -668,41 +546,53 @@ export default function Toolbar({ onOpenRuns, onOpenReactRunner, onReactRunStart
           style={{ display: 'none' }}
         />
 
-        <Button 
-          type="primary" 
-          icon={<PlusOutlined />}
-          onClick={handleCreateWorkflow}
-        >
-          New Workflow
-        </Button>
-        
-        <Button 
-          icon={<UploadOutlined />}
-          onClick={() => importInputRef.current?.click()}
-          disabled={isRunning}
-        >
-          Import
-        </Button>
-
-        <Button 
-          icon={<DownloadOutlined />}
-          onClick={handleExportWorkflow}
+        <Button
+          icon={<SaveOutlined />}
+          onClick={handleSaveWorkflow}
+          loading={savingWorkflow}
           disabled={isRunning || nodes.length === 0}
         >
-          Export
+          Save
         </Button>
-        
-        <Button 
+
+        <Button
+          icon={<CheckOutlined />}
+          onClick={handleValidateWorkflow}
+          loading={validatingWorkflow}
+          disabled={isRunning || runningWorkflow || nodes.length === 0}
+        >
+          Validate
+        </Button>
+
+        <Button
           type="primary"
           icon={<PlayCircleOutlined />}
           onClick={handleRunWorkflow}
-          disabled={nodes.length === 0 || isRunning}
-          loading={isRunning}
-          style={{ background: '#52c41a', borderColor: '#52c41a' }}
+          loading={runningWorkflow}
+          disabled={isRunning || nodes.length === 0}
+          className="workbench-run-button"
         >
-          {isRunning ? 'Running...' : 'Run'}
+          Run
         </Button>
-      </Space>
+
+        <Dropdown
+          menu={{
+            items: moreMenuItems,
+            onClick: ({ key }) => {
+              if (key === 'import') {
+                importInputRef.current?.click();
+              }
+              if (key === 'export') {
+                handleExportWorkflow();
+              }
+            },
+          }}
+          trigger={['click']}
+          placement="bottomRight"
+        >
+          <Button icon={<MoreOutlined />} aria-label="More workflow actions" />
+        </Dropdown>
+      </div>
     </div>
   );
 }

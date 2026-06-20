@@ -11,69 +11,166 @@ import ReactFlow, {
   ReactFlowInstance,
   Node as ReactFlowNode,
 } from 'reactflow';
-import { Button, message, Space, Spin, Tag, Typography } from 'antd';
+import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import { api } from '@/api/client';
-import { defaultReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   BuiltinTaskMeta,
-  DynamicRunEvent,
-  DynamicRunSnapshot,
-  DynamicRunStatus,
   WorkspaceTaskMeta,
   WorkflowEdge,
   WorkflowNode,
+  StaticWorkflowRunNode,
+  StaticWorkflowRunSnapshot,
 } from '@/types/workflow';
 import CustomNode from './CustomNode';
-import ReActRuntimeCanvas, { buildAgentTrace } from './ReActRuntimeCanvas';
-
-const { Text, Title } = Typography;
 
 const nodeTypes = {
   taskNode: CustomNode,
 };
 
-const dynamicTerminalStatuses = new Set<DynamicRunStatus>([
-  'finalized',
-  'succeeded',
-  'failed',
-  'canceled',
-  'cancelled',
-  'timed_out',
-  'interrupted',
-]);
+const COPY_PASTE_OFFSET = 48;
 
-const dynamicStatusColors: Record<DynamicRunStatus, string> = {
-  created: 'default',
-  running: 'processing',
-  finalized: 'success',
-  succeeded: 'success',
-  failed: 'error',
-  canceled: 'orange',
-  cancelled: 'orange',
-  timed_out: 'volcano',
-  interrupted: 'magenta',
+type RuntimeNodeData = WorkflowNode['data'] & {
+  runState?: StaticWorkflowRunNode | null;
+  runStatus?: string | null;
 };
 
-interface WorkflowCanvasProps {
-  activeDynamicRunId?: string | null;
-  onOpenRuns?: () => void;
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === 'input'
+    || tagName === 'textarea'
+    || tagName === 'select'
+    || target.isContentEditable
+    || Boolean(target.closest('.monaco-editor'))
+  );
 }
 
-function toNodeRunStatus(status?: DynamicRunStatus | null) {
-  if (!status) return null;
-  if (status === 'finalized' || status === 'succeeded') return 'completed';
-  if (status === 'failed') return 'failed';
-  if (status === 'interrupted' || status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'interrupted';
-  return 'running';
+function cloneTaskInputs(inputs: WorkflowNode['data']['inputs']) {
+  return inputs.map((input) => {
+    if (input.source === 'task') {
+      return {
+        ...input,
+        source: 'user' as const,
+        value: '',
+        taskSource: undefined,
+      };
+    }
+    return { ...input };
+  });
 }
 
-function formatTime(value?: number | null) {
-  if (!value) return '-';
-  return new Date(value * 1000).toLocaleString();
+function copyableNode(node: WorkflowNode): WorkflowNode {
+  const { runState, runStatus, ...data } = node.data as WorkflowNode['data'] & {
+    runState?: unknown;
+    runStatus?: unknown;
+  };
+  const hasTaskSourceInput = (data.inputs || []).some((input) => input.source === 'task');
+  return {
+    ...node,
+    position: { ...node.position },
+    data: {
+      ...data,
+      inputs: cloneTaskInputs(data.inputs || []),
+      outputs: (data.outputs || []).map((output) => ({ ...output })),
+      resources: data.resources ? { ...data.resources } : undefined,
+      configured: hasTaskSourceInput ? false : data.configured,
+    },
+  };
 }
 
-export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: WorkflowCanvasProps) {
+function copiedLabel(label: string, existingLabels: Set<string>) {
+  const base = `${label} Copy`;
+  if (!existingLabels.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!existingLabels.has(candidate)) return candidate;
+  }
+  return `${base} ${Date.now()}`;
+}
+
+function duplicateNode(node: WorkflowNode, existingNodes: WorkflowNode[], pasteIndex: number): WorkflowNode {
+  const labels = new Set(existingNodes.map((item) => item.data.label));
+  const offset = COPY_PASTE_OFFSET * pasteIndex;
+  const copied = copyableNode(node);
+  return {
+    ...copied,
+    id: `node-${Date.now()}-${pasteIndex}`,
+    position: {
+      x: node.position.x + offset,
+      y: node.position.y + offset,
+    },
+    data: {
+      ...copied.data,
+      label: copiedLabel(node.data.label, labels),
+    },
+  };
+}
+
+function runTaskResources(task: StaticWorkflowRunNode) {
+  const resources = task.resources || {};
+  return {
+    cpu: Number((resources as any).cpu || 0),
+    cpu_mem: Number((resources as any).cpu_mem || 0),
+    gpu: Number((resources as any).gpu || 0),
+    gpu_mem: Number((resources as any).gpu_mem || 0),
+  };
+}
+
+function nodeFromRunTask(
+  taskId: string,
+  task: StaticWorkflowRunNode,
+  index: number,
+  currentNodes: WorkflowNode[],
+): WorkflowNode {
+  const existing = currentNodes.find((node) => node.id === taskId);
+  return {
+    id: taskId,
+    type: 'taskNode',
+    position: existing?.position || {
+      x: 160 + (index % 3) * 280,
+      y: 120 + Math.floor(index / 3) * 180,
+    },
+    data: {
+      category: (existing?.data.category || 'builtin') as WorkflowNode['data']['category'],
+      nodeType: 'task',
+      label: task.task_name || task.label || existing?.data.label || taskId,
+      taskRef: existing?.data.taskRef || task.maze_task_id,
+      customCode: existing?.data.customCode,
+      workspaceDir: existing?.data.workspaceDir,
+      taskPath: existing?.data.taskPath,
+      functionName: existing?.data.functionName,
+      inputs: existing?.data.inputs || [],
+      outputs: existing?.data.outputs || [],
+      resources: existing?.data.resources || runTaskResources(task),
+      configured: true,
+      runState: task,
+      runStatus: task.status,
+    } as RuntimeNodeData,
+  };
+}
+
+function runViewNodes(run: StaticWorkflowRunSnapshot, currentNodes: WorkflowNode[]) {
+  const taskNodes = run.task_nodes || {};
+  const graphNodeIds = run.graph?.nodes || [];
+  const ids = graphNodeIds.length > 0 ? graphNodeIds : Object.keys(taskNodes);
+  return ids.map((taskId, index) => (
+    nodeFromRunTask(taskId, taskNodes[taskId] || {
+      node_id: taskId,
+      status: 'pending',
+    }, index, currentNodes)
+  ));
+}
+
+function runViewEdges(run: StaticWorkflowRunSnapshot): WorkflowEdge[] {
+  return (run.graph?.edges || []).map((edge, index) => ({
+    id: `run-edge-${edge.source}-${edge.target}-${index}`,
+    source: edge.source,
+    target: edge.target,
+  }));
+}
+
+export default function WorkflowCanvas() {
   const {
     nodes,
     edges,
@@ -82,102 +179,39 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
     addNode,
     deleteNode,
     selectNode,
-    workflowId,
-    setWorkflowId,
     activeRunId,
     selectedRunId,
     staticRuns,
   } = useWorkflowStore();
-  const [runtimeCanvasOpen, setRuntimeCanvasOpen] = React.useState(false);
-  const [dynamicRun, setDynamicRun] = React.useState<DynamicRunSnapshot | null>(null);
-  const [dynamicEvents, setDynamicEvents] = React.useState<DynamicRunEvent[]>([]);
-  const [dynamicLoading, setDynamicLoading] = React.useState(false);
   
   const visibleRunId = selectedRunId || activeRunId;
   const visibleRun = visibleRunId ? staticRuns.find((run) => run.run_id === visibleRunId) : null;
-  const dynamicNodeStatus = toNodeRunStatus(dynamicRun?.status);
+  const isRunView = Boolean(selectedRunId && visibleRun);
   const nodesWithRunState = React.useMemo(() => (
-    nodes.map((node) => ({
-      ...node,
-      data: {
-        ...node.data,
-        runState: node.data.category === 'agent' && activeDynamicRunId && dynamicNodeStatus
-          ? { status: dynamicNodeStatus }
-          : visibleRun?.task_nodes?.[node.id] || null,
-        runStatus: node.data.category === 'agent' && activeDynamicRunId && dynamicNodeStatus
-          ? dynamicNodeStatus
-          : visibleRun?.status || null,
-      },
-    }))
-  ), [activeDynamicRunId, dynamicNodeStatus, nodes, visibleRun]);
+    isRunView && visibleRun
+      ? runViewNodes(visibleRun, nodes)
+      : nodes.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          runState: visibleRun?.task_nodes?.[node.id] || null,
+          runStatus: visibleRun?.task_nodes?.[node.id]?.status || null,
+        },
+      }))
+  ), [isRunView, nodes, visibleRun]);
+  const visibleEdges = React.useMemo(() => (
+    isRunView && visibleRun ? runViewEdges(visibleRun) : edges
+  ), [edges, isRunView, visibleRun]);
 
   const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodesWithRunState);
-  const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(edges);
+  const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(visibleEdges);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = React.useState<ReactFlowInstance | null>(null);
-  const creatingWorkflowRef = useRef<Promise<string> | null>(null);
+  const copiedNodeRef = useRef<WorkflowNode | null>(null);
+  const pasteIndexRef = useRef(1);
 
   const lastRenderedNodesRef = useRef<string>('');
   const lastRenderedEdgesRef = useRef<string>('');
-  const agentTrace = React.useMemo(() => buildAgentTrace(dynamicEvents), [dynamicEvents]);
-
-  const loadActiveDynamicRun = useCallback(async (silent = false) => {
-    if (!activeDynamicRunId) {
-      return;
-    }
-
-    if (!silent) {
-      setDynamicLoading(true);
-    }
-
-    try {
-      const [runResult, eventResult] = await Promise.all([
-        api.getDynamicRun(activeDynamicRunId),
-        api.getDynamicRunEvents(activeDynamicRunId),
-      ]);
-      setDynamicRun(runResult.run);
-      setDynamicEvents(eventResult.events || []);
-    } catch (error: any) {
-      console.error('Failed to load active dynamic run:', error);
-      if (!silent) {
-        message.error(error.response?.data?.error || 'Failed to load active dynamic run');
-      }
-    } finally {
-      if (!silent) {
-        setDynamicLoading(false);
-      }
-    }
-  }, [activeDynamicRunId]);
-
-  useEffect(() => {
-    if (!activeDynamicRunId) {
-      setRuntimeCanvasOpen(false);
-      setDynamicRun(null);
-      setDynamicEvents([]);
-      return;
-    }
-
-    setRuntimeCanvasOpen(true);
-    setDynamicRun(null);
-    setDynamicEvents([]);
-    void loadActiveDynamicRun();
-  }, [activeDynamicRunId, loadActiveDynamicRun]);
-
-  useEffect(() => {
-    if (!activeDynamicRunId) {
-      return undefined;
-    }
-
-    if (dynamicRun && dynamicTerminalStatuses.has(dynamicRun.status)) {
-      return undefined;
-    }
-
-    const timer = window.setInterval(() => {
-      void loadActiveDynamicRun(true);
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [activeDynamicRunId, dynamicRun?.status, loadActiveDynamicRun]);
   
   useEffect(() => {
     const nodesStr = JSON.stringify(nodesWithRunState);
@@ -188,14 +222,22 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
   }, [nodesWithRunState, setReactFlowNodes]);
 
   useEffect(() => {
-    const edgesStr = JSON.stringify(edges);
+    const edgesStr = JSON.stringify(visibleEdges);
     if (edgesStr !== lastRenderedEdgesRef.current) {
-      setReactFlowEdges(edges);
+      setReactFlowEdges(visibleEdges);
       lastRenderedEdgesRef.current = edgesStr;
     }
-  }, [edges, setReactFlowEdges]);
+  }, [setReactFlowEdges, visibleEdges]);
 
   useEffect(() => {
+    if (!reactFlowInstance || nodesWithRunState.length === 0) return;
+    window.setTimeout(() => {
+      reactFlowInstance.fitView({ padding: 0.25, duration: 200 });
+    }, 0);
+  }, [nodesWithRunState.length, reactFlowInstance, visibleRunId]);
+
+  useEffect(() => {
+    if (isRunView) return;
     const normalizedNodes = reactFlowNodes.map(rfNode => {
       const storeNode = nodes.find(n => n.id === rfNode.id);
       if (storeNode) {
@@ -205,7 +247,7 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
         };
       }
 
-      const { runState, runStatus, ...data } = rfNode.data || {};
+      const { runState, runStatus, ...data } = (rfNode.data || {}) as RuntimeNodeData;
       return {
         ...rfNode,
         data,
@@ -237,14 +279,15 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [reactFlowNodes, reactFlowEdges, setNodes, setEdges, nodes, edges]);
+  }, [isRunView, reactFlowNodes, reactFlowEdges, setNodes, setEdges, nodes, edges]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => {
+      if (isRunView) return;
       const newEdges = addEdge(params, reactFlowEdges);
       setReactFlowEdges(newEdges);
     },
-    [reactFlowEdges, setReactFlowEdges]
+    [isRunView, reactFlowEdges, setReactFlowEdges]
   );
 
   const onNodeClick = useCallback(
@@ -257,46 +300,67 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
   const onNodesDelete = useCallback(
     (deletedNodes: ReactFlowNode[]) => {
+      if (isRunView) return;
       deletedNodes.forEach((node) => deleteNode(node.id));
     },
-    [deleteNode]
+    [deleteNode, isRunView]
   );
+
+  const copySelectedNode = useCallback(() => {
+    const selectedNode = useWorkflowStore.getState().selectedNode;
+    if (!selectedNode) return;
+    copiedNodeRef.current = copyableNode(selectedNode);
+    pasteIndexRef.current = 1;
+    message.success('Task copied');
+  }, []);
+
+  const pasteCopiedNode = useCallback(() => {
+    const copiedNode = copiedNodeRef.current;
+    if (!copiedNode) return;
+    const currentNodes = useWorkflowStore.getState().nodes;
+    const newNode = duplicateNode(copiedNode, currentNodes, pasteIndexRef.current);
+    pasteIndexRef.current += 1;
+    addNode(newNode);
+    selectNode(newNode);
+    message.success('Task pasted');
+  }, [addNode, selectNode]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isRunView) return;
+      if (!(event.ctrlKey || event.metaKey) || isEditableTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (key === 'c') {
+        const selectedNode = useWorkflowStore.getState().selectedNode;
+        if (!selectedNode) return;
+        event.preventDefault();
+        copySelectedNode();
+      } else if (key === 'v') {
+        if (!copiedNodeRef.current) return;
+        event.preventDefault();
+        pasteCopiedNode();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [copySelectedNode, isRunView, pasteCopiedNode]);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
   }, []);
 
-  const ensureWorkflow = useCallback(async () => {
-    if (workflowId) {
-      return workflowId;
-    }
-
-    if (!creatingWorkflowRef.current) {
-      const hideLoading = message.loading('Creating workflow...', 0);
-      creatingWorkflowRef.current = api.createWorkflow()
-        .then(({ workflowId: newWorkflowId }) => {
-          setWorkflowId(newWorkflowId);
-          message.success('Workflow created automatically');
-          return newWorkflowId;
-        })
-        .catch((error) => {
-          console.error('Failed to auto-create workflow:', error);
-          message.error('Failed to create workflow');
-          throw error;
-        })
-        .finally(() => {
-          hideLoading();
-          creatingWorkflowRef.current = null;
-        });
-    }
-
-    return creatingWorkflowRef.current;
-  }, [workflowId, setWorkflowId]);
-
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
       event.preventDefault();
+
+      if (isRunView) {
+        message.info('Open the workflow draft to edit tasks. Run views are read-only.');
+        return;
+      }
 
       if (!reactFlowInstance) {
         return;
@@ -315,7 +379,6 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
         };
 
         const position = reactFlowInstance.screenToFlowPosition(dropPoint);
-        await ensureWorkflow();
 
         if (type === 'builtin') {
           const builtinTask = task as BuiltinTaskMeta;
@@ -389,35 +452,6 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
           addNode(newNode);
           selectNode(newNode);
-        } else if (type === 'agent-react') {
-          const templateTask = task || {};
-          const newNode = {
-            id: `node-${Date.now()}`,
-            type: 'taskNode' as const,
-            position,
-            data: {
-              category: 'agent' as const,
-              nodeType: 'task' as const,
-              label: templateTask.label || 'ReAct Workflow',
-              agentKind: 'react' as const,
-              reactMode: templateTask.reactMode || 'local' as const,
-              prompt: templateTask.prompt || 'Use the calculator to compute 18 * 7, then give the final answer.',
-              maxSteps: templateTask.maxSteps || 4,
-              maxTokens: templateTask.maxTokens || 2048,
-              taskTimeout: templateTask.taskTimeout || defaultReactTaskTimeout(templateTask.reactMode || 'local'),
-              skills: templateTask.skills || [],
-              recommendedSkills: templateTask.recommendedSkills || templateTask.skills || [],
-              inputs: [],
-              outputs: [{ name: 'answer', dataType: 'any' }],
-              configured: true,
-            },
-          };
-
-          addNode(newNode);
-          selectNode(newNode);
-          if ((templateTask.recommendedSkills || []).length > 0) {
-            message.info('Recommended skills can be imported from Skills Library if they are not in this workspace.');
-          }
         } else if (type === 'workflow-distributed-smoke') {
           const baseId = Date.now();
           const smokeNodes = Array.from({ length: 2 }, (_, index) => ({
@@ -454,14 +488,14 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
 
           smokeNodes.forEach((node) => addNode(node));
           selectNode(smokeNodes[0]);
-        } else if (type === 'workspace-example-task') {
-          message.info('Use Add in the Library to import this example task into the workspace.');
+        } else if (type === 'workspace-example-task' || type === 'workflow-resource-soak') {
+          message.info('Use Add in the Library to import this example into the workspace.');
         }
       } catch (error) {
         console.error('Failed to drop node:', error);
       }
     },
-    [reactFlowInstance, ensureWorkflow, addNode, selectNode]
+    [isRunView, reactFlowInstance, addNode, selectNode]
   );
 
   return (
@@ -478,6 +512,9 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
         onDrop={onDrop}
         onDragOver={onDragOver}
         deleteKeyCode={['Backspace', 'Delete']}
+        nodesDraggable={!isRunView}
+        nodesConnectable={!isRunView}
+        elementsSelectable
         nodeTypes={nodeTypes}
         fitView
       >
@@ -485,86 +522,6 @@ export default function WorkflowCanvas({ activeDynamicRunId, onOpenRuns }: Workf
         <Controls />
         <MiniMap />
       </ReactFlow>
-
-      {activeDynamicRunId && runtimeCanvasOpen && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 16,
-            zIndex: 10,
-            display: 'flex',
-            flexDirection: 'column',
-            minHeight: 0,
-            background: '#fff',
-            border: '1px solid #d9d9d9',
-            borderRadius: 8,
-            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.16)',
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
-              padding: '12px 14px',
-              borderBottom: '1px solid #f0f0f0',
-              background: '#fff',
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <Space size={8} wrap>
-                <Title level={5} style={{ margin: 0 }}>
-                  Live ReAct Runtime
-                </Title>
-                {dynamicRun ? (
-                  <Tag color={dynamicStatusColors[dynamicRun.status] || 'default'}>{dynamicRun.status}</Tag>
-                ) : (
-                  <Tag>loading</Tag>
-                )}
-              </Space>
-              <Space size={8} wrap style={{ marginTop: 4 }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {activeDynamicRunId}
-                </Text>
-                {dynamicRun?.created_time && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Started {formatTime(dynamicRun.created_time)}
-                  </Text>
-                )}
-              </Space>
-            </div>
-
-            <Space>
-              <Button onClick={onOpenRuns}>
-                Open Runs
-              </Button>
-              <Button onClick={() => setRuntimeCanvasOpen(false)}>
-                Back to Editor
-              </Button>
-            </Space>
-          </div>
-
-          <div style={{ flex: 1, minHeight: 0, padding: 12, background: '#fafafa' }}>
-            {dynamicLoading && !dynamicRun ? (
-              <div style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
-                <Space direction="vertical" align="center">
-                  <Spin />
-                  <Text type="secondary">Loading runtime graph...</Text>
-                </Space>
-              </div>
-            ) : (
-              <ReActRuntimeCanvas
-                trace={agentTrace}
-                run={dynamicRun}
-                height="100%"
-                emptyDescription="Waiting for ReAct runtime events..."
-              />
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

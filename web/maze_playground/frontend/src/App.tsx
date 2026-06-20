@@ -8,9 +8,8 @@ import WorkflowCanvas from './components/WorkflowCanvas';
 import NodePanel from './components/NodePanel';
 import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
-import ReActRunModal from './components/ReActRunModal';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
-import WorkspaceAgentPanel from './components/WorkspaceAgentPanel';
+import WorkbenchShell from './components/WorkbenchShell';
 import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
@@ -26,12 +25,8 @@ function App() {
   const latestWorkflowFingerprintRef = useRef('');
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
-  const [dynamicRunFocusId, setDynamicRunFocusId] = useState<string | null>(null);
-  const [staticRunFocusId, setStaticRunFocusId] = useState<string | null>(null);
-  const [activeDynamicRunId, setActiveDynamicRunId] = useState<string | null>(null);
-  const [reactRunnerOpen, setReactRunnerOpen] = useState(false);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
-  const [workspaceAgentOpen, setWorkspaceAgentOpen] = useState(true);
+  const [nodePanelOpen, setNodePanelOpen] = useState(false);
   const {
     workflowId,
     workflowName,
@@ -354,67 +349,30 @@ function App() {
 
   return (
     <ConfigProvider locale={enUS}>
-      <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-        <Toolbar
-          onOpenRuns={() => setRunsOpen(true)}
-          onOpenReactRunner={() => setReactRunnerOpen(true)}
-          onOpenClusterResources={() => setClusterResourcesOpen(true)}
-          onReactRunStarted={(runId) => {
-            setActiveDynamicRunId(runId);
-            setDynamicRunFocusId(runId);
-            setStaticRunFocusId(null);
-          }}
-        />
-        
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          {workspaceReady && workspaceDir ? <BuiltinTasksSidebar /> : null}
-          
-          <div style={{ flex: 1, position: 'relative' }}>
-            <WorkflowCanvas
-              activeDynamicRunId={activeDynamicRunId}
-              onOpenRuns={() => setRunsOpen(true)}
-            />
-          </div>
-          
-          <NodePanel />
-          {workspaceReady && workspaceDir ? (
-            <WorkspaceAgentPanel
-              open={workspaceAgentOpen}
-              workspaceReady={workspaceReady}
-              onToggle={() => setWorkspaceAgentOpen((value) => !value)}
-              onOpenRuns={(runId) => {
-                if (runId) {
-                  setActiveDynamicRunId(null);
-                  setDynamicRunFocusId(null);
-                  setStaticRunFocusId(runId);
-                }
-                setRunsOpen(true);
-              }}
-            />
-          ) : null}
-        </div>
-        
-        <ResultsModal />
-        <RunsInspector
-          open={runsOpen}
-          onClose={() => setRunsOpen(false)}
-          focusDynamicRunId={dynamicRunFocusId}
-          focusStaticRunId={staticRunFocusId}
-        />
-        <ReActRunModal
-          open={reactRunnerOpen}
-          onClose={() => setReactRunnerOpen(false)}
-          onCompleted={(runId) => {
-            setActiveDynamicRunId(runId);
-            setDynamicRunFocusId(runId);
-            setStaticRunFocusId(null);
-          }}
-        />
-        <ClusterResourcesDrawer
-          open={clusterResourcesOpen}
-          onClose={() => setClusterResourcesOpen(false)}
-        />
-      </div>
+      <WorkbenchShell
+        topBar={(
+          <Toolbar
+            onOpenClusterResources={() => setClusterResourcesOpen(true)}
+          />
+        )}
+        leftSidebar={<BuiltinTasksSidebar onOpenRuns={() => setRunsOpen(true)} />}
+        canvas={<WorkflowCanvas />}
+        nodePanel={<NodePanel open={nodePanelOpen} onClose={() => setNodePanelOpen(false)} />}
+        resultsModal={<ResultsModal />}
+        runsInspector={(
+          <RunsInspector
+            open={runsOpen}
+            onClose={() => setRunsOpen(false)}
+          />
+        )}
+        clusterDrawer={(
+          <ClusterResourcesDrawer
+            open={clusterResourcesOpen}
+            onClose={() => setClusterResourcesOpen(false)}
+          />
+        )}
+        onOpenNodePanel={() => setNodePanelOpen(true)}
+      />
     </ConfigProvider>
   );
 }

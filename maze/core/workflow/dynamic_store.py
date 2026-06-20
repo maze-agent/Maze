@@ -16,7 +16,7 @@ ACTIVE_DYNAMIC_RUN_STATUSES = {"created", "running"}
 
 def default_workspace_dir() -> Path:
     project_root = Path(__file__).resolve().parents[3]
-    return Path(os.environ.get("MAZE_WORKSPACE_DIR", project_root / "workspace")).expanduser().resolve()
+    return Path(os.environ.get("MAZE_WORKSPACE_DIR", project_root / "workspaces" / "default")).expanduser().resolve()
 
 
 class DynamicRunStore:

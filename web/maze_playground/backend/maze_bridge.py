@@ -29,11 +29,11 @@ sys.path.insert(0, project_root)
 workspace_root = os.path.abspath(os.path.expanduser(
     os.environ.get("MAZE_WORKSPACE_ROOT_DIR")
     or os.environ.get("MAZE_WORKSPACE_DIR")
-    or os.path.join(project_root, "workspace")
+    or os.path.join(project_root, "workspaces")
 ))
 workspaces_dir = os.path.abspath(os.path.expanduser(
     os.environ.get("MAZE_WORKSPACES_DIR")
-    or os.path.join(workspace_root, "workspaces")
+    or workspace_root
 ))
 default_workspace_dir = os.path.abspath(os.path.expanduser(
     os.environ.get("MAZE_DEFAULT_WORKSPACE_DIR")
