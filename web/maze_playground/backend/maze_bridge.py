@@ -962,6 +962,35 @@ def _load_workspace_task_func(workspace_dir, relative_path, function_name):
     return task_func
 
 
+def _node_resources(node_data):
+    resources = dict(node_data.get("resources") or {})
+    return {
+        "cpu": int(resources.get("cpu") or 1),
+        "cpu_mem": int(resources.get("cpu_mem") or 0),
+        "gpu": int(resources.get("gpu") or 0),
+        "gpu_mem": int(resources.get("gpu_mem") or 0),
+    }
+
+
+def _node_model_anchor(node_data):
+    anchor = node_data.get("modelAnchor") or node_data.get("model_anchor")
+    if isinstance(anchor, dict) and anchor.get("local_model"):
+        return {
+            "local_model": str(anchor.get("local_model")),
+            "model_scope": str(anchor.get("model_scope") or "head"),
+            "backend": str(anchor.get("backend") or "transformers"),
+            **{k: v for k, v in anchor.items() if k not in {"local_model", "model_scope", "backend"}},
+        }
+    local_model = str(node_data.get("localModel") or "").strip()
+    if local_model:
+        return {
+            "local_model": local_model,
+            "model_scope": "head",
+            "backend": "transformers",
+        }
+    return None
+
+
 def create_maze_workflow(workflow_id, server_url="http://localhost:8000"):
     """
     创建 Maze 工作流（已废弃）
@@ -1069,7 +1098,12 @@ def build_and_run_workflow(
                 
                 # 添加任务到工作流
                 print(f"[DEBUG] 添加内置任务: {func_name}, 输入: {list(task_inputs.keys())}", file=sys.stderr)
-                ma_task = workflow.add_task(task_func, inputs=task_inputs)
+                ma_task = workflow.add_task(
+                    task_func,
+                    inputs=task_inputs,
+                    resources=_node_resources(node_data),
+                    model_anchor=_node_model_anchor(node_data),
+                )
                 remember_task(node_id, ma_task)
                 print(f"[DEBUG] 任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
 
@@ -1102,7 +1136,12 @@ def build_and_run_workflow(
                     f"[DEBUG] 添加工作区任务: {task_path}:{function_name}, 输入: {list(task_inputs.keys())}",
                     file=sys.stderr,
                 )
-                ma_task = workflow.add_task(task_func, inputs=task_inputs)
+                ma_task = workflow.add_task(
+                    task_func,
+                    inputs=task_inputs,
+                    resources=_node_resources(node_data),
+                    model_anchor=_node_model_anchor(node_data),
+                )
                 remember_task(node_id, ma_task)
                 print(f"[DEBUG] 工作区任务已添加: {node_id} -> {ma_task.task_id}", file=sys.stderr)
             
@@ -1143,7 +1182,12 @@ def build_and_run_workflow(
                         }
                     
                     # Add task
-                    ma_task = workflow.add_task(task_func, inputs=task_inputs)
+                    ma_task = workflow.add_task(
+                        task_func,
+                        inputs=task_inputs,
+                        resources=_node_resources(node_data),
+                        model_anchor=_node_model_anchor(node_data),
+                    )
                     remember_task(node_id, ma_task)
                 
                 finally:

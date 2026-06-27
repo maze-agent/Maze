@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Drawer, Progress, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Collapse, Drawer, Form, Input, InputNumber, Modal, Progress, Select, Space, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
 import { api } from '@/api/client';
 import type {
   ClusterQueueTask,
   ClusterQueuesResponse,
   ClusterResourceNode,
   ClusterResourcesResponse,
+  WorkerProfile,
+  WorkerProfileDraftTestResponse,
 } from '@/types/workflow';
 
 const { Text } = Typography;
@@ -83,10 +85,49 @@ function gpuTotals(node: ClusterResourceNode) {
   return { total, available };
 }
 
+function gpuMemoryTotals(node: ClusterResourceNode) {
+  const gpu = node.resources?.gpu;
+  const devices = gpu?.devices || [];
+  if (devices.length > 0) {
+    return devices.reduce(
+      (acc, device) => ({
+        total: acc.total + Number(device.total_memory || 0),
+        available: acc.available + Number(device.available_memory || 0),
+      }),
+      { total: 0, available: 0 },
+    );
+  }
+  return {
+    total: Number(gpu?.total_memory || 0),
+    available: Number(gpu?.available_memory || 0),
+  };
+}
+
 type QueueRow = ClusterQueueTask & {
   queue_bucket: string;
   row_key: string;
 };
+
+type WorkerAction = 'test' | 'start' | 'restart' | 'stop' | 'logs';
+
+const WORKER_ACTION_LABELS: Record<WorkerAction, string> = {
+  test: 'Test',
+  start: 'Start',
+  restart: 'Restart',
+  stop: 'Stop process',
+  logs: 'Logs',
+};
+
+const CONSOLE_PRESETS = [
+  { label: 'pwd', command: 'pwd' },
+  { label: 'nvidia-smi', command: 'nvidia-smi' },
+  { label: 'ray status', command: 'ray status --address auto' },
+  { label: 'conda envs', command: 'conda info --envs' },
+  { label: 'maze status', command: 'PYTHONPATH=/root/data/Maze /root/miniconda3/envs/maze/bin/python -m maze.cli.cli dev status' },
+  { label: 'disk', command: 'df -h' },
+  { label: 'memory', command: 'free -h' },
+  { label: 'worker log', command: 'LOG="$(ls -t /root/data/Maze/logs/maze_worker_remote_*.log 2>/dev/null | head -1)"; if [ -n "$LOG" ]; then echo "LOG=$LOG"; tail -80 "$LOG"; else echo "no worker log"; fi' },
+];
 
 function queueStatusColor(status?: string): string {
   if (status === 'running') return 'processing';
@@ -123,11 +164,27 @@ function candidateRejectSummary(task: ClusterQueueTask): string[] {
 }
 
 export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourcesDrawerProps) {
+  const [form] = Form.useForm();
   const [data, setData] = useState<ClusterResourcesResponse | null>(null);
   const [queues, setQueues] = useState<ClusterQueuesResponse['queues'] | null>(null);
+  const [workerProfiles, setWorkerProfiles] = useState<WorkerProfile[]>([]);
   const [loading, setLoading] = useState(false);
+  const [workersLoading, setWorkersLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [workerError, setWorkerError] = useState<string | null>(null);
+  const [workerModalOpen, setWorkerModalOpen] = useState(false);
+  const [workerTestLoading, setWorkerTestLoading] = useState(false);
+  const [workerDraftTest, setWorkerDraftTest] = useState<WorkerProfileDraftTestResponse['test'] | null>(null);
+  const [actionKey, setActionKey] = useState('');
+  const [nodeActionKey, setNodeActionKey] = useState('');
+  const [selectedWorkerIds, setSelectedWorkerIds] = useState<string[]>([]);
+  const [logModal, setLogModal] = useState<{ title: string; output: string } | null>(null);
+  const [activeTab, setActiveTab] = useState('resources');
+  const [consoleCommand, setConsoleCommand] = useState('pwd');
+  const [consoleRunning, setConsoleRunning] = useState(false);
+  const [consoleOutput, setConsoleOutput] = useState('');
+  const [consoleHistory, setConsoleHistory] = useState<Array<{ command: string; ok: boolean; ranAt: string }>>([]);
 
   const loadResources = useCallback(async () => {
     setLoading(true);
@@ -163,15 +220,30 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     setLoading(false);
   }, []);
 
+  const loadWorkerProfiles = useCallback(async () => {
+    setWorkersLoading(true);
+    try {
+      const result = await api.listWorkerProfiles();
+      setWorkerProfiles(result.profiles || []);
+      setWorkerError(null);
+    } catch (reason: any) {
+      console.error('Failed to load worker profiles:', reason);
+      setWorkerError(reason?.response?.data?.error || reason?.message || 'Failed to load worker profiles');
+    } finally {
+      setWorkersLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) {
       return;
     }
 
     loadResources();
+    loadWorkerProfiles();
     const timer = window.setInterval(loadResources, 3000);
     return () => window.clearInterval(timer);
-  }, [loadResources, open]);
+  }, [loadResources, loadWorkerProfiles, open]);
 
   const nodes = useMemo(() => {
     const registered = data?.cluster?.nodes || [];
@@ -183,14 +255,39 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     (acc, node) => {
       const cpu = cpuTotals(node);
       const gpu = gpuTotals(node);
+      const gpuMemory = gpuMemoryTotals(node);
       acc.nodes += 1;
       acc.registered += node.registered ? 1 : 0;
       acc.cpu += cpu.total || 0;
       acc.gpu += gpu.total || 0;
+      acc.gpuMemoryTotal += gpuMemory.total || 0;
+      acc.gpuMemoryAvailable += gpuMemory.available || 0;
       return acc;
     },
-    { nodes: 0, registered: 0, cpu: 0, gpu: 0 },
+    { nodes: 0, registered: 0, cpu: 0, gpu: 0, gpuMemoryTotal: 0, gpuMemoryAvailable: 0 },
   ), [nodes]);
+
+  const defaultHeadUrl = useMemo(() => {
+    const headIp = data?.cluster?.head_node_ip;
+    return headIp ? `http://${headIp}:8000` : 'http://127.0.0.1:8000';
+  }, [data?.cluster?.head_node_ip]);
+
+  const defaultWorkerFormValues = useMemo(() => ({
+    port: 22,
+    username: 'root',
+    remoteProjectDir: '/root/data/Maze',
+    condaEnv: 'maze',
+    condaSh: '/root/miniconda3/etc/profile.d/conda.sh',
+    heartbeatInterval: 10,
+    authMethod: 'password',
+  }), []);
+
+  const openWorkerModal = () => {
+    form.resetFields();
+    form.setFieldsValue(defaultWorkerFormValues);
+    setWorkerDraftTest(null);
+    setWorkerModalOpen(true);
+  };
 
   const queueRows = useMemo<QueueRow[]>(() => {
     if (!queues) return [];
@@ -208,6 +305,304 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       ...buildRows('running', queues.running_tasks),
     ];
   }, [queues]);
+
+  const buildWorkerProfileFromValues = (values: any) => {
+    return {
+      id: values.id,
+      name: values.name,
+      host: values.host,
+      port: values.port,
+      username: values.username,
+      remoteProjectDir: values.remoteProjectDir,
+      condaEnv: values.condaEnv,
+      condaSh: values.condaSh,
+      headUrl: defaultHeadUrl,
+      heartbeatInterval: values.heartbeatInterval,
+      auth: {
+        method: values.authMethod,
+        privateKeyPath: values.privateKeyPath,
+      },
+    };
+  };
+
+  const testWorkerProfileDraft = async () => {
+    try {
+      const values = await form.validateFields(['name', 'host', 'port', 'username', 'authMethod', 'password', 'privateKeyPath', 'remoteProjectDir', 'condaEnv', 'condaSh', 'heartbeatInterval']);
+      setWorkerTestLoading(true);
+      setWorkerDraftTest(null);
+      const result = await api.testWorkerProfileDraft({
+        profile: buildWorkerProfileFromValues(values),
+        password: values.password,
+        timeoutMs: 30000,
+      });
+      setWorkerDraftTest(result.test || null);
+      if (result.test?.ok) {
+        message.success('Worker connection test passed');
+      } else {
+        message.warning('Worker connection test completed with warnings');
+      }
+      await loadWorkerProfiles();
+    } catch (reason: any) {
+      if (reason?.errorFields) {
+        return;
+      }
+      const result = reason?.response?.data?.result;
+      const output = result ? [result.stdout, result.stderr].filter(Boolean).join('\n') : '';
+      setWorkerDraftTest({
+        ok: false,
+        checks: [{
+          name: 'test',
+          ok: false,
+          stderr: reason?.response?.data?.error || reason?.message || 'Worker connection test failed',
+        }],
+        result,
+      });
+      if (output) {
+        setLogModal({ title: 'Worker connection test failed', output });
+      }
+      message.error(reason?.response?.data?.error || reason?.message || 'Worker connection test failed');
+    } finally {
+      setWorkerTestLoading(false);
+    }
+  };
+
+  const saveWorkerProfile = async (values: any) => {
+    const profile = buildWorkerProfileFromValues(values);
+    try {
+      await api.saveWorkerProfile({ profile, password: values.password });
+      message.success('Worker profile saved');
+      setWorkerModalOpen(false);
+      setWorkerDraftTest(null);
+      form.resetFields();
+      form.setFieldsValue(defaultWorkerFormValues);
+      await loadWorkerProfiles();
+    } catch (reason: any) {
+      message.error(reason?.response?.data?.error || reason?.message || 'Failed to save worker profile');
+    }
+  };
+
+  const runWorkerAction = async (profile: WorkerProfile, action: WorkerAction, password?: string) => {
+    const key = `${profile.id}:${action}`;
+    setActionKey(key);
+    try {
+      const result = await api.runWorkerProfileAction(profile.id, action, { password, timeoutMs: 90000 });
+      if (action === 'logs') {
+        setLogModal({
+          title: `${profile.name} logs`,
+          output: [result.result?.stdout, result.result?.stderr].filter(Boolean).join('\n') || 'No output',
+        });
+      } else {
+        message.success(`${WORKER_ACTION_LABELS[action]} sent to ${profile.name}`);
+      }
+      await Promise.all([loadWorkerProfiles(), loadResources()]);
+    } catch (reason: any) {
+      const output = reason?.response?.data?.result;
+      const text = output ? [output.stdout, output.stderr].filter(Boolean).join('\n') : '';
+      if (text) {
+        setLogModal({ title: `${profile.name} ${WORKER_ACTION_LABELS[action]} failed`, output: text });
+      }
+      message.error(reason?.response?.data?.error || reason?.message || `Failed to ${WORKER_ACTION_LABELS[action].toLowerCase()} worker`);
+    } finally {
+      setActionKey('');
+    }
+  };
+
+  const setNodeDisabled = async (node: ClusterResourceNode, disabled: boolean) => {
+    const key = `${node.node_id}:${disabled ? 'disable' : 'enable'}`;
+    setNodeActionKey(key);
+    try {
+      const result = await api.setClusterNodeDisabled(node.node_id, disabled);
+      if (result.cluster) {
+        setData({ status: 'success', cluster: result.cluster });
+      } else {
+        await loadResources();
+      }
+      message.success(`${disabled ? 'Drain' : 'Enable'} sent to ${node.node_ip || shortId(node.node_id)}`);
+    } catch (reason: any) {
+      message.error(reason?.response?.data?.error || reason?.message || 'Failed to update node scheduling');
+    } finally {
+      setNodeActionKey('');
+    }
+  };
+
+  const unlockWorkerProfile = (profile: WorkerProfile) => {
+    if (profile.auth?.method === 'key') {
+      confirmWorkerAction(profile, 'test');
+      return;
+    }
+    Modal.confirm({
+      title: `Unlock ${profile.name}`,
+      content: (
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Text type="secondary">
+            This tests SSH and keeps the password only in the current backend session.
+          </Text>
+          <Input.Password
+            autoFocus
+            placeholder="SSH password"
+            onChange={(event) => {
+              (unlockWorkerProfile as any).password = event.target.value;
+            }}
+          />
+        </Space>
+      ),
+      onOk: () => runWorkerAction(profile, 'test', (unlockWorkerProfile as any).password || ''),
+      afterClose: () => {
+        (unlockWorkerProfile as any).password = '';
+      },
+    });
+  };
+
+  const confirmWorkerAction = (profile: WorkerProfile, action: WorkerAction) => {
+    if (profile.auth?.method === 'password' && !profile.auth?.hasPassword && action !== 'logs') {
+      Modal.confirm({
+        title: `Password for ${profile.name}`,
+        content: (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Text type="secondary">
+              {WORKER_ACTION_LABELS[action]} runs over SSH on the worker. The password is kept only in the current backend session.
+            </Text>
+            <Input.Password
+              autoFocus
+              placeholder="SSH password for this action"
+              onChange={(event) => {
+                (confirmWorkerAction as any).password = event.target.value;
+              }}
+            />
+          </Space>
+        ),
+        onOk: () => runWorkerAction(profile, action, (confirmWorkerAction as any).password || ''),
+        afterClose: () => {
+          (confirmWorkerAction as any).password = '';
+        },
+      });
+      return;
+    }
+    runWorkerAction(profile, action);
+  };
+
+  const deleteWorkerProfile = async (profile: WorkerProfile) => {
+    Modal.confirm({
+      title: `Delete ${profile.name}?`,
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        await api.deleteWorkerProfile(profile.id);
+        message.success('Worker profile deleted');
+        await loadWorkerProfiles();
+      },
+    });
+  };
+
+  const executeBulkWorkerAction = async (
+    action: WorkerAction,
+    passwordByProfileId?: Record<string, string>,
+  ) => {
+    const key = `bulk:${action}`;
+    setActionKey(key);
+    try {
+      const result = await api.runWorkerProfilesBulkAction({
+        action,
+        profileIds: selectedWorkerIds,
+        passwordByProfileId,
+        timeoutMs: 90000,
+      });
+      const failed = (result.results || []).filter((item) => !item.ok);
+      if (failed.length > 0) {
+        setLogModal({
+          title: `${action} selected workers`,
+          output: failed.map((item) => `${item.profileId}: ${item.error || 'failed'}`).join('\n'),
+        });
+        message.warning(`${failed.length} worker action failed`);
+      } else {
+        message.success(`${action} sent to ${selectedWorkerIds.length} worker${selectedWorkerIds.length === 1 ? '' : 's'}`);
+      }
+      await Promise.all([loadWorkerProfiles(), loadResources()]);
+    } catch (reason: any) {
+      message.error(reason?.response?.data?.error || reason?.message || `Failed to ${action} selected workers`);
+    } finally {
+      setActionKey('');
+    }
+  };
+
+  const runBulkWorkerAction = async (action: WorkerAction) => {
+    if (selectedWorkerIds.length === 0) {
+      message.warning('Select at least one worker profile');
+      return;
+    }
+
+    const passwordProfiles = workerProfiles.filter(
+      (profile) => selectedWorkerIds.includes(profile.id)
+        && profile.auth?.method === 'password'
+        && !profile.auth?.hasPassword
+        && action !== 'logs',
+    );
+    if (passwordProfiles.length > 0) {
+      Modal.confirm({
+        title: `Password for ${passwordProfiles.length} selected worker${passwordProfiles.length === 1 ? '' : 's'}`,
+        content: (
+          <Input.Password
+            autoFocus
+            placeholder="SSH password for this batch action"
+            onChange={(event) => {
+              (runBulkWorkerAction as any).password = event.target.value;
+            }}
+          />
+        ),
+        onOk: () => {
+          const password = (runBulkWorkerAction as any).password || '';
+          const passwordByProfileId = Object.fromEntries(
+            passwordProfiles.map((profile) => [profile.id, password]),
+          );
+          return executeBulkWorkerAction(action, passwordByProfileId);
+        },
+        afterClose: () => {
+          (runBulkWorkerAction as any).password = '';
+        },
+      });
+      return;
+    }
+
+    executeBulkWorkerAction(action);
+  };
+
+  const runConsoleCommand = async () => {
+    const command = consoleCommand.trim();
+    if (!command) {
+      message.warning('Enter a command to run');
+      return;
+    }
+    setConsoleRunning(true);
+    try {
+      const result = await api.runClusterConsoleCommand({
+        target: 'head',
+        command,
+        timeoutMs: 60000,
+      });
+      const output = [
+        `$ ${result.command}`,
+        result.result?.stdout || '',
+        result.result?.stderr || '',
+        `exit ${result.result?.code ?? 0}`,
+      ].filter(Boolean).join('\n');
+      setConsoleOutput(output);
+      setConsoleHistory((items) => [
+        { command: result.command, ok: Boolean(result.result?.ok), ranAt: result.ranAt },
+        ...items,
+      ].slice(0, 8));
+    } catch (reason: any) {
+      const result = reason?.response?.data?.result;
+      const output = [
+        `$ ${command}`,
+        result?.stdout || '',
+        result?.stderr || '',
+        reason?.response?.data?.error || reason?.message || 'Command failed',
+      ].filter(Boolean).join('\n');
+      setConsoleOutput(output);
+      message.error(reason?.response?.data?.error || reason?.message || 'Command failed');
+    } finally {
+      setConsoleRunning(false);
+    }
+  };
 
   const columns: ColumnsType<ClusterResourceNode> = [
     {
@@ -237,6 +632,8 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
           <Tag color={node.registered ? 'geekblue' : 'orange'}>
             {node.registered ? 'registered' : 'ray only'}
           </Tag>
+          {node.disabled && <Tag color="volcano">drained</Tag>}
+          {node.stale && <Tag color="orange">stale</Tag>}
         </Space>
       ),
     },
@@ -274,24 +671,42 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     {
       title: 'GPU',
       key: 'gpu',
+      width: 160,
       render: (_, node) => {
         const { total, available } = gpuTotals(node);
-        const devices = node.resources?.gpu?.devices || [];
         if (!total) {
           return <Text type="secondary">No GPU</Text>;
         }
 
         return (
-          <Space direction="vertical" size={4}>
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
             <Text>{available === undefined ? `${total} total` : `${available} / ${total} available`}</Text>
+            <Progress percent={available === undefined ? 0 : percent(available, total)} showInfo={false} size="small" />
+          </Space>
+        );
+      },
+    },
+    {
+      title: 'GPU Memory',
+      key: 'gpu_memory',
+      width: 260,
+      render: (_, node) => {
+        const devices = node.resources?.gpu?.devices || [];
+        const totals = gpuMemoryTotals(node);
+        if (!totals.total) {
+          return <Text type="secondary">-</Text>;
+        }
+
+        return (
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <Text>{formatGpuMemory(totals.available)} / {formatGpuMemory(totals.total)}</Text>
+            <Progress percent={percent(totals.available, totals.total)} showInfo={false} size="small" />
             <Space size={4} wrap>
-              {devices.length > 0 ? devices.map((device) => (
-                <Tag key={String(device.gpu_id)} color={device.available_count > 0 ? 'green' : 'volcano'}>
+              {devices.map((device) => (
+                <Tag key={String(device.gpu_id)} color={device.available_memory > 0 ? 'green' : 'volcano'}>
                   GPU {device.gpu_id}: {formatGpuMemory(device.available_memory)} / {formatGpuMemory(device.total_memory)}
                 </Tag>
-              )) : (
-                <Tag color="default">{total} Ray GPU</Tag>
-              )}
+              ))}
             </Space>
           </Space>
         );
@@ -312,6 +727,35 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
           </Tag>
         </Space>
       ),
+    },
+    {
+      title: 'Scheduling',
+      key: 'scheduling',
+      width: 150,
+      render: (_, node) => {
+        if (node.role === 'head' || !node.registered) {
+          return <Text type="secondary">-</Text>;
+        }
+        return node.disabled ? (
+          <Button
+            size="small"
+            loading={nodeActionKey === `${node.node_id}:enable`}
+            onClick={() => setNodeDisabled(node, false)}
+          >
+            Enable
+          </Button>
+        ) : (
+          <Tooltip title="Stop assigning new tasks without SSHing into the worker">
+            <Button
+              size="small"
+              loading={nodeActionKey === `${node.node_id}:disable`}
+              onClick={() => setNodeDisabled(node, true)}
+            >
+              Drain
+            </Button>
+          </Tooltip>
+        );
+      },
     },
   ];
 
@@ -416,102 +860,404 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     },
   ];
 
+  const workerColumns: ColumnsType<WorkerProfile> = [
+    {
+      title: 'Worker',
+      key: 'worker',
+      width: 230,
+      render: (_, profile) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{profile.name}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{profile.username}@{profile.host}:{profile.port}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: 'Runtime',
+      key: 'runtime',
+      render: (_, profile) => (
+        <Space direction="vertical" size={2}>
+          <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: profile.remoteProjectDir }}>
+            {profile.remoteProjectDir}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: profile.headUrl || defaultHeadUrl }}>
+            head {profile.headUrl || defaultHeadUrl}
+          </Text>
+          <Space size={4} wrap>
+            <Tag>{profile.condaEnv}</Tag>
+            <Tag color={profile.auth?.method === 'key' ? 'geekblue' : 'purple'}>{profile.auth?.method || 'password'}</Tag>
+            {profile.auth?.hasPassword && <Tag color="green">session secret</Tag>}
+            {profile.auth?.method === 'password' && !profile.auth?.hasPassword && <Tag color="orange">secret needed</Tag>}
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: 'Last Action',
+      key: 'lastAction',
+      width: 170,
+      render: (_, profile) => (
+        <Space direction="vertical" size={2}>
+          <Space size={4} wrap>
+            <Text>{profile.lastAction?.action || '-'}</Text>
+              {profile.lastAction?.action && (
+                <Tag color={profile.lastAction.ok === false ? 'red' : 'green'}>
+                  {profile.lastAction.ok === false ? 'failed' : 'ok'}
+              </Tag>
+            )}
+          </Space>
+          <Text type="secondary" style={{ fontSize: 12 }}>{profile.lastAction?.at ? new Date(profile.lastAction.at).toLocaleString() : '-'}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      width: 390,
+      render: (_, profile) => (
+        <Space size={6} wrap>
+          <Button size="small" icon={<ToolOutlined />} loading={actionKey === `${profile.id}:test`} onClick={() => confirmWorkerAction(profile, 'test')}>Test</Button>
+          <Button size="small" loading={actionKey === `${profile.id}:test`} onClick={() => unlockWorkerProfile(profile)}>Unlock</Button>
+          <Button size="small" icon={<PlayCircleOutlined />} loading={actionKey === `${profile.id}:start`} onClick={() => confirmWorkerAction(profile, 'start')}>Start</Button>
+          <Button size="small" icon={<ReloadOutlined />} loading={actionKey === `${profile.id}:restart`} onClick={() => confirmWorkerAction(profile, 'restart')}>Restart</Button>
+          <Tooltip title="SSH into the worker and stop the remote process">
+            <Button size="small" icon={<StopOutlined />} loading={actionKey === `${profile.id}:stop`} onClick={() => confirmWorkerAction(profile, 'stop')}>Stop process</Button>
+          </Tooltip>
+          <Button size="small" onClick={() => confirmWorkerAction(profile, 'logs')}>Logs</Button>
+          <Button size="small" danger title="Delete worker profile" icon={<DeleteOutlined />} onClick={() => deleteWorkerProfile(profile)} />
+        </Space>
+      ),
+    },
+  ];
+
+  const resourcesContent = (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {error && <Alert type="error" message={error} showIcon />}
+      {queueError && <Alert type="warning" message={queueError} showIcon />}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+          gap: 12,
+        }}
+      >
+        {[
+          ['Nodes', totals.nodes],
+          ['Registered', `${totals.registered}/${totals.nodes}`],
+          ['CPU', totals.cpu],
+          ['GPU', totals.gpu],
+          ['GPU Memory', `${formatGpuMemory(totals.gpuMemoryAvailable)} / ${formatGpuMemory(totals.gpuMemoryTotal)}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              border: '1px solid #f0f0f0',
+              borderRadius: 6,
+              padding: '10px 12px',
+              minHeight: 68,
+            }}
+          >
+            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{label}</Text>
+            <Text strong style={{ fontSize: 22 }}>{value}</Text>
+          </div>
+        ))}
+      </div>
+      {(data?.cluster?.unregistered_ray_nodes?.length || 0) > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message="Some Ray nodes are not registered with Maze"
+          description="Start or restart the worker from the Workers tab, or run maze start --worker --addr <head-ip>:8000 on that machine."
+        />
+      )}
+      <Table
+        rowKey={(node) => `${node.node_id}-${node.registered ? 'maze' : 'ray'}`}
+        loading={loading && !data}
+        columns={columns}
+        dataSource={nodes}
+        pagination={false}
+        size="middle"
+        scroll={{ x: 880 }}
+      />
+      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
+        <Space wrap>
+          <Text strong>Scheduler Queues</Text>
+          {queues?.scheduling_policy && <Tag color="geekblue">{queues.scheduling_policy}</Tag>}
+          {queues?.snapshot_time && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {formatTime(queues.snapshot_time)}
+            </Text>
+          )}
+        </Space>
+        <Space size={6} wrap>
+          {[
+            ['ready', queues?.counts.ready || 0],
+            ['pending', queues?.counts.pending || 0],
+            ['retrying', queues?.counts.retrying || 0],
+            ['running', queues?.counts.running || 0],
+            ['total', queues?.counts.total_queued || 0],
+          ].map(([label, value]) => (
+            <Tag key={label} color={queueStatusColor(String(label))}>
+              {label}: {value}
+            </Tag>
+          ))}
+          {(queues?.stopped_workflow_ids?.length || 0) > 0 && (
+            <Tag color="default">stopped: {queues?.stopped_workflow_ids?.length}</Tag>
+          )}
+        </Space>
+      </Space>
+      <Table
+        rowKey="row_key"
+        loading={loading && !queues}
+        columns={queueColumns}
+        dataSource={queueRows}
+        pagination={queueRows.length > 8 ? { pageSize: 8, size: 'small' } : false}
+        size="small"
+        scroll={{ x: 980 }}
+      />
+    </Space>
+  );
+
+  const workersContent = (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {workerError && <Alert type="error" message={workerError} showIcon />}
+      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center" wrap>
+        <Space wrap>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openWorkerModal}>Add Worker</Button>
+          <Tag color="geekblue">head {defaultHeadUrl}</Tag>
+          <Tag>{selectedWorkerIds.length} selected</Tag>
+        </Space>
+        <Space wrap>
+          <Button size="small" icon={<ToolOutlined />} disabled={selectedWorkerIds.length === 0} loading={actionKey === 'bulk:test'} onClick={() => runBulkWorkerAction('test')}>Test selected</Button>
+          <Button size="small" icon={<PlayCircleOutlined />} disabled={selectedWorkerIds.length === 0} loading={actionKey === 'bulk:start'} onClick={() => runBulkWorkerAction('start')}>Start selected</Button>
+          <Button size="small" icon={<ReloadOutlined />} disabled={selectedWorkerIds.length === 0} loading={actionKey === 'bulk:restart'} onClick={() => runBulkWorkerAction('restart')}>Restart selected</Button>
+          <Button size="small" icon={<StopOutlined />} disabled={selectedWorkerIds.length === 0} loading={actionKey === 'bulk:stop'} onClick={() => runBulkWorkerAction('stop')}>Stop processes</Button>
+        </Space>
+      </Space>
+      <Table
+        rowKey="id"
+        loading={workersLoading}
+        columns={workerColumns}
+        dataSource={workerProfiles}
+        rowSelection={{
+          selectedRowKeys: selectedWorkerIds,
+          onChange: (keys) => setSelectedWorkerIds(keys.map(String)),
+        }}
+        pagination={false}
+        size="middle"
+        scroll={{ x: 900 }}
+      />
+    </Space>
+  );
+
+  const consoleContent = (
+    <Space direction="vertical" size={14} style={{ width: '100%' }}>
+      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center" wrap>
+        <Space direction="vertical" size={2}>
+          <Text strong>Head Console</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Commands run on the Maze head at {defaultHeadUrl}
+          </Text>
+        </Space>
+        <Tag color="geekblue">cwd /root/data/Maze</Tag>
+      </Space>
+      <Space.Compact style={{ width: '100%' }}>
+        <Input
+          value={consoleCommand}
+          onChange={(event) => setConsoleCommand(event.target.value)}
+          onPressEnter={runConsoleCommand}
+          placeholder="pwd, nvidia-smi, ray status..."
+        />
+        <Button type="primary" loading={consoleRunning} onClick={runConsoleCommand}>Run</Button>
+      </Space.Compact>
+      <Space size={8} wrap>
+        {CONSOLE_PRESETS.map((preset) => (
+          <Button key={preset.label} size="small" onClick={() => setConsoleCommand(preset.command)}>
+            {preset.label}
+          </Button>
+        ))}
+      </Space>
+      <pre
+        style={{
+          minHeight: 360,
+          maxHeight: 560,
+          overflow: 'auto',
+          background: '#111827',
+          color: '#f9fafb',
+          borderRadius: 6,
+          border: '1px solid #1f2937',
+          padding: 16,
+          whiteSpace: 'pre-wrap',
+          fontSize: 13,
+          lineHeight: 1.55,
+        }}
+      >
+        {consoleOutput || '$ Ready'}
+      </pre>
+      {consoleHistory.length > 0 && (
+        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+          <Text strong>History</Text>
+          <Space wrap>
+            {consoleHistory.map((item, index) => (
+              <Button
+                key={`${item.ranAt}-${index}`}
+                size="small"
+                onClick={() => setConsoleCommand(item.command)}
+              >
+                <Tag color={item.ok ? 'green' : 'red'}>{item.ok ? 'ok' : 'failed'}</Tag>
+                {item.command}
+              </Button>
+            ))}
+          </Space>
+        </Space>
+      )}
+    </Space>
+  );
+
   return (
     <Drawer
-      title="Cluster Resources"
+      title="Cluster"
       open={open}
       onClose={onClose}
       width="min(960px, 100vw)"
       extra={(
-        <Button icon={<ReloadOutlined />} onClick={loadResources} loading={loading}>
+        <Button icon={<ReloadOutlined />} onClick={() => Promise.all([loadResources(), loadWorkerProfiles()])} loading={loading || workersLoading}>
           Refresh
         </Button>
       )}
     >
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {error && <Alert type="error" message={error} showIcon />}
-        {queueError && <Alert type="warning" message={queueError} showIcon />}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-            gap: 12,
-          }}
-        >
-          {[
-            ['Nodes', totals.nodes],
-            ['Registered', `${totals.registered}/${totals.nodes}`],
-            ['CPU', totals.cpu],
-            ['GPU', totals.gpu],
-          ].map(([label, value]) => (
-            <div
-              key={label}
-              style={{
-                border: '1px solid #f0f0f0',
-                borderRadius: 6,
-                padding: '10px 12px',
-                minHeight: 68,
-              }}
-            >
-              <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{label}</Text>
-              <Text strong style={{ fontSize: 22 }}>{value}</Text>
-            </div>
-          ))}
-        </div>
-        {(data?.cluster?.unregistered_ray_nodes?.length || 0) > 0 && (
-          <Alert
-            type="warning"
-            showIcon
-            message="Some Ray nodes are not registered with Maze"
-            description="Run maze start --worker --addr <head-ip>:8000 on each worker, or use the distributed GPU smoke registration helper."
-          />
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          { key: 'resources', label: 'Resources', children: resourcesContent },
+          { key: 'workers', label: 'Workers', children: workersContent },
+          { key: 'console', label: 'Console', children: consoleContent },
+        ]}
+      />
+      <Modal
+        title={logModal?.title}
+        open={Boolean(logModal)}
+        onCancel={() => setLogModal(null)}
+        footer={null}
+        width={760}
+      >
+        <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 460, overflow: 'auto', fontSize: 12 }}>
+          {logModal?.output}
+        </pre>
+      </Modal>
+      <Modal
+        title="Add Worker"
+        open={workerModalOpen}
+        onCancel={() => {
+          setWorkerModalOpen(false);
+          setWorkerDraftTest(null);
+        }}
+        footer={(
+          <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
+            <Button loading={workerTestLoading} onClick={testWorkerProfileDraft}>
+              Test Connection
+            </Button>
+            <Space>
+              <Button onClick={() => {
+                setWorkerModalOpen(false);
+                setWorkerDraftTest(null);
+              }}>
+                Cancel
+              </Button>
+              <Button type="primary" onClick={() => form.submit()}>
+                Save Worker
+              </Button>
+            </Space>
+          </Space>
         )}
-        <Table
-          rowKey={(node) => `${node.node_id}-${node.registered ? 'maze' : 'ray'}`}
-          loading={loading && !data}
-          columns={columns}
-          dataSource={nodes}
-          pagination={false}
-          size="middle"
-          scroll={{ x: 880 }}
-        />
-        <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
-          <Space wrap>
-            <Text strong>Scheduler Queues</Text>
-            {queues?.scheduling_policy && <Tag color="geekblue">{queues.scheduling_policy}</Tag>}
-            {queues?.snapshot_time && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {formatTime(queues.snapshot_time)}
-              </Text>
-            )}
-          </Space>
-          <Space size={6} wrap>
-            {[
-              ['ready', queues?.counts.ready || 0],
-              ['pending', queues?.counts.pending || 0],
-              ['retrying', queues?.counts.retrying || 0],
-              ['running', queues?.counts.running || 0],
-              ['total', queues?.counts.total_queued || 0],
-            ].map(([label, value]) => (
-              <Tag key={label} color={queueStatusColor(String(label))}>
-                {label}: {value}
-              </Tag>
-            ))}
-            {(queues?.stopped_workflow_ids?.length || 0) > 0 && (
-              <Tag color="default">stopped: {queues?.stopped_workflow_ids?.length}</Tag>
-            )}
-          </Space>
-        </Space>
-        <Table
-          rowKey="row_key"
-          loading={loading && !queues}
-          columns={queueColumns}
-          dataSource={queueRows}
-          pagination={queueRows.length > 8 ? { pageSize: 8, size: 'small' } : false}
-          size="small"
-          scroll={{ x: 980 }}
-        />
-      </Space>
+        width={720}
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={saveWorkerProfile}
+          initialValues={defaultWorkerFormValues}
+          onValuesChange={() => setWorkerDraftTest(null)}
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`Workers will join ${defaultHeadUrl}`}
+          />
+          {workerDraftTest && (
+            <Alert
+              type={workerDraftTest.ok ? 'success' : 'warning'}
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={workerDraftTest.ok ? 'Connection test passed' : 'Connection test has issues'}
+              description={(
+                <Space size={6} wrap>
+                  {workerDraftTest.checks.map((check) => (
+                    <Tag
+                      key={check.name}
+                      color={check.ok ? 'green' : check.warning ? 'orange' : 'red'}
+                      title={check.stderr || check.stdout || undefined}
+                    >
+                      {check.name}: {check.ok ? 'ok' : check.warning ? 'warning' : 'failed'}
+                    </Tag>
+                  ))}
+                </Space>
+              )}
+            />
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <Form.Item name="name" label="Name" rules={[{ required: true }]}>
+              <Input placeholder="gpu-worker-1" />
+            </Form.Item>
+            <Form.Item name="host" label="Host" rules={[{ required: true }]}>
+              <Input placeholder="10.0.0.2 or ssh.example.com" />
+            </Form.Item>
+            <Form.Item name="port" label="SSH Port" rules={[{ required: true }]}>
+              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="username" label="User" rules={[{ required: true }]}>
+              <Input />
+            </Form.Item>
+            <Form.Item name="authMethod" label="Auth">
+              <Select options={[{ value: 'password', label: 'Password' }, { value: 'key', label: 'Private key' }]} />
+            </Form.Item>
+            <Form.Item name="password" label="Password">
+              <Input.Password placeholder="Kept only in this backend session" />
+            </Form.Item>
+          </div>
+          <Collapse
+            size="small"
+            ghost
+            items={[
+              {
+                key: 'advanced',
+                label: 'Advanced',
+                children: (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                    <Form.Item name="privateKeyPath" label="Private Key Path">
+                      <Input placeholder="/root/.ssh/id_rsa" />
+                    </Form.Item>
+                    <Form.Item name="remoteProjectDir" label="Project Dir" rules={[{ required: true }]}>
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="condaEnv" label="Conda Env" rules={[{ required: true }]}>
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="condaSh" label="Conda Init Script">
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="heartbeatInterval" label="Heartbeat">
+                      <InputNumber min={1} max={300} style={{ width: '100%' }} />
+                    </Form.Item>
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </Form>
+      </Modal>
     </Drawer>
   );
 }

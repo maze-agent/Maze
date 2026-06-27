@@ -30,6 +30,7 @@ htmlcov/
 *.sqlite
 *.db
 logs/
+.maze_runtime.json
 
 # Environment files
 .env
@@ -39,7 +40,15 @@ env/
 
 # Project specific
 log.txt
-model_cache/
+
+# Local model weights
+/model_cache/
+
+# Local operator state and private notes
+/.agent/
+/.codegraph/
+/updates/
+/workspaces/
 workspace/workspace.json
 workspace/policies/
 workspace/files/

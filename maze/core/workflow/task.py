@@ -20,6 +20,7 @@ class CodeTask():
         self.code_str = None
         self.code_ser = None
         self.file_context = None
+        self.model_anchor = None
         self.max_retries = None
         self.retry_backoff_seconds = 0
         self.retry_on = None
@@ -53,6 +54,7 @@ class CodeTask():
         code_ser:str,
         resources:Dict,
         file_context:Dict|None=None,
+        model_anchor:Dict|None=None,
         max_retries:int|None=None,
         retry_backoff_seconds:float=0,
         retry_on:list[str]|None=None,
@@ -66,6 +68,7 @@ class CodeTask():
         self.code_ser=code_ser
         self.resources=resources
         self.file_context=file_context
+        self.model_anchor=model_anchor
         self.max_retries=max_retries
         self.retry_backoff_seconds=retry_backoff_seconds or 0
         self.retry_on=retry_on
@@ -83,6 +86,7 @@ class CodeTask():
             "code_str":self.code_str,
             "code_ser":self.code_ser,
             "file_context":self.file_context,
+            "model_anchor":self.model_anchor,
             "max_retries":self.max_retries,
             "retry_backoff_seconds":self.retry_backoff_seconds,
             "retry_on":self.retry_on,

@@ -79,6 +79,8 @@ def create_openai_react_llm_task(
         step: int,
         skills: dict | None = None,
         system_prompt: str | None = None,
+        invocation_repair: dict | None = None,
+        max_tokens_override: int | None = None,
     ):
         import json
         import os
@@ -143,10 +145,20 @@ def create_openai_react_llm_task(
                 "skill-specific procedures."
             ),
         }
+        extra_instruction = ""
+        if isinstance(invocation_repair, dict) and invocation_repair:
+            extra_instruction = (
+                " Previous Maze invocation failed with "
+                f"{invocation_repair.get('reason')}. Repair it now: return one strict JSON object, "
+                "use exactly {\"tool\": \"tool_name\", \"args\": {...}} or {\"final\": \"answer\"}, "
+                "and include every required tool argument."
+            )
+
         messages = [
             {"role": "system", "content": system_prompt or default_system_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False) + extra_instruction},
         ]
+        request_max_tokens = max_tokens_override or max_tokens
         response = requests.post(
             str(resolved_base_url).rstrip("/") + "/chat/completions",
             headers={
@@ -157,12 +169,15 @@ def create_openai_react_llm_task(
                 "model": str(resolved_model),
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                "max_tokens": request_max_tokens,
             },
             timeout=timeout,
         )
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"].get("content", "").strip()
+        response_payload = response.json()
+        choice = response_payload["choices"][0]
+        content = choice["message"].get("content", "").strip()
+        finish_reason = choice.get("finish_reason")
 
         parse_error = None
         try:
@@ -220,9 +235,12 @@ def create_openai_react_llm_task(
                         action = {"final": json.dumps(payload, ensure_ascii=False)}
 
         return {
+            "__maze_invocation_task__": True,
             "action": action,
             "raw": content[:1000],
             "parse_error": parse_error,
+            "finish_reason": finish_reason,
+            "max_tokens": request_max_tokens,
         }
 
     decorated = task(resources=task_resources)(_openai_react_decide)

@@ -13,6 +13,7 @@
 ## 📰 News
 
 
+- **2026-06**: Maze added practical cluster and model operations in Playground: remote worker management, head-side command execution for developer debugging, local model directory scanning, model testing through Maze tasks, GPU memory visibility, model resource estimation, and runtime fault-tolerance traces for OOM retry, node-loss recovery, and LLM invocation repair.
 - **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
 - **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
 - **2026-06**: Maze Playground ReAct workflows now expose a single `Task Timeout` control. Maze uses it for ReAct task waits, `exec_code` subprocess defaults, and an automatically derived run-level timeout, so users do not need to tune several timeout knobs.
@@ -27,13 +28,14 @@
 
 ## Latest Update Summary
 
-This update focuses on making Maze Workbench a clearer, more complete surface for building and operating distributed workflows:
+This update focuses on making Maze more practical to operate as a distributed runtime for model-backed workflows:
 
-- Added a system-catalog **Resource Mix CPU/GPU/I/O Demo** workflow that exercises CPU parsing, GPU-style scoring, file I/O, artifact generation, quality checks, and final report writing.
-- Updated Workbench workflow discovery so system workflows can be loaded directly from `View all workflows` without copying template workflow files into the active workspace.
-- Improved run artifact handling across the Task Inspector and Runs console: `maze://...` artifact records now resolve to HTTP-backed open/download actions, including artifacts recorded through task file manifests.
-- Refined the Task Inspector artifact layout so produced files, paths, sizes, timestamps, task IDs, and actions are easier to scan in the right-side panel.
-- Refreshed the README Workbench section with current local screenshots for workflow design, run inspection, and cluster resources, replacing the older remote video links.
+- Added Playground cluster operations for starting from a head node, registering remote workers, testing worker SSH connectivity, reusing saved worker profiles for lifecycle actions, and running head-side shell commands for developer debugging.
+- Added local model operations on the head server: configure a server-side model directory, scan available local models, choose a model from a dropdown, test loading through a Maze task, and inspect GPU memory while tests run.
+- Added a model anchor contract for workflow tasks, using `backend` to describe the execution backend, plus lightweight model resource estimates based on model metadata, parameter scale, quantization/dtype hints, and weight size.
+- Added runtime resource feedback for tasks so Maze can record observed CPU/GPU/memory behavior and use those observations as the basis for later retry, scheduling, and fault-tolerance decisions.
+- Added a fault-tolerance trace to run snapshots and the Playground Runtime panel, covering failure diagnosis, repair action, retry, and outcome.
+- Added concrete recovery paths for GPU OOM resource re-anchoring, node-loss worker reselect, pinned-node failure reporting, and Maze-controlled LLM invocation repair.
 
 <br>
 

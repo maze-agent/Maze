@@ -30,6 +30,7 @@ class DynamicTaskSpec:
         retry_backoff_seconds: float = 0,
         retry_on: List[str] | None = None,
         timeout_seconds: float | None = None,
+        model_anchor: Dict[str, Any] | None = None,
     ):
         if code_ser is None and code_str is None:
             raise ValueError("Dynamic task spec requires code_str or code_ser")
@@ -49,6 +50,7 @@ class DynamicTaskSpec:
         self.retry_backoff_seconds = retry_backoff_seconds or 0
         self.retry_on = list(retry_on) if retry_on is not None else None
         self.timeout_seconds = timeout_seconds
+        self.model_anchor = dict(model_anchor or {}) or None
 
     def metadata_snapshot(self) -> Dict[str, Any]:
         payload = {
@@ -66,6 +68,7 @@ class DynamicTaskSpec:
             "retry_backoff_seconds": self.retry_backoff_seconds,
             "retry_on": self.retry_on,
             "timeout_seconds": self.timeout_seconds,
+            "model_anchor": to_json_safe(self.model_anchor),
         }
         if self.task_path:
             payload["task_path"] = self.task_path
@@ -99,6 +102,7 @@ class DynamicRun:
         self.failed_tasks: set[str] = set()
         self.task_errors: Dict[str, Any] = {}
         self.task_file_manifests: Dict[str, Dict[str, Any]] = {}
+        self.task_fault_tolerance: Dict[str, Dict[str, Any]] = {}
         self.request_ids: Dict[str, str] = {}
         self.event_log: List[Dict[str, Any]] = []
         self.event_seq = 0
@@ -214,6 +218,7 @@ class DynamicRun:
             retry_backoff_seconds=spec.retry_backoff_seconds,
             retry_on=spec.retry_on,
             timeout_seconds=spec.timeout_seconds,
+            model_anchor=spec.model_anchor,
         )
 
         explicit_parents = set(parents or [])
@@ -223,6 +228,7 @@ class DynamicRun:
             raise ValueError(f"Dynamic task parents not found: {sorted(unknown_parents)}")
 
         self.tasks[task_id] = task
+        self.task_fault_tolerance[task_id] = _default_fault_tolerance()
         self.task_parents[task_id] = all_parents
         if request_id:
             self.request_ids[request_id] = task_id
@@ -250,11 +256,12 @@ class DynamicRun:
             self.status = "running"
         self._touch()
 
-    def mark_finished(self, task_id: str) -> List[CodeTask]:
+    def mark_finished(self, task_id: str, fault_tolerance: Dict[str, Any] | None = None) -> List[CodeTask]:
         if self.is_terminal():
             return []
         self.running_tasks.discard(task_id)
         self.completed_tasks.add(task_id)
+        self.set_task_fault_tolerance(task_id, fault_tolerance)
         if task_id in self.tasks:
             self.tasks[task_id].completed = True
             self.tasks[task_id].finish_time = time.time()
@@ -274,20 +281,79 @@ class DynamicRun:
             self.task_file_manifests[task_id] = to_json_safe(file_manifest)
             self._touch()
 
-    def mark_retrying(self, task_id: str, error: Any | None = None):
+    def set_task_fault_tolerance(self, task_id: str, fault_tolerance: Dict[str, Any] | None):
+        if fault_tolerance:
+            self.task_fault_tolerance[task_id] = to_json_safe(fault_tolerance)
+            self._touch()
+
+    def record_invocation_repair_observation(
+        self,
+        task_id: str,
+        *,
+        error_type: str,
+        message: str,
+        repair_action: Dict[str, Any] | None = None,
+        retry: Dict[str, Any] | None = None,
+        outcome: Dict[str, Any] | None = None,
+    ):
+        if not task_id:
+            return
+        trace = self.task_fault_tolerance.setdefault(task_id, _default_fault_tolerance())
+        reason = _invocation_fault_reason(error_type, message)
+        trace["status"] = "repairing"
+        trace.setdefault("attempts", []).append(to_json_safe({
+            "attempt": None,
+            "failure": {
+                "error_type": "invocation_error",
+                "message": message,
+                "details": {"agent_error_type": error_type},
+            },
+            "diagnosis": {
+                "category": "invocation",
+                "reason": reason,
+                "recoverable": True,
+            },
+            "repair_action": repair_action or {
+                "type": "invocation_correction",
+                "applied": True,
+                "strategy": "feedback_observation",
+            },
+            "retry": retry or {
+                "scheduled": True,
+                "kind": "next_llm_decision",
+            },
+            "outcome": outcome or {
+                "status": "feedback_recorded",
+            },
+        }))
+        self._touch()
+
+    def mark_retrying(
+        self,
+        task_id: str,
+        error: Any | None = None,
+        fault_tolerance: Dict[str, Any] | None = None,
+    ):
         if self.is_terminal():
             return
         self.running_tasks.discard(task_id)
         if error is not None:
             self.task_errors[task_id] = to_json_safe(error)
+        self.set_task_fault_tolerance(task_id, fault_tolerance)
         self._touch()
 
-    def mark_failed(self, task_id: str, reason: str | None = None):
+    def mark_failed(
+        self,
+        task_id: str,
+        reason: str | None = None,
+        fault_tolerance: Dict[str, Any] | None = None,
+    ):
         if self.is_terminal():
             return
         self.running_tasks.discard(task_id)
         self.failed_tasks.add(task_id)
         self.task_errors[task_id] = to_json_safe(reason)
+        self.set_task_fault_tolerance(task_id, fault_tolerance)
         self.failed = True
         self.status = "timed_out" if isinstance(reason, dict) and reason.get("error_type") == "timeout" else "failed"
         self.failure_reason = reason
@@ -412,6 +478,7 @@ class DynamicRun:
             "request_ids": dict(self.request_ids),
             "task_errors": to_json_safe(self.task_errors),
             "task_file_manifests": to_json_safe(self.task_file_manifests),
+            "task_fault_tolerance": to_json_safe(self.task_fault_tolerance),
             "event_count": len(self.event_log),
             "last_event_seq": self.event_seq,
             "final_result": final_result,
@@ -451,6 +518,9 @@ class DynamicRun:
             "resources": to_json_safe(task.resources),
             "error": to_json_safe(self.task_errors.get(task_id)),
             "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
+            "fault_tolerance": to_json_safe(
+                self.task_fault_tolerance.get(task_id) or _default_fault_tolerance()
+            ),
         }
 
 
@@ -495,6 +565,27 @@ def merge_dynamic_resources(
     return resources
 
 
+def _default_fault_tolerance() -> Dict[str, Any]:
+    return {
+        "enabled": True,
+        "status": "idle",
+        "attempts": [],
+    }
+
+
+def _invocation_fault_reason(error_type: str | None, message: str | None) -> str:
+    text = f"{error_type or ''} {message or ''}".lower()
+    if "missing" in text and ("arg" in text or "tool" in text):
+        return "tool_invocation_args_missing"
+    if "schema" in text or "validation" in text:
+        return "schema_mismatch"
+    if "json" in text or "malformed" in text or "parse" in text:
+        return "json_parse_failed"
+    if "token" in text or "length" in text:
+        return "max_tokens_insufficient"
+    return "invocation_error"
+
+
 def _resource_number(value: Any, default: Any = 0) -> int | float:
     try:
         parsed = float(value)
@@ -524,6 +615,7 @@ def dynamic_task_spec_from_payload(payload: Dict[str, Any]) -> DynamicTaskSpec:
         retry_backoff_seconds=payload.get("retry_backoff_seconds", 0),
         retry_on=payload.get("retry_on"),
         timeout_seconds=payload.get("timeout_seconds"),
+        model_anchor=payload.get("model_anchor") or payload.get("modelAnchor"),
     )
 
 

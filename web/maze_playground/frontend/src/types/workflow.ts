@@ -8,6 +8,78 @@ export interface Resources {
   gpu_mem: number;
 }
 
+export interface LocalModel {
+  id: string;
+  name: string;
+  path: string;
+  type: 'local' | string;
+  model_type?: string;
+  backend?: string;
+  backends?: string[];
+  model_scope?: string;
+  weight_bytes?: number;
+  weight_size?: string;
+  estimated_params?: number;
+  estimated_params_label?: string;
+  estimated_weight_memory_bytes?: number;
+  estimated_weight_memory?: string;
+  estimated_gpu_mem_mb?: number;
+  estimate_method?: string;
+}
+
+export interface ModelAnchor {
+  local_model: string;
+  model_scope: 'head' | string;
+  backend: 'transformers' | string;
+  estimated_weight_memory_bytes?: number;
+  estimated_gpu_mem_mb?: number;
+  estimated_params?: number;
+}
+
+export interface ModelsResponse {
+  status: 'success' | string;
+  model_dir: string;
+  models: LocalModel[];
+}
+
+export interface ModelTestResponse {
+  status: 'success' | string;
+  ok: boolean;
+  model: LocalModel;
+  checks: Array<{
+    name: string;
+    ok: boolean;
+    message: string;
+  }>;
+  runtime?: {
+    tokenizer_seconds?: number;
+    load_seconds?: number;
+    generate_seconds?: number;
+    device?: string;
+    generated_text?: string;
+    cuda?: boolean;
+    peak_cuda_allocated_bytes?: number;
+    peak_cuda_reserved_bytes?: number;
+  };
+  run_id?: string | null;
+  workflow_id?: string;
+  task_id?: string;
+  resources?: Resources & Record<string, any>;
+  message: string;
+}
+
+export interface ResourceHistoryResponse {
+  status: 'success' | string;
+  history: {
+    schema?: string;
+    schema_version?: number;
+    updated_time?: number;
+    models?: Record<string, any>;
+    tasks?: Record<string, any>;
+    recent_observations?: Array<Record<string, any>>;
+  };
+}
+
 export interface TaskInputConfig {
   name: string;
   dataType: string;
@@ -210,6 +282,8 @@ export interface WorkflowNode {
     maxSteps?: number;
     maxTokens?: number;
     taskTimeout?: number;
+    localModel?: string;
+    modelAnchor?: ModelAnchor;
     skills?: string[];
     recommendedSkills?: string[];
     execBackend?: 'workspace_sandbox' | 'docker';
@@ -250,6 +324,8 @@ export interface ClusterResourceNode {
   role: 'head' | 'worker' | string;
   registered: boolean;
   alive: boolean;
+  disabled?: boolean;
+  stale?: boolean;
   running_task_count?: number;
   registered_time?: number | null;
   last_seen_time?: number | null;
@@ -267,6 +343,8 @@ export interface ClusterResourceNode {
       total_count: number;
       available_count: number;
       devices: ClusterGpuDevice[];
+      total_memory?: number;
+      available_memory?: number;
     };
   };
   capabilities?: {
@@ -275,6 +353,7 @@ export interface ClusterResourceNode {
     docker_reason?: string;
     [key: string]: any;
   };
+  local_models?: LocalModel[];
   ray_resources?: Record<string, number>;
 }
 
@@ -288,6 +367,7 @@ export interface ClusterResourcesResponse {
       implemented: boolean;
       description: string;
     }>;
+    disabled_node_ids?: string[];
     nodes: ClusterResourceNode[];
     unregistered_ray_nodes?: ClusterResourceNode[];
   };
@@ -308,12 +388,27 @@ export interface ClusterScheduleDecision {
     node_ip?: string | null;
     role?: string;
     alive?: boolean;
+    disabled?: boolean;
     registered?: boolean;
     running_task_count?: number;
     reject_reasons?: string[];
     can_run?: boolean;
     selected_gpu_id?: number | string;
     available_resources?: any;
+  }>;
+}
+
+export interface FaultToleranceTrace {
+  enabled?: boolean;
+  status?: string;
+  attempts?: Array<{
+    attempt?: number | null;
+    failure?: any;
+    diagnosis?: any;
+    repair_action?: any;
+    retry?: any;
+    outcome?: any;
+    timestamp?: string;
   }>;
 }
 
@@ -333,6 +428,7 @@ export interface ClusterQueueTask {
   last_error?: any;
   resources?: Resources;
   schedule_decision?: ClusterScheduleDecision | null;
+  fault_tolerance?: FaultToleranceTrace;
   selected_node?: {
     node_id?: string | null;
     node_ip?: string | null;
@@ -361,6 +457,109 @@ export interface ClusterQueuesResponse {
     retrying_tasks: ClusterQueueTask[];
     running_tasks: ClusterQueueTask[];
   };
+}
+
+export interface WorkerProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  remoteProjectDir: string;
+  condaEnv: string;
+  condaSh?: string;
+  headUrl?: string;
+  heartbeatInterval?: number;
+  logDir?: string;
+  auth?: {
+    method?: 'password' | 'key' | string;
+    hasPassword?: boolean;
+    hasPrivateKey?: boolean;
+    privateKeyPath?: string;
+  };
+  createdAt?: string;
+  updatedAt?: string;
+  lastAction?: {
+    action?: string;
+    ok?: boolean;
+    at?: string;
+    stdoutTail?: string;
+    stderrTail?: string;
+  } | null;
+}
+
+export interface WorkerProfilesResponse {
+  success: boolean;
+  workspaceId?: string;
+  workspaceDir?: string;
+  profiles: WorkerProfile[];
+}
+
+export interface WorkerProfileActionResponse {
+  success: boolean;
+  workspaceId?: string;
+  workspaceDir?: string;
+  action: string;
+  profile?: WorkerProfile;
+  result?: {
+    ok: boolean;
+    code: number;
+    stdout: string;
+    stderr: string;
+  };
+  results?: Array<{
+    profileId: string;
+    ok: boolean;
+    profile?: WorkerProfile;
+    result?: {
+      ok: boolean;
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
+    error?: string;
+  }>;
+}
+
+export interface WorkerProfileDraftTestResponse {
+  success: boolean;
+  workspaceId?: string;
+  workspaceDir?: string;
+  profile?: WorkerProfile;
+  test?: {
+    ok: boolean;
+    checks: Array<{
+      name: string;
+      ok: boolean;
+      warning?: boolean;
+      stdout?: string;
+      stderr?: string;
+    }>;
+    result?: {
+      ok: boolean;
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
+  };
+}
+
+export interface ClusterConsoleRunResponse {
+  success: boolean;
+  workspaceId?: string;
+  workspaceDir?: string;
+  target: string;
+  targetLabel?: string;
+  command: string;
+  timeoutMs: number;
+  ranAt: string;
+  result?: {
+    ok: boolean;
+    code: number;
+    stdout: string;
+    stderr: string;
+  };
+  error?: string;
 }
 
 export interface RunResult {
@@ -408,6 +607,7 @@ export interface StaticWorkflowRunNode {
   resources?: Resources | Record<string, any>;
   schedule_decision?: ClusterScheduleDecision | null;
   file_manifest?: any;
+  fault_tolerance?: FaultToleranceTrace;
   artifacts?: RunArtifact[];
 }
 
@@ -496,6 +696,7 @@ export interface UnifiedRunTaskSnapshot {
   next_eligible_time?: number | null;
   timeout_seconds?: number | null;
   file_manifest?: any;
+  fault_tolerance?: FaultToleranceTrace;
 }
 
 export interface UnifiedRunSnapshot {

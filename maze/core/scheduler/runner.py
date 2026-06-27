@@ -7,7 +7,9 @@ import cloudpickle
 from maze.core.files.lineage import ArtifactError, TASK_RESULT_ENVELOPE, run_task_with_file_context
 from maze.core.scheduler.error import (
     exception_to_error_envelope,
+    make_error_envelope,
     is_task_error_result,
+    looks_like_oom,
     task_error_result,
 )
 from maze.metrics.collector import _drain, _metrics_scope
@@ -16,6 +18,27 @@ from maze.metrics.collector import _drain, _metrics_scope
 # without calling metrics.report(). The framework strips this key before
 # the result reaches downstream tasks.
 USER_METRICS_RETURN_KEY = "__maze_metrics__"
+INVOCATION_ERROR_REASONS = {
+    "json_parse_failed",
+    "schema_mismatch",
+    "max_tokens_insufficient",
+    "tool_invocation_args_missing",
+}
+
+
+def _invocation_error_result(reason: str, message: str, *, details: dict | None = None):
+    return task_error_result(
+        make_error_envelope(
+            "invocation_error",
+            message,
+            retryable=True,
+            origin="invocation",
+        )
+        | {
+            "invocation_reason": reason,
+            "details": details or {},
+        }
+    )
 
 
 def _merge_metrics(*dicts):
@@ -98,6 +121,67 @@ def _ensure_result_can_cross_worker_boundary(result):
     return result
 
 
+def _maybe_invocation_error_output(output):
+    if not isinstance(output, dict):
+        return output
+    if not output.get("__maze_invocation_task__"):
+        return output
+    cleaned_output = dict(output)
+    cleaned_output.pop("__maze_invocation_task__", None)
+
+    action = cleaned_output.get("action")
+    parse_error = cleaned_output.get("parse_error")
+    finish_reason = cleaned_output.get("finish_reason") or cleaned_output.get("stop_reason")
+
+    if parse_error and isinstance(action, dict) and "error" in action:
+        return _invocation_error_result(
+            "json_parse_failed",
+            str(action.get("error") or parse_error),
+            details={
+                "parse_error": parse_error,
+                "raw": cleaned_output.get("raw"),
+            },
+        )
+
+    if str(finish_reason or "").lower() == "length":
+        return _invocation_error_result(
+            "max_tokens_insufficient",
+            "LLM response stopped because max_tokens was insufficient.",
+            details={
+                "finish_reason": finish_reason,
+                "max_tokens": cleaned_output.get("max_tokens"),
+            },
+        )
+
+    if isinstance(action, dict) and "error" in action:
+        message = str(action.get("error") or "")
+        reason = _invocation_reason(message)
+        if reason in INVOCATION_ERROR_REASONS:
+            return _invocation_error_result(
+                reason,
+                message,
+                details={
+                    "raw": action.get("raw") or cleaned_output.get("raw"),
+                    "action": action,
+                },
+            )
+
+    return cleaned_output
+
+
+def _invocation_reason(message: str) -> str:
+    text = str(message or "").lower()
+    if "max_tokens" in text or "finish_reason" in text or ("maximum" in text and "token" in text):
+        return "max_tokens_insufficient"
+    if "json" in text or "expecting value" in text or "malformed" in text:
+        return "json_parse_failed"
+    if "schema" in text or "validation" in text or "required field" in text:
+        return "schema_mismatch"
+    if "missing" in text and ("arg" in text or "tool" in text):
+        return "tool_invocation_args_missing"
+    return "invocation_error"
+
+
 def run_code_task(
     code_str: str = None,
     code_ser: str = None,
@@ -108,12 +192,12 @@ def run_code_task(
         if code_ser is not None:
             func = cloudpickle.loads(base64.b64decode(code_ser))
             return _ensure_result_can_cross_worker_boundary(
-                run_task_with_file_context(func, task_input_data, file_context)
+                _maybe_invocation_error_output(run_task_with_file_context(func, task_input_data, file_context))
             )
         if code_str is not None:
             runner = Runner(code_str, task_input_data)
             return _ensure_result_can_cross_worker_boundary(
-                run_task_with_file_context(lambda data: runner.run(data), task_input_data, file_context)
+                _maybe_invocation_error_output(run_task_with_file_context(lambda data: runner.run(data), task_input_data, file_context))
             )
         raise ValueError("Missing code_str or code_ser")
     except ArtifactError as exc:
@@ -143,7 +227,7 @@ def run_code_task(
     except Exception as exc:
         return task_error_result(
             exception_to_error_envelope(
-                "user_code",
+                "resource_insufficient" if looks_like_oom(exc) else "user_code",
                 exc,
                 origin="runner",
             )

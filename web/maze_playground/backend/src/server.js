@@ -10,6 +10,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import crypto from 'crypto';
 import os from 'os';
+import { tmpdir } from 'os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +41,7 @@ const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled',
 const staticRunWriteQueues = new Map();
 const recoveredStaticRunWorkspaces = new Set();
 const workspaceTasksCache = new Map();
+const activeWorkerProfileSecrets = new Map();
 
 function getPythonBin() {
   if (process.env.PYTHON_BIN) {
@@ -338,6 +340,7 @@ async function ensureWorkspaceDirs(workspaceDir) {
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'skills'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'mcp_profiles'), { recursive: true });
+  await fs.mkdir(path.join(resolved, 'cluster_workers'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_sessions'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_drafts'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'agent_runs'), { recursive: true });
@@ -1185,6 +1188,362 @@ function mcpProfilesDir(workspaceDir) {
 
 function mcpProfilePath(workspaceDir, name) {
   return path.join(mcpProfilesDir(workspaceDir), `${safeMcpProfileName(name)}.json`);
+}
+
+function workerProfilesDir(workspaceDir) {
+  return path.join(workspaceDir, 'cluster_workers');
+}
+
+function workerProfilesPath(workspaceDir) {
+  return path.join(workerProfilesDir(workspaceDir), 'worker_profiles.json');
+}
+
+function safeWorkerProfileId(value, fallbackPrefix = 'worker') {
+  return safeWorkspaceId(value, fallbackPrefix);
+}
+
+function hasActiveWorkerPassword(workspaceDir, profileId) {
+  const entry = activeWorkerProfileSecrets.get(workerSecretKey(workspaceDir, profileId));
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt) {
+    activeWorkerProfileSecrets.delete(workerSecretKey(workspaceDir, profileId));
+    return false;
+  }
+  return Boolean(entry.password);
+}
+
+function redactedWorkerProfile(profile, workspaceDir = '') {
+  const auth = profile.auth || {};
+  return {
+    ...profile,
+    auth: {
+      method: auth.method || 'password',
+      hasPassword: Boolean(workspaceDir && hasActiveWorkerPassword(workspaceDir, profile.id)),
+      hasPrivateKey: Boolean(auth.privateKeyPath),
+      privateKeyPath: auth.privateKeyPath || '',
+    },
+  };
+}
+
+function sanitizeWorkerProfileInput(input = {}, existing = null) {
+  const now = new Date().toISOString();
+  const id = safeWorkerProfileId(input.id || existing?.id || input.name || input.host);
+  const host = String(input.host || existing?.host || '').trim();
+  if (!host) {
+    throw new Error('worker host is required');
+  }
+  const port = Number(input.port || existing?.port || 22);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('worker ssh port must be between 1 and 65535');
+  }
+  const username = String(input.username || existing?.username || 'root').trim() || 'root';
+  const authMethod = String(input.auth?.method || input.authMethod || existing?.auth?.method || 'password');
+  const privateKeyPath = String(input.auth?.privateKeyPath || input.privateKeyPath || existing?.auth?.privateKeyPath || '').trim();
+  const remoteProjectDir = String(input.remoteProjectDir || existing?.remoteProjectDir || PROJECT_ROOT).trim();
+  const condaEnv = String(input.condaEnv || existing?.condaEnv || 'maze').trim() || 'maze';
+  const condaSh = String(input.condaSh || existing?.condaSh || '/root/miniconda3/etc/profile.d/conda.sh').trim();
+  const headUrl = String(input.headUrl || existing?.headUrl || MAZE_CORE_URL).trim();
+  const heartbeatInterval = Number(input.heartbeatInterval || existing?.heartbeatInterval || 10);
+  const logDir = String(input.logDir || existing?.logDir || path.posix.join(remoteProjectDir, 'logs')).trim();
+  const hasIncomingPassword = Boolean(input.auth?.password || input.password);
+  return {
+    id,
+    name: String(input.name || existing?.name || id).trim() || id,
+    host,
+    port,
+    username,
+    remoteProjectDir,
+    condaEnv,
+    condaSh,
+    headUrl,
+    heartbeatInterval: Number.isFinite(heartbeatInterval) ? Math.max(1, heartbeatInterval) : 10,
+    logDir,
+    auth: {
+      method: authMethod === 'key' ? 'key' : 'password',
+      privateKeyPath,
+    },
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    lastAction: existing?.lastAction || null,
+  };
+}
+
+async function loadWorkerProfiles(workspaceDir) {
+  const payload = await readJsonFile(workerProfilesPath(workspaceDir), {
+    schema: 'maze_worker_profiles',
+    schema_version: 1,
+    profiles: [],
+  });
+  return {
+    schema: payload.schema || 'maze_worker_profiles',
+    schema_version: Number(payload.schema_version || 1),
+    profiles: Array.isArray(payload.profiles) ? payload.profiles : [],
+  };
+}
+
+async function saveWorkerProfiles(workspaceDir, profiles) {
+  await fs.mkdir(workerProfilesDir(workspaceDir), { recursive: true });
+  await writeJsonAtomic(workerProfilesPath(workspaceDir), {
+    schema: 'maze_worker_profiles',
+    schema_version: 1,
+    updatedAt: new Date().toISOString(),
+    profiles,
+  });
+}
+
+function workerSecretKey(workspaceDir, profileId) {
+  return `${path.resolve(workspaceDir)}:${profileId}`;
+}
+
+function rememberWorkerPassword(workspaceDir, profileId, password) {
+  if (!password) return;
+  activeWorkerProfileSecrets.set(workerSecretKey(workspaceDir, profileId), {
+    password: String(password),
+    expiresAt: Date.now() + 6 * 60 * 60 * 1000,
+  });
+}
+
+function getWorkerPassword(workspaceDir, profileId, incomingPassword = '') {
+  if (incomingPassword) return String(incomingPassword);
+  const entry = activeWorkerProfileSecrets.get(workerSecretKey(workspaceDir, profileId));
+  if (!entry) return '';
+  if (Date.now() > entry.expiresAt) {
+    activeWorkerProfileSecrets.delete(workerSecretKey(workspaceDir, profileId));
+    return '';
+  }
+  return entry.password;
+}
+
+function sshTarget(profile) {
+  return `${profile.username}@${profile.host}`;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function headAddrFromUrl(url, fallbackHost = '') {
+  const parsed = new URL(url || MAZE_CORE_URL);
+  const hostname = ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname) && fallbackHost
+    ? fallbackHost
+    : parsed.hostname;
+  return `${hostname}:${parsed.port || (parsed.protocol === 'https:' ? '443' : '80')}`;
+}
+
+function mazeRuntimePath() {
+  const candidates = [];
+  if (process.env.MAZE_CONDA_PREFIX) {
+    candidates.push(path.join(process.env.MAZE_CONDA_PREFIX, 'bin'));
+  }
+  candidates.push(path.dirname(PYTHON_BIN));
+  return candidates.filter(Boolean).join(':');
+}
+
+function limitCommandResult(result, maxOutputChars = 60000) {
+  const limitText = (value) => {
+    const text = String(value || '');
+    if (text.length <= maxOutputChars) return text;
+    return `${text.slice(0, maxOutputChars)}\n... output truncated ...\n`;
+  };
+  return {
+    ...result,
+    stdout: limitText(result.stdout),
+    stderr: limitText(result.stderr),
+  };
+}
+
+function remoteWorkerCommand(profile, action) {
+  const projectDir = profile.remoteProjectDir;
+  const logDir = profile.logDir || path.posix.join(projectDir, 'logs');
+  const pidPath = path.posix.join(logDir, 'maze_worker_remote.pid');
+  const quotedCondaSh = shellQuote(profile.condaSh);
+  const quotedCondaEnv = shellQuote(profile.condaEnv);
+  const quotedLogDir = shellQuote(logDir);
+  const quotedPidPath = shellQuote(pidPath);
+  const quotedProjectDir = shellQuote(projectDir);
+  const base = [
+    `source ${quotedCondaSh} 2>/dev/null || true`,
+    `conda activate ${quotedCondaEnv} 2>/dev/null || true`,
+    `mkdir -p ${quotedLogDir}`,
+  ];
+  if (action === 'test') {
+    return [...base, 'hostname', 'pwd'].join('; ');
+  }
+  const stopLines = [
+    `if [ -f ${quotedPidPath} ]; then kill "$(cat ${quotedPidPath})" 2>/dev/null || true; fi`,
+    `pkill -f "[p]ython -m maze.cli.cli start --worker --addr" 2>/dev/null || true`,
+    'ray stop --force >/dev/null 2>&1 || true',
+    'for i in 1 2 3 4 5; do pgrep -f "[r]aylet|[g]cs_server|[p]lasma_store" >/dev/null || break; sleep 1; done',
+  ];
+  if (action === 'stop') {
+    return [
+      ...base,
+      ...stopLines,
+      'echo stopped',
+    ].join('\n');
+  }
+  if (action === 'logs') {
+    return [
+      ...base,
+      `LOG="$(ls -t ${quotedLogDir}/maze_worker_remote_*.log 2>/dev/null | head -1)"`,
+      'if [ -n "$LOG" ]; then echo "LOG=$LOG"; tail -120 "$LOG"; else echo "no worker log"; fi',
+    ].join('\n');
+  }
+  const headAddr = headAddrFromUrl(profile.headUrl || MAZE_CORE_URL, process.env.MAZE_HEAD_HOST || '');
+  const workerShell = [
+    `source ${shellQuote(profile.condaSh)} 2>/dev/null || true`,
+    `conda activate ${shellQuote(profile.condaEnv)} 2>/dev/null || true`,
+    `cd ${shellQuote(projectDir)}`,
+    'MAZE_WORKER_PY=python',
+    `exec "$MAZE_WORKER_PY" -m maze.cli.cli start --worker --addr ${shellQuote(headAddr)} --agent --heartbeat-interval ${Number(profile.heartbeatInterval || 10)} --log-level INFO`,
+  ].join('; ');
+  return [
+    ...base,
+    ...stopLines,
+    `cd ${quotedProjectDir}`,
+    'WORKER_LOG="$PWD/logs/maze_worker_remote_$(date +%Y%m%d_%H%M%S).log"',
+    `setsid env PYTHONPATH=${shellQuote(projectDir)} PYTHONUNBUFFERED=1 /bin/bash -c ${shellQuote(workerShell)} > "$WORKER_LOG" 2>&1 < /dev/null &`,
+    'echo $! > "$PWD/logs/maze_worker_remote.pid"',
+    'printf "REMOTE_WORKER_PID=%s\\nREMOTE_WORKER_LOG=%s\\n" "$(cat "$PWD/logs/maze_worker_remote.pid")" "$WORKER_LOG"',
+  ].join('\n');
+}
+
+async function runSshCommand(profile, command, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 45000);
+  const password = options.password || '';
+  const args = [
+    '-p',
+    String(profile.port),
+    '-o',
+    'StrictHostKeyChecking=no',
+    '-o',
+    'UserKnownHostsFile=/root/.ssh/known_hosts',
+    '-o',
+    'ConnectTimeout=10',
+  ];
+  const tempFiles = [];
+  const sshEnv = {
+    ...process.env,
+    DISPLAY: process.env.DISPLAY || 'maze-ssh',
+  };
+  if (profile.auth?.method === 'key') {
+    if (!profile.auth.privateKeyPath) {
+      throw new Error('privateKeyPath is required for key auth');
+    }
+    args.push('-i', profile.auth.privateKeyPath);
+  } else if (password) {
+    const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'maze-ssh-'));
+    const askpassPath = path.join(tempDir, 'askpass.sh');
+    await fs.writeFile(askpassPath, `#!/usr/bin/env bash\nprintf '%s\\n' ${shellQuote(password)}\n`, { encoding: 'utf-8', mode: 0o700 });
+    tempFiles.push(tempDir);
+    args.push('-o', 'BatchMode=no', '-o', 'PreferredAuthentications=password,keyboard-interactive');
+    sshEnv.SSH_ASKPASS_REQUIRE = 'force';
+    sshEnv.SSH_ASKPASS = askpassPath;
+  } else if (profile.auth?.method === 'password') {
+    throw new Error('password is required for this worker profile in the current backend session');
+  }
+  args.push(sshTarget(profile), command);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('setsid', ['ssh', ...args], {
+      env: sshEnv,
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`SSH command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.on('error', reject);
+    child.on('close', async (code) => {
+      clearTimeout(timer);
+      for (const tempFile of tempFiles) {
+        await fs.rm(tempFile, { recursive: true, force: true }).catch(() => {});
+      }
+      const result = { code, stdout, stderr, ok: code === 0 };
+      if (code === 0) {
+        resolve(result);
+      } else {
+        const error = new Error(stderr || stdout || `SSH command failed with code ${code}`);
+        error.result = result;
+        reject(error);
+      }
+    });
+  });
+}
+
+async function runLocalCommand(command, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const cwd = options.cwd || PROJECT_ROOT;
+  return new Promise((resolve, reject) => {
+    const child = spawn('/bin/bash', ['-lc', command], {
+      cwd,
+      env: {
+        ...process.env,
+        PATH: `${mazeRuntimePath()}:${process.env.PATH || ''}`,
+        PYTHONPATH: process.env.PYTHONPATH || PROJECT_ROOT,
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const result = { code, stdout, stderr, ok: code === 0 };
+      if (code === 0) {
+        resolve(result);
+      } else {
+        const error = new Error(stderr || stdout || `Command failed with code ${code}`);
+        error.result = result;
+        reject(error);
+      }
+    });
+  });
+}
+
+async function runWorkerDraftTest(profile, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const password = options.password || '';
+  const checks = [];
+  try {
+    const ping = await runLocalCommand(`ping -c 1 -W 2 ${shellQuote(profile.host)}`, { timeoutMs: 5000, cwd: PROJECT_ROOT });
+    checks.push({ name: 'ping', ok: true, stdout: ping.stdout, stderr: ping.stderr });
+  } catch (error) {
+    checks.push({
+      name: 'ping',
+      ok: false,
+      stdout: error.result?.stdout || '',
+      stderr: error.result?.stderr || error.message,
+      warning: true,
+    });
+  }
+
+  const sshCommand = [
+    'echo SSH_OK',
+    'hostname',
+    'pwd',
+    `test -d ${shellQuote(profile.remoteProjectDir)} && echo PROJECT_DIR_OK || echo PROJECT_DIR_MISSING`,
+    `test -f ${shellQuote(profile.condaSh)} && echo CONDA_SH_OK || echo CONDA_SH_MISSING`,
+  ].join('\n');
+  const ssh = await runSshCommand(profile, sshCommand, { password, timeoutMs });
+  checks.push({ name: 'ssh', ok: true, stdout: ssh.stdout, stderr: ssh.stderr });
+  return {
+    ok: checks.every((check) => check.ok || check.warning),
+    checks,
+    result: limitCommandResult(ssh, 20000),
+  };
 }
 
 function safeAgentId(value, fallbackPrefix = 'agent') {
@@ -6464,6 +6823,209 @@ app.get('/api/runs', async (req, res) => {
   }
 });
 
+app.get('/api/cluster/worker-profiles', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const payload = await loadWorkerProfiles(context.workspaceDir);
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      profiles: payload.profiles.map((profile) => redactedWorkerProfile(profile, context.workspaceDir)),
+    });
+  } catch (error) {
+    console.error('Failed to list worker profiles:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/cluster/worker-profiles', async (req, res) => {
+  try {
+    const { workspaceId, workspaceDir: requestedWorkspaceDir, profile: rawProfile = {}, password } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const payload = await loadWorkerProfiles(context.workspaceDir);
+    const existing = payload.profiles.find((item) => item.id === rawProfile.id);
+    const profile = sanitizeWorkerProfileInput(rawProfile, existing);
+    const incomingPassword = password || rawProfile.auth?.password || rawProfile.password;
+    rememberWorkerPassword(context.workspaceDir, profile.id, incomingPassword);
+    const nextProfiles = [
+      ...payload.profiles.filter((item) => item.id !== profile.id),
+      profile,
+    ].sort((left, right) => String(left.name).localeCompare(String(right.name)));
+    await saveWorkerProfiles(context.workspaceDir, nextProfiles);
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      profile: redactedWorkerProfile(profile, context.workspaceDir),
+    });
+  } catch (error) {
+    console.error('Failed to save worker profile:', error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/cluster/worker-profiles/test-draft', async (req, res) => {
+  try {
+    const { workspaceId, workspaceDir: requestedWorkspaceDir, profile: rawProfile = {}, password } = req.body || {};
+    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
+    const profile = sanitizeWorkerProfileInput(rawProfile, null);
+    const incomingPassword = password || rawProfile.auth?.password || rawProfile.password || '';
+    if (profile.auth?.method === 'password' && !incomingPassword) {
+      return res.status(400).json({ error: 'password is required to test password auth' });
+    }
+    const test = await runWorkerDraftTest(profile, {
+      password: incomingPassword,
+      timeoutMs: req.body?.timeoutMs || 30000,
+    });
+    rememberWorkerPassword(context.workspaceDir, profile.id, incomingPassword);
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      profile: redactedWorkerProfile(profile, context.workspaceDir),
+      test,
+    });
+  } catch (error) {
+    console.error('Failed to test worker profile draft:', error);
+    res.status(500).json({ error: error.message, result: error.result || null });
+  }
+});
+
+app.delete('/api/cluster/worker-profiles/:profileId', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const profileId = safeWorkerProfileId(req.params.profileId);
+    const payload = await loadWorkerProfiles(context.workspaceDir);
+    await saveWorkerProfiles(context.workspaceDir, payload.profiles.filter((item) => item.id !== profileId));
+    activeWorkerProfileSecrets.delete(workerSecretKey(context.workspaceDir, profileId));
+    res.json({ success: true, workspaceId: context.workspaceId, workspaceDir: context.workspaceDir, profileId });
+  } catch (error) {
+    console.error('Failed to delete worker profile:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function runWorkerProfileAction(context, profileId, action, options = {}) {
+  const payload = await loadWorkerProfiles(context.workspaceDir);
+  const profile = payload.profiles.find((item) => item.id === profileId);
+  if (!profile) {
+    throw new Error(`worker profile not found: ${profileId}`);
+  }
+  const password = getWorkerPassword(context.workspaceDir, profileId, options.password || '');
+  if (options.password) {
+    rememberWorkerPassword(context.workspaceDir, profileId, options.password);
+  }
+  const command = remoteWorkerCommand(profile, action);
+  const result = await runSshCommand(profile, command, { password, timeoutMs: options.timeoutMs || 60000 });
+  profile.lastAction = {
+    action,
+    ok: true,
+    at: new Date().toISOString(),
+    stdoutTail: String(result.stdout || '').split(/\r?\n/).slice(-20).join('\n'),
+    stderrTail: String(result.stderr || '').split(/\r?\n/).slice(-20).join('\n'),
+  };
+  await saveWorkerProfiles(
+    context.workspaceDir,
+    payload.profiles.map((item) => (item.id === profile.id ? profile : item)),
+  );
+  return { profile: redactedWorkerProfile(profile, context.workspaceDir), result };
+}
+
+app.post('/api/cluster/worker-profiles/:profileId/:action', async (req, res) => {
+  try {
+    const action = String(req.params.action || '');
+    if (req.params.profileId === 'bulk') {
+      return res.status(404).json({ error: 'use /api/cluster/worker-profiles/bulk' });
+    }
+    if (!['test', 'start', 'restart', 'stop', 'logs'].includes(action)) {
+      return res.status(400).json({ error: 'unsupported worker action' });
+    }
+    const context = await resolveWorkspaceContext(req.body || {});
+    const profileId = safeWorkerProfileId(req.params.profileId);
+    const output = await runWorkerProfileAction(context, profileId, action, {
+      password: req.body?.password,
+      timeoutMs: req.body?.timeoutMs,
+    });
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      action,
+      profile: output.profile,
+      result: output.result,
+    });
+  } catch (error) {
+    console.error('Failed to run worker profile action:', error);
+    const result = error.result || null;
+    res.status(500).json({ error: error.message, result });
+  }
+});
+
+app.post('/api/cluster/worker-profiles/bulk', async (req, res) => {
+  try {
+    const action = String(req.body?.action || '');
+    if (!['test', 'start', 'restart', 'stop', 'logs'].includes(action)) {
+      return res.status(400).json({ error: 'unsupported worker action' });
+    }
+    const context = await resolveWorkspaceContext(req.body || {});
+    const ids = Array.isArray(req.body?.profileIds) ? req.body.profileIds.map((id) => safeWorkerProfileId(id)) : [];
+    const passwordByProfileId = req.body?.passwordByProfileId || {};
+    const results = [];
+    for (const profileId of ids) {
+      try {
+        const output = await runWorkerProfileAction(context, profileId, action, {
+          password: passwordByProfileId[profileId],
+          timeoutMs: req.body?.timeoutMs,
+        });
+        results.push({ profileId, ok: true, profile: output.profile, result: output.result });
+      } catch (error) {
+        results.push({ profileId, ok: false, error: error.message, result: error.result || null });
+      }
+    }
+    res.json({ success: true, workspaceId: context.workspaceId, workspaceDir: context.workspaceDir, action, results });
+  } catch (error) {
+    console.error('Failed to run worker profile bulk action:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/cluster/console/run', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.body || {});
+    const target = String(req.body?.target || 'head');
+    const command = String(req.body?.command || '').trim();
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 30000), 1000), 120000);
+    const password = req.body?.password;
+    if (!command) {
+      return res.status(400).json({ error: 'command is required' });
+    }
+    if (command.length > 4000) {
+      return res.status(400).json({ error: 'command is too long' });
+    }
+    if (target !== 'head') {
+      return res.status(400).json({ error: 'console commands run on the head node only' });
+    }
+    let result = await runLocalCommand(command, { timeoutMs, cwd: PROJECT_ROOT });
+    result = limitCommandResult(result);
+
+    res.json({
+      success: true,
+      workspaceId: context.workspaceId,
+      workspaceDir: context.workspaceDir,
+      target: 'head',
+      targetLabel: 'head',
+      command,
+      timeoutMs,
+      result,
+      ranAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Failed to run cluster console command:', error);
+    res.status(500).json({ error: error.message, result: error.result || null });
+  }
+});
+
 app.get('/api/cluster/resources', async (req, res) => {
   try {
     const result = await callMazeCore('/cluster/resources');
@@ -6481,6 +7043,67 @@ app.get('/api/cluster/queues', async (req, res) => {
   } catch (error) {
     console.error('Failed to get cluster queues:', error);
     res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster queues' });
+  }
+});
+
+app.get('/api/models', async (req, res) => {
+  try {
+    const result = await callMazeCore('/models');
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to get models:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to get models' });
+  }
+});
+
+app.get('/api/resource-history', async (req, res) => {
+  try {
+    const result = await callMazeCore('/resource-history');
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to get resource history:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to get resource history' });
+  }
+});
+
+app.post('/api/models/config', async (req, res) => {
+  try {
+    const result = await callMazeCore('/models/config', {
+      method: 'POST',
+      body: req.body || {},
+    });
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to update model config:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to update model config' });
+  }
+});
+
+app.post('/api/models/test', async (req, res) => {
+  try {
+    const result = await callMazeCore('/models/test', {
+      method: 'POST',
+      body: req.body || {},
+    });
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to test model:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to test model' });
+  }
+});
+
+app.post('/api/cluster/nodes/:nodeId/:action', async (req, res) => {
+  try {
+    const action = String(req.params.action || '');
+    if (!['disable', 'enable'].includes(action)) {
+      return res.status(400).json({ error: 'unsupported cluster node action' });
+    }
+    const nodeId = encodeURIComponent(req.params.nodeId);
+    const result = await callMazeCore(`/cluster/nodes/${nodeId}/${action}`, { method: 'POST' });
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to control cluster node:', error);
+    res.status(error.status || 500).json({ error: error.message || 'Failed to control cluster node' });
   }
 });
 

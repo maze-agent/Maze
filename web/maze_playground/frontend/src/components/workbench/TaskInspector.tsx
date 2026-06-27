@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Button, Empty, Input, Select, Space, Tag, Typography } from 'antd';
 import {
@@ -13,6 +13,8 @@ import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
   StaticWorkflowRunEvent,
   StaticWorkflowRunNode,
+  FaultToleranceTrace,
+  LocalModel,
   WorkflowEdge,
   WorkflowNode,
 } from '@/types/workflow';
@@ -73,6 +75,8 @@ export type WorkbenchTask = {
     placementConstraints?: unknown;
     requiredCapabilities?: unknown;
     localityHints?: unknown;
+    localModel?: string;
+    modelAnchor?: WorkflowNode['data']['modelAnchor'];
   };
   resources: {
     cpu?: number;
@@ -100,6 +104,7 @@ export type WorkbenchTask = {
     lastHeartbeat?: string;
     schedulingReason?: string;
   };
+  faultTolerance?: FaultToleranceTrace;
   placement?: {
     worker?: string;
     node?: string;
@@ -267,6 +272,31 @@ function formatStorageGiB(value?: number | null) {
   return `${value} GiB`;
 }
 
+function formatGiBFromMiB(value?: number | null) {
+  if (!value) return undefined;
+  return `${(value / 1024).toFixed(1)} GiB`;
+}
+
+function localModelLabel(model: LocalModel) {
+  return [
+    model.name,
+    model.model_type,
+    model.estimated_params_label,
+    model.estimated_weight_memory || formatGiBFromMiB(model.estimated_gpu_mem_mb),
+  ].filter(Boolean).join(' · ');
+}
+
+function modelAnchor(model: LocalModel) {
+  return {
+    local_model: model.id,
+    model_scope: model.model_scope || 'head',
+    backend: model.backend || 'transformers',
+    estimated_weight_memory_bytes: model.estimated_weight_memory_bytes,
+    estimated_gpu_mem_mb: model.estimated_gpu_mem_mb,
+    estimated_params: model.estimated_params,
+  };
+}
+
 function renderable(value: ReactNode) {
   return value !== undefined && value !== null && value !== '';
 }
@@ -289,6 +319,39 @@ function errorMessage(value: any) {
   } catch {
     return String(value);
   }
+}
+
+function compactJson(value: unknown) {
+  if (value === undefined || value === null || value === '') return '-';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function faultText(entry: any, key: 'failure' | 'diagnosis' | 'repair_action' | 'retry' | 'outcome') {
+  const value = entry?.[key];
+  if (!value) return '-';
+  if (key === 'failure') {
+    return [value.error_type, value.message].filter(Boolean).join(': ') || compactJson(value);
+  }
+  if (key === 'diagnosis') {
+    return [value.category, value.reason, value.recoverable === false ? 'not recoverable' : null].filter(Boolean).join(' / ') || compactJson(value);
+  }
+  if (key === 'repair_action') {
+    return [value.type, value.applied === false ? 'not applied' : null, value.reason].filter(Boolean).join(' / ') || compactJson(value);
+  }
+  if (key === 'retry') {
+    return value.scheduled ? `scheduled${value.next_attempt ? ` -> attempt ${value.next_attempt}` : ''}` : 'not scheduled';
+  }
+  if (key === 'outcome') {
+    return value.status || compactJson(value);
+  }
+  return compactJson(value);
 }
 
 function dependencyLabels(nodeId: string, edges: WorkflowEdge[], nodes: WorkflowNode[], direction: 'upstream' | 'downstream') {
@@ -433,6 +496,8 @@ function buildTask(
       placementConstraints: data.placementConstraints,
       requiredCapabilities: data.requiredCapabilities,
       localityHints: data.localityHints,
+      localModel: data.localModel,
+      modelAnchor: data.modelAnchor,
     },
     resources: {
       cpu: Number((resources as any).cpu || 0) || undefined,
@@ -460,6 +525,7 @@ function buildTask(
       lastHeartbeat: formatTimestamp((runtime as any)?.last_heartbeat || (runtime as any)?.heartbeat_time),
       schedulingReason: runtime?.schedule_decision?.reason || undefined,
     },
+    faultTolerance: runtime?.fault_tolerance,
     placement: {
       worker: runtime?.node_ip || selectedNode?.node_ip || runtime?.node_id_runtime || undefined,
       node: runtime?.node_id_runtime || selectedNode?.node_id || undefined,
@@ -840,11 +906,13 @@ function DefinitionPanel({
 function ResourcesPanel({
   task,
   readOnly,
+  localModels,
   onUpdate,
   onUpdateResources,
 }: {
   task: WorkbenchTask;
   readOnly: boolean;
+  localModels: LocalModel[];
   onUpdate: (updates: Record<string, unknown>) => void;
   onUpdateResources: (updates: Record<string, number | undefined>) => void;
 }) {
@@ -864,6 +932,37 @@ function ResourcesPanel({
         </FieldRow>
         <FieldRow label="GPU memory GiB">
           <Input size="small" type="number" min={0} value={task.resources.gpuMemoryGiB ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ gpu_mem: event.target.value ? Number(event.target.value) * 1024 : undefined })} />
+        </FieldRow>
+        <FieldRow label="Local model">
+          <Select
+            allowClear
+            size="small"
+            placeholder="None"
+            value={task.config.localModel}
+            disabled={readOnly}
+            options={localModels.map((model) => ({
+              value: model.id,
+              label: localModelLabel(model),
+            }))}
+            onChange={(value) => {
+              const model = localModels.find((item) => item.id === value);
+              onUpdate({
+                localModel: value || undefined,
+                modelAnchor: model ? modelAnchor(model) : undefined,
+                ...(model ? { taskKind: 'gpu', implementationType: 'local LLM inference' } : {}),
+              });
+              if (model) {
+                onUpdateResources({
+                  cpu: task.resources.cpu || 1,
+                  gpu: Math.max(1, task.resources.gpu || 0),
+                  gpu_mem: Math.max(
+                    Math.round((task.resources.gpuMemoryGiB || 0) * 1024),
+                    model.estimated_gpu_mem_mb || 0,
+                  ) || undefined,
+                });
+              }
+            }}
+          />
         </FieldRow>
         <FieldRow label="Timeout sec">
           <Input size="small" type="number" min={0} value={task.config.timeoutSeconds ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ taskTimeout: Number(event.target.value) || undefined })} />
@@ -904,6 +1003,7 @@ function ResourcesPanel({
 
 function RuntimePanel({ task, runTiming }: { task: WorkbenchTask; runTiming: RunTimingContext }) {
   const taskQueueTime = task.runtime.queueTimeRecorded ? task.runtime.queueTime : 'Not recorded';
+  const faultAttempts = task.faultTolerance?.attempts || [];
   return (
     <>
       <KeyValueSection
@@ -953,6 +1053,31 @@ function RuntimePanel({ task, runTiming }: { task: WorkbenchTask; runTiming: Run
           ['Task Timeout', formatSecondsLabel(task.config.timeoutSeconds)],
         ]}
       />
+      <section className="workbench-inspector-section">
+        <div className="workbench-inspector-section-title">FAULT TOLERANCE TRACE</div>
+        {faultAttempts.length === 0 ? (
+          <Text type="secondary">No fault-tolerance action recorded.</Text>
+        ) : (
+          <div className="workbench-inspector-subsection">
+            <Space size={[4, 4]} wrap>
+              <Tag color={task.faultTolerance?.status === 'recovered' ? 'green' : task.faultTolerance?.status === 'failed' ? 'red' : 'blue'}>
+                {task.faultTolerance?.status || 'recorded'}
+              </Tag>
+              <Tag>{faultAttempts.length} event{faultAttempts.length > 1 ? 's' : ''}</Tag>
+            </Space>
+            {faultAttempts.map((entry, index) => (
+              <div className="workbench-inspector-note" key={`${entry?.attempt || 'attempt'}-${index}`}>
+                <Text strong>Attempt {entry?.attempt || index + 1}</Text>
+                <div>Failure: {faultText(entry, 'failure')}</div>
+                <div>Diagnosis: {faultText(entry, 'diagnosis')}</div>
+                <div>Repair: {faultText(entry, 'repair_action')}</div>
+                <div>Retry: {faultText(entry, 'retry')}</div>
+                <div>Outcome: {faultText(entry, 'outcome')}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
       <section className="workbench-inspector-section">
         <div className="workbench-inspector-section-title">DEPENDENCIES</div>
         <div className="workbench-inspector-runtime-links">
@@ -1105,6 +1230,7 @@ interface TaskInspectorProps {
 
 export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>('overview');
+  const [localModels, setLocalModels] = useState<LocalModel[]>([]);
   const {
     selectedNode,
     nodes,
@@ -1149,6 +1275,12 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
     memoryGiB: nodes.reduce((sum, node) => sum + Number(node.data.resources?.cpu_mem || 0) / 1024, 0),
   }), [nodes]);
   const latestRun = visibleRun || staticRuns[0];
+
+  useEffect(() => {
+    api.getModels()
+      .then((result) => setLocalModels(result.models || []))
+      .catch(() => setLocalModels([]));
+  }, []);
 
   const headerTitle = task?.name || workflowName;
   const headerState = task?.state || (workflowSaveState === 'saved_workflow' ? 'validated' : 'draft');
@@ -1215,6 +1347,7 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
               <ResourcesPanel
                 task={task}
                 readOnly={isSpecReadOnly}
+                localModels={localModels}
                 onUpdate={updateTaskData}
                 onUpdateResources={updateTaskResources}
               />

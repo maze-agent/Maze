@@ -6,6 +6,7 @@ from typing import Any,List,Dict
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.scheduler.runtime import SelectedNode
+from maze.core.local_models import scan_local_model_refs
 from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 from maze.utils.utils import collect_gpu_info
 
@@ -128,6 +129,7 @@ class ResourceManager():
         self.head_node_ip = None
         self.nodes:Dict[str,Node] = {}
         self.running_task_counts: Dict[str, int] = {}
+        self.disabled_node_ids: set[str] = set()
         self.scheduling_policy = "default"
         self.worker_stale_after_seconds = 30
         
@@ -192,7 +194,10 @@ class ResourceManager():
                         self.head_node_ip,
                         head_node_resource,
                         head_node_resource,
-                        detect_agent_sandbox_capabilities(),
+                        {
+                            **detect_agent_sandbox_capabilities(),
+                            "local_models": scan_local_model_refs(),
+                        },
                     )
                     self.running_task_counts.setdefault(self.head_node_id, 0)
                     return
@@ -259,7 +264,12 @@ class ResourceManager():
             "devices": devices,
         }
 
+    def _refresh_head_local_models(self):
+        if self.head_node_id in self.nodes:
+            self.nodes[self.head_node_id].capabilities["local_models"] = scan_local_model_refs()
+
     def get_cluster_resources(self):
+        self._refresh_head_local_models()
         ray_nodes = self._ray_node_index()
         registered_nodes = []
 
@@ -279,6 +289,7 @@ class ResourceManager():
                 "role": "head" if node_id == self.head_node_id else "worker",
                 "registered": True,
                 "alive": alive,
+                "disabled": node_id in self.disabled_node_ids,
                 "stale": stale,
                 "running_task_count": self.running_task_counts.get(node_id, 0),
                 "registered_time": node.registered_time,
@@ -297,6 +308,7 @@ class ResourceManager():
                     "gpu": self._gpu_snapshot(node),
                 },
                 "capabilities": copy.deepcopy(node.capabilities),
+                "local_models": copy.deepcopy(node.capabilities.get("local_models") or []),
                 "ray_resources": ray_node.get("Resources", {}) if ray_node else {},
             })
 
@@ -313,6 +325,7 @@ class ResourceManager():
                 "registered": False,
                 "alive": True,
                 "capabilities": {"workspace_sandbox": True, "docker_sandbox": False},
+                "local_models": [],
                 "ray_resources": ray_node.get("Resources", {}),
             })
 
@@ -321,8 +334,24 @@ class ResourceManager():
             "head_node_ip": self.head_node_ip,
             "scheduling_policy": self.scheduling_policy,
             "supported_scheduling_policies": copy.deepcopy(SUPPORTED_SCHEDULING_POLICIES),
+            "disabled_node_ids": sorted(self.disabled_node_ids),
             "nodes": sorted(registered_nodes, key=lambda item: (item["role"] != "head", item["node_ip"] or "")),
             "unregistered_ray_nodes": sorted(unregistered_ray_nodes, key=lambda item: item["node_ip"] or ""),
+        }
+
+    def set_node_disabled(self, node_id: str, disabled: bool):
+        if node_id == self.head_node_id and disabled:
+            raise ValueError("head node cannot be disabled")
+        if node_id not in self.nodes:
+            raise KeyError(f"node not registered: {node_id}")
+        if disabled:
+            self.disabled_node_ids.add(node_id)
+        else:
+            self.disabled_node_ids.discard(node_id)
+        return {
+            "node_id": node_id,
+            "disabled": node_id in self.disabled_node_ids,
+            "cluster": self.get_cluster_resources(),
         }
             
             
@@ -331,6 +360,7 @@ class ResourceManager():
         Stop worker node
         '''
         del self.nodes[node_id]
+        self.disabled_node_ids.discard(node_id)
         
     def _node_resource_snapshot(self, node: Node) -> Dict[str, Any]:
         return {
@@ -348,10 +378,15 @@ class ResourceManager():
             return "specified_node_unavailable"
         if all("node_not_alive" in candidate.get("reject_reasons", []) for candidate in candidates):
             return "no_registered_alive_node"
+        if all("node_disabled" in candidate.get("reject_reasons", []) for candidate in candidates):
+            return "all_candidate_nodes_disabled"
 
         reason_priority = [
             "specified_node_unavailable",
+            "node_disabled",
             "missing_capability",
+            "missing_model",
+            "avoided_after_failure",
             "insufficient_cpu",
             "insufficient_cpu_mem",
             "insufficient_gpu",
@@ -385,6 +420,7 @@ class ResourceManager():
         task_need_resources:dict,
         *,
         reservation_kind: str = "task",
+        model_anchor: Dict[str, Any] | None = None,
     ) -> ResourceSelection:
         '''
         Select sufficient resources node
@@ -396,7 +432,15 @@ class ResourceManager():
         assert(gpu_need <= 1)
 
         target_node_id = task_need_resources.get("node_id") or task_need_resources.get("target_node_id")
+        avoid_node_ids = {
+            str(node_id)
+            for node_id in (task_need_resources.get("avoid_node_ids") or [])
+            if node_id
+        }
         required_capability = task_need_resources.get("required_capability")
+        required_model = (model_anchor or {}).get("local_model")
+        required_backend = (model_anchor or {}).get("backend") or "transformers"
+        self._refresh_head_local_models()
         ray_nodes = self._ray_node_index()
         candidates = []
 
@@ -411,6 +455,12 @@ class ResourceManager():
                 reject_reasons.append("node_not_alive")
                 if target_node_id == node_id:
                     reject_reasons.append("specified_node_unavailable")
+            if node_id in avoid_node_ids:
+                reject_reasons.append("avoided_after_failure")
+            if node_id in self.disabled_node_ids:
+                reject_reasons.append("node_disabled")
+                if target_node_id == node_id:
+                    reject_reasons.append("specified_node_unavailable")
 
             if node.available_resources.get('cpu', 0) < cpu_need:
                 reject_reasons.append("insufficient_cpu")
@@ -418,6 +468,16 @@ class ResourceManager():
                 reject_reasons.append("insufficient_cpu_mem")
             if required_capability and not node.capabilities.get(required_capability):
                 reject_reasons.append("missing_capability")
+            if required_model:
+                local_models = node.capabilities.get("local_models") or []
+                has_model = any(
+                    model.get("id") == required_model
+                    and (model.get("backend") or "transformers") == required_backend
+                    for model in local_models
+                    if isinstance(model, dict)
+                )
+                if not has_model:
+                    reject_reasons.append("missing_model")
 
             if gpu_need > 0:
                 gpu_options = []
@@ -441,6 +501,7 @@ class ResourceManager():
                 "node_ip": node.node_ip,
                 "role": "head" if node_id == self.head_node_id else "worker",
                 "alive": alive,
+                "disabled": node_id in self.disabled_node_ids,
                 "registered": True,
                 "running_task_count": self.running_task_counts.get(node_id, 0),
                 "available_cpu": node.available_resources.get("cpu", 0),

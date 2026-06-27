@@ -91,6 +91,7 @@ class StaticRun:
                 "finished_time": None,
                 "duration_seconds": None,
                 "resources": to_json_safe(task.resources),
+                "model_anchor": to_json_safe(getattr(task, "model_anchor", None)),
                 "inputs": _task_io_snapshot(task.task_input),
                 "outputs": _task_io_snapshot(task.task_output),
                 "selected_node": None,
@@ -101,6 +102,11 @@ class StaticRun:
                 "pending_reason": None,
                 "schedule_decision": None,
                 "file_manifest": None,
+                "fault_tolerance": {
+                    "enabled": True,
+                    "status": "idle",
+                    "attempts": [],
+                },
             }
 
     def _touch(self):
@@ -127,10 +133,13 @@ class StaticRun:
         task = self.task_nodes.get(task_id)
         if not task:
             return
+        schedule_decision = (node_info or {}).get("schedule_decision") or {}
         task["status"] = "running"
         task["started_time"] = time.time()
         task["pending_reason"] = None
-        task["schedule_decision"] = to_json_safe((node_info or {}).get("schedule_decision"))
+        task["schedule_decision"] = to_json_safe(schedule_decision)
+        if schedule_decision.get("requested_resources"):
+            task["resources"] = to_json_safe(schedule_decision.get("requested_resources"))
         task["selected_node"] = {
             "node_id": (node_info or {}).get("node_id"),
             "node_ip": (node_info or {}).get("node_ip"),
@@ -154,7 +163,17 @@ class StaticRun:
         task["schedule_decision"] = to_json_safe(schedule_decision)
         self._touch()
 
-    def mark_task_retry(self, task_id: str, error: Any = None, attempt: int | None = None):
+    def _update_task_fault_tolerance(self, task: Dict[str, Any], fault_tolerance: Dict[str, Any] | None):
+        if fault_tolerance:
+            task["fault_tolerance"] = to_json_safe(fault_tolerance)
+
+    def mark_task_retry(
+        self,
+        task_id: str,
+        error: Any = None,
+        attempt: int | None = None,
+        fault_tolerance: Dict[str, Any] | None = None,
+    ):
         task = self.task_nodes.get(task_id)
         if not task:
             return
@@ -164,6 +183,7 @@ class StaticRun:
         task["pending_reason"] = None
         if attempt is not None:
             task["attempt"] = attempt
+        self._update_task_fault_tolerance(task, fault_tolerance)
         self._touch()
 
     def mark_task_finished(
@@ -176,6 +196,7 @@ class StaticRun:
         finished_at: float | None = None,
         duration_ms: int | None = None,
         node_id: str | None = None,
+        fault_tolerance: Dict[str, Any] | None = None,
     ):
         task = self.task_nodes.get(task_id)
         if not task:
@@ -195,6 +216,7 @@ class StaticRun:
         task["result_summary"] = to_json_safe(result)
         task["file_manifest"] = to_json_safe(file_manifest)
         task["pending_reason"] = None
+        self._update_task_fault_tolerance(task, fault_tolerance)
 
         for child_id in task.get("children", []):
             child = self.task_nodes.get(child_id)
@@ -206,7 +228,13 @@ class StaticRun:
         else:
             self._touch()
 
-    def mark_task_failed(self, task_id: str, error: Any, file_manifest: Dict[str, Any] | None = None):
+    def mark_task_failed(
+        self,
+        task_id: str,
+        error: Any,
+        file_manifest: Dict[str, Any] | None = None,
+        fault_tolerance: Dict[str, Any] | None = None,
+    ):
         task = self.task_nodes.get(task_id)
         if task:
             error_type = error.get("error_type") if isinstance(error, dict) else None
@@ -217,6 +245,7 @@ class StaticRun:
             task["last_error"] = to_json_safe(error)
             if file_manifest:
                 task["file_manifest"] = to_json_safe(file_manifest)
+            self._update_task_fault_tolerance(task, fault_tolerance)
         self.status = "timed_out" if isinstance(error, dict) and error.get("error_type") == "timeout" else "failed"
         self.error_summary = to_json_safe(error)
         self.finished_time = time.time()

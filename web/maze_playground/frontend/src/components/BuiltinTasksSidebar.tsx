@@ -17,6 +17,8 @@ import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
   BuiltinTaskMeta,
+  ModelTestResponse,
+  LocalModel,
   LocalWorkspaceFileMeta,
   WorkflowNode,
   SystemCatalogItem,
@@ -220,6 +222,25 @@ function formatPercent(value: number | null | undefined) {
   return value === null || value === undefined ? '-' : `${value}%`;
 }
 
+function formatGiBFromBytes(value?: number | null) {
+  if (!value) return undefined;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+}
+
+function formatGiBFromMiB(value?: number | null) {
+  if (!value) return undefined;
+  return `${(value / 1024).toFixed(1)} GiB`;
+}
+
+function localModelLabel(model: LocalModel) {
+  return [
+    model.name,
+    model.model_type,
+    model.estimated_params_label,
+    model.estimated_weight_memory || formatGiBFromMiB(model.estimated_gpu_mem_mb),
+  ].filter(Boolean).join(' · ');
+}
+
 async function fileToBase64(file: File) {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -333,6 +354,12 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
   const [testingLlm, setTestingLlm] = useState(false);
+  const [modelDirInput, setModelDirInput] = useState('');
+  const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  const [selectedLocalModelId, setSelectedLocalModelId] = useState('');
+  const [modelTestResult, setModelTestResult] = useState<ModelTestResponse | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [testingModel, setTestingModel] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
@@ -773,12 +800,85 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
     setWorkspaceInput(workspaceDir);
     setLlmSettingsDraft(loadLlmSettings());
     setAdvancedSettingsOpen(true);
+    void loadModelConfig();
   };
 
-  const saveAdvancedSettings = () => {
+  const loadModelConfig = async (showSuccess = false) => {
+    setModelsLoading(true);
+    try {
+      const result = await api.getModels();
+      setModelDirInput(result.model_dir || '');
+      setLocalModels(result.models || []);
+      setSelectedLocalModelId((current) => (
+        current && result.models?.some((model) => model.id === current)
+          ? current
+          : result.models?.[0]?.id || ''
+      ));
+      setModelTestResult(null);
+      if (showSuccess) {
+        message.success(`Scanned ${result.models?.length || 0} local models`);
+      }
+      return result;
+    } catch (error: any) {
+      console.error('Failed to load local models:', error);
+      message.error(error.response?.data?.error || 'Failed to load local models');
+      return null;
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const saveModelConfig = async () => {
+    if (modelDirInput.trim()) {
+      setModelsLoading(true);
+      try {
+        const result = await api.updateModelConfig(modelDirInput.trim());
+        setModelDirInput(result.model_dir || modelDirInput.trim());
+        setLocalModels(result.models || []);
+        setSelectedLocalModelId((current) => (
+          current && result.models?.some((model) => model.id === current)
+            ? current
+            : result.models?.[0]?.id || ''
+        ));
+        setModelTestResult(null);
+        return result;
+      } catch (error: any) {
+        console.error('Failed to save model directory:', error);
+        message.error(error.response?.data?.error || 'Failed to save model directory');
+        return null;
+      } finally {
+        setModelsLoading(false);
+      }
+    }
+    return null;
+  };
+
+  const saveAdvancedSettings = async () => {
     saveLlmSettings(llmSettingsDraft);
+    if (modelDirInput.trim()) {
+      const result = await saveModelConfig();
+      if (!result) return;
+    }
     setAdvancedSettingsOpen(false);
     message.success('Advanced settings saved');
+  };
+
+  const testLocalModel = async () => {
+    if (!selectedLocalModelId) {
+      message.warning('Select a local model first');
+      return;
+    }
+    setTestingModel(true);
+    try {
+      const result = await api.testModel(selectedLocalModelId);
+      setModelTestResult(result);
+      message.success(result.ok ? 'Local model loaded and generated' : 'Local model test failed');
+    } catch (error: any) {
+      console.error('Failed to test local model:', error);
+      message.error(error.response?.data?.error || 'Failed to test local model');
+    } finally {
+      setTestingModel(false);
+    }
   };
 
   const testLlmConnection = async () => {
@@ -2576,6 +2676,86 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
                 No local file cache selected.
               </Text>
             )}
+          </div>
+
+          <div>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <FolderOpenOutlined style={{ color: '#389e0d' }} />
+              <Text strong>Local Models</Text>
+              <Tag style={{ margin: 0 }}>head server</Tag>
+            </Space>
+            <Input
+              value={modelDirInput}
+              onChange={(event) => setModelDirInput(event.target.value)}
+              placeholder="/root/data/Maze/model_cache"
+            />
+            <Space size={8} wrap style={{ marginTop: 8 }}>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={modelsLoading}
+                onClick={async () => {
+                  const result = await saveModelConfig();
+                  if (result) {
+                    message.success(`Scanned ${result.models?.length || 0} local models`);
+                  }
+                }}
+              >
+                Scan Path
+              </Button>
+              <Tag style={{ margin: 0 }}>{localModels.length} models</Tag>
+            </Space>
+            {localModels.length > 0 && (
+              <Space.Compact style={{ width: '100%', marginTop: 8 }}>
+                <Select
+                  showSearch
+                  value={selectedLocalModelId || undefined}
+                  onChange={(value) => {
+                    setSelectedLocalModelId(value);
+                    setModelTestResult(null);
+                  }}
+                  options={localModels.map((model) => ({
+                    label: localModelLabel(model),
+                    value: model.id,
+                  }))}
+                  style={{ width: '100%' }}
+                />
+                <Button loading={testingModel} onClick={testLocalModel}>
+                  Test Model
+                </Button>
+              </Space.Compact>
+            )}
+            {modelTestResult && (
+              <Alert
+                type={modelTestResult.ok ? 'success' : 'error'}
+                showIcon
+                style={{ marginTop: 8 }}
+                message={modelTestResult.message}
+                description={(
+                  <Space size={[4, 4]} wrap>
+                    {modelTestResult.run_id && (
+                      <Tag color="blue" style={{ margin: 0 }}>run: {modelTestResult.run_id.slice(0, 8)}</Tag>
+                    )}
+                    {modelTestResult.task_id && (
+                      <Tag color="geekblue" style={{ margin: 0 }}>task: {modelTestResult.task_id.slice(0, 8)}</Tag>
+                    )}
+                    {modelTestResult.runtime?.peak_cuda_reserved_bytes !== undefined && (
+                      <Tag color="purple" style={{ margin: 0 }}>
+                        peak: {formatGiBFromBytes(modelTestResult.runtime.peak_cuda_reserved_bytes)}
+                      </Tag>
+                    )}
+                    {modelTestResult.checks.map((check) => (
+                      <Tag key={check.name} color={check.ok ? 'green' : 'red'} style={{ margin: 0 }}>
+                        {check.name}: {check.message}
+                      </Tag>
+                    ))}
+                  </Space>
+                )}
+              />
+            )}
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+              Absolute path on the head server. Browser folder selection is only for Local File Cache.
+            </Text>
           </div>
 
           <div>

@@ -1,22 +1,27 @@
 from ast import arg
 import asyncio
+import math
+import struct
 import uuid
 import signal
 import copy
 import contextlib
+import importlib.util
+import json
+import os
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from urllib.parse import urlsplit, urlunsplit
 from maze.core.path.path import MaPath
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
-import cloudpickle
-import binascii
 from pydantic import BaseModel
 from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
+from maze.core.local_models import DEFAULT_MODEL_DIR, RUNTIME_CONFIG_PATH, model_dir
 
 
 app = FastAPI()
@@ -34,6 +39,317 @@ mapath = MaPath()
 artifact_store = LocalCASArtifactStore()
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODEL_TEST_TASK_TIMEOUT_SECONDS = 180
+MODEL_TEST_WAIT_TIMEOUT_SECONDS = 240
+MODEL_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".gguf", ".pt", ".pth")
+DTYPE_BYTES = {
+    "F64": 8,
+    "FLOAT64": 8,
+    "F32": 4,
+    "FLOAT32": 4,
+    "FP32": 4,
+    "F16": 2,
+    "FLOAT16": 2,
+    "FP16": 2,
+    "BF16": 2,
+    "BFloat16": 2,
+    "I64": 8,
+    "U64": 8,
+    "I32": 4,
+    "U32": 4,
+    "I16": 2,
+    "U16": 2,
+    "I8": 1,
+    "U8": 1,
+    "BOOL": 1,
+}
+
+
+LOCAL_MODEL_TEST_TASK_CODE = r'''
+def maze_local_model_test(model_dir: str):
+    import os
+    import time
+    from pathlib import Path
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    model = None
+    tokenizer = None
+    try:
+        model_path = Path(model_dir)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        started = time.time()
+        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=True)
+        tokenizer_seconds = time.time() - started
+
+        started = time.time()
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            local_files_only=True,
+            trust_remote_code=True,
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None,
+        )
+        load_seconds = time.time() - started
+        device = getattr(model, "device", None)
+        if device is None:
+            device = next(model.parameters()).device
+
+        messages = [{"role": "user", "content": "Reply with exactly: OK"}]
+        if hasattr(tokenizer, "apply_chat_template"):
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt = "Reply with exactly: OK"
+        inputs = tokenizer([prompt], return_tensors="pt")
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+
+        started = time.time()
+        with torch.inference_mode():
+            output = model.generate(**inputs, max_new_tokens=8, do_sample=False)
+        generate_seconds = time.time() - started
+        new_tokens = output[:, inputs["input_ids"].shape[-1]:]
+        generated_text = tokenizer.decode(new_tokens[0], skip_special_tokens=True).strip()
+        peak_allocated = torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+        peak_reserved = torch.cuda.max_memory_reserved() if torch.cuda.is_available() else 0
+
+        return {
+            "tokenizer_seconds": round(tokenizer_seconds, 3),
+            "load_seconds": round(load_seconds, 3),
+            "generate_seconds": round(generate_seconds, 3),
+            "device": str(device),
+            "generated_text": generated_text,
+            "cuda": torch.cuda.is_available(),
+            "peak_cuda_allocated_bytes": int(peak_allocated),
+            "peak_cuda_reserved_bytes": int(peak_reserved),
+            "__maze_metrics__": {
+                "model_load_seconds": round(load_seconds, 6),
+                "gpu_memory_peak_allocated_bytes": int(peak_allocated),
+                "gpu_memory_peak_reserved_bytes": int(peak_reserved),
+            },
+        }
+    finally:
+        del model
+        del tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+'''
+
+
+def _load_runtime_config() -> Dict[str, Any]:
+    with contextlib.suppress(Exception):
+        return json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_runtime_config(config: Dict[str, Any]) -> None:
+    RUNTIME_CONFIG_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _model_dir() -> Path:
+    return model_dir()
+
+
+def _module_available(name: str) -> bool:
+    with contextlib.suppress(Exception):
+        return importlib.util.find_spec(name) is not None
+    return False
+
+
+def _format_bytes(num_bytes: int | float | None) -> str | None:
+    if num_bytes is None:
+        return None
+    value = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(value) < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
+def _format_params(count: int | float | None) -> str | None:
+    if count is None:
+        return None
+    value = float(count)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(int(value))
+
+
+def _dtype_nbytes(dtype: Any) -> float | None:
+    raw = str(dtype or "").replace("torch.", "").replace("_", "").replace("-", "").upper()
+    aliases = {
+        "FLOAT64": 8,
+        "DOUBLE": 8,
+        "FLOAT32": 4,
+        "FP32": 4,
+        "FLOAT": 4,
+        "FLOAT16": 2,
+        "FP16": 2,
+        "HALF": 2,
+        "BFLOAT16": 2,
+        "BF16": 2,
+        "INT8": 1,
+        "UINT8": 1,
+        "FP8": 1,
+        "INT4": 0.5,
+        "UINT4": 0.5,
+        "NF4": 0.5,
+    }
+    if raw in DTYPE_BYTES:
+        return DTYPE_BYTES[raw]
+    if raw in aliases:
+        return aliases[raw]
+    if "4BIT" in raw:
+        return 0.55
+    if "8BIT" in raw:
+        return 1
+    return None
+
+
+def _config_weight_nbytes(config: Dict[str, Any]) -> float:
+    quant = config.get("quantization_config") or {}
+    if isinstance(quant, dict):
+        bits = quant.get("bits") or quant.get("weight_bits")
+        if quant.get("load_in_4bit") or bits == 4 or "4bit" in str(quant).lower():
+            return 0.55
+        if quant.get("load_in_8bit") or bits == 8 or "8bit" in str(quant).lower():
+            return 1
+    return _dtype_nbytes(config.get("torch_dtype") or config.get("dtype")) or 2
+
+
+def _weight_files(path: Path) -> List[Path]:
+    files: List[Path] = []
+    if not path.is_dir():
+        return files
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [
+            name for name in dirs
+            if not name.startswith(".") and name != "__pycache__"
+        ]
+        for name in names:
+            if name.endswith(MODEL_WEIGHT_SUFFIXES):
+                files.append(Path(root) / name)
+    return sorted(files)
+
+
+def _safetensors_header_stats(file_path: Path) -> Dict[str, Any] | None:
+    try:
+        with file_path.open("rb") as handle:
+            raw_len = handle.read(8)
+            if len(raw_len) != 8:
+                return None
+            header_len = struct.unpack("<Q", raw_len)[0]
+            if header_len <= 0 or header_len > 100 * 1024 * 1024:
+                return None
+            header = json.loads(handle.read(header_len).decode("utf-8"))
+    except Exception:
+        return None
+
+    params = 0
+    weight_bytes = 0
+    dtypes: Dict[str, int] = {}
+    for name, info in header.items():
+        if name == "__metadata__" or not isinstance(info, dict):
+            continue
+        shape = info.get("shape") or []
+        dtype = str(info.get("dtype") or "")
+        dtypes[dtype] = dtypes.get(dtype, 0) + 1
+        tensor_params = 1
+        for dim in shape:
+            tensor_params *= int(dim)
+        params += tensor_params
+
+        offsets = info.get("data_offsets")
+        if isinstance(offsets, list) and len(offsets) == 2:
+            weight_bytes += max(0, int(offsets[1]) - int(offsets[0]))
+        else:
+            nbytes = _dtype_nbytes(dtype)
+            if nbytes is not None:
+                weight_bytes += int(tensor_params * nbytes)
+
+    if not params and not weight_bytes:
+        return None
+    return {
+        "params": params or None,
+        "weight_bytes": weight_bytes or None,
+        "dtypes": dtypes,
+    }
+
+
+def _config_llm_param_estimate(config: Dict[str, Any]) -> int | None:
+    hidden = config.get("hidden_size") or config.get("n_embd") or config.get("d_model")
+    layers = config.get("num_hidden_layers") or config.get("n_layer") or config.get("num_layers")
+    vocab = config.get("vocab_size")
+    if not hidden or not layers or not vocab:
+        return None
+
+    hidden = int(hidden)
+    layers = int(layers)
+    vocab = int(vocab)
+    heads = int(config.get("num_attention_heads") or config.get("n_head") or 0)
+    kv_heads = int(config.get("num_key_value_heads") or config.get("num_kv_heads") or heads or 0)
+    head_dim = int(config.get("head_dim") or (hidden // heads if heads else hidden))
+    intermediate = config.get("intermediate_size") or config.get("n_inner") or config.get("ffn_dim")
+
+    kv_width = kv_heads * head_dim if kv_heads else hidden
+    attention = hidden * hidden + (2 * hidden * kv_width) + hidden * hidden
+
+    mlp = 0
+    if intermediate:
+        intermediate = int(intermediate)
+        model_type = str(config.get("model_type") or "").lower()
+        gated = model_type in {"llama", "mistral", "mixtral", "qwen2", "qwen3", "gemma", "deepseek_v2"}
+        mlp = hidden * intermediate * (3 if gated else 2)
+
+    layer_norms = layers * hidden * 2
+    embeddings = vocab * hidden
+    total = embeddings + layers * (attention + mlp + layer_norms)
+    if config.get("tie_word_embeddings") is False:
+        total += embeddings
+    return int(total)
+
+
+def _estimate_local_model(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    files = _weight_files(path)
+    file_bytes = sum(file.stat().st_size for file in files if file.is_file())
+
+    safe_stats = [_safetensors_header_stats(file) for file in files if file.suffix == ".safetensors"]
+    safe_stats = [item for item in safe_stats if item]
+    if safe_stats:
+        params = sum(int(item.get("params") or 0) for item in safe_stats) or None
+        weight_bytes = sum(int(item.get("weight_bytes") or 0) for item in safe_stats) or file_bytes
+        method = "safetensors_header"
+    else:
+        params = _config_llm_param_estimate(config)
+        if params:
+            weight_bytes = int(params * _config_weight_nbytes(config))
+            method = "config_formula"
+        else:
+            weight_bytes = file_bytes
+            method = "file_size"
+
+    gpu_mem_mb = int(math.ceil((weight_bytes * 1.2) / (1024 * 1024))) if weight_bytes else 0
+    return {
+        "weight_file_count": len(files),
+        "weight_bytes": int(file_bytes),
+        "weight_size": _format_bytes(file_bytes),
+        "estimated_params": params,
+        "estimated_params_label": _format_params(params),
+        "estimated_weight_memory_bytes": int(weight_bytes) if weight_bytes else 0,
+        "estimated_weight_memory": _format_bytes(weight_bytes),
+        "estimated_gpu_mem_mb": gpu_mem_mb,
+        "estimate_method": method,
+    }
 
 
 def _is_local_host(host: str | None) -> bool:
@@ -70,6 +386,278 @@ def _replace_url_host(base_url: str, host: str, fallback_port: int | None = None
 def _request_base_url(req: Request) -> str:
     parsed = urlsplit(str(req.base_url))
     return urlunsplit((parsed.scheme or "http", parsed.netloc, "", "", "")).rstrip("/")
+
+
+def _local_models() -> List[Dict[str, Any]]:
+    model_dir = _model_dir()
+    models = []
+    if not model_dir.exists():
+        return models
+    for path in sorted(item for item in model_dir.iterdir() if item.is_dir()):
+        config_path = path / "config.json"
+        if not config_path.is_file():
+            continue
+        config: Dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        model_type = str(config.get("model_type") or "")
+        estimate = _estimate_local_model(path, config)
+        models.append({
+            "id": path.name,
+            "name": path.name,
+            "path": str(path),
+            "type": "local",
+            "model_type": model_type,
+            "backend": "transformers",
+            "backends": ["transformers"],
+            "model_scope": "head",
+            **estimate,
+        })
+    return models
+
+
+def _model_file_checks(model_id: str) -> tuple[Dict[str, Any], Path, List[Dict[str, Any]], Dict[str, Any] | None]:
+    model = next((item for item in _local_models() if item["id"] == model_id), None)
+    if not model:
+        raise HTTPException(status_code=404, detail="local model not found in the configured model directory")
+
+    path = Path(model["path"])
+    checks = []
+
+    def check(name: str, ok: bool, message: str):
+        checks.append({"name": name, "ok": ok, "message": message})
+
+    config_path = path / "config.json"
+    config_ok = False
+    with contextlib.suppress(Exception):
+        json.loads(config_path.read_text(encoding="utf-8"))
+        config_ok = True
+    check("config", config_ok, "config.json is readable" if config_ok else "config.json is missing or invalid")
+
+    weight_suffixes = (".safetensors", ".bin", ".gguf", ".pt", ".pth")
+    weight_files = [
+        item.name
+        for item in path.iterdir()
+        if item.is_file() and (item.name.endswith(weight_suffixes) or item.name.endswith(".index.json"))
+    ] if path.is_dir() else []
+    check("weights", bool(weight_files), f"{len(weight_files)} weight/index file(s)" if weight_files else "no model weight file found")
+
+    tokenizer_files = [
+        name for name in ("tokenizer.json", "tokenizer.model", "vocab.json", "merges.txt")
+        if (path / name).is_file()
+    ]
+    check("tokenizer", bool(tokenizer_files), ", ".join(tokenizer_files) if tokenizer_files else "no tokenizer file found")
+
+    file_ready = config_ok and bool(weight_files) and bool(tokenizer_files)
+    if not file_ready:
+        return model, path, checks, {
+            "status": "success",
+            "ok": False,
+            "model": model,
+            "checks": checks,
+            "message": "Model files are incomplete",
+        }
+
+    transformers_ok = _module_available("transformers")
+    check("transformers", transformers_ok, "installed" if transformers_ok else "not installed in the head environment")
+    if not transformers_ok:
+        return model, path, checks, {
+            "status": "success",
+            "ok": False,
+            "model": model,
+            "checks": checks,
+            "message": "Transformers is required for the local load test",
+        }
+
+    return model, path, checks, None
+
+
+def _model_anchor_for_model(model: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "local_model": model["id"],
+        "model_scope": model.get("model_scope") or "head",
+        "backend": model.get("backend") or "transformers",
+        "estimated_weight_memory_bytes": model.get("estimated_weight_memory_bytes") or 0,
+        "estimated_gpu_mem_mb": model.get("estimated_gpu_mem_mb") or 0,
+        "estimated_params": model.get("estimated_params"),
+    }
+
+
+def _model_gpu_mem_request_mb(anchor: Dict[str, Any]) -> int:
+    for key in ("estimated_gpu_mem_mb", "gpu_mem", "gpu_memory_mb"):
+        value = anchor.get(key)
+        if value:
+            return max(0, int(math.ceil(float(value))))
+    bytes_value = anchor.get("estimated_weight_memory_bytes") or anchor.get("weight_bytes")
+    if bytes_value:
+        return max(0, int(math.ceil(float(bytes_value) * 1.2 / (1024 * 1024))))
+    return 0
+
+
+async def _resources_for_model_anchor(
+    resources: Dict[str, Any] | None,
+    model_anchor: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    next_resources = dict(resources or {})
+    next_resources["cpu"] = max(1, int(next_resources.get("cpu") or 1))
+    next_resources["cpu_mem"] = max(0, int(next_resources.get("cpu_mem") or 0))
+    next_resources["gpu"] = max(0, int(next_resources.get("gpu") or 0))
+    next_resources["gpu_mem"] = max(0, int(next_resources.get("gpu_mem") or 0))
+
+    if not model_anchor:
+        return next_resources
+
+    anchor = dict(model_anchor)
+    if anchor.get("model_scope") == "head":
+        cluster = await mapath.get_cluster_resources()
+        head_node_id = cluster.get("head_node_id")
+        if head_node_id:
+            next_resources["target_node_id"] = head_node_id
+
+    if str(anchor.get("backend") or "transformers") == "transformers":
+        next_resources["gpu"] = max(1, next_resources.get("gpu", 0))
+        next_resources["gpu_mem"] = max(next_resources.get("gpu_mem", 0), _model_gpu_mem_request_mb(anchor))
+
+    return next_resources
+
+
+def _model_test_resources(cluster: Dict[str, Any], model: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    head_node_id = cluster.get("head_node_id")
+    head = next((node for node in cluster.get("nodes", []) if node.get("node_id") == head_node_id), None)
+    resources = {"cpu": 1, "cpu_mem": 1024, "gpu": 0, "gpu_mem": 0}
+    if head_node_id:
+        resources["target_node_id"] = head_node_id
+    estimated_gpu_mem = int((model or {}).get("estimated_gpu_mem_mb") or 0)
+    for device in (head or {}).get("resources", {}).get("gpu", {}).get("devices", []):
+        if device.get("total_count", 0) > 0:
+            resources["gpu"] = 1
+            if estimated_gpu_mem:
+                resources["gpu_mem"] = estimated_gpu_mem
+            return resources
+    return resources
+
+
+async def _wait_for_model_test_run(run_id: str, timeout_seconds: float) -> Dict[str, Any]:
+    queue = mapath.async_que.get(run_id)
+    if queue is None:
+        raise RuntimeError(f"run queue not found: {run_id}")
+
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        message = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if message.get("type") in {"finish_workflow", "task_exception"}:
+            return mapath.get_static_run_snapshot(run_id)
+
+
+async def _run_model_test_task(model: Dict[str, Any], path: Path, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    cluster = await mapath.get_cluster_resources()
+    resources = _model_test_resources(cluster, model)
+    model_anchor = _model_anchor_for_model(model)
+    workflow_id = f"model-test-{uuid.uuid4()}"
+    task_id = str(uuid.uuid4())
+    run_id = None
+
+    mapath.create_workflow(workflow_id)
+    try:
+        workflow = mapath.get_workflow(workflow_id)
+        task = CodeTask(workflow_id, task_id, f"Test {model['name']}")
+        workflow.add_task(task_id, task)
+        task.save_task(
+            task_input={
+                "input_params": {
+                    "1": {
+                        "key": "model_dir",
+                        "input_schema": "from_user",
+                        "data_type": "str",
+                        "value": str(path),
+                        "has_value": True,
+                    }
+                }
+            },
+            task_output={
+                "output_params": {
+                    "1": {"key": "generated_text", "data_type": "str"},
+                }
+            },
+            code_str=LOCAL_MODEL_TEST_TASK_CODE,
+            code_ser=None,
+            resources=resources,
+            model_anchor=model_anchor,
+            timeout_seconds=MODEL_TEST_TASK_TIMEOUT_SECONDS,
+        )
+
+        run_id = mapath.run_workflow(
+            workflow_id,
+            timeout_seconds=MODEL_TEST_WAIT_TIMEOUT_SECONDS,
+            tags=["model-test"],
+            metadata={"kind": "local_model_test", "model_id": model["id"], "model_path": str(path)},
+        )
+        checks.append({"name": "maze_task", "ok": True, "message": f"run {run_id[:8]} task {task_id[:8]}"})
+        snapshot = await _wait_for_model_test_run(run_id, MODEL_TEST_WAIT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(Exception):
+            if run_id:
+                await mapath.stop_workflow(run_id)
+        checks.append({"name": "load", "ok": False, "message": f"timed out after {MODEL_TEST_WAIT_TIMEOUT_SECONDS}s"})
+        return {
+            "status": "success",
+            "ok": False,
+            "model": model,
+            "checks": checks,
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "resources": resources,
+            "message": "Local model test task timed out",
+        }
+    finally:
+        mapath.workflows.pop(workflow_id, None)
+        if run_id:
+            mapath.async_que.pop(run_id, None)
+
+    task_snapshot = (snapshot.get("task_nodes") or {}).get(task_id) or {}
+    result = task_snapshot.get("result_summary") or {}
+    if snapshot.get("status") != "succeeded" or task_snapshot.get("status") != "succeeded":
+        error = task_snapshot.get("error") or snapshot.get("error_summary") or {}
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        checks.append({"name": "load", "ok": False, "message": message or "task failed"})
+        return {
+            "status": "success",
+            "ok": False,
+            "model": model,
+            "checks": checks,
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "resources": resources,
+            "error": error,
+            "message": "Local model load test failed",
+        }
+
+    checks.append({"name": "load", "ok": True, "message": f"{result.get('load_seconds', '?')}s on {result.get('device', 'unknown')}"})
+    checks.append({"name": "generate", "ok": bool(result.get("generated_text")), "message": result.get("generated_text") or "no text generated"})
+    return {
+        "status": "success",
+        "ok": bool(result.get("generated_text")),
+        "model": model,
+        "checks": checks,
+        "runtime": result,
+        "run_id": run_id,
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "resources": resources,
+        "message": "Local model loaded and generated a response" if result.get("generated_text") else "Local model loaded but generated no text",
+    }
+
+
+async def _test_local_model(model_id: str) -> Dict[str, Any]:
+    model, path, checks, early_response = _model_file_checks(model_id)
+    if early_response is not None:
+        return early_response
+    return await _run_model_test_task(model, path, checks)
 
 
 async def _worker_reachable_file_context(req: Request, file_context: Dict[str, Any] | None):
@@ -159,7 +747,8 @@ async def save_task(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         task_id = data["task_id"]
-        resources = data["resources"]
+        model_anchor = data.get("model_anchor")
+        resources = await _resources_for_model_anchor(data.get("resources"), model_anchor)
 
         task = mapath.get_workflow(workflow_id).get_task(task_id)
         if(task.task_type == TaskType.CODE.value):    
@@ -176,6 +765,7 @@ async def save_task(req:Request):
                 code_ser=code_ser,
                 resources=resources,
                 file_context=data.get("file_context"),
+                model_anchor=model_anchor,
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
                 retry_on=data.get("retry_on"),
@@ -194,7 +784,8 @@ async def save_task_and_add_edge(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         task_id = data["task_id"]
-        resources = data["resources"]
+        model_anchor = data.get("model_anchor")
+        resources = await _resources_for_model_anchor(data.get("resources"), model_anchor)
 
         workflow = mapath.get_workflow(workflow_id)
         task = workflow.get_task(task_id)
@@ -212,6 +803,7 @@ async def save_task_and_add_edge(req:Request):
                 code_ser=code_ser,
                 resources=resources,
                 file_context=data.get("file_context"),
+                model_anchor=model_anchor,
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
                 retry_on=data.get("retry_on"),
@@ -364,6 +956,10 @@ async def submit_dag_workflow(req: Request):
         payload = data.get("spec", data)
         spec = dag_spec_from_payload(payload)
         workflow_id = mapath.create_dag_workflow(spec)
+        workflow = mapath.get_workflow(workflow_id)
+        for task in workflow.tasks.values():
+            if getattr(task, "model_anchor", None):
+                task.resources = await _resources_for_model_anchor(task.resources, task.model_anchor)
 
         run_config = spec.get("run") or {}
         artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
@@ -872,6 +1468,52 @@ async def get_head_ray_port():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/models")
+async def get_models():
+    return {
+        "status": "success",
+        "model_dir": str(_model_dir()),
+        "models": _local_models(),
+    }
+
+@app.get("/resource-history")
+async def get_resource_history():
+    try:
+        return {"status": "success", "history": mapath.resource_history.load()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/models/config")
+async def set_models_config(req: Request):
+    data = await req.json()
+    raw_model_dir = str(data.get("model_dir") or "").strip()
+    if not raw_model_dir:
+        raise HTTPException(status_code=400, detail="model_dir is required")
+    model_dir = Path(raw_model_dir).expanduser()
+    if not model_dir.is_absolute():
+        raise HTTPException(status_code=400, detail="model_dir must be an absolute path on the head server")
+
+    model_dir = model_dir.resolve()
+    if not model_dir.exists() or not model_dir.is_dir():
+        raise HTTPException(status_code=400, detail="model_dir must be an existing directory on the head server")
+
+    config = _load_runtime_config()
+    config["model_dir"] = str(model_dir)
+    _save_runtime_config(config)
+    return {
+        "status": "success",
+        "model_dir": str(model_dir),
+        "models": _local_models(),
+    }
+
+@app.post("/models/test")
+async def test_model(req: Request):
+    data = await req.json()
+    model_id = str(data.get("model_id") or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+    return await _test_local_model(model_id)
+
 @app.get("/cluster/resources")
 async def get_cluster_resources():
     try:
@@ -889,6 +1531,36 @@ async def get_cluster_queues():
         return {"status": "success", "queues": queues}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler queue snapshot")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/cluster/nodes/{node_id}/disable")
+async def disable_cluster_node(node_id: str):
+    try:
+        result = await mapath.set_cluster_node_disabled(node_id=node_id, disabled=True)
+        return {
+            "status": "success",
+            "node_id": result.get("node_id", node_id),
+            "disabled": result.get("disabled", True),
+            "cluster": result.get("cluster"),
+        }
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler node control")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/cluster/nodes/{node_id}/enable")
+async def enable_cluster_node(node_id: str):
+    try:
+        result = await mapath.set_cluster_node_disabled(node_id=node_id, disabled=False)
+        return {
+            "status": "success",
+            "node_id": result.get("node_id", node_id),
+            "disabled": result.get("disabled", False),
+            "cluster": result.get("cluster"),
+        }
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for scheduler node control")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

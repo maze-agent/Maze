@@ -26,6 +26,7 @@ from maze.core.runs import GlobalMetrics
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.files.artifact_store import LocalCASArtifactStore
+from maze.core.resource_history import ResourceHistoryStore
 from maze.utils.utils import get_available_ports
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,12 @@ class MaPath:
         self.cluster_resource_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
         self.worker_registration_requests: Dict[str, asyncio.Queue] = {}
+        self.cluster_control_requests: Dict[str, asyncio.Queue] = {}
         self.atlas_enqueue_index = 0
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
         self.global_metrics = GlobalMetrics()
+        self.resource_history = ResourceHistoryStore()
         for snapshot in self.static_run_store.list_runs():
             status = snapshot.get("status")
             if status in ("submitted", "running"):
@@ -200,6 +203,11 @@ class MaPath:
     def _task_run_payload(self, workflow: Workflow, task: CodeTask, submit_id: str, file_context: Dict[str, Any] | None = None):
         data = task.to_json()
         data['workflow_id'] = submit_id
+        data["resources"] = self.resource_history.apply(
+            data.get("resources"),
+            data.get("model_anchor"),
+            data.get("task_name"),
+        )
 
         if file_context and file_context.get("enabled"):
             task_node_ids = file_context.get("task_node_ids") or {}
@@ -501,6 +509,31 @@ class MaPath:
         event_data = event.get("data") or {}
         if not isinstance(event_data, dict):
             raise ValueError("Dynamic run event data must be a JSON object")
+        dynamic_run = self.get_dynamic_run(run_id)
+        if event_type == "agent_repair_observation":
+            result = event_data.get("result") or {}
+            decision_task_id = event_data.get("decision_task_id")
+            if decision_task_id and isinstance(result, dict):
+                dynamic_run.record_invocation_repair_observation(
+                    decision_task_id,
+                    error_type=str(result.get("error_type") or "invocation_error"),
+                    message=str(result.get("error") or result.get("message") or "Agent invocation repair observation"),
+                    repair_action={
+                        "type": "invocation_correction",
+                        "applied": True,
+                        "strategy": "feedback_observation",
+                        "tool": event_data.get("tool"),
+                    },
+                    retry={
+                        "scheduled": True,
+                        "kind": "next_llm_decision",
+                        "step": event_data.get("step"),
+                    },
+                    outcome={
+                        "status": "feedback_recorded",
+                        "step": event_data.get("step"),
+                    },
+                )
 
         await self._emit_dynamic_event(run_id, {
             **event,
@@ -645,6 +678,11 @@ class MaPath:
     def _dynamic_task_run_payload(self, dynamic_run: DynamicRun, task: CodeTask):
         data = task.to_json()
         data['workflow_id'] = task.workflow_id
+        data["resources"] = self.resource_history.apply(
+            data.get("resources"),
+            data.get("model_anchor"),
+            data.get("task_name"),
+        )
         file_context = dynamic_run.file_context
         if file_context and file_context.get("enabled"):
             parent_task_ids = sorted(dynamic_run.task_parents.get(task.task_id, set()))
@@ -725,6 +763,46 @@ class MaPath:
         if task_id not in task_nodes:
             raise ValueError(f"Task not found in run {run_id}: {task_id}")
         return task_nodes[task_id]
+
+    def _resource_observation_from_message(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        status: str,
+        metrics: Dict[str, Any] | None = None,
+        error: Dict[str, Any] | None = None,
+        schedule_decision: Dict[str, Any] | None = None,
+        node_id: str | None = None,
+    ) -> Dict[str, Any]:
+        task = None
+        if run_id in self.submit_workflows:
+            task = self.submit_workflows[run_id].tasks.get(task_id)
+        elif run_id in self.dynamic_runs:
+            task = self.dynamic_runs[run_id].tasks.get(task_id)
+
+        task_name = getattr(task, "task_name", None)
+        model_anchor = getattr(task, "model_anchor", None)
+        task_resources = copy.deepcopy(getattr(task, "resources", None) or {})
+        requested_resources = (
+            (schedule_decision or {}).get("requested_resources")
+            or task_resources
+        )
+        selected_node = (schedule_decision or {}).get("selected_node") or {}
+        if node_id and "node_id" not in selected_node:
+            selected_node = {**selected_node, "node_id": node_id}
+
+        return self.resource_history.record(
+            run_id=run_id,
+            task_id=task_id,
+            task_name=task_name,
+            status=status,
+            requested_resources=requested_resources,
+            model_anchor=model_anchor,
+            metrics=metrics,
+            error=error,
+            selected_node=selected_node,
+        )
 
     def get_global_metrics_snapshot(self) -> Dict[str, Any]:
         return self.global_metrics.snapshot(
@@ -1073,9 +1151,21 @@ class MaPath:
             return
 
         if message_type == "finish_task":
+            observation = self._resource_observation_from_message(
+                run_id,
+                task_id,
+                status="succeeded",
+                metrics=message.get("data", {}).get("metrics") or {},
+                schedule_decision=message.get("data", {}).get("schedule_decision"),
+                node_id=message.get("data", {}).get("node_id"),
+            )
+            message.setdefault("data", {})["resource_observation"] = observation
             await self._emit_dynamic_event(run_id, message)
             dynamic_run.set_task_file_manifest(task_id, message.get("data", {}).get("file_manifest"))
-            ready_tasks = dynamic_run.mark_finished(task_id)
+            ready_tasks = dynamic_run.mark_finished(
+                task_id,
+                message.get("data", {}).get("fault_tolerance"),
+            )
             self._persist_dynamic_run(run_id)
             for ready_task in ready_tasks:
                 await self._emit_dynamic_event(run_id, {
@@ -1094,14 +1184,35 @@ class MaPath:
             return
 
         if message_type == "task_retry":
-            dynamic_run.mark_retrying(task_id, message.get("data", {}).get("error"))
+            dynamic_run.mark_retrying(
+                task_id,
+                message.get("data", {}).get("error"),
+                message.get("data", {}).get("fault_tolerance"),
+            )
             await self._emit_dynamic_event(run_id, message)
             return
 
         if message_type == "task_exception":
             error = message.get("data", {}).get("error", message.get("data", {}).get("result"))
+            observation = self._resource_observation_from_message(
+                run_id,
+                task_id,
+                status="failed",
+                metrics=message.get("data", {}).get("metrics") or {},
+                error=error if isinstance(error, dict) else None,
+                schedule_decision=message.get("data", {}).get("schedule_decision"),
+            )
+            message.setdefault("data", {})["resource_observation"] = observation
+            if isinstance(error, dict):
+                error = {**error, "resource_observation": observation}
+                message["data"]["error"] = error
+                message["data"]["result"] = error
             dynamic_run.set_task_file_manifest(task_id, message.get("data", {}).get("file_manifest"))
-            dynamic_run.mark_failed(task_id, error)
+            dynamic_run.mark_failed(
+                task_id,
+                error,
+                message.get("data", {}).get("fault_tolerance"),
+            )
             await self._emit_dynamic_event(run_id, message)
             return
         
@@ -1147,6 +1258,29 @@ class MaPath:
             return await asyncio.wait_for(response_queue.get(), timeout=timeout)
         finally:
             self.cluster_queue_requests.pop(request_id, None)
+
+    async def set_cluster_node_disabled(self, node_id: str, disabled: bool, timeout: float = 5.0):
+        request_id = str(uuid.uuid4())
+        response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.cluster_control_requests[request_id] = response_queue
+
+        message = {
+            "type": "set_node_disabled",
+            "data": {
+                "request_id": request_id,
+                "node_id": node_id,
+                "disabled": bool(disabled),
+            },
+        }
+        self._send_scheduler_message(message)
+
+        try:
+            result = await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            if not result.get("ok", False):
+                raise RuntimeError(result.get("error") or "cluster control failed")
+            return result
+        finally:
+            self.cluster_control_requests.pop(request_id, None)
     
     async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
         request_id = str(uuid.uuid4())
@@ -1234,6 +1368,13 @@ class MaPath:
                             await response_queue.put(message_data.get("worker", {}))
                         continue
 
+                    if message_type == "cluster_control":
+                        request_id = message_data.get("request_id")
+                        response_queue = self.cluster_control_requests.get(request_id)
+                        if response_queue is not None:
+                            await response_queue.put(message_data)
+                        continue
+
                     if(message_type=="finish_task"):
                         if message_data["task_id"] in self.async_que: #langgraph task
                             que: Queue[Any] = self.async_que[message_data['task_id']]
@@ -1248,6 +1389,20 @@ class MaPath:
 
                             static_run = self.static_runs.get(submit_id)
                             task_metrics = message_data.get("metrics") or {}
+                            observation = self._resource_observation_from_message(
+                                submit_id,
+                                message_data["task_id"],
+                                status="succeeded",
+                                metrics=task_metrics,
+                                schedule_decision=message_data.get("schedule_decision"),
+                                node_id=message_data.get("node_id"),
+                            )
+                            task_metrics = {
+                                **task_metrics,
+                                "resource_observation": observation,
+                            }
+                            message_data["metrics"] = task_metrics
+                            message_data["resource_observation"] = observation
                             if static_run is not None:
                                 static_run.mark_task_finished(
                                     message_data["task_id"],
@@ -1258,6 +1413,7 @@ class MaPath:
                                     finished_at=message_data.get("finished_at"),
                                     duration_ms=message_data.get("duration_ms"),
                                     node_id=message_data.get("node_id"),
+                                    fault_tolerance=message_data.get("fault_tolerance"),
                                 )
                                 message = self._record_static_event(submit_id, message)
 
@@ -1356,15 +1512,27 @@ class MaPath:
                                         message_data["task_id"],
                                         message_data.get("error"),
                                         message_data.get("attempt"),
+                                        message_data.get("fault_tolerance"),
                                     )
                                     message = self._record_static_event(submit_id, message)
                             elif message_type == "task_exception":
                                 if static_run is not None:
                                     error = message_data.get("error", message_data.get("result"))
+                                    observation = self._resource_observation_from_message(
+                                        submit_id,
+                                        message_data["task_id"],
+                                        status="failed",
+                                        metrics=message_data.get("metrics") or {},
+                                        error=error if isinstance(error, dict) else None,
+                                        schedule_decision=message_data.get("schedule_decision"),
+                                    )
+                                    if isinstance(error, dict):
+                                        error = {**error, "resource_observation": observation}
                                     static_run.mark_task_failed(
                                         message_data["task_id"],
                                         error,
                                         message_data.get("file_manifest"),
+                                        message_data.get("fault_tolerance"),
                                     )
                                     message = self._record_static_event(submit_id, message)
                                     if static_run.status == "failed":

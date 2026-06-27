@@ -1,5 +1,6 @@
 from logging import Logger
 import heapq
+import copy
 
 
 import logging
@@ -30,12 +31,28 @@ from maze.core.scheduler.error import (
     enrich_error_for_task,
     exception_to_error_envelope,
     is_task_error_result,
+    looks_like_oom,
     make_error_envelope,
+)
+from maze.core.fault_tolerance import (
+    apply_repair_action,
+    diagnose_failure,
+    record_final_failure,
+    record_retry_decision,
+    record_success,
+    trace_snapshot,
 )
 from maze.core.workflow.task import TaskType
 from maze.core.files.lineage import TASK_RESULT_ENVELOPE
 
 logger = logging.getLogger(__name__)
+
+
+def _int_resource(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 class PriorityQueue:
     def __init__(self):
@@ -133,10 +150,11 @@ class Scheduler():
             "retry_wait_seconds": round(retry_wait_seconds, 6),
             "next_eligible_time": task.next_eligible_time or None,
             "pending_reason": getattr(task, "pending_reason", None),
-            "last_error": getattr(task, "last_error", None),
-            "resources": task.resources,
-            "schedule_decision": getattr(task, "last_schedule_decision", None),
-        }
+                "last_error": getattr(task, "last_error", None),
+                "resources": task.resources,
+                "schedule_decision": getattr(task, "last_schedule_decision", None),
+                "fault_tolerance": trace_snapshot(task),
+            }
 
     def _running_task_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float):
         selected_node = getattr(task, "selected_node", None)
@@ -157,6 +175,7 @@ class Scheduler():
             "started_time": started_time,
             "elapsed_seconds": elapsed,
             "timeout_seconds": task.timeout_seconds,
+            "fault_tolerance": trace_snapshot(task),
         }
 
     def get_queue_snapshot(self):
@@ -194,6 +213,7 @@ class Scheduler():
 
     def _send_task_exception(self, socket_to_main, task: TaskRuntime|LanggraphTaskRuntime, error: Dict[str, Any]):
         file_manifest = getattr(task, "file_manifest", None)
+        metrics = getattr(task, "last_metrics", None)
         message = {
             "type": "task_exception",
             "data": {
@@ -202,10 +222,14 @@ class Scheduler():
                 "result": error,
                 "error": error,
                 "attempt": task.attempt,
+                "schedule_decision": getattr(task, "last_schedule_decision", None),
+                "fault_tolerance": trace_snapshot(task),
             },
         }
         if file_manifest:
             message["data"]["file_manifest"] = file_manifest
+        if metrics:
+            message["data"]["metrics"] = metrics
         socket_to_main.send(json.dumps(message).encode("utf-8"))
 
     def _send_task_retry(self, socket_to_main, task: TaskRuntime|LanggraphTaskRuntime, error: Dict[str, Any]):
@@ -218,6 +242,9 @@ class Scheduler():
                 "attempt": task.attempt,
                 "next_attempt": task.attempt + 1,
                 "retry_backoff_seconds": task.retry_backoff_seconds,
+                "resources": task.resources,
+                "schedule_decision": getattr(task, "last_schedule_decision", None),
+                "fault_tolerance": trace_snapshot(task),
             },
         }
         socket_to_main.send(json.dumps(message).encode("utf-8"))
@@ -241,27 +268,73 @@ class Scheduler():
         task: TaskRuntime|LanggraphTaskRuntime,
         error: Dict[str, Any],
         file_manifest: Dict[str, Any] | None = None,
+        metrics: Dict[str, Any] | None = None,
     ):
         error = enrich_error_for_task(error, task)
         task.last_error = error
+        task.last_metrics = metrics
         if file_manifest:
             task.file_manifest = file_manifest
         self._stopped_workflows().add(task.workflow_id)
         self.workflow_manager.clear_task_ref(task)
 
-        if task.should_retry(error):
+        diagnosis = diagnose_failure(error, task)
+        should_retry = task.should_retry(error) and bool(diagnosis.get("recoverable", False))
+        repair_action = None
+        original_resources = copy.deepcopy(task.resources)
+        if should_retry:
+            repair_action = apply_repair_action(task, error, diagnosis)
+            should_retry = bool(repair_action.get("applied", False))
+
+        if should_retry:
             self._stopped_workflows().discard(task.workflow_id)
-            self.resource_manager.release_task_resource(tasks=[task])
+            self._release_task_attempt_resource(task, original_resources)
+            error["repair_action"] = copy.deepcopy(repair_action)
+            if repair_action.get("adjusted_resources"):
+                error["adjusted_resources"] = copy.deepcopy(repair_action.get("adjusted_resources"))
             task.schedule_retry(error)
+            record_retry_decision(
+                task,
+                error,
+                diagnosis,
+                repair_action,
+                retry_scheduled=True,
+                next_attempt=task.attempt + 1,
+            )
             self.task_queue.put(task, task.priority)
             self._send_task_retry(socket_to_main, task, error)
             return
+
+        if repair_action is None:
+            repair_action = {
+                "type": "none",
+                "applied": False,
+                "reason": "retry_policy_rejected" if not task.should_retry(error) else "not_recoverable",
+            }
+        error["repair_action"] = copy.deepcopy(repair_action)
+        record_retry_decision(
+            task,
+            error,
+            diagnosis,
+            repair_action,
+            retry_scheduled=False,
+            next_attempt=None,
+        )
+        record_final_failure(task, error)
 
         canceld_tasks = self.workflow_manager.cancel_workflow(task.workflow_id)
         if len(canceld_tasks) > 0:
             self.resource_manager.release_task_resource(tasks=canceld_tasks)
             self.workflow_manager.clear_workflow(task.workflow_id)
         self._send_task_exception(socket_to_main, task, error)
+
+    def _release_task_attempt_resource(self, task: TaskRuntime|LanggraphTaskRuntime, resources: Dict[str, Any]):
+        current_resources = task.resources
+        try:
+            task.resources = resources
+            self.resource_manager.release_task_resource(tasks=[task])
+        finally:
+            task.resources = current_resources
 
     def _fail_timed_out_tasks(self, socket_to_main):
         for task in list(self.workflow_manager.get_running_tasks()):
@@ -317,6 +390,7 @@ class Scheduler():
                                                                 task_input=message_data['task_input'],
                                                                 task_output=message_data['task_output'],
                                                                 resources=message_data['resources'],
+                                                                model_anchor=message_data.get('model_anchor'),
                                                                 code_str=message_data.get('code_str'),
                                                                 code_ser=message_data.get('code_ser'),
                                                                 file_context=message_data.get('file_context'),
@@ -335,6 +409,7 @@ class Scheduler():
                                                                                   args=message_data['args'],
                                                                                   kwargs=message_data['kwargs'],
                                                                                   resources=message_data['resources'],
+                                                                                  model_anchor=message_data.get('model_anchor'),
                                                                                   max_retries=message_data.get('max_retries'),
                                                                                   retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
                                                                                   retry_on=message_data.get('retry_on'),
@@ -395,6 +470,32 @@ class Scheduler():
                             "queues": queues,
                         },
                     }
+                    socket_to_main.send(json.dumps(response).encode("utf-8"))
+                elif(message_type=="set_node_disabled"):
+                    request_id = message_data.get("request_id")
+                    try:
+                        with self.lock:
+                            result = self.resource_manager.set_node_disabled(
+                                node_id=message_data["node_id"],
+                                disabled=bool(message_data.get("disabled")),
+                            )
+                        response = {
+                            "type": "cluster_control",
+                            "data": {
+                                "request_id": request_id,
+                                "ok": True,
+                                **result,
+                            },
+                        }
+                    except Exception as exc:
+                        response = {
+                            "type": "cluster_control",
+                            "data": {
+                                "request_id": request_id,
+                                "ok": False,
+                                "error": str(exc),
+                            },
+                        }
                     socket_to_main.send(json.dumps(response).encode("utf-8"))
                 elif(message_type=="stop_worker"):
                     with self.lock:
@@ -486,7 +587,10 @@ class Scheduler():
             self.workflow_manager.add_task(self.cur_ready_task)
 
             #Get the node can run the task
-            selection = self.resource_manager.select_node(task_need_resources=self.cur_ready_task.resources)
+            selection = self.resource_manager.select_node(
+                task_need_resources=self.cur_ready_task.resources,
+                model_anchor=getattr(self.cur_ready_task, "model_anchor", None),
+            )
             if selection:
                 selected_node = selection.selected_node
                 self.cur_ready_task.pending_reason = None
@@ -559,7 +663,8 @@ class Scheduler():
                         if is_task_error_result(raw_result):
                             error = raw_result["error"]
                             file_manifest = raw_result.get("file_manifest")
-                            self._retry_or_fail_task(socket_to_main, finished_task, error, file_manifest)
+                            metrics = raw_result.get("metrics")
+                            self._retry_or_fail_task(socket_to_main, finished_task, error, file_manifest, metrics)
                             continue
 
                         file_manifest = None
@@ -581,6 +686,7 @@ class Scheduler():
                         self.workflow_manager.set_task_result(finished_task,result)
                         self.resource_manager.release_task_resource(tasks=[finished_task])
                         self.workflow_manager.clear_task_ref(finished_task)
+                        fault_tolerance = record_success(finished_task)
 
                         #Send message to main
                         node_id = None
@@ -598,6 +704,8 @@ class Scheduler():
                             ),
                             "attempt": finished_task.attempt,
                             "node_id": node_id,
+                            "schedule_decision": getattr(finished_task, "last_schedule_decision", None),
+                            "fault_tolerance": fault_tolerance,
                         }
                         if started_at is not None:
                             message_data["started_at"] = started_at
@@ -619,7 +727,7 @@ class Scheduler():
                     except ray.exceptions.RayTaskError as e:
                         logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         error = exception_to_error_envelope(
-                            "user_code",
+                            "resource_insufficient" if looks_like_oom(e) else "user_code",
                             e,
                             origin="scheduler",
                             attempt=finished_task.attempt,

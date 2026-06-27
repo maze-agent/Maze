@@ -12,6 +12,7 @@ import contextlib
 from pathlib import Path
 from maze.core.worker.worker import Worker
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
+from maze.cli.dev import add_dev_parser, handle_dev_command
 import asyncio
 from maze.config.logging_config import setup_logging
 
@@ -735,11 +736,14 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     )
     status_parser.add_argument("--log-file", metavar="LOG FILE", default=None)
+    add_dev_parser(subparsers)
 
     # Parse args
     args = parser.parse_args()
     
     setup_logging(getattr(args, "log_level", "INFO"), getattr(args, "log_file", None))
+    if handle_dev_command(args):
+        return
     if args.command == "start":
         if args.head:
             if args.port is None:

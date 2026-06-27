@@ -726,7 +726,8 @@ def _resolve_workspace_files_dir(workspace_dir: str = "") -> Path:
 
     requested = str(workspace_dir or "").strip()
     if not requested:
-        requested = os.environ.get("MAZE_WORKSPACE_DIR") or str(Path.cwd() / "workspace")
+        project_root = Path(__file__).resolve().parents[3]
+        requested = os.environ.get("MAZE_WORKSPACE_DIR") or str(project_root / "workspaces" / "default")
     root = Path(requested).expanduser().resolve()
     files_dir = (root / "files").resolve()
     files_dir.mkdir(parents=True, exist_ok=True)

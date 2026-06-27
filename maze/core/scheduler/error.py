@@ -10,6 +10,7 @@ TASK_ERROR_ENVELOPE = "__maze_task_error_envelope__"
 ERROR_RETRYABLE_DEFAULTS = {
     "user_code": False,
     "resource_unavailable": True,
+    "resource_insufficient": True,
     "node_lost": True,
     "artifact_error": True,
     "serialization_error": False,
@@ -79,6 +80,20 @@ def exception_to_error_envelope(
         node_ip=node_ip,
         attempt=attempt,
         exception_type=f"{type(exc).__module__}.{type(exc).__name__}",
+    )
+
+
+def looks_like_oom(value: Any) -> bool:
+    text = str(value or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "cuda out of memory",
+            "outofmemoryerror",
+            "cublas_status_alloc_failed",
+            "hip out of memory",
+            "memory allocation failed",
+        )
     )
 
 

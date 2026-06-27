@@ -7,7 +7,7 @@ from maze.core.scheduler.runner import remote_task_runner,remote_lgraph_task_run
 
 
 DEFAULT_MAX_RETRIES = 1
-DEFAULT_RETRY_ON = ("node_lost", "resource_unavailable")
+DEFAULT_RETRY_ON = ("node_lost", "resource_unavailable", "resource_insufficient", "invocation_error")
 
 class SelectedNode():
     def __init__(self,node_id:str,node_ip:str,gpu_id:int=None):
@@ -36,6 +36,7 @@ class LanggraphTaskRuntime():
         args:str,
         kwargs:str,
         resources:Dict,
+        model_anchor:Dict|None=None,
         max_retries:int|None=None,
         retry_backoff_seconds:float=0,
         retry_on:List[str]|None=None,
@@ -48,6 +49,7 @@ class LanggraphTaskRuntime():
         self.args: str = args
         self.kwargs: str = kwargs
         self.resources: Dict[str, Any] = resources
+        self.model_anchor: Dict[str, Any] | None = model_anchor
         self.priority = 0
         self.max_retries = _normalize_max_retries(max_retries)
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds or 0))
@@ -55,6 +57,7 @@ class LanggraphTaskRuntime():
         self.timeout_seconds = None if timeout_seconds is None else float(timeout_seconds)
         self.attempt = 0
         self.last_error: Dict[str, Any] | None = None
+        self.last_metrics: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
         self.started_time = None
         self.created_time = time.time()
@@ -62,6 +65,12 @@ class LanggraphTaskRuntime():
         self.last_schedule_decision: Dict[str, Any] | None = None
         self.object_ref = None
         self.selected_node = None
+        self.fault_tolerance = {
+            "enabled": True,
+            "status": "idle",
+            "attempts": [],
+        }
+        self.invocation_correction_count = 0
 
     def set_priority(self, priority):
         self.priority = priority
@@ -101,6 +110,7 @@ class TaskRuntime():
         task_input:Dict,
         task_output:Dict,
         resources:Dict,
+        model_anchor:Dict|None=None,
         code_str:str=None,
         code_ser:str=None,
         file_context:Dict|None=None,
@@ -115,6 +125,7 @@ class TaskRuntime():
         self.task_input: Dict[Any, Any] = task_input
         self.task_output: Dict[Any, Any] = task_output
         self.resources: Dict[str, Any] = resources
+        self.model_anchor: Dict[str, Any] | None = model_anchor
         self.code_str: str = code_str
         self.code_ser: str = code_ser 
         self.file_context: Dict[str, Any] | None = file_context
@@ -129,11 +140,18 @@ class TaskRuntime():
         self.selected_node = None
         self.attempt = 0
         self.last_error: Dict[str, Any] | None = None
+        self.last_metrics: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
         self.started_time = None
         self.created_time = time.time()
         self.pending_reason = None
         self.last_schedule_decision: Dict[str, Any] | None = None
+        self.fault_tolerance = {
+            "enabled": True,
+            "status": "idle",
+            "attempts": [],
+        }
+        self.invocation_correction_count = 0
 
         self.priority = 0
     

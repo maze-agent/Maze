@@ -43,7 +43,8 @@ class MaWorkflow:
                  code_str: str = None,
                  task_input: Dict[str, Any] = None,
                  task_output: Dict[str, Any] = None,
-                 resources: Dict[str, Any] = None) -> MaTask:
+                 resources: Dict[str, Any] = None,
+                 model_anchor: Dict[str, Any] = None) -> MaTask:
         """
         Add task to workflow (supports decorator function or manual configuration)
         
@@ -77,7 +78,7 @@ class MaWorkflow:
         """
         # New API: Use decorator function
         if task_func is not None:
-            return self._add_task_from_decorator(task_func, inputs, task_name)
+            return self._add_task_from_decorator(task_func, inputs, task_name, resources, model_anchor)
         
         # Legacy API: Manual configuration (kept for compatibility)
         return self._add_task_manual(task_type, task_name)
@@ -85,7 +86,9 @@ class MaWorkflow:
     def _add_task_from_decorator(self, 
                                   task_func: Callable,
                                   inputs: Dict[str, Any],
-                                  task_name: Optional[str] = None) -> MaTask:
+                                  task_name: Optional[str] = None,
+                                  resources: Dict[str, Any] = None,
+                                  model_anchor: Dict[str, Any] = None) -> MaTask:
         """
         Create task from decorator function (internal method)
         """
@@ -130,8 +133,10 @@ class MaWorkflow:
             'code_ser': metadata.code_ser,  # 传递序列化的函数
             'task_input': task_input,
             'task_output': task_output,
-            'resources': metadata.resources,
+            'resources': resources or metadata.resources,
         }
+        if model_anchor:
+            save_data['model_anchor'] = model_anchor
         
         save_response = requests.post(save_url, json=save_data)
         

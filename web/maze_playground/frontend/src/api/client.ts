@@ -10,7 +10,15 @@ import type {
   DynamicRunEvent,
   DynamicRunSnapshot,
   ClusterQueuesResponse,
+  ClusterConsoleRunResponse,
   ClusterResourcesResponse,
+  ModelTestResponse,
+  ModelsResponse,
+  ResourceHistoryResponse,
+  WorkerProfile,
+  WorkerProfileActionResponse,
+  WorkerProfileDraftTestResponse,
+  WorkerProfilesResponse,
   StaticWorkflowRunEvent,
   StaticWorkflowRunSnapshot,
   RunLogLine,
@@ -749,6 +757,119 @@ export const api = {
 
   async getClusterQueues(): Promise<ClusterQueuesResponse> {
     const response = await axios.get(`${API_BASE}/cluster/queues`);
+    return response.data;
+  },
+
+  async getModels(): Promise<ModelsResponse> {
+    const response = await axios.get(`${API_BASE}/models`);
+    return response.data;
+  },
+
+  async getResourceHistory(): Promise<ResourceHistoryResponse> {
+    const response = await axios.get(`${API_BASE}/resource-history`);
+    return response.data;
+  },
+
+  async updateModelConfig(modelDir: string): Promise<ModelsResponse> {
+    const response = await axios.post(`${API_BASE}/models/config`, { model_dir: modelDir });
+    return response.data;
+  },
+
+  async testModel(modelId: string): Promise<ModelTestResponse> {
+    const response = await axios.post(`${API_BASE}/models/test`, { model_id: modelId });
+    return response.data;
+  },
+
+  async setClusterNodeDisabled(
+    nodeId: string,
+    disabled: boolean,
+  ): Promise<{ status: string; node_id: string; disabled: boolean; cluster?: ClusterResourcesResponse['cluster'] }> {
+    const action = disabled ? 'disable' : 'enable';
+    const response = await axios.post(`${API_BASE}/cluster/nodes/${encodeURIComponent(nodeId)}/${action}`);
+    return response.data;
+  },
+
+  async listWorkerProfiles(params?: {
+    workspaceId?: string;
+    workspaceDir?: string;
+  }): Promise<WorkerProfilesResponse> {
+    const response = await axios.get(`${API_BASE}/cluster/worker-profiles`, { params });
+    return response.data;
+  },
+
+  async saveWorkerProfile(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    profile: Partial<WorkerProfile> & {
+      password?: string;
+      auth?: WorkerProfile['auth'] & { password?: string };
+    };
+    password?: string;
+  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir?: string; profile: WorkerProfile }> {
+    const response = await axios.post(`${API_BASE}/cluster/worker-profiles`, data);
+    return response.data;
+  },
+
+  async testWorkerProfileDraft(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    profile: Partial<WorkerProfile> & {
+      password?: string;
+      auth?: WorkerProfile['auth'] & { password?: string };
+    };
+    password?: string;
+    timeoutMs?: number;
+  }): Promise<WorkerProfileDraftTestResponse> {
+    const response = await axios.post(`${API_BASE}/cluster/worker-profiles/test-draft`, data);
+    return response.data;
+  },
+
+  async deleteWorkerProfile(
+    profileId: string,
+    params?: { workspaceId?: string; workspaceDir?: string },
+  ): Promise<{ success: boolean; profileId: string }> {
+    const response = await axios.delete(`${API_BASE}/cluster/worker-profiles/${encodeURIComponent(profileId)}`, { params });
+    return response.data;
+  },
+
+  async runWorkerProfileAction(
+    profileId: string,
+    action: 'test' | 'start' | 'restart' | 'stop' | 'logs',
+    data?: {
+      workspaceId?: string;
+      workspaceDir?: string;
+      password?: string;
+      timeoutMs?: number;
+    },
+  ): Promise<WorkerProfileActionResponse> {
+    const response = await axios.post(
+      `${API_BASE}/cluster/worker-profiles/${encodeURIComponent(profileId)}/${action}`,
+      data || {},
+    );
+    return response.data;
+  },
+
+  async runWorkerProfilesBulkAction(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    action: 'test' | 'start' | 'restart' | 'stop' | 'logs';
+    profileIds: string[];
+    passwordByProfileId?: Record<string, string>;
+    timeoutMs?: number;
+  }): Promise<WorkerProfileActionResponse> {
+    const response = await axios.post(`${API_BASE}/cluster/worker-profiles/bulk`, data);
+    return response.data;
+  },
+
+  async runClusterConsoleCommand(data: {
+    workspaceId?: string;
+    workspaceDir?: string;
+    target: string;
+    command: string;
+    password?: string;
+    timeoutMs?: number;
+  }): Promise<ClusterConsoleRunResponse> {
+    const response = await axios.post(`${API_BASE}/cluster/console/run`, data);
     return response.data;
   },
 
