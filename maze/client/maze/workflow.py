@@ -137,6 +137,7 @@ class MaWorkflow:
             'task_input': task_input,
             'task_output': task_output,
             'resources': metadata.resources,
+            'task_kind': metadata.task_kind,
             'max_retries': metadata.max_retries,
             'retry_backoff_seconds': metadata.retry_backoff_seconds,
             'retry_on': metadata.retry_on,
@@ -162,7 +163,8 @@ class MaWorkflow:
             "func_name": metadata.func_name,
             "inputs": metadata.inputs,
             "outputs": metadata.outputs,
-            "resources": metadata.resources
+            "resources": metadata.resources,
+            "task_kind": metadata.task_kind,
         }
         
         # 7. Record edges (detect dependencies from TaskOutput references)
@@ -1056,11 +1058,16 @@ class MaWorkflow:
                 if len(outputs) > 3:
                     label_parts.append("...")
             
-            # Add resource info if significant
-            if resources.get('gpu', 0) > 0:
-                label_parts.append(f"<BR/>🎮 GPU: {resources['gpu']}")
-            if resources.get('cpu', 0) > 1:
-                label_parts.append(f"<BR/>💻 CPU: {resources['cpu']}")
+            # Add resource info if significant.
+            gpu_mem = resources.get("gpu_mem", 0)
+            cpu_num = resources.get("cpu_num", resources.get("cpu", 0))
+            io_num = resources.get("io_num", 0)
+            if gpu_mem > 0:
+                label_parts.append(f"<BR/>GPU memory: {gpu_mem} MB")
+            if cpu_num > 1:
+                label_parts.append(f"<BR/>CPU cores: {cpu_num}")
+            if io_num > 0:
+                label_parts.append(f"<BR/>I/O units: {io_num}")
             
             label = '<' + '<BR/>'.join(label_parts) + '>'
             dot.node(task_short_id, label)

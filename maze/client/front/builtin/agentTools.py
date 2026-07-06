@@ -45,7 +45,7 @@ def _resolve_workspace_file(path: str, workspace_dir: str = "", permission: str 
 
 @task(
     data_types={"path": "str", "content": "str", "append": "bool", "workspace_dir": "str"},
-    resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
 )
 def write_file(path: str, content: str, append: bool = False, workspace_dir: str = ""):
     """Write text content to a file under workspace/files."""
@@ -90,7 +90,7 @@ def write_file(path: str, content: str, append: bool = False, workspace_dir: str
 
 @task(
     data_types={"path": "str", "max_bytes": "int", "workspace_dir": "str"},
-    resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
 )
 def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
     """Read text content from a file under workspace/files."""
@@ -138,7 +138,7 @@ def read_file(path: str, max_bytes: int = 20000, workspace_dir: str = ""):
         "gpu_mem": "int",
         "target_node_id": "str",
     },
-    resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
+    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
 )
 def exec_code(
     path: str = "",

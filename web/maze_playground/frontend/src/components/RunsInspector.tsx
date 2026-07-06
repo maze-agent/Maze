@@ -218,10 +218,10 @@ function compactText(value: any, maxLength = 180) {
 function formatResources(resources?: any) {
   if (!resources || typeof resources !== 'object') return '';
   const parts = [];
-  if (resources.cpu !== undefined) parts.push(`CPU ${resources.cpu}`);
-  if (resources.gpu !== undefined) parts.push(`GPU ${resources.gpu}`);
-  if (resources.cpu_mem !== undefined) parts.push(`Mem ${resources.cpu_mem}MB`);
+  const cpuNum = resources.cpu_num ?? resources.cpu;
+  if (cpuNum !== undefined) parts.push(`CPU ${cpuNum}`);
   if (resources.gpu_mem !== undefined) parts.push(`VRAM ${resources.gpu_mem}MB`);
+  if (resources.io_num !== undefined) parts.push(`I/O ${resources.io_num}`);
   return parts.join(' / ');
 }
 

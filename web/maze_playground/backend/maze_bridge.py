@@ -86,7 +86,7 @@ def evaluate_arithmetic(expression: str):
     return visit(node)
 
 
-@task(resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def playground_react_decide(prompt: str, history: list, tools: dict, step: int):
     if not history:
         return {
@@ -117,7 +117,7 @@ def playground_react_decide(prompt: str, history: list, tools: dict, step: int):
     }
 
 
-@task(resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def calculator(expression: str):
     result = evaluate_arithmetic(expression)
     return {"result": result}
@@ -164,7 +164,7 @@ def build_react_workspace_tools(
 
     @task(
         data_types={"path": "str", "content": "str", "append": "bool"},
-        resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
     )
     def write_file(path: str, content: str, append: bool = False):
         try:
@@ -212,7 +212,7 @@ def build_react_workspace_tools(
 
     @task(
         data_types={"path": "str", "max_bytes": "int"},
-        resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0},
+        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
     )
     def read_file(path: str, max_bytes: int = 20000):
         try:
@@ -256,7 +256,7 @@ def build_react_workspace_tools(
             "gpu_mem": "int",
             "target_node_id": "str",
         },
-        resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
+        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
     )
     def exec_code(
         path: str = "",
@@ -965,11 +965,20 @@ def _load_workspace_task_func(workspace_dir, relative_path, function_name):
 def _node_resources(node_data):
     resources = dict(node_data.get("resources") or {})
     return {
-        "cpu": int(resources.get("cpu") or 1),
-        "cpu_mem": int(resources.get("cpu_mem") or 0),
-        "gpu": int(resources.get("gpu") or 0),
+        "cpu_num": int(resources.get("cpu_num") or resources.get("cpu") or 1),
         "gpu_mem": int(resources.get("gpu_mem") or 0),
+        "io_num": int(resources.get("io_num") or 0),
     }
+
+
+def _node_task_kind(node_data):
+    explicit = str(node_data.get("task_kind") or node_data.get("taskKind") or "").strip().lower()
+    if explicit in {"cpu", "gpu", "io"}:
+        return explicit
+    resources = _node_resources(node_data)
+    if resources.get("gpu_mem", 0) > 0 or _node_model_anchor(node_data):
+        return "gpu"
+    return "cpu"
 
 
 def _node_model_anchor(node_data):
@@ -1102,6 +1111,7 @@ def build_and_run_workflow(
                     task_func,
                     inputs=task_inputs,
                     resources=_node_resources(node_data),
+                    task_kind=_node_task_kind(node_data),
                     model_anchor=_node_model_anchor(node_data),
                 )
                 remember_task(node_id, ma_task)
@@ -1140,6 +1150,7 @@ def build_and_run_workflow(
                     task_func,
                     inputs=task_inputs,
                     resources=_node_resources(node_data),
+                    task_kind=_node_task_kind(node_data),
                     model_anchor=_node_model_anchor(node_data),
                 )
                 remember_task(node_id, ma_task)
@@ -1186,6 +1197,7 @@ def build_and_run_workflow(
                         task_func,
                         inputs=task_inputs,
                         resources=_node_resources(node_data),
+                        task_kind=_node_task_kind(node_data),
                         model_anchor=_node_model_anchor(node_data),
                     )
                     remember_task(node_id, ma_task)

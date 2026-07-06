@@ -52,7 +52,7 @@ type RunTimingContext = {
 export type WorkbenchTask = {
   id: string;
   name: string;
-  kind: 'cpu' | 'gpu' | 'io' | 'llm';
+  kind: 'cpu' | 'gpu' | 'io';
   state: TaskState;
   isDynamic?: boolean;
   description?: string;
@@ -79,10 +79,9 @@ export type WorkbenchTask = {
     modelAnchor?: WorkflowNode['data']['modelAnchor'];
   };
   resources: {
-    cpu?: number;
-    memoryGiB?: number;
-    gpu?: number;
+    cpuNum?: number;
     gpuMemoryGiB?: number;
+    ioNum?: number;
   };
   dependencies: {
     upstream: string[];
@@ -169,12 +168,20 @@ function statusColor(status?: string | null) {
 }
 
 function taskKind(node: WorkflowNode): WorkbenchTask['kind'] {
-  const explicitKind = (node.data as any).taskKind;
-  if (['cpu', 'gpu', 'io', 'llm'].includes(explicitKind)) return explicitKind;
+  const explicitKind = (node.data as any).task_kind || (node.data as any).taskKind;
+  if (['cpu', 'gpu', 'io'].includes(explicitKind)) return explicitKind;
   const resources = node.data.resources;
   const label = `${node.data.label} ${node.data.taskRef || ''} ${node.data.functionName || ''} ${node.data.taskPath || ''}`.toLowerCase();
-  if (resources?.gpu || label.includes('gpu') || label.includes('cuda')) return 'gpu';
-  if (label.includes('llm') || label.includes('model') || label.includes('inference')) return 'llm';
+  if (
+    resources?.gpu_mem
+    || node.data.modelAnchor
+    || node.data.localModel
+    || label.includes('gpu')
+    || label.includes('cuda')
+    || label.includes('llm')
+    || label.includes('model')
+    || label.includes('inference')
+  ) return 'gpu';
   if (label.includes('file') || label.includes('io') || label.includes('input') || label.includes('artifact')) return 'io';
   return 'cpu';
 }
@@ -182,7 +189,6 @@ function taskKind(node: WorkflowNode): WorkbenchTask['kind'] {
 function taskTypeLabel(kind: WorkbenchTask['kind']) {
   if (kind === 'gpu') return 'GPU';
   if (kind === 'io') return 'I/O';
-  if (kind === 'llm') return 'LLM';
   return 'CPU';
 }
 
@@ -389,10 +395,9 @@ function unknownItems(value: unknown): string[] {
 
 function resourceParts(task: WorkbenchTask) {
   return [
-    task.resources.cpu ? `${task.resources.cpu} vCPU` : null,
-    task.resources.memoryGiB ? `${task.resources.memoryGiB} GiB` : null,
-    task.resources.gpu ? `${task.resources.gpu} GPU` : null,
+    task.resources.cpuNum ? `${task.resources.cpuNum} CPU` : null,
     task.resources.gpuMemoryGiB ? `${task.resources.gpuMemoryGiB} GiB GPU` : null,
+    task.resources.ioNum ? `${task.resources.ioNum} I/O` : null,
   ].filter(Boolean) as string[];
 }
 
@@ -427,8 +432,9 @@ function buildTask(
   const kind = taskKind(node);
   const state = normalizeState(runtime?.status);
   const resources = node.data.resources || runtime?.resources || {};
-  const cpuMem = Number((resources as any).cpu_mem || 0);
+  const cpuNum = Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1);
   const gpuMem = Number((resources as any).gpu_mem || 0);
+  const ioNum = Number((resources as any).io_num || 0);
   const selectedNode = runtime?.schedule_decision?.selected_node;
   const queueReason = runtime?.pending_reason || runtime?.schedule_decision?.reason || undefined;
   const manifest = (runtime as any)?.file_manifest || {};
@@ -500,10 +506,9 @@ function buildTask(
       modelAnchor: data.modelAnchor,
     },
     resources: {
-      cpu: Number((resources as any).cpu || 0) || undefined,
-      memoryGiB: cpuMem ? Number((cpuMem / 1024).toFixed(2)) : undefined,
-      gpu: Number((resources as any).gpu || 0) || undefined,
+      cpuNum: cpuNum || undefined,
       gpuMemoryGiB: gpuMem ? Number((gpuMem / 1024).toFixed(2)) : undefined,
+      ioNum: ioNum || undefined,
     },
     dependencies: {
       upstream: dependencyLabels(node.id, edges, nodes, 'upstream'),
@@ -539,7 +544,13 @@ function buildTask(
     queueInfo: state === 'queued' || state === 'pending'
       ? {
         reason: queueReason,
-        required: (resources as any).gpu ? `${(resources as any).gpu} GPU` : (resources as any).cpu ? `${(resources as any).cpu} CPU` : undefined,
+        required: resourceParts({
+          resources: {
+            cpuNum: cpuNum || undefined,
+            gpuMemoryGiB: gpuMem ? Number((gpuMem / 1024).toFixed(2)) : undefined,
+            ioNum: ioNum || undefined,
+          },
+        } as WorkbenchTask).join(' / ') || undefined,
         available: runtime?.schedule_decision?.candidate_nodes?.[0]?.available_resources
           ? JSON.stringify(runtime.schedule_decision.candidate_nodes[0].available_resources)
           : undefined,
@@ -727,10 +738,9 @@ function OverviewPanel({ task }: { task: WorkbenchTask }) {
       <KeyValueSection
         title="RESOURCES (REQUESTED)"
         rows={[
-          ['CPU', task.resources.cpu ? `${task.resources.cpu} vCPU` : undefined],
-          ['Memory', formatStorageGiB(task.resources.memoryGiB)],
-          ['GPU', task.resources.gpu ? `${task.resources.gpu}` : undefined],
+          ['CPU', task.resources.cpuNum ? `${task.resources.cpuNum} cores` : undefined],
           ['GPU Memory', formatStorageGiB(task.resources.gpuMemoryGiB)],
+          ['I/O', task.resources.ioNum ? `${task.resources.ioNum}` : undefined],
         ]}
       />
 
@@ -806,9 +816,8 @@ function DefinitionPanel({
               { value: 'cpu', label: 'CPU' },
               { value: 'gpu', label: 'GPU' },
               { value: 'io', label: 'I/O' },
-              { value: 'llm', label: 'LLM' },
             ]}
-            onChange={(value) => onUpdate({ taskKind: value })}
+            onChange={(value) => onUpdate({ task_kind: value })}
           />
         </FieldRow>
         <FieldRow label="Execution mode">
@@ -922,16 +931,13 @@ function ResourcesPanel({
       <section className="workbench-inspector-section workbench-inspector-resource-section">
         <div className="workbench-inspector-section-title">RESOURCE PROFILE / REQUESTED RESOURCES</div>
         <FieldRow label="CPU cores">
-          <Input size="small" type="number" min={0} value={task.resources.cpu ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ cpu: Number(event.target.value) || undefined })} />
-        </FieldRow>
-        <FieldRow label="Memory GiB">
-          <Input size="small" type="number" min={0} value={task.resources.memoryGiB ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ cpu_mem: event.target.value ? Number(event.target.value) * 1024 : undefined })} />
-        </FieldRow>
-        <FieldRow label="GPU count">
-          <Input size="small" type="number" min={0} value={task.resources.gpu ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ gpu: Number(event.target.value) || undefined })} />
+          <Input size="small" type="number" min={1} value={task.resources.cpuNum ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ cpu_num: Number(event.target.value) || undefined })} />
         </FieldRow>
         <FieldRow label="GPU memory GiB">
           <Input size="small" type="number" min={0} value={task.resources.gpuMemoryGiB ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ gpu_mem: event.target.value ? Number(event.target.value) * 1024 : undefined })} />
+        </FieldRow>
+        <FieldRow label="I/O units">
+          <Input size="small" type="number" min={0} value={task.resources.ioNum ?? ''} disabled={readOnly} onChange={(event) => onUpdateResources({ io_num: Number(event.target.value) || undefined })} />
         </FieldRow>
         <FieldRow label="Local model">
           <Select
@@ -949,12 +955,11 @@ function ResourcesPanel({
               onUpdate({
                 localModel: value || undefined,
                 modelAnchor: model ? modelAnchor(model) : undefined,
-                ...(model ? { taskKind: 'gpu', implementationType: 'local LLM inference' } : {}),
+                ...(model ? { task_kind: 'gpu', implementationType: 'local LLM inference' } : {}),
               });
               if (model) {
                 onUpdateResources({
-                  cpu: task.resources.cpu || 1,
-                  gpu: Math.max(1, task.resources.gpu || 0),
+                  cpu_num: task.resources.cpuNum || 1,
                   gpu_mem: Math.max(
                     Math.round((task.resources.gpuMemoryGiB || 0) * 1024),
                     model.estimated_gpu_mem_mb || 0,
@@ -1034,10 +1039,9 @@ function RuntimePanel({ task, runTiming }: { task: WorkbenchTask; runTiming: Run
       <KeyValueSection
         title="RESOURCES (ALLOCATED)"
         rows={[
-          ['CPU', task.resources.cpu ? `${task.resources.cpu} vCPU` : undefined],
-          ['Memory', formatStorageGiB(task.resources.memoryGiB)],
-          ['GPU', task.resources.gpu ? `${task.resources.gpu}` : undefined],
+          ['CPU', task.resources.cpuNum ? `${task.resources.cpuNum} cores` : undefined],
           ['GPU Memory', formatStorageGiB(task.resources.gpuMemoryGiB)],
+          ['I/O', task.resources.ioNum ? `${task.resources.ioNum}` : undefined],
         ]}
       />
       <KeyValueSection
@@ -1171,7 +1175,7 @@ function WorkflowSummaryPanel({
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   dynamicCount: number;
-  resourceEstimate: { cpu: number; gpu: number; memoryGiB: number };
+  resourceEstimate: { cpu: number; gpuMemoryGiB: number; io: number };
   workflowSaveState: string;
   workflowDraftError: string | null;
   latestRun: any;
@@ -1204,8 +1208,8 @@ function WorkflowSummaryPanel({
           ['Dynamic Task Count', dynamicCount],
           ['Current Run Status', latestRun ? <Tag color={statusColor(latestRun.status)}>{latestRun.status}</Tag> : undefined],
           ['Estimated CPU', resourceEstimate.cpu || '-'],
-          ['Estimated GPU', resourceEstimate.gpu || '-'],
-          ['Estimated Memory', resourceEstimate.memoryGiB ? `${resourceEstimate.memoryGiB.toFixed(2)} GiB` : '-'],
+          ['Estimated GPU Memory', resourceEstimate.gpuMemoryGiB ? `${resourceEstimate.gpuMemoryGiB.toFixed(2)} GiB` : '-'],
+          ['Estimated I/O', resourceEstimate.io || '-'],
         ]}
       />
       <KeyValueSection
@@ -1270,9 +1274,9 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
     [nodes],
   );
   const resourceEstimate = useMemo(() => ({
-    cpu: nodes.reduce((sum, node) => sum + Number(node.data.resources?.cpu || 0), 0),
-    gpu: nodes.reduce((sum, node) => sum + Number(node.data.resources?.gpu || 0), 0),
-    memoryGiB: nodes.reduce((sum, node) => sum + Number(node.data.resources?.cpu_mem || 0) / 1024, 0),
+    cpu: nodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.cpu_num ?? (node.data.resources as any)?.cpu ?? 0), 0),
+    gpuMemoryGiB: nodes.reduce((sum, node) => sum + Number(node.data.resources?.gpu_mem || 0) / 1024, 0),
+    io: nodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.io_num || 0), 0),
   }), [nodes]);
   const latestRun = visibleRun || staticRuns[0];
 
@@ -1296,7 +1300,7 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
     if (!task || !currentSelectedNode || isSpecReadOnly) return;
     updateNode(task.id, {
       resources: {
-        ...(currentSelectedNode.data.resources || { cpu: 1, cpu_mem: 0, gpu: 0, gpu_mem: 0 }),
+        ...(currentSelectedNode.data.resources || { cpu_num: 1, gpu_mem: 0, io_num: 0 }),
         ...updates,
       },
     });

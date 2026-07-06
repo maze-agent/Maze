@@ -6,8 +6,12 @@ from typing import Any, Dict, List, Tuple
 
 import networkx as nx
 
-from maze.core.application.spec import DEFAULT_RESOURCES
 from maze.core.workflow.task import CodeTask
+from maze.core.workflow.resources import (
+    ResourceSpecError,
+    normalize_resources,
+    normalize_task_semantics,
+)
 from maze.core.workflow.workflow import Workflow
 
 
@@ -76,6 +80,7 @@ def build_dag_workflow(workflow_id: str, spec: Dict[str, Any]) -> Workflow:
             code_str=node.get("code_str"),
             code_ser=node.get("code_ser"),
             resources=node["resources"],
+            task_kind=node.get("task_kind"),
             file_context=node.get("file_context"),
             model_anchor=node.get("model_anchor"),
             max_retries=node.get("max_retries"),
@@ -136,17 +141,25 @@ def _normalize_node(raw: Any) -> Dict[str, Any]:
         raise DagSpecError(f"node {node_id} requires code_str/code or code_ser")
 
     outputs = _normalize_outputs(node.get("outputs"), node_id)
+    model_anchor = dict(node.get("model_anchor") or {}) or None
+    task_kind, resources = _normalize_task_semantics(
+        task_kind=node.get("task_kind"),
+        resources=node.get("resources"),
+        model_anchor=model_anchor,
+        node_id=node_id,
+    )
     return {
         "id": node_id,
         "type": "code",
         "task_name": str(node.get("task_name") or node.get("name") or node_id),
         "inputs": _normalize_inputs(node.get("inputs") or {}, node_id),
         "outputs": outputs,
-        "resources": _normalize_resources(node.get("resources")),
+        "task_kind": task_kind,
+        "resources": resources,
         "code_str": code_str,
         "code_ser": code_ser,
         "file_context": node.get("file_context"),
-        "model_anchor": dict(node.get("model_anchor") or {}) or None,
+        "model_anchor": model_anchor,
         "max_retries": _optional_int(node.get("max_retries")),
         "retry_backoff_seconds": max(0.0, float(node.get("retry_backoff_seconds") or 0)),
         "retry_on": _optional_str_list(node.get("retry_on")),
@@ -326,20 +339,27 @@ def _normalize_run(run: Any) -> Dict[str, Any]:
 
 
 def _normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:
-    resources = dict(resources or {})
-    normalized = dict(DEFAULT_RESOURCES)
-    if "memory" in resources and "cpu_mem" not in resources:
-        resources["cpu_mem"] = resources["memory"]
-    if "mem" in resources and "cpu_mem" not in resources:
-        resources["cpu_mem"] = resources["mem"]
-    for key in DEFAULT_RESOURCES:
-        if key in resources and resources[key] is not None:
-            normalized[key] = int(resources[key]) if key in {"cpu", "gpu"} else float(resources[key])
-    if normalized["cpu"] < 0 or normalized["gpu"] < 0:
-        raise DagSpecError("resources.cpu and resources.gpu must be non-negative")
-    if normalized["cpu_mem"] < 0 or normalized["gpu_mem"] < 0:
-        raise DagSpecError("resources.cpu_mem and resources.gpu_mem must be non-negative")
-    return normalized
+    try:
+        return normalize_resources(resources)
+    except ResourceSpecError as exc:
+        raise DagSpecError(str(exc)) from exc
+
+
+def _normalize_task_semantics(
+    *,
+    task_kind: Any,
+    resources: Dict[str, Any] | None,
+    model_anchor: Dict[str, Any] | None,
+    node_id: str,
+) -> tuple[str, Dict[str, Any]]:
+    try:
+        return normalize_task_semantics(
+            task_kind=task_kind,
+            resources=resources,
+            model_anchor=model_anchor,
+        )
+    except ResourceSpecError as exc:
+        raise DagSpecError(f"node {node_id}: {exc}") from exc
 
 
 def _validate_graph(node_ids: List[str], edges: List[Dict[str, str]]) -> None:

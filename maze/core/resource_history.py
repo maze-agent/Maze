@@ -10,6 +10,7 @@ from typing import Any, Dict
 
 from maze.core.scheduler.result_summary import to_json_safe
 from maze.core.workflow.dynamic_store import default_workspace_dir
+from maze.core.workflow.resources import normalize_resources
 
 
 SCHEMA_VERSION = 1
@@ -89,11 +90,7 @@ class ResourceHistoryStore:
         model_anchor: Dict[str, Any] | None = None,
         task_name: str | None = None,
     ) -> Dict[str, Any]:
-        next_resources = dict(resources or {})
-        next_resources["cpu"] = max(1, _int_value(next_resources.get("cpu"), 1))
-        next_resources["cpu_mem"] = max(0, _int_value(next_resources.get("cpu_mem"), 0))
-        next_resources["gpu"] = max(0, _int_value(next_resources.get("gpu"), 0))
-        next_resources["gpu_mem"] = max(0, _int_value(next_resources.get("gpu_mem"), 0))
+        next_resources = normalize_resources(resources)
 
         data = self.load()
         records = []
@@ -106,7 +103,6 @@ class ResourceHistoryStore:
         suggested_gpu_mem = max(_int_value(record.get("recommended_gpu_mem_mb")) for record in records) if records else 0
         if suggested_gpu_mem:
             next_resources["gpu_mem"] = max(next_resources["gpu_mem"], suggested_gpu_mem)
-            next_resources["gpu"] = max(1, next_resources["gpu"])
         return next_resources
 
     def record(
@@ -122,7 +118,7 @@ class ResourceHistoryStore:
         error: Dict[str, Any] | None = None,
         selected_node: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        requested_resources = dict(requested_resources or {})
+        requested_resources = normalize_resources(requested_resources)
         metrics = dict(metrics or {})
         error = error if isinstance(error, dict) else None
         peak_bytes = _peak_gpu_bytes(metrics)

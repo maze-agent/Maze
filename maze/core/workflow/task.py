@@ -2,6 +2,7 @@ import time
 from typing import Any,Dict
 from enum import Enum
 from maze.core.predictor.predictor import FEATURES
+from maze.core.workflow.resources import DEFAULT_TASK_KIND, normalize_task_semantics
 
 class TaskType(Enum):
     CODE = "code"
@@ -13,6 +14,7 @@ class CodeTask():
         self.workflow_id = workflow_id
         self.task_id = task_id
         self.task_name=task_name
+        self.task_kind = DEFAULT_TASK_KIND
 
         self.resources = None
         self.task_input = None
@@ -53,6 +55,7 @@ class CodeTask():
         code_str:str,
         code_ser:str,
         resources:Dict,
+        task_kind:str|None=None,
         file_context:Dict|None=None,
         model_anchor:Dict|None=None,
         max_retries:int|None=None,
@@ -66,7 +69,11 @@ class CodeTask():
         self.task_output=task_output
         self.code_str=code_str
         self.code_ser=code_ser
-        self.resources=resources
+        self.task_kind, self.resources = normalize_task_semantics(
+            task_kind=task_kind,
+            resources=resources,
+            model_anchor=model_anchor,
+        )
         self.file_context=file_context
         self.model_anchor=model_anchor
         self.max_retries=max_retries
@@ -80,6 +87,7 @@ class CodeTask():
             "workflow_id":self.workflow_id,
             "task_id":self.task_id,
             "task_name":self.task_name,
+            "task_kind":self.task_kind,
             "task_input":self.task_input,
             "task_output":self.task_output,
             "resources":self.resources,
@@ -94,13 +102,17 @@ class CodeTask():
         }
 
 class LangGraphTask():
-    def __init__(self,workflow_id:str,task_id:str,task_name:str,code_ser:str,resources:Dict):
+    def __init__(self,workflow_id:str,task_id:str,task_name:str,code_ser:str,resources:Dict,task_kind:str|None=None):
         self.task_type = TaskType.LANGGRAPH.value
         self.workflow_id = workflow_id
         self.task_id = task_id
         self.task_name=task_name
         self.code_ser = code_ser
-        self.resources = resources
+        self.task_kind, self.resources = normalize_task_semantics(
+            task_kind=task_kind,
+            resources=resources,
+            model_anchor=None,
+        )
 
         self.args = None
         self.kwargs = None
@@ -117,6 +129,7 @@ class LangGraphTask():
             "workflow_id":self.workflow_id,
             "task_id":self.task_id,
             "task_name":self.task_name,
+            "task_kind":self.task_kind,
             "resources":self.resources,
             "code_ser":self.code_ser,
             "args":self.args,

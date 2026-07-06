@@ -2,10 +2,9 @@ export type NodeType = 'task' | 'tool';
 export type NodeCategory = 'builtin' | 'custom' | 'workspace' | 'agent';
 
 export interface Resources {
-  cpu: number;
-  cpu_mem: number;
-  gpu: number;
+  cpu_num: number;
   gpu_mem: number;
+  io_num: number;
 }
 
 export interface LocalModel {
@@ -290,6 +289,7 @@ export interface WorkflowNode {
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;
+    task_kind?: 'cpu' | 'gpu' | 'io';
     configured: boolean;
   };
 }
@@ -586,6 +586,7 @@ export type StaticWorkflowRunStatus =
 export interface StaticWorkflowRunNode {
   node_id: string;
   task_name?: string;
+  task_kind?: 'cpu' | 'gpu' | 'io';
   label?: string;
   category?: string;
   status: 'pending' | 'queued' | 'running' | 'completed' | 'succeeded' | 'failed' | 'canceled' | 'cancelled' | 'timed_out';

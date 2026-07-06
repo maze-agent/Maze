@@ -110,10 +110,9 @@ function duplicateNode(node: WorkflowNode, existingNodes: WorkflowNode[], pasteI
 function runTaskResources(task: StaticWorkflowRunNode) {
   const resources = task.resources || {};
   return {
-    cpu: Number((resources as any).cpu || 0),
-    cpu_mem: Number((resources as any).cpu_mem || 0),
-    gpu: Number((resources as any).gpu || 0),
+    cpu_num: Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1),
     gpu_mem: Number((resources as any).gpu_mem || 0),
+    io_num: Number((resources as any).io_num || 0),
   };
 }
 
@@ -142,6 +141,7 @@ function nodeFromRunTask(
       functionName: existing?.data.functionName,
       inputs: existing?.data.inputs || [],
       outputs: existing?.data.outputs || [],
+      task_kind: (task.task_kind || existing?.data.task_kind || 'cpu') as any,
       resources: existing?.data.resources || runTaskResources(task),
       configured: true,
       runState: task,
@@ -454,7 +454,7 @@ export default function WorkflowCanvas() {
           selectNode(newNode);
         } else if (type === 'workflow-distributed-smoke') {
           const baseId = Date.now();
-          const smokeNodes = Array.from({ length: 2 }, (_, index) => ({
+          const smokeNodes: WorkflowNode[] = Array.from({ length: 2 }, (_, index) => ({
             id: `node-${baseId}-${index + 1}`,
             type: 'taskNode' as const,
             position: {
@@ -481,7 +481,8 @@ export default function WorkflowCanvas() {
                 },
               ],
               outputs: [{ name: 'placement', dataType: 'dict' }],
-              resources: { cpu: 1, cpu_mem: 128, gpu: 1, gpu_mem: 0 },
+              task_kind: 'gpu' as const,
+              resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
               configured: true,
             },
           }));

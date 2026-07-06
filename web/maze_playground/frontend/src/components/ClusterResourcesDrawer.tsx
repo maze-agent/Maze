@@ -804,13 +804,16 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       width: 190,
       render: (_, task) => {
         const selected = task.selected_node || task.schedule_decision?.selected_node;
+        const taskResources: Record<string, any> = task.resources || {};
+        const cpuNum = taskResources.cpu_num ?? (taskResources as any).cpu;
         return (
           <Space direction="vertical" size={2}>
             <Text>{selected?.node_ip || '-'}</Text>
             <Space size={4} wrap>
               {selected?.gpu_id !== undefined && selected?.gpu_id !== null && <Tag color="gold">GPU {selected.gpu_id}</Tag>}
-              {task.resources?.cpu !== undefined && <Tag>CPU {task.resources.cpu}</Tag>}
-              {task.resources?.gpu !== undefined && <Tag>GPU req {task.resources.gpu}</Tag>}
+              {cpuNum !== undefined && <Tag>CPU {cpuNum}</Tag>}
+              {taskResources.gpu_mem !== undefined && <Tag>VRAM {formatGpuMemory(taskResources.gpu_mem)}</Tag>}
+              {taskResources.io_num !== undefined && <Tag>I/O {taskResources.io_num}</Tag>}
             </Space>
           </Space>
         );

@@ -1033,6 +1033,8 @@ maze start --head \
            --ray-head-port 6379 \
            --strategy least-loaded \
            [--playground] \
+           [--playground-port 5173] \
+           [--playground-backend-port 3001] \
            [--log-level INFO] [--log-file /path/to/log]
 ```
 
@@ -1041,9 +1043,31 @@ maze start --head \
 | `--port` | `8000` | Maze Head FastAPI port. |
 | `--ray-head-port` | `6379` | Ray Head GCS port. |
 | `--strategy` | `least-loaded` | Scheduling strategy. Common values: `least-loaded`, `Default`, `DAPS`, `HACS`, `ATLAS`. |
-| `--playground` | off | Start Workbench backend on 3001 and frontend on 5173. |
+| `--playground` | off | Start the Workbench UI and its Node.js backend together with the head node. |
+| `--playground-port` | `5173` | Workbench web UI port. |
+| `--playground-backend-port` | `3001` | Workbench backend API port. If omitted and `--playground-port` is changed, defaults to `--playground-port + 1`. |
 | `--log-level` | `INFO` | Logging level. |
 | `--log-file` | unset | Write logs to a file. |
+
+Examples:
+
+```bash
+# Default one-line startup.
+maze start --head --port 8000 --ray-head-port 6379 --playground
+
+# Custom ports. The CLI wires the Workbench backend to the selected Maze Head
+# and wires the frontend proxy to the selected Workbench backend.
+maze start --head \
+           --port 9000 \
+           --ray-head-port 6380 \
+           --playground \
+           --playground-port 5174
+```
+
+With `--playground-port 5174`, the Workbench backend defaults to `5175`.
+Use `--playground-backend-port` only when that backend port must be fixed.
+Maze checks configured ports before startup and prints a clear error when a
+port is already in use or two services are configured to share the same port.
 
 #### Worker mode
 
@@ -1073,7 +1097,18 @@ Workbench is started by:
 maze start --head --playground
 ```
 
-Backend default port: `3001`.
+Default ports:
+
+| Service | Default |
+|---|---|
+| Maze Head API | `8000` |
+| Ray Head GCS | `6379` |
+| Workbench frontend | `5173` |
+| Workbench backend | `3001` |
+
+The CLI automatically sets `MAZE_CORE_URL` for the Workbench backend and
+`VITE_MAZE_BACKEND_URL` for the frontend when custom ports are used, so users
+normally do not need to export these variables manually.
 
 Implementation:
 

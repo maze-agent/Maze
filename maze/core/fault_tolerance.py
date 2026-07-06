@@ -197,16 +197,13 @@ def _apply_resource_reanchor(task: Any) -> Dict[str, Any]:
     if current <= 0:
         return {"type": "resource_reanchor", "applied": False, "reason": "missing_gpu_mem_anchor"}
 
-    current_gpu = _int_resource(resources.get("gpu"))
     updated = int(current * 1.25)
-    resources["gpu"] = max(1, current_gpu)
     resources["gpu_mem"] = updated
     return {
         "type": "resource_reanchor",
         "applied": True,
         "adjusted_resources": copy.deepcopy(resources),
         "changes": {
-            "gpu": {"from": current_gpu, "to": resources["gpu"]},
             "gpu_mem": {"from": current, "to": updated},
         },
     }

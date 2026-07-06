@@ -70,7 +70,7 @@ def create_openai_react_llm_task(
         "Use either {\"tool\": \"tool_name\", \"args\": {...}} or "
         "{\"final\": \"answer\"}."
     )
-    task_resources = resources or {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+    task_resources = resources or {"cpu_num": 1, "gpu_mem": 0, "io_num": 1}
 
     def _openai_react_decide(
         prompt: str,

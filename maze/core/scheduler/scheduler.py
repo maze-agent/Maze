@@ -4,7 +4,6 @@ import copy
 
 
 import logging
-import resource
 
 from traitlets import Instance
 from zmq.backend import select
@@ -15,6 +14,7 @@ import threading
 import queue
 import json
 import os
+import sys
 import base64
 import cloudpickle
 import binascii
@@ -27,6 +27,7 @@ from maze.core.scheduler.resource import ResourceManager
 from maze.core.scheduler.llm_instance import LlmInstanceManager,LlmInstanceMessage
 from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
 from maze.core.scheduler.result_summary import summarize_task_result
+from maze.core.workflow.resources import to_internal_scheduler_resources
 from maze.core.scheduler.error import (
     enrich_error_for_task,
     exception_to_error_envelope,
@@ -141,6 +142,7 @@ class Scheduler():
             "workflow_id": task.workflow_id,
             "task_id": task.task_id,
             "task_type": "langgraph" if isinstance(task, LanggraphTaskRuntime) else "code",
+            "task_kind": getattr(task, "task_kind", "cpu"),
             "status": queue_status,
             "runtime_status": task.status,
             "priority": task.priority,
@@ -164,6 +166,7 @@ class Scheduler():
             "workflow_id": task.workflow_id,
             "task_id": task.task_id,
             "task_type": "langgraph" if isinstance(task, LanggraphTaskRuntime) else "code",
+            "task_kind": getattr(task, "task_kind", "cpu"),
             "status": task.status,
             "attempt": task.attempt,
             "resources": task.resources,
@@ -177,6 +180,12 @@ class Scheduler():
             "timeout_seconds": task.timeout_seconds,
             "fault_tolerance": trace_snapshot(task),
         }
+
+    def _public_schedule_decision(self, task: TaskRuntime|LanggraphTaskRuntime, decision: Dict[str, Any]):
+        decision = copy.deepcopy(decision)
+        decision["internal_requested_resources"] = decision.get("requested_resources")
+        decision["requested_resources"] = copy.deepcopy(task.resources)
+        return decision
 
     def get_queue_snapshot(self):
         now = time.time()
@@ -219,6 +228,7 @@ class Scheduler():
             "data": {
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
+                "task_kind": getattr(task, "task_kind", "cpu"),
                 "result": error,
                 "error": error,
                 "attempt": task.attempt,
@@ -232,12 +242,36 @@ class Scheduler():
             message["data"]["metrics"] = metrics
         socket_to_main.send(json.dumps(message).encode("utf-8"))
 
+    def _send_task_rejected(self, socket_to_main, message_data: Dict[str, Any], exc: BaseException):
+        error = exception_to_error_envelope(
+            "scheduler_error",
+            exc,
+            origin="scheduler",
+        )
+        message = {
+            "type": "task_exception",
+            "data": {
+                "workflow_id": message_data.get("workflow_id"),
+                "task_id": message_data.get("task_id"),
+                "task_kind": message_data.get("task_kind", "cpu"),
+                "result": error,
+                "error": error,
+                "attempt": 0,
+                "resources": message_data.get("resources"),
+                "schedule_decision": {
+                    "reason": "task_rejected_by_scheduler",
+                },
+            },
+        }
+        socket_to_main.send(json.dumps(message).encode("utf-8"))
+
     def _send_task_retry(self, socket_to_main, task: TaskRuntime|LanggraphTaskRuntime, error: Dict[str, Any]):
         message = {
             "type": "task_retry",
             "data": {
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
+                "task_kind": getattr(task, "task_kind", "cpu"),
                 "error": error,
                 "attempt": task.attempt,
                 "next_attempt": task.attempt + 1,
@@ -255,6 +289,7 @@ class Scheduler():
             "data": {
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
+                "task_kind": getattr(task, "task_kind", "cpu"),
                 "pending_reason": task.pending_reason,
                 "schedule_decision": task.last_schedule_decision,
                 "attempt": task.attempt,
@@ -330,11 +365,18 @@ class Scheduler():
 
     def _release_task_attempt_resource(self, task: TaskRuntime|LanggraphTaskRuntime, resources: Dict[str, Any]):
         current_resources = task.resources
+        current_scheduler_resources = task.scheduler_resources
         try:
             task.resources = resources
+            task.scheduler_resources = to_internal_scheduler_resources(
+                resources,
+                task_kind=getattr(task, "task_kind", None),
+                model_anchor=getattr(task, "model_anchor", None),
+            )
             self.resource_manager.release_task_resource(tasks=[task])
         finally:
             task.resources = current_resources
+            task.scheduler_resources = current_scheduler_resources
 
     def _fail_timed_out_tasks(self, socket_to_main):
         for task in list(self.workflow_manager.get_running_tasks()):
@@ -355,7 +397,7 @@ class Scheduler():
     def _cleanup(self):
         try:
             subprocess.run(
-                ["ray", "stop"],
+                [sys.executable, "-m", "ray.scripts.scripts", "stop"],
                 check=False,
                 text=True,
                 capture_output=True,
@@ -383,41 +425,50 @@ class Scheduler():
                 message_type = message["type"]
                 message_data = message.get("data", {})
                 if(message_type =="run_task"):
-                    self._stopped_workflows().discard(message_data["workflow_id"])
-                    if(message_data["task_type"]==TaskType.CODE.value):
-                        task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
-                                                                task_id=message_data['task_id'],
-                                                                task_input=message_data['task_input'],
-                                                                task_output=message_data['task_output'],
-                                                                resources=message_data['resources'],
-                                                                model_anchor=message_data.get('model_anchor'),
-                                                                code_str=message_data.get('code_str'),
-                                                                code_ser=message_data.get('code_ser'),
-                                                                file_context=message_data.get('file_context'),
-                                                                max_retries=message_data.get('max_retries'),
-                                                                retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
-                                                                retry_on=message_data.get('retry_on'),
-                                                                timeout_seconds=message_data.get('timeout_seconds'),
-                                                                )
-                        priority =  message_data.get('priority', 0)
-                        task_runtime.set_priority(priority)
-                        self.task_queue.put(task_runtime,priority)
-                    elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
-                        task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
-                                                                                  task_id=message_data['task_id'],
-                                                                                  code_ser=message_data['code_ser'],
-                                                                                  args=message_data['args'],
-                                                                                  kwargs=message_data['kwargs'],
-                                                                                  resources=message_data['resources'],
-                                                                                  model_anchor=message_data.get('model_anchor'),
-                                                                                  max_retries=message_data.get('max_retries'),
-                                                                                  retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
-                                                                                  retry_on=message_data.get('retry_on'),
-                                                                                  timeout_seconds=message_data.get('timeout_seconds'),
-                                                                                )
-                        priority =  message_data.get('priority', 0)
-                        task_runtime.set_priority(priority)
-                        self.task_queue.put(task_runtime,0)
+                    try:
+                        self._stopped_workflows().discard(message_data["workflow_id"])
+                        if(message_data["task_type"]==TaskType.CODE.value):
+                            task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
+                                                                    task_id=message_data['task_id'],
+                                                                    task_input=message_data['task_input'],
+                                                                    task_output=message_data['task_output'],
+                                                                    resources=message_data['resources'],
+                                                                    task_kind=message_data.get('task_kind'),
+                                                                    model_anchor=message_data.get('model_anchor'),
+                                                                    code_str=message_data.get('code_str'),
+                                                                    code_ser=message_data.get('code_ser'),
+                                                                    file_context=message_data.get('file_context'),
+                                                                    max_retries=message_data.get('max_retries'),
+                                                                    retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
+                                                                    retry_on=message_data.get('retry_on'),
+                                                                    timeout_seconds=message_data.get('timeout_seconds'),
+                                                                    )
+                            priority =  message_data.get('priority', 0)
+                            task_runtime.set_priority(priority)
+                            self.task_queue.put(task_runtime,priority)
+                        elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
+                            task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
+                                                                                      task_id=message_data['task_id'],
+                                                                                      code_ser=message_data['code_ser'],
+                                                                                      args=message_data['args'],
+                                                                                      kwargs=message_data['kwargs'],
+                                                                                      resources=message_data['resources'],
+                                                                                      task_kind=message_data.get('task_kind'),
+                                                                                      model_anchor=message_data.get('model_anchor'),
+                                                                                      max_retries=message_data.get('max_retries'),
+                                                                                      retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
+                                                                                      retry_on=message_data.get('retry_on'),
+                                                                                      timeout_seconds=message_data.get('timeout_seconds'),
+                                                                                    )
+                            priority =  message_data.get('priority', 0)
+                            task_runtime.set_priority(priority)
+                            self.task_queue.put(task_runtime,0)
+                    except Exception as exc:
+                        logger.exception(
+                            "Rejecting task %s before scheduling",
+                            message_data.get("task_id"),
+                        )
+                        self._send_task_rejected(socket_to_main, message_data, exc)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
                         self._stopped_workflows().add(message_data["workflow_id"])
@@ -588,12 +639,13 @@ class Scheduler():
 
             #Get the node can run the task
             selection = self.resource_manager.select_node(
-                task_need_resources=self.cur_ready_task.resources,
+                task_need_resources=self.cur_ready_task.scheduler_resources,
                 model_anchor=getattr(self.cur_ready_task, "model_anchor", None),
             )
             if selection:
                 selected_node = selection.selected_node
                 self.cur_ready_task.pending_reason = None
+                selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
                 self.cur_ready_task.last_schedule_decision = selection.decision
                 #Run task
                 self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
@@ -604,6 +656,7 @@ class Scheduler():
                     "data":{
                         "workflow_id":self.cur_ready_task.workflow_id,
                         "task_id":self.cur_ready_task.task_id,
+                        "task_kind":getattr(self.cur_ready_task, "task_kind", "cpu"),
                         "node_ip":selected_node.node_ip,
                         "node_id":selected_node.node_id,
                         "gpu_id":selected_node.gpu_id,
@@ -619,8 +672,10 @@ class Scheduler():
                 self.lock.release()
             else:
                 previous_pending_reason = self.cur_ready_task.pending_reason
+                pending_reason = selection.decision.get("reason")
                 self.cur_ready_task.set_task_status("pending")
-                self.cur_ready_task.pending_reason = selection.decision.get("reason")
+                self.cur_ready_task.pending_reason = pending_reason
+                selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
                 self.cur_ready_task.last_schedule_decision = selection.decision
                 if previous_pending_reason != self.cur_ready_task.pending_reason:
                     self._send_task_pending(socket_to_main, self.cur_ready_task)
@@ -697,6 +752,7 @@ class Scheduler():
                         message_data = {
                             "workflow_id": finished_task.workflow_id,
                             "task_id": finished_task.task_id,
+                            "task_kind": getattr(finished_task, "task_kind", "cpu"),
                             "result": summarize_task_result(
                                 finished_task.result,
                                 run_id=finished_task.workflow_id,
@@ -767,7 +823,13 @@ class Scheduler():
     def _launch_ray_head(self):
         try:
             command = [
-                "ray", "start", "--head","--port",str(self.ray_head_port),
+                sys.executable,
+                "-m",
+                "ray.scripts.scripts",
+                "start",
+                "--head",
+                "--port",
+                str(self.ray_head_port),
             ]
             result = subprocess.run(
                 command,

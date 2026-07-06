@@ -7,7 +7,7 @@ These tasks demonstrate how to handle file types like images and audio
 from maze.client.front.decorator import task
 
 
-@task(data_types={"image_path": "file:image", "info": "dict"}, resources={"cpu": 1, "cpu_mem": 256, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", data_types={"image_path": "file:image", "info": "dict"}, resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def get_image_info(image_path: str):
     """
     Get image information
@@ -35,7 +35,7 @@ def get_image_info(image_path: str):
     return {"info": info}
 
 
-@task(data_types={"image_path": "file:image", "output_size": "str", "resized_image_path": "file:image", "info": "dict"}, resources={"cpu": 1, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", data_types={"image_path": "file:image", "output_size": "str", "resized_image_path": "file:image", "info": "dict"}, resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def resize_image(image_path: str, output_size: str):
     """
     Resize image
@@ -76,7 +76,7 @@ def resize_image(image_path: str, output_size: str):
     }
 
 
-@task(data_types={"image_path": "file:image", "grayscale_image_path": "file:image"}, resources={"cpu": 1, "cpu_mem": 256, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", data_types={"image_path": "file:image", "grayscale_image_path": "file:image"}, resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def convert_to_grayscale(image_path: str):
     """
     Convert image to grayscale

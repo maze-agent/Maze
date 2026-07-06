@@ -1,7 +1,7 @@
 from maze import task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 256, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def resource_mix_merge_signals(
     token_stats: dict = None,
     keyword_scores: dict = None,

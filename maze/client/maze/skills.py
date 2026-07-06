@@ -136,7 +136,7 @@ def build_skill_reader_tool(skills: Iterable[SkillSpec], max_chars: int = 12000)
 
     skill_map = {skill.name: skill for skill in skills}
 
-    @task(resources={"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0})
+    @task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
     def read_skill_file(skill_name: str, file_name: str = SKILL_MAIN_FILE):
         """Read details from a registered skill file when the catalog is insufficient."""
         if skill_name not in skill_map:

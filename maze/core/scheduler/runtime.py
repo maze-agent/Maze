@@ -4,6 +4,12 @@ import cloudpickle
 import time
 from typing import Any, List,Dict,Callable
 from maze.core.scheduler.runner import remote_task_runner,remote_lgraph_task_runner
+from maze.core.workflow.resources import (
+    normalize_task_kind,
+    normalize_resources,
+    require_schedulable_resources,
+    to_internal_scheduler_resources,
+)
 
 
 DEFAULT_MAX_RETRIES = 1
@@ -36,6 +42,7 @@ class LanggraphTaskRuntime():
         args:str,
         kwargs:str,
         resources:Dict,
+        task_kind:str|None=None,
         model_anchor:Dict|None=None,
         max_retries:int|None=None,
         retry_backoff_seconds:float=0,
@@ -48,7 +55,14 @@ class LanggraphTaskRuntime():
         self.code_ser: str = code_ser
         self.args: str = args
         self.kwargs: str = kwargs
-        self.resources: Dict[str, Any] = resources
+        self.task_kind: str = normalize_task_kind(task_kind, resources=resources, model_anchor=model_anchor)
+        self.resources: Dict[str, Any] = normalize_resources(resources)
+        require_schedulable_resources(self.task_kind, self.resources, model_anchor)
+        self.scheduler_resources: Dict[str, Any] = to_internal_scheduler_resources(
+            self.resources,
+            task_kind=self.task_kind,
+            model_anchor=model_anchor,
+        )
         self.model_anchor: Dict[str, Any] | None = model_anchor
         self.priority = 0
         self.max_retries = _normalize_max_retries(max_retries)
@@ -98,6 +112,11 @@ class LanggraphTaskRuntime():
 
     def schedule_retry(self, error: Dict[str, Any]):
         self.last_error = error
+        self.scheduler_resources = to_internal_scheduler_resources(
+            self.resources,
+            task_kind=self.task_kind,
+            model_anchor=self.model_anchor,
+        )
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
@@ -110,6 +129,7 @@ class TaskRuntime():
         task_input:Dict,
         task_output:Dict,
         resources:Dict,
+        task_kind:str|None=None,
         model_anchor:Dict|None=None,
         code_str:str=None,
         code_ser:str=None,
@@ -124,7 +144,14 @@ class TaskRuntime():
         self.task_id: str = task_id
         self.task_input: Dict[Any, Any] = task_input
         self.task_output: Dict[Any, Any] = task_output
-        self.resources: Dict[str, Any] = resources
+        self.task_kind: str = normalize_task_kind(task_kind, resources=resources, model_anchor=model_anchor)
+        self.resources: Dict[str, Any] = normalize_resources(resources)
+        require_schedulable_resources(self.task_kind, self.resources, model_anchor)
+        self.scheduler_resources: Dict[str, Any] = to_internal_scheduler_resources(
+            self.resources,
+            task_kind=self.task_kind,
+            model_anchor=model_anchor,
+        )
         self.model_anchor: Dict[str, Any] | None = model_anchor
         self.code_str: str = code_str
         self.code_ser: str = code_ser 
@@ -181,6 +208,11 @@ class TaskRuntime():
 
     def schedule_retry(self, error: Dict[str, Any]):
         self.last_error = error
+        self.scheduler_resources = to_internal_scheduler_resources(
+            self.resources,
+            task_kind=self.task_kind,
+            model_anchor=self.model_anchor,
+        )
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
@@ -306,16 +338,16 @@ class WorkflowRuntimeManager():
             #gpu task
             if node.gpu_id is not None: 
                 result_ref = remote_lgraph_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    num_gpus=task.resources["gpu"],
-                    memory=task.resources["cpu_mem"],
+                    num_cpus=task.scheduler_resources["cpu"],
+                    num_gpus=task.scheduler_resources["gpu"],
+                    memory=task.scheduler_resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
                 ).remote(code_ser=task.code_ser,args=task.args,kwargs=task.kwargs,cuda_visible_devices=str(node.gpu_id))
             #cpu task
             else: 
                 result_ref = remote_lgraph_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    memory=task.resources["cpu_mem"],
+                    num_cpus=task.scheduler_resources["cpu"],
+                    memory=task.scheduler_resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
                 ).remote(code_ser=task.code_ser,args=task.args,kwargs=task.kwargs,cuda_visible_devices=None)
             
@@ -335,9 +367,9 @@ class WorkflowRuntimeManager():
             #gpu task
             if node.gpu_id is not None: 
                 result_ref = remote_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    num_gpus=task.resources["gpu"],
-                    memory=task.resources["cpu_mem"],
+                    num_cpus=task.scheduler_resources["cpu"],
+                    num_gpus=task.scheduler_resources["gpu"],
+                    memory=task.scheduler_resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
                 ).remote(
                     code_str=task.code_str,
@@ -349,8 +381,8 @@ class WorkflowRuntimeManager():
             #cpu task
             else: 
                 result_ref = remote_task_runner.options(
-                    num_cpus=task.resources["cpu"],
-                    memory=task.resources["cpu_mem"],
+                    num_cpus=task.scheduler_resources["cpu"],
+                    memory=task.scheduler_resources["cpu_mem"],
                     scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
                 ).remote(
                     code_str=task.code_str,

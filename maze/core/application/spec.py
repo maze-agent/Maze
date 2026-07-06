@@ -7,16 +7,14 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict
 
+from maze.core.workflow.resources import (
+    DEFAULT_RESOURCES,
+    ResourceSpecError,
+    normalize_resources,
+    normalize_task_semantics,
+)
 from maze.core.workflow.task import CodeTask
 from maze.core.workflow.workflow import Workflow
-
-
-DEFAULT_RESOURCES = {
-    "cpu": 1,
-    "cpu_mem": 128,
-    "gpu": 0,
-    "gpu_mem": 0,
-}
 
 
 class AppSpecError(ValueError):
@@ -58,27 +56,10 @@ def _safe_task_name(name: str) -> str:
 
 
 def _normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:
-    resources = dict(resources or {})
-    if "memory" in resources and "cpu_mem" not in resources:
-        resources["cpu_mem"] = resources["memory"]
-    if "mem" in resources and "cpu_mem" not in resources:
-        resources["cpu_mem"] = resources["mem"]
-
-    normalized = dict(DEFAULT_RESOURCES)
-    for key in DEFAULT_RESOURCES:
-        if key not in resources or resources[key] is None:
-            continue
-        value = resources[key]
-        if key in {"cpu", "gpu"}:
-            normalized[key] = int(value)
-        else:
-            normalized[key] = float(value)
-
-    if normalized["cpu"] < 0 or normalized["gpu"] < 0:
-        raise AppSpecError("resources.cpu and resources.gpu must be non-negative")
-    if normalized["cpu_mem"] < 0 or normalized["gpu_mem"] < 0:
-        raise AppSpecError("resources.cpu_mem and resources.gpu_mem must be non-negative")
-    return normalized
+    try:
+        return normalize_resources(resources)
+    except ResourceSpecError as exc:
+        raise AppSpecError(str(exc)) from exc
 
 
 def _normalize_env(env: Any) -> Dict[str, Any]:
@@ -155,6 +136,15 @@ def app_spec_from_payload(
     command = _normalize_command(payload.get("command"))
     env = _normalize_env(payload.get("env"))
     resources = _normalize_resources(payload.get("resources"))
+    task_kind = payload.get("task_kind")
+    try:
+        task_kind, resources = normalize_task_semantics(
+            task_kind=task_kind,
+            resources=resources,
+            model_anchor=payload.get("model_anchor"),
+        )
+    except ResourceSpecError as exc:
+        raise AppSpecError(str(exc)) from exc
     retries = _normalize_retries(payload)
     timeout_seconds = _normalize_timeout(payload)
 
@@ -172,6 +162,7 @@ def app_spec_from_payload(
         "workspace": _resolve_workspace(payload, source_path),
         "workdir": payload.get("workdir") or ".",
         "resources": resources,
+        "task_kind": task_kind,
         "env": env,
         "artifacts": [str(item) for item in artifacts],
         "timeout_seconds": timeout_seconds,
@@ -306,6 +297,7 @@ def build_app_workflow(workflow_id: str, spec: Dict[str, Any]) -> Workflow:
         code_str=_app_task_code(spec),
         code_ser=None,
         resources=spec["resources"],
+        task_kind=spec.get("task_kind"),
         max_retries=spec.get("max_retries"),
         retry_backoff_seconds=spec.get("retry_backoff_seconds", 0),
         retry_on=spec.get("retry_on"),

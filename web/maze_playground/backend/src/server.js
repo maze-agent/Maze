@@ -982,7 +982,7 @@ function buildTaskGenerationMessages({ description, taskName, relativePath, task
     'from pathlib import Path',
     'from maze import task',
     '',
-    '@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})',
+    '@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})',
     'def summarize_text(input_path: str = "input.txt", output_path: str = "reports/summary.txt"):',
     '    # Path(".") is the task sandbox root containing staged workspace files.',
     '    text = Path(input_path).read_text(encoding="utf-8")',
@@ -1008,7 +1008,7 @@ function buildTaskGenerationMessages({ description, taskName, relativePath, task
         }, null, 2),
         'The code must be Python for exactly one Maze task.',
         'Use: from maze import task',
-        'Use one @task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}) decorator.',
+        'Use one @task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0}) decorator.',
         'Use normal Python function parameters with safe defaults when useful.',
         'The task must return a dict.',
         'Tasks execute in a sandbox working directory. Path(".") / cwd is the logical files root for this task.',
@@ -1179,6 +1179,13 @@ async function writeJsonAtomic(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fs.writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+  await fs.rename(tmpPath, filePath);
+}
+
+async function writeTextAtomic(filePath, content) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  await fs.writeFile(tmpPath, content, 'utf-8');
   await fs.rename(tmpPath, filePath);
 }
 
@@ -1932,9 +1939,26 @@ function normalizeAgentTaskDefinitions(taskDefinitions = []) {
       code: String(definition.code || ''),
       inputs: Array.isArray(definition.inputs) ? definition.inputs : [],
       outputs: Array.isArray(definition.outputs) ? definition.outputs : [],
-      resources: definition.resources || { cpu: 1, cpu_mem: 128, gpu: 0, gpu_mem: 0 },
+      resources: normalizeTaskResources(definition.resources),
     }))
     .filter((definition) => definition.relativePath && definition.code.trim());
+}
+
+function normalizeTaskResources(resources = {}) {
+  const raw = resources && typeof resources === 'object' ? resources : {};
+  return {
+    cpu_num: Math.max(1, Number(raw.cpu_num ?? raw.cpu ?? 1) || 1),
+    gpu_mem: Math.max(0, Number(raw.gpu_mem ?? raw.gpuMemoryMb ?? 0) || 0),
+    io_num: Math.max(0, Number(raw.io_num ?? 0) || 0),
+  };
+}
+
+function normalizeTaskKind(data = {}) {
+  const raw = String(data.task_kind || data.taskKind || '').toLowerCase();
+  if (['cpu', 'gpu', 'io'].includes(raw)) return raw;
+  const resources = normalizeTaskResources(data.resources || {});
+  if (resources.gpu_mem > 0 || data.modelAnchor || data.model_anchor || data.localModel) return 'gpu';
+  return 'cpu';
 }
 
 function validateAgentTaskDefinitionCode(definition) {
@@ -2017,7 +2041,8 @@ function normalizeAgentWorkflowDraftInput(input = {}) {
           customCode: node.data?.customCode || node.customCode,
           inputs: normalizeWorkflowNodeInputs(node.data?.inputs || node.inputs),
           outputs: Array.isArray(node.data?.outputs || node.outputs) ? (node.data?.outputs || node.outputs) : [],
-          resources: node.data?.resources || node.resources || { cpu: 1, cpu_mem: 128, gpu: 0, gpu_mem: 0 },
+          task_kind: normalizeTaskKind(node.data || node),
+          resources: normalizeTaskResources(node.data?.resources || node.resources),
           configured: node.data?.configured !== false,
         },
       })),
@@ -5017,7 +5042,19 @@ async function nextImportedTaskPath(workspaceDir, workflowName, relativePath, co
   }
 }
 
-async function saveImportedTaskDefinition(workspaceDir, relativePath, definition) {
+async function saveImportedTaskDefinition(workspaceDir, relativePath, definition, { parse = true } = {}) {
+  if (!parse) {
+    const { relativePath: targetRelativePath, fullPath } = resolveTaskDefinitionFile(workspaceDir, relativePath);
+    await writeTextAtomic(fullPath, definition.code);
+    clearWorkspaceTasksCache(workspaceDir);
+    return {
+      success: true,
+      workspaceDir,
+      tasksDir: path.join(workspaceDir, 'tasks'),
+      relativePath: targetRelativePath,
+    };
+  }
+
   const result = await callPython('save_workspace_task', {
     workspaceDir,
     relativePath,
@@ -5042,7 +5079,12 @@ async function saveImportedTaskDefinition(workspaceDir, relativePath, definition
   return result;
 }
 
-async function importTaskDefinitions(workspaceDir, taskDefinitions = [], workflowName = 'imported-workflow') {
+async function importTaskDefinitions(
+  workspaceDir,
+  taskDefinitions = [],
+  workflowName = 'imported-workflow',
+  { parse = true } = {},
+) {
   const imported = [];
   const skipped = [];
   const remapped = [];
@@ -5063,12 +5105,12 @@ async function importTaskDefinitions(workspaceDir, taskDefinitions = [], workflo
         skipped.push({ relativePath, reason: 'exists-same' });
       } else {
         targetRelativePath = await nextImportedTaskPath(workspaceDir, workflowName, relativePath, definition.code);
-        await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition);
+        await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition, { parse });
         imported.push({ relativePath: targetRelativePath, sourceRelativePath: relativePath });
         remapped.push({ from: relativePath, to: targetRelativePath, reason: 'conflict' });
       }
     } else {
-      await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition);
+      await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition, { parse });
       imported.push({ relativePath: targetRelativePath });
     }
 
@@ -5801,7 +5843,12 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
     const workspaceDir = context.workspaceDir;
     const workflow = normalizeWorkflowPayload(payload);
-    const importResult = await importTaskDefinitions(workspaceDir, workflow.includedTasks, workflow.name);
+    const importResult = await importTaskDefinitions(
+      workspaceDir,
+      workflow.includedTasks,
+      workflow.name,
+      { parse: false },
+    );
     workflow.nodes = await hydrateWorkspaceWorkflowNodes(
       workflow.nodes,
       workspaceDir,

@@ -24,8 +24,8 @@ from maze.client.maze.agent_permissions import (
 
 
 DEFAULT_MAX_OBSERVATION_CHARS = 12000
-DEFAULT_CALLABLE_RESOURCES = {"cpu": 1, "cpu_mem": 64, "gpu": 0, "gpu_mem": 0}
-EXEC_CODE_RESOURCE_KEYS = ("cpu", "cpu_mem", "gpu", "gpu_mem")
+DEFAULT_CALLABLE_RESOURCES = {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
+EXEC_CODE_RESOURCE_KEYS = ("cpu_num", "gpu_mem", "io_num")
 EXEC_CODE_TARGET_NODE_KEYS = ("target_node_id", "node_id")
 
 
@@ -1015,18 +1015,12 @@ def exec_code_resource_override_from_args(
     elif backend in {"", "local", "workspace_sandbox"}:
         override["required_capability"] = "workspace_sandbox"
 
-    if override.get("cpu", 1) < 1:
-        override["cpu"] = 1
-    if override.get("cpu_mem", 0) < 0:
-        override["cpu_mem"] = 0
-    if override.get("gpu", 0) < 0:
-        override["gpu"] = 0
-    if override.get("gpu", 0) > 1:
-        override["gpu"] = 1
+    if override.get("cpu_num", 1) < 1:
+        override["cpu_num"] = 1
     if override.get("gpu_mem", 0) < 0:
         override["gpu_mem"] = 0
-    if override.get("gpu_mem", 0) > 0 and override.get("gpu", 0) < 1:
-        override["gpu"] = 1
+    if override.get("io_num", 0) < 0:
+        override["io_num"] = 0
 
     return override or None
 
@@ -1203,6 +1197,7 @@ def _attach_callable_task_metadata(
         inputs=inputs,
         outputs=list(outputs),
         resources=dict(resources),
+        task_kind="gpu" if int(resources.get("gpu_mem", 0) or 0) > 0 else "cpu",
         data_types=type_map,
         timeout_seconds=timeout_seconds,
     )

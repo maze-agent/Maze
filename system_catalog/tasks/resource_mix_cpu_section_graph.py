@@ -7,7 +7,7 @@ def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[A-Za-z][A-Za-z0-9_'-]*", text.lower()))
 
 
-@task(resources={"cpu": 2, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 2, "gpu_mem": 0, "io_num": 0})
 def resource_mix_cpu_section_graph(sections: list = None, top_terms: list = None):
     """Build a section similarity graph and rank the most connected sections."""
     sections = sections or []

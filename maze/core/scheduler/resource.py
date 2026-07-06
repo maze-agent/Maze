@@ -569,7 +569,7 @@ class ResourceManager():
             node_id = task.selected_node.node_id
             if node_id not in self.nodes:
                 continue
-            self.nodes[node_id].release_resource(task.resources,task.selected_node.gpu_id)
+            self.nodes[node_id].release_resource(task.scheduler_resources,task.selected_node.gpu_id)
             self.running_task_counts[node_id] = max(0, self.running_task_counts.get(node_id, 0) - 1)
 
     def release_instance_resource(self,resource_detail:dict):

@@ -11,7 +11,8 @@ from maze.client.front.decorator import task
         "sleep_seconds": "int",
         "placement": "dict",
     },
-    resources={"cpu": 1, "cpu_mem": 128, "gpu": 1, "gpu_mem": 0},
+    task_kind="gpu",
+    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
 )
 def distributed_gpu_probe(probe_id: int = 0, sleep_seconds: int = 1):
     """Report the worker machine, Ray node, and GPU visibility for a distributed smoke task."""

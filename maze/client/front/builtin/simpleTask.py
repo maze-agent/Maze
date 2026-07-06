@@ -7,7 +7,7 @@ These tasks are defined using the @task decorator and include metadata for input
 from maze.client.front.decorator import task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def task1(task1_input: str):
     """
     Add the current timestamp to the input text.
@@ -29,7 +29,7 @@ def task1(task1_input: str):
     }
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def task2(task2_input: str):
     """
     Add the current timestamp and a suffix to the input text.

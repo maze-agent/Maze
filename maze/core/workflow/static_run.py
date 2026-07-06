@@ -83,6 +83,7 @@ class StaticRun:
             self.task_nodes[task_id] = {
                 "task_id": task_id,
                 "task_name": task.task_name,
+                "task_kind": getattr(task, "task_kind", "cpu"),
                 "status": "pending" if parents else "queued",
                 "parents": parents,
                 "children": children,

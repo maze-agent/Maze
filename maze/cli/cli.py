@@ -9,6 +9,7 @@ import signal
 import json
 import requests
 import contextlib
+import socket
 from pathlib import Path
 from maze.core.worker.worker import Worker
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -18,12 +19,53 @@ from maze.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
-async def _async_start_head(port: int, ray_head_port: int, strategy: str = "least-loaded", playground: bool = False):
+def _default_playground_backend_port(frontend_port: int) -> int:
+    return 3001 if frontend_port == 5173 else frontend_port + 1
+
+
+def _ensure_unique_ports(service_ports: list[tuple[str, int]]):
+    seen = {}
+    for service_name, port in service_ports:
+        if port in seen:
+            raise RuntimeError(
+                f"{service_name} port {port} conflicts with {seen[port]}. "
+                "Choose different ports."
+            )
+        seen[port] = service_name
+
+
+async def _async_start_head(
+    port: int,
+    ray_head_port: int,
+    strategy: str = "least-loaded",
+    playground: bool = False,
+    playground_port: int = 5173,
+    playground_backend_port: int | None = None,
+):
   
     from maze.core.server import app as server_app, mapath
     use_predictor = strategy == "DAPS"
     if use_predictor:
         from maze.core.predictor.server import app as predictor_app
+
+    service_ports = [
+        ("Maze core", port),
+        ("Ray head", ray_head_port),
+    ]
+    if use_predictor:
+        service_ports.append(("DAPS predictor", port + 1))
+    if playground:
+        resolved_playground_backend_port = (
+            playground_backend_port
+            or _default_playground_backend_port(playground_port)
+        )
+        service_ports.extend([
+            ("Playground backend", resolved_playground_backend_port),
+            ("Playground frontend", playground_port),
+        ])
+    _ensure_unique_ports(service_ports)
+    for service_name, service_port in service_ports:
+        _ensure_port_available(service_port, service_name)
 
     mapath.init(ray_head_port=ray_head_port, strategy=strategy)  
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
@@ -43,7 +85,11 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "leas
 
     playground_processes = []
     if playground:
-        playground_processes = start_playground()
+        playground_processes = start_playground(
+            core_port=port,
+            frontend_port=playground_port,
+            backend_port=playground_backend_port,
+        )
 
     try:
         tasks = [server_task, monitor_coroutine]
@@ -71,8 +117,28 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "leas
         if playground_processes:
             stop_playground(playground_processes)
 
-def start_playground():
+def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _ensure_port_available(port: int, service_name: str):
+    if _port_in_use(port):
+        raise RuntimeError(
+            f"{service_name} port {port} is already in use. "
+            "Stop the existing process or choose another port."
+        )
+
+
+def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_port: int | None = None):
     processes = []
+    backend_port = backend_port or _default_playground_backend_port(frontend_port)
+    core_url = f"http://localhost:{core_port}"
+    backend_url = f"http://localhost:{backend_port}"
+
+    _ensure_port_available(backend_port, "Playground backend")
+    _ensure_port_available(frontend_port, "Playground frontend")
     
     project_root = Path(__file__).parent.parent.parent
     backend_dir = project_root / "web" / "maze_playground" / "backend"
@@ -83,11 +149,17 @@ def start_playground():
     print("="*60)
     
     if backend_dir.exists():
-        print("🔧 starting playground backend (http://localhost:3001)...")
+        print(f"🔧 starting playground backend ({backend_url})...")
         try:
+            backend_env = {
+                **os.environ,
+                "PORT": str(backend_port),
+                "MAZE_CORE_URL": core_url,
+            }
             backend_process = subprocess.Popen(
                 ["node", "src/server.js"],
                 cwd=str(backend_dir),
+                env=backend_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
@@ -100,13 +172,18 @@ def start_playground():
     
 
     if frontend_dir.exists():
-        print("🎨 starting playground frontend (http://localhost:5173)...")
+        print(f"🎨 starting playground frontend (http://localhost:{frontend_port})...")
         try:
       
             npm_cmd = "npm.cmd" if sys.platform == 'win32' else "npm"
+            frontend_env = {
+                **os.environ,
+                "VITE_MAZE_BACKEND_URL": backend_url,
+            }
             frontend_process = subprocess.Popen(
-                [npm_cmd, "run", "dev", "--", "--host", "0.0.0.0"],
+                [npm_cmd, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(frontend_port)],
                 cwd=str(frontend_dir),
+                env=frontend_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
@@ -121,9 +198,10 @@ def start_playground():
         print("\n" + "="*60)
         print("🎉 Playground successfully started!")
         print("="*60)
-        print("📱 frontend address: http://localhost:5173")
-        print("🔌 backend address: http://localhost:3001")
-        print("🎮 open browser to http://localhost:5173 to start using")
+        print(f"📱 frontend address: http://localhost:{frontend_port}")
+        print(f"🔌 backend address: {backend_url}")
+        print(f"🧠 core address: {core_url}")
+        print(f"🎮 open browser to http://localhost:{frontend_port} to start using")
         print("="*60 + "\n")
     
     return processes
@@ -144,8 +222,24 @@ def stop_playground(processes):
             print(f"⚠️  Failed to stop {name}: {e}")
     print("✅ Playground closed")
 
-def start_head(port: int, ray_head_port: int, strategy: str = "least-loaded", playground: bool = False):
-    asyncio.run(_async_start_head(port, ray_head_port, strategy, playground))
+def start_head(
+    port: int,
+    ray_head_port: int,
+    strategy: str = "least-loaded",
+    playground: bool = False,
+    playground_port: int = 5173,
+    playground_backend_port: int | None = None,
+):
+    asyncio.run(
+        _async_start_head(
+            port,
+            ray_head_port,
+            strategy,
+            playground,
+            playground_port,
+            playground_backend_port,
+        )
+    )
 
 def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10):
     Worker.start_worker(addr, agent=agent, heartbeat_interval=heartbeat_interval)
@@ -635,6 +729,8 @@ def main():
     start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
     start_parser.add_argument("--playground", action="store_true", help="Start Maze Playground visual interface (only applicable to --head)")
+    start_parser.add_argument("--playground-port", type=int, default=5173, help="Port for the Playground web UI")
+    start_parser.add_argument("--playground-backend-port", type=int, default=None, help="Port for the Playground backend API (default: 3001, or --playground-port + 1 when the UI port is changed)")
     start_parser.add_argument("--agent", action="store_true", help="Keep worker alive and periodically re-register with Maze core")
     start_parser.add_argument("--heartbeat-interval", type=float, default=10, help="Worker agent registration interval in seconds")
     start_parser.add_argument("--log-level", metavar="LOG LEVEL", help="Set log level",default="INFO",choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
@@ -753,9 +849,24 @@ def main():
             
            
             if hasattr(args, 'playground') and args.playground:
-                start_head(args.port, args.ray_head_port, args.strategy, playground=True)
+                try:
+                    start_head(
+                        args.port,
+                        args.ray_head_port,
+                        args.strategy,
+                        playground=True,
+                        playground_port=args.playground_port,
+                        playground_backend_port=args.playground_backend_port,
+                    )
+                except RuntimeError as exc:
+                    print(f"❌ {exc}", file=sys.stderr)
+                    sys.exit(1)
             else:
-                start_head(args.port, args.ray_head_port, args.strategy, playground=False)
+                try:
+                    start_head(args.port, args.ray_head_port, args.strategy, playground=False)
+                except RuntimeError as exc:
+                    print(f"❌ {exc}", file=sys.stderr)
+                    sys.exit(1)
         elif args.worker:
             if args.addr is None:
                 parser.error("--addr is required when using --worker")

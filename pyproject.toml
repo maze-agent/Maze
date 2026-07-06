@@ -7,7 +7,7 @@ name = "maze-agent"
 version = "1.0.2"
 description = "A Task-Level Distributed Agent Workflow Framework for building scalable, resource-efficient multi-agent systems"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = {text = "MIT"}
 authors = [
     {name = "Maze Development Team", email = "your-email@example.com"}

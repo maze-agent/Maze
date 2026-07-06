@@ -44,6 +44,14 @@ type BuiltinWorkflowExample = {
   sleepSeconds?: number;
 };
 
+function normalizeResources(resources: any = {}) {
+  return {
+    cpu_num: Math.max(1, Number(resources.cpu_num ?? resources.cpu ?? 1) || 1),
+    gpu_mem: Math.max(0, Number(resources.gpu_mem ?? 0) || 0),
+    io_num: Math.max(0, Number(resources.io_num ?? 0) || 0),
+  };
+}
+
 const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
   {
     key: 'distributed-smoke',
@@ -101,7 +109,7 @@ type WorkflowNavItem = {
 
 const defaultWorkspaceTaskCode = (functionName: string) => `from maze import task
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def ${functionName}(text: str = ""):
     """Process text and return a result."""
     return {"result": f"Processed: {text}"}
@@ -115,7 +123,7 @@ const resourceSoakCpuTaskCode = `from maze import task
         "sleep_seconds": "int",
         "placement": "dict",
     },
-    resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0},
+    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
 )
 def resource_soak_cpu(probe_id: int = 0, sleep_seconds: int = 60):
     """Sleep for a short period and report CPU-side placement."""
@@ -515,10 +523,8 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
     const counts = tasks.reduce((acc, task) => {
       const label = `${task.displayName || task.name} ${task.description || ''} ${'module' in task ? task.module : task.relativePath}`.toLowerCase();
       const resources = task.resources;
-      if (resources?.gpu || label.includes('gpu') || label.includes('cuda')) {
+      if (resources?.gpu_mem || label.includes('gpu') || label.includes('cuda') || label.includes('llm') || label.includes('model') || label.includes('inference')) {
         acc.gpu += 1;
-      } else if (label.includes('llm') || label.includes('model') || label.includes('inference')) {
-        acc.llm += 1;
       } else if (label.includes('file') || label.includes('io') || label.includes('input') || label.includes('artifact')) {
         acc.io += 1;
       } else if (label.includes('util') || label.includes('health') || label.includes('smoke')) {
@@ -1147,7 +1153,7 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
         value: '',
       })),
       outputs: task.outputs,
-      resources: task.resources,
+      resources: normalizeResources(task.resources),
       configured: true,
     },
   });
@@ -1167,7 +1173,7 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
         { name: 'sleep_seconds', dataType: 'int' },
       ],
       outputs: [{ name: 'placement', dataType: 'dict' }],
-      resources: { cpu: 1, cpu_mem: 128, gpu: 0, gpu_mem: 0 },
+      resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
     };
   };
 
@@ -1228,7 +1234,8 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
         },
       ],
       outputs: [{ name: 'placement', dataType: 'dict' }],
-      resources: { cpu: 1, cpu_mem: 128, gpu: 1, gpu_mem: 0 },
+      task_kind: 'gpu',
+      resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
       configured: true,
     },
   });
@@ -1387,7 +1394,9 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
       const reusedCount = loaded.importedTaskDefinitions?.skipped.filter((entry) => entry.reason === 'exists-same').length || 0;
       const remappedCount = loaded.importedTaskDefinitions?.remapped?.length || 0;
       if (importedCount > 0 || remappedCount > 0) {
-        await loadWorkspaceTasks(loaded.workspaceDir);
+        void loadWorkspaceTasks(loaded.workspaceDir).catch((refreshError) => {
+          console.error('Failed to refresh workspace tasks after loading system workflow:', refreshError);
+        });
       }
       const taskImportText = importedCount > 0 || reusedCount > 0 || remappedCount > 0
         ? ` Tasks added: ${importedCount}, reused: ${reusedCount}, remapped: ${remappedCount}.`
@@ -1649,7 +1658,8 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
           },
         ],
         outputs: [{ name: 'placement', dataType: 'dict' }],
-        resources: { cpu: 1, cpu_mem: 128, gpu: 1, gpu_mem: 0 },
+        task_kind: 'gpu',
+        resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
         configured: true,
       },
     }));
@@ -1927,7 +1937,7 @@ export default function BuiltinTasksSidebar({ onOpenRuns }: BuiltinTasksSidebarP
         </div>
         {task.resources && (
           <Text type="secondary" style={{ fontSize: '11px' }}>
-            CPU {task.resources.cpu}, GPU {task.resources.gpu}, Mem {task.resources.cpu_mem}MB, VRAM {task.resources.gpu_mem}MB
+            CPU {task.resources.cpu_num ?? (task.resources as any).cpu}, VRAM {task.resources.gpu_mem}MB, I/O {task.resources.io_num ?? 0}
           </Text>
         )}
       </div>

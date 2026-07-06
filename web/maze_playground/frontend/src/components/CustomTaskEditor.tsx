@@ -81,7 +81,7 @@ export default function CustomTaskEditor({ node, open, onClose }: CustomTaskEdit
 
   const defaultCode = `from maze import task
 
-@task(resources={"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def my_custom_task(text: str = ""):
     """
     Custom task example
@@ -336,7 +336,7 @@ def my_custom_task(text: str = ""):
               <ul style={{ marginBottom: 0 }}>
                 <li>Inputs are inferred from function parameters, e.g. <code>def my_task(text: str, count: int = 1):</code></li>
                 <li>Outputs are inferred from returned dictionary keys, e.g. <code>{`return {"result": value}`}</code></li>
-                <li><code>resources</code> (optional): Resource config, e.g. <code>{`{"cpu": 1, "gpu": 0}`}</code></li>
+                <li><code>resources</code> (optional): Resource config, e.g. <code>{`{"cpu_num": 1, "gpu_mem": 0, "io_num": 0}`}</code></li>
                 <li>Return value must be a dictionary</li>
               </ul>
             </div>

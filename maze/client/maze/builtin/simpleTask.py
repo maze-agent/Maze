@@ -11,7 +11,7 @@ from maze.client.maze.decorator import task
 
 
 
-@task(resources={"cpu": 1, "cpu_mem": 123, "gpu": 1, "gpu_mem": 123})
+@task(task_kind="gpu", resources={"cpu_num": 1, "gpu_mem": 123, "io_num": 0})
 def task1(task1_input: str):
     
     now = datetime.now()
@@ -23,7 +23,7 @@ def task1(task1_input: str):
     }
 
 
-@task(resources={"cpu": 10, "cpu_mem": 123, "gpu": 0.8, "gpu_mem": 324})
+@task(task_kind="gpu", resources={"cpu_num": 10, "gpu_mem": 324, "io_num": 0})
 def task2(task2_input: str):
     """
     Task 2: Get input and add current timestamp and suffix

@@ -13,6 +13,7 @@
 ## 📰 News
 
 
+- **2026-07**: Our Maze research paper has been accepted to SC26. We are aligning the open-source implementation with the paper version in small, reviewable updates.
 - **2026-06**: Maze added practical cluster and model operations in Playground: remote worker management, head-side command execution for developer debugging, local model directory scanning, model testing through Maze tasks, GPU memory visibility, model resource estimation, and runtime fault-tolerance traces for OOM retry, node-loss recovery, and LLM invocation repair.
 - **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
 - **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/ReAct/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Playground `Runs` console.
@@ -28,14 +29,14 @@
 
 ## Latest Update Summary
 
-This update focuses on making Maze more practical to operate as a distributed runtime for model-backed workflows:
+This update focuses on aligning the open-source runtime with the accepted SC26 paper version, with an emphasis on core execution behavior and day-to-day usability:
 
-- Added Playground cluster operations for starting from a head node, registering remote workers, testing worker SSH connectivity, reusing saved worker profiles for lifecycle actions, and running head-side shell commands for developer debugging.
-- Added local model operations on the head server: configure a server-side model directory, scan available local models, choose a model from a dropdown, test loading through a Maze task, and inspect GPU memory while tests run.
-- Added a model anchor contract for workflow tasks, using `backend` to describe the execution backend, plus lightweight model resource estimates based on model metadata, parameter scale, quantization/dtype hints, and weight size.
-- Added runtime resource feedback for tasks so Maze can record observed CPU/GPU/memory behavior and use those observations as the basis for later retry, scheduling, and fault-tolerance decisions.
-- Added a fault-tolerance trace to run snapshots and the Playground Runtime panel, covering failure diagnosis, repair action, retry, and outcome.
-- Added concrete recovery paths for GPU OOM resource re-anchoring, node-loss worker reselect, pinned-node failure reporting, and Maze-controlled LLM invocation repair.
+- Standardized task resource semantics around `cpu_num`, `gpu_mem`, and `io_num`, with `task_kind` limited to `cpu`, `gpu`, and `io`.
+- Updated the Resource Mix demo and related Playground task definitions to use the paper-aligned CPU/GPU/I/O task model.
+- Hardened scheduler failure handling so malformed task construction reports a task-level error instead of terminating the scheduler process.
+- Improved Maze head startup and cluster APIs to fail fast when the scheduler process exits unexpectedly.
+- Simplified one-line Playground startup: `maze start --head --playground` now wires the Core, Workbench backend, and frontend together, supports configurable Playground ports, and reports port conflicts before startup.
+- Reduced the first-load latency for built-in workflow templates by avoiding repeated Python bridge startup during trusted system-catalog task imports.
 
 <br>
 
@@ -117,12 +118,12 @@ This update focuses on making Maze more practical to operate as a distributed ru
 from maze import MaClient, task
 
 # 1. Define task functions using the @task decorator.
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def greet(text: str = ""):
     return {"result": f"Hello {text}"}
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def uppercase(result: str = ""):
     return {"upper": result.upper()}
 
@@ -152,7 +153,7 @@ workflow.show_results(run_id)
 from maze import MaClient, task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def summarize(topic: str = ""):
     return {"summary": f"Maze can build workflows dynamically for {topic}."}
 
@@ -249,10 +250,9 @@ name: gpu-demo
 command: python train.py
 workspace: .
 resources:
-  cpu: 4
-  cpu_mem: 1024
-  gpu: 1
-  gpu_mem: 0
+  cpu_num: 4
+  gpu_mem: 8192
+  io_num: 0
 env:
   conda: maze
   vars:
@@ -285,7 +285,7 @@ You can configure task-level reliability directly on the decorator:
 
 ```python
 @task(
-    resources={"cpu": 2, "cpu_mem": 1024, "gpu": 1, "gpu_mem": 0},
+    resources={"cpu_num": 2, "gpu_mem": 8192, "io_num": 0},
     timeout_seconds=300,
     max_retries=2,
     retry_backoff_seconds=5,
@@ -342,8 +342,20 @@ maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
 ## 🖥️ Maze Playground
 Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, running ReAct workflow templates, using MCP tools, collaborating with a built-in Workspace Agent, and inspecting static, dynamic, ReAct, and app runs in one `Runs` console. You can start the playground with the following command option.
 ```
-maze start --head --port HEAD_PORT --playground
+maze start --head --port HEAD_PORT --ray-head-port RAY_HEAD_PORT --playground
 ```
+
+The default Playground entry is `http://localhost:5173`. The CLI starts and wires the Maze Head, Workbench backend, and Workbench frontend together. To use a custom Playground UI port:
+
+```bash
+maze start --head \
+  --port 9000 \
+  --ray-head-port 6380 \
+  --playground \
+  --playground-port 5174
+```
+
+When the UI port is changed, the Workbench backend defaults to `--playground-port + 1`; use `--playground-backend-port` only when the backend API port must be fixed. Maze checks configured ports before startup and prints a clear error if a port is already in use or two services are configured to share one port.
 
 The sidebar separates reusable building blocks into workspace tasks, builtin workflows, and builtin tasks. The current builtin workflow template is `ReAct Workflow`. The builtin agent utility tasks include `Write File`, `Read File`, and `Exec Code`, which operate under `workspace/files` and allow ReAct agents to create helper scripts, inspect files, and execute Python code through Maze tasks. Online ReAct nodes include `Max Tokens`; ReAct nodes and the ReAct run modal include `Task Timeout`, which controls both per-task waits and the default `Exec Code` subprocess timeout while Maze derives the run-level safety timeout automatically. Long tool outputs are compacted before the next LLM turn, and malformed JSON decisions become repair observations that the agent can recover from.
 

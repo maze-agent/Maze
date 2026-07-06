@@ -20,7 +20,7 @@ def _tokens(text: str) -> list[str]:
     ]
 
 
-@task(resources={"cpu": 2, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 2, "gpu_mem": 0, "io_num": 0})
 def resource_mix_cpu_token_stats(corpus: str = "", sections: list = None):
     """Compute CPU-heavy token counts and per-section densities."""
     sections = sections or []

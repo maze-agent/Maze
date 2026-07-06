@@ -1,7 +1,7 @@
 from maze import task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 192, "gpu": 0, "gpu_mem": 0})
+@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def resource_mix_quality_gate(scorecard: dict = None, findings: list = None, graph_stats: dict = None, embedding_summary: dict = None):
     """Apply a deterministic quality gate before the report task runs."""
     scorecard = scorecard or {}

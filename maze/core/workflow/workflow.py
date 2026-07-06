@@ -10,6 +10,7 @@ import time
 HACS_TASK_TYPE_AVG_TIMES = {
     "cpu": 3.0,
     "gpu": 60.0,
+    "io": 8.0,
 }
 
 class LangGraphWorkflow:
@@ -79,6 +80,7 @@ class Workflow:
         self.task_states[task_id] = {
             "task_id": task_id,
             "task_name": task.task_name,
+            "task_kind": task.task_kind,
             "status": "pending",
             "started_at": None,
             "finished_at": None,
@@ -138,10 +140,7 @@ class Workflow:
 
     def _get_task_type(self, task_id: str) -> str:
         task = self.tasks[task_id]
-        resources = task.resources or {}
-        if resources.get("gpu", 0) > 0:
-            return "gpu"
-        return "cpu"
+        return getattr(task, "task_kind", "cpu") or "cpu"
 
     def mark_task_started(
         self,
@@ -156,6 +155,7 @@ class Workflow:
         state = self.task_states.setdefault(task_id, {
             "task_id": task_id,
             "task_name": self.tasks[task_id].task_name,
+            "task_kind": self.tasks[task_id].task_kind,
             "status": "pending",
             "started_at": None,
             "finished_at": None,

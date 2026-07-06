@@ -14,7 +14,7 @@ import {
 } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 
-type TaskKind = 'cpu' | 'gpu' | 'io' | 'llm';
+type TaskKind = 'cpu' | 'gpu' | 'io';
 
 const taskKindStyles: Record<TaskKind, {
   label: string;
@@ -44,16 +44,11 @@ const taskKindStyles: Record<TaskKind, {
     background: '#f0fdf4',
     iconColor: '#059669',
   },
-  llm: {
-    label: 'LLM',
-    color: '#4338ca',
-    border: '#6366f1',
-    background: '#eef2ff',
-    iconColor: '#4f46e5',
-  },
 };
 
 function taskKind(data: any): TaskKind {
+  const explicitKind = data.task_kind || data.taskKind;
+  if (['cpu', 'gpu', 'io'].includes(explicitKind)) return explicitKind;
   const resources = data.resources || {};
   const label = [
     data.label,
@@ -62,11 +57,19 @@ function taskKind(data: any): TaskKind {
     data.functionName,
   ].filter(Boolean).join(' ').toLowerCase();
 
-  if (Number(resources.gpu || 0) > 0 || Number(resources.gpu_mem || 0) > 0 || label.includes('gpu') || label.includes('cuda')) {
+  if (
+    Number(resources.gpu_mem || 0) > 0
+    || data.modelAnchor
+    || data.model_anchor
+    || data.localModel
+    || label.includes('gpu')
+    || label.includes('cuda')
+    || label.includes('llm')
+    || label.includes('model')
+    || label.includes('inference')
+    || label.includes('embed')
+  ) {
     return 'gpu';
-  }
-  if (label.includes('llm') || label.includes('model') || label.includes('inference') || label.includes('embed')) {
-    return 'llm';
   }
   if (label.includes('file') || label.includes('io') || label.includes('input') || label.includes('artifact') || label.includes('sandbox')) {
     return 'io';

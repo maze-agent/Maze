@@ -2,7 +2,7 @@ from pathlib import Path
 from maze import task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def file_sandbox_report(
     input_path: str = "demo/input.txt",
     report_path: str = "reports/file_sandbox_report.md",

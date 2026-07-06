@@ -1065,6 +1065,8 @@ maze start --head \
            --ray-head-port 6379 \
            --strategy least-loaded \
            [--playground] \
+           [--playground-port 5173] \
+           [--playground-backend-port 3001] \
            [--log-level INFO] [--log-file /path/to/log]
 ```
 
@@ -1073,9 +1075,30 @@ maze start --head \
 | `--port` | 8000 | Maze Head FastAPI 端口 |
 | `--ray-head-port` | 6379 | Ray Head 的 GCS 端口 |
 | `--strategy` | `least-loaded` | 调度策略；常用值包括 `least-loaded`、`Default`、`DAPS`、`HACS`、`ATLAS` |
-| `--playground` |  | 同时拉起 Playground 后端 (3001) + 前端 (5173) |
+| `--playground` |  | 随 Head 一起拉起 Workbench 前端和 Node.js 后端 |
+| `--playground-port` | 5173 | Workbench 页面入口端口 |
+| `--playground-backend-port` | 3001 | Workbench 后端 API 端口；如果未设置且修改了 `--playground-port`，默认使用 `--playground-port + 1` |
 | `--log-level` | `INFO` | `DEBUG/INFO/WARNING/ERROR/CRITICAL` |
 | `--log-file` |  | 写入文件 |
+
+示例：
+
+```bash
+# 默认一行启动。
+maze start --head --port 8000 --ray-head-port 6379 --playground
+
+# 自定义端口。CLI 会自动把 Workbench 后端连到所选 Maze Head，
+# 也会自动把前端代理连到所选 Workbench 后端。
+maze start --head \
+           --port 9000 \
+           --ray-head-port 6380 \
+           --playground \
+           --playground-port 5174
+```
+
+当使用 `--playground-port 5174` 时，Workbench 后端默认使用 `5175`。
+只有需要固定后端端口时才需要显式设置 `--playground-backend-port`。
+Maze 会在启动前检查端口；如果端口已被占用，或者两个服务配置到了同一个端口，会直接给出明确错误提示。
 
 #### Worker 模式
 ```bash
@@ -1098,7 +1121,18 @@ maze stop [--log-level INFO] [--log-file ...]
 
 ## 四、Maze Playground 后端 REST API
 
-由 `maze start --head --playground` 拉起，运行在 Node.js（默认端口 **3001**），代码：`web/maze_playground/backend/src/server.js`。前端 (5173) 调它，它再调用 Maze Head (`http://localhost:8000`) 和 Python 桥 `maze_bridge.py`。
+由 `maze start --head --playground` 拉起，运行在 Node.js，代码：`web/maze_playground/backend/src/server.js`。Workbench 前端调它，它再调用 Maze Head 和 Python 桥 `maze_bridge.py`。
+
+默认端口：
+
+| 服务 | 默认端口 |
+|---|---|
+| Maze Head API | 8000 |
+| Ray Head GCS | 6379 |
+| Workbench 前端 | 5173 |
+| Workbench 后端 | 3001 |
+
+使用自定义端口时，CLI 会自动为 Workbench 后端设置 `MAZE_CORE_URL`，并自动为前端设置 `VITE_MAZE_BACKEND_URL`。普通用户通常不需要手动 export 这些环境变量。
 
 环境变量：
 

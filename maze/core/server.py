@@ -21,6 +21,7 @@ from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
+from maze.core.workflow.resources import apply_model_anchor_estimate, model_anchor_gpu_mem_mb, normalize_resources
 from maze.core.local_models import DEFAULT_MODEL_DIR, RUNTIME_CONFIG_PATH, model_dir
 
 
@@ -483,26 +484,11 @@ def _model_anchor_for_model(model: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _model_gpu_mem_request_mb(anchor: Dict[str, Any]) -> int:
-    for key in ("estimated_gpu_mem_mb", "gpu_mem", "gpu_memory_mb"):
-        value = anchor.get(key)
-        if value:
-            return max(0, int(math.ceil(float(value))))
-    bytes_value = anchor.get("estimated_weight_memory_bytes") or anchor.get("weight_bytes")
-    if bytes_value:
-        return max(0, int(math.ceil(float(bytes_value) * 1.2 / (1024 * 1024))))
-    return 0
-
-
 async def _resources_for_model_anchor(
     resources: Dict[str, Any] | None,
     model_anchor: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
-    next_resources = dict(resources or {})
-    next_resources["cpu"] = max(1, int(next_resources.get("cpu") or 1))
-    next_resources["cpu_mem"] = max(0, int(next_resources.get("cpu_mem") or 0))
-    next_resources["gpu"] = max(0, int(next_resources.get("gpu") or 0))
-    next_resources["gpu_mem"] = max(0, int(next_resources.get("gpu_mem") or 0))
+    next_resources = apply_model_anchor_estimate(resources, model_anchor)
 
     if not model_anchor:
         return next_resources
@@ -514,23 +500,18 @@ async def _resources_for_model_anchor(
         if head_node_id:
             next_resources["target_node_id"] = head_node_id
 
-    if str(anchor.get("backend") or "transformers") == "transformers":
-        next_resources["gpu"] = max(1, next_resources.get("gpu", 0))
-        next_resources["gpu_mem"] = max(next_resources.get("gpu_mem", 0), _model_gpu_mem_request_mb(anchor))
-
     return next_resources
 
 
 def _model_test_resources(cluster: Dict[str, Any], model: Dict[str, Any] | None = None) -> Dict[str, Any]:
     head_node_id = cluster.get("head_node_id")
     head = next((node for node in cluster.get("nodes", []) if node.get("node_id") == head_node_id), None)
-    resources = {"cpu": 1, "cpu_mem": 1024, "gpu": 0, "gpu_mem": 0}
+    resources = {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
     if head_node_id:
         resources["target_node_id"] = head_node_id
-    estimated_gpu_mem = int((model or {}).get("estimated_gpu_mem_mb") or 0)
+    estimated_gpu_mem = model_anchor_gpu_mem_mb(_model_anchor_for_model(model or {})) if model else 0
     for device in (head or {}).get("resources", {}).get("gpu", {}).get("devices", []):
         if device.get("total_count", 0) > 0:
-            resources["gpu"] = 1
             if estimated_gpu_mem:
                 resources["gpu_mem"] = estimated_gpu_mem
             return resources
@@ -585,6 +566,7 @@ async def _run_model_test_task(model: Dict[str, Any], path: Path, checks: List[D
             code_str=LOCAL_MODEL_TEST_TASK_CODE,
             code_ser=None,
             resources=resources,
+            task_kind="gpu",
             model_anchor=model_anchor,
             timeout_seconds=MODEL_TEST_TASK_TIMEOUT_SECONDS,
         )
@@ -764,6 +746,7 @@ async def save_task(req:Request):
                 code_str=code_str,
                 code_ser=code_ser,
                 resources=resources,
+                task_kind=data.get("task_kind"),
                 file_context=data.get("file_context"),
                 model_anchor=model_anchor,
                 max_retries=data.get("max_retries"),
@@ -802,6 +785,7 @@ async def save_task_and_add_edge(req:Request):
                 code_str=code_str,
                 code_ser=code_ser,
                 resources=resources,
+                task_kind=data.get("task_kind"),
                 file_context=data.get("file_context"),
                 model_anchor=model_anchor,
                 max_retries=data.get("max_retries"),
@@ -1435,10 +1419,11 @@ async def add_langgraph_task(req:Request):
         task_name: str =data["task_name"]
         code_ser = data["code_ser"]
         resources = data["resources"]
+        task_kind = data.get("task_kind")
         task_id: str = str(uuid.uuid4())
      
         if(task_type == TaskType.LANGGRAPH.value):
-            mapath.get_workflow(workflow_id).add_task(task_id,LangGraphTask(workflow_id,task_id,task_name,code_ser=code_ser,resources=resources))
+            mapath.get_workflow(workflow_id).add_task(task_id,LangGraphTask(workflow_id,task_id,task_name,code_ser=code_ser,resources=resources,task_kind=task_kind))
             
         else:
             raise HTTPException(status_code=500, detail="Invalid task_type")

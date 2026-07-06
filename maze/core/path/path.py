@@ -27,6 +27,7 @@ from maze.core.scheduler.scheduler import scheduler_process
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.files.artifact_store import LocalCASArtifactStore
 from maze.core.resource_history import ResourceHistoryStore
+from maze.core.workflow.resources import ResourceSpecError, normalize_task_semantics, require_schedulable_resources
 from maze.utils.utils import get_available_ports
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,23 @@ class MaPath:
                     pass
 
     def _send_scheduler_message(self, message: Dict[str, Any]):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable:
+            raise RuntimeError(unavailable)
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
+
+    def _scheduler_unavailable_message(self) -> str | None:
+        scheduler_process = getattr(self, "scheduler_process", None)
+        if scheduler_process is None:
+            return "scheduler process is not initialized"
+        if scheduler_process.is_alive():
+            return None
+
+        exitcode = scheduler_process.exitcode
+        pid = scheduler_process.pid
+        detail = f"pid={pid}, exitcode={exitcode}" if pid else f"exitcode={exitcode}"
+        return f"scheduler process exited ({detail}). Restart Maze core to recover the scheduler."
         
     def create_workflow(self,workflow_id:str):
         '''
@@ -208,6 +224,19 @@ class MaPath:
             data.get("model_anchor"),
             data.get("task_name"),
         )
+        data["task_kind"], data["resources"] = normalize_task_semantics(
+            task_kind=data.get("task_kind"),
+            resources=data.get("resources"),
+            model_anchor=data.get("model_anchor"),
+        )
+        try:
+            require_schedulable_resources(
+                data["task_kind"],
+                data["resources"],
+                data.get("model_anchor"),
+            )
+        except ResourceSpecError as exc:
+            raise ValueError(f"task {task.task_name}: {exc}") from exc
 
         if file_context and file_context.get("enabled"):
             task_node_ids = file_context.get("task_node_ids") or {}
@@ -382,6 +411,7 @@ class MaPath:
                 "run_id": run_id,
                 "task_spec_id": task_spec.task_spec_id,
                 "task_name": task_spec.task_name,
+                "task_kind": task_spec.task_kind,
                 "inputs": task_spec.inputs,
                 "outputs": task_spec.outputs,
                 "resources": task_spec.resources,
@@ -425,6 +455,7 @@ class MaPath:
                     "task_id": task.task_id,
                     "task_spec_id": task_spec.task_spec_id,
                     "task_name": task.task_name,
+                    "task_kind": task.task_kind,
                     "parents": sorted(dynamic_run.task_parents.get(task.task_id, set())),
                     "request_id": request_id,
                     "status": status,
@@ -683,6 +714,19 @@ class MaPath:
             data.get("model_anchor"),
             data.get("task_name"),
         )
+        data["task_kind"], data["resources"] = normalize_task_semantics(
+            task_kind=data.get("task_kind"),
+            resources=data.get("resources"),
+            model_anchor=data.get("model_anchor"),
+        )
+        try:
+            require_schedulable_resources(
+                data["task_kind"],
+                data["resources"],
+                data.get("model_anchor"),
+            )
+        except ResourceSpecError as exc:
+            raise ValueError(f"task {task.task_name}: {exc}") from exc
         file_context = dynamic_run.file_context
         if file_context and file_context.get("enabled"):
             parent_task_ids = sorted(dynamic_run.task_parents.get(task.task_id, set()))
@@ -1174,6 +1218,7 @@ class MaPath:
                         "run_id": run_id,
                         "task_id": ready_task.task_id,
                         "task_name": ready_task.task_name,
+                        "task_kind": ready_task.task_kind,
                     },
                 })
                 self._submit_dynamic_task(ready_task)
@@ -1224,6 +1269,9 @@ class MaPath:
         return self.ray_head_port
 
     async def get_cluster_resources(self, timeout: float = 5.0):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable:
+            raise RuntimeError(unavailable)
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.cluster_resource_requests[request_id] = response_queue
@@ -1242,6 +1290,9 @@ class MaPath:
             self.cluster_resource_requests.pop(request_id, None)
 
     async def get_cluster_queues(self, timeout: float = 5.0):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable:
+            raise RuntimeError(unavailable)
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.cluster_queue_requests[request_id] = response_queue
@@ -1260,6 +1311,9 @@ class MaPath:
             self.cluster_queue_requests.pop(request_id, None)
 
     async def set_cluster_node_disabled(self, node_id: str, disabled: bool, timeout: float = 5.0):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable:
+            raise RuntimeError(unavailable)
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.cluster_control_requests[request_id] = response_queue
@@ -1283,6 +1337,9 @@ class MaPath:
             self.cluster_control_requests.pop(request_id, None)
     
     async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable:
+            raise RuntimeError(unavailable)
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.worker_registration_requests[request_id] = response_queue
@@ -1326,7 +1383,19 @@ class MaPath:
         self.socket_from_scheduler = self.context.socket(zmq.ROUTER)
         self.socket_from_scheduler.bind(f"tcp://127.0.0.1:{port2}")
 
-        message = self.ready_queue.get()
+        deadline = time.time() + 60
+        while True:
+            if not self.ready_queue.empty():
+                message = self.ready_queue.get()
+                break
+            if not self.scheduler_process.is_alive():
+                raise RuntimeError(
+                    f"scheduler process exited before ready "
+                    f"(exitcode={self.scheduler_process.exitcode})"
+                )
+            if time.time() >= deadline:
+                raise TimeoutError("Timed out waiting for scheduler process to become ready")
+            time.sleep(0.1)
         if message == 'ready':
             pass
         else:

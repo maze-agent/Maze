@@ -4,7 +4,7 @@ from pathlib import Path
 from maze import task
 
 
-@task(resources={"cpu": 1, "cpu_mem": 192, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def resource_mix_write_section_files(sections: list = None, output_dir: str = "resource_mix_demo/sections"):
     """Write section text files and a manifest artifact."""
     sections = sections or []

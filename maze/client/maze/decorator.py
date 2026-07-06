@@ -23,6 +23,7 @@ class TaskMetadata:
     inputs: List[str]
     outputs: List[str]
     resources: Dict[str, Any]
+    task_kind: str
     data_types: Dict[str, str]  # Parameter data types
     max_retries: int | None = None
     retry_backoff_seconds: float = 0
@@ -39,10 +40,9 @@ def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None
     Normalize and validate resource configuration
     
     Rules:
-    1. Default: cpu=1, cpu_mem=0, gpu=0, gpu_mem=0
-    2. Fill missing fields with defaults
-    3. If cpu is specified, ensure it's at least 1
-    4. If gpu_mem is specified, ensure gpu is at least 1
+    1. Default: cpu_num=1, gpu_mem=0, io_num=0
+    2. Legacy cpu/gpu/gpu_mem inputs are accepted and converted.
+    3. GPU device count is not emitted as public task metadata.
     
     Args:
         resources: User-provided resource configuration
@@ -50,46 +50,39 @@ def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None
     Returns:
         Dict: Normalized resource configuration
     """
-    # Default resource configuration
     default_resources = {
-        "cpu": 1,
-        "cpu_mem": 0,
-        "gpu": 0,
-        "gpu_mem": 0
+        "cpu_num": 1,
+        "gpu_mem": 0,
+        "io_num": 0,
     }
-    
-    # Start with defaults
     normalized = default_resources.copy()
-    explicit_gpu = False
     explicit_gpu_mem = False
 
     if resources is None:
         resources = {}
     else:
-        explicit_gpu = "gpu" in resources
         explicit_gpu_mem = "gpu_mem" in resources
-    
-    # Update with user-provided values
-    for key in ["cpu", "cpu_mem", "gpu", "gpu_mem"]:
-        if key in resources:
-            normalized[key] = resources[key]
+
+    if "cpu_num" in resources:
+        normalized["cpu_num"] = resources["cpu_num"]
+    elif "cpu" in resources:
+        normalized["cpu_num"] = resources["cpu"]
+    if "gpu_mem" in resources:
+        normalized["gpu_mem"] = resources["gpu_mem"]
+    if "io_num" in resources:
+        normalized["io_num"] = resources["io_num"]
 
     if func is not None and not explicit_gpu_mem:
-        should_infer_gpu = (not explicit_gpu) or normalized["gpu"] > 0
-        if should_infer_gpu:
-            inferred_gpu = infer_gpu_resources_from_function(func)
-            normalized["gpu_mem"] = max(normalized["gpu_mem"], inferred_gpu["gpu_mem"])
-            if not explicit_gpu:
-                normalized["gpu"] = max(normalized["gpu"], inferred_gpu["gpu"])
-    
-    # Ensure cpu is at least 1 if specified
-    if normalized["cpu"] < 1:
-        normalized["cpu"] = 1
-    
-    # If gpu_mem is specified and > 0, ensure gpu is at least 1
-    if normalized["gpu_mem"] > 0 and normalized["gpu"] < 1:
-        normalized["gpu"] = 1
-    
+        inferred_gpu = infer_gpu_resources_from_function(func)
+        normalized["gpu_mem"] = max(normalized["gpu_mem"], inferred_gpu.get("gpu_mem", 0))
+
+    if normalized["cpu_num"] < 1:
+        normalized["cpu_num"] = 1
+    if normalized["gpu_mem"] < 0:
+        normalized["gpu_mem"] = 0
+    if normalized["io_num"] < 0:
+        normalized["io_num"] = 0
+
     return normalized
 
 
@@ -281,6 +274,7 @@ def task(
     func: Callable = None,
     *,
     resources: Dict[str, Any] = None,
+    task_kind: str | None = None,
     data_types: Dict[str, str] = None,
     max_retries: int | None = None,
     retry_backoff_seconds: float = 0,
@@ -296,10 +290,11 @@ def task(
     returned dict. The task must return a dict at runtime.
     
     Args:
-        resources: Resource requirements configuration, defaults to {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
+        resources: Resource requirements configuration, defaults to {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
+        task_kind: Optional task kind, one of "cpu", "gpu", or "io".
         
     Example:
-        @task(resources={"cpu": 1, "cpu_mem": 128})
+        @task(task_kind="cpu", resources={"cpu_num": 1})
         def my_task(input_value: str):
             return {"output_value": input_value + " processed"}
     """
@@ -323,6 +318,9 @@ def task(
 
         # Normalize and validate resource configuration
         resources_config = _normalize_resources(resources, func)
+        task_kind_config = (task_kind or ("gpu" if resources_config.get("gpu_mem", 0) > 0 else "cpu")).strip().lower()
+        if task_kind_config not in {"cpu", "gpu", "io"}:
+            raise ValueError("task_kind must be one of: cpu, gpu, io")
         types_config = _infer_data_types(func, inputs, outputs, data_types=data_types)
 
         # Create metadata
@@ -334,6 +332,7 @@ def task(
             inputs=inputs,
             outputs=outputs,
             resources=resources_config,
+            task_kind=task_kind_config,
             data_types=types_config,
             max_retries=max_retries,
             retry_backoff_seconds=retry_backoff_seconds,

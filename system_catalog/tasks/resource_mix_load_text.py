@@ -30,7 +30,7 @@ def _pick_text_file(input_path: str) -> Path | None:
     return txt_files[0] if txt_files else None
 
 
-@task(resources={"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0})
+@task(task_kind="io", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def resource_mix_load_text(input_path: str = "questions.txt", fallback_text: str = SAMPLE_TEXT):
     """Read an uploaded text file, or create a deterministic sample when none exists."""
     source = _pick_text_file(input_path)

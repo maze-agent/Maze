@@ -8,7 +8,7 @@ from maze.client.front.decorator import task
 import os
 
 
-@task(data_types={"tongue_image_path": "file:image", "tongue_features": "dict"}, resources={"cpu": 2, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0})
+@task(data_types={"tongue_image_path": "file:image", "tongue_features": "dict"}, resources={"cpu_num": 2, "gpu_mem": 0, "io_num": 0})
 def analyze_tongue_image(tongue_image_path: str):
     """
     Analyze tongue coating image features using VLM
@@ -49,7 +49,7 @@ def analyze_tongue_image(tongue_image_path: str):
     raise Exception(f"VLM analysis failed: {response.message}")
 
 
-@task(data_types={"symptom_description": "str", "structured_symptoms": "dict"}, resources={"cpu": 1, "cpu_mem": 256, "gpu": 0, "gpu_mem": 0})
+@task(data_types={"symptom_description": "str", "structured_symptoms": "dict"}, resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
 def extract_symptoms(symptom_description: str):
     """
     Extract structured symptom information from patient descriptions using LLM
@@ -108,7 +108,7 @@ def extract_symptoms(symptom_description: str):
     raise Exception(f"Symptom extraction failed: {response.message}")
 
 
-@task(data_types={"tongue_features": "dict", "structured_symptoms": "dict", "medical_advice": "dict"}, resources={"cpu": 2, "cpu_mem": 512, "gpu": 0, "gpu_mem": 0})
+@task(data_types={"tongue_features": "dict", "structured_symptoms": "dict", "medical_advice": "dict"}, resources={"cpu_num": 2, "gpu_mem": 0, "io_num": 0})
 def generate_medical_advice(tongue_features: dict, structured_symptoms: dict):
     """
     Generate medical advice by combining tongue diagnosis and symptoms using web search

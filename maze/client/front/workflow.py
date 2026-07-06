@@ -44,7 +44,8 @@ class MaWorkflow:
                  task_input: Dict[str, Any] = None,
                  task_output: Dict[str, Any] = None,
                  resources: Dict[str, Any] = None,
-                 model_anchor: Dict[str, Any] = None) -> MaTask:
+                 model_anchor: Dict[str, Any] = None,
+                 task_kind: str = None) -> MaTask:
         """
         Add task to workflow (supports decorator function or manual configuration)
         
@@ -78,7 +79,7 @@ class MaWorkflow:
         """
         # New API: Use decorator function
         if task_func is not None:
-            return self._add_task_from_decorator(task_func, inputs, task_name, resources, model_anchor)
+            return self._add_task_from_decorator(task_func, inputs, task_name, resources, model_anchor, task_kind)
         
         # Legacy API: Manual configuration (kept for compatibility)
         return self._add_task_manual(task_type, task_name)
@@ -88,7 +89,8 @@ class MaWorkflow:
                                   inputs: Dict[str, Any],
                                   task_name: Optional[str] = None,
                                   resources: Dict[str, Any] = None,
-                                  model_anchor: Dict[str, Any] = None) -> MaTask:
+                                  model_anchor: Dict[str, Any] = None,
+                                  task_kind: str = None) -> MaTask:
         """
         Create task from decorator function (internal method)
         """
@@ -135,6 +137,7 @@ class MaWorkflow:
             'task_output': task_output,
             'resources': resources or metadata.resources,
         }
+        save_data['task_kind'] = task_kind or metadata.task_kind
         if model_anchor:
             save_data['model_anchor'] = model_anchor
         
