@@ -13,6 +13,7 @@
 ## 📰 News
 
 
+- **2026-07-10**: Maze Core added paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS`/`HACS` task scheduling, observed-runtime EMA estimates, richer queue diagnostics, and an optional zero-VRAM standby worker execution path.
 - **2026-07**: Our Maze research paper has been accepted to SC26. We are aligning the open-source implementation with the paper version in small, reviewable updates.
 - **2026-06**: Maze added practical cluster and model operations in Playground: remote worker management, head-side command execution for developer debugging, local model directory scanning, model testing through Maze tasks, GPU memory visibility, model resource estimation, and runtime fault-tolerance traces for OOM retry, node-loss recovery, and LLM invocation repair.
 - **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
@@ -29,14 +30,16 @@
 
 ## Latest Update Summary
 
-This update focuses on aligning the open-source runtime with the accepted SC26 paper version, with an emphasis on core execution behavior and day-to-day usability:
+This update focuses on bringing Maze Core closer to the SC26 paper scheduler while keeping the implementation modular and observable:
 
-- Standardized task resource semantics around `cpu_num`, `gpu_mem`, and `io_num`, with `task_kind` limited to `cpu`, `gpu`, and `io`.
-- Updated the Resource Mix demo and related Playground task definitions to use the paper-aligned CPU/GPU/I/O task model.
-- Hardened scheduler failure handling so malformed task construction reports a task-level error instead of terminating the scheduler process.
-- Improved Maze head startup and cluster APIs to fail fast when the scheduler process exits unexpectedly.
-- Simplified one-line Playground startup: `maze start --head --playground` now wires the Core, Workbench backend, and frontend together, supports configurable Playground ports, and reports port conflicts before startup.
-- Reduced the first-load latency for built-in workflow templates by avoiding repeated Python bridge startup during trusted system-catalog task imports.
+- Added real heterogeneous scheduler queues for `gpu`, `cpu`, and `io` tasks. Maze no longer lets a blocked GPU queue head stop CPU or I/O queue progress, while still preserving same-queue head order to avoid starvation.
+- Added explicit task scheduling algorithms with `FCFS` and `HACS`. `FCFS` is the default, and `HACS` is now implemented behind a pluggable strategy interface instead of being embedded directly in `scheduler.py`.
+- Added HACS scheduling metadata for static and dynamic workflows, including predicted duration, topological weight, workflow wait time, remaining value-task count, final HACS score, and score breakdown.
+- Added a lightweight `RuntimeEstimator` based on observed runtime EMA. It falls back from `task_kind + code_hash` to `task_kind` and then to conservative defaults (`gpu=60s`, `cpu=30s`, `io=10s`), and only learns from successful executions.
+- Added richer `/cluster/queues` diagnostics and Playground Scheduling visibility: per-queue counts, queue names, pending/retry state, prediction source, confidence, sample count, HACS score, and HACS breakdown.
+- Added DAG-context affinity placement, KV-cache-aware model routing, demand-driven inference engine scale-out, and LRU scale-in support for model instances.
+- Added a zero-VRAM standby worker pool and optional standby execution path. When `MAZE_STANDBY_EXECUTION_ENABLED=1`, Maze tries to execute scheduled tasks on warm standby actors first and falls back to the existing Ray remote runner path when no standby worker is available.
+- Kept standby execution on the same runner contract as normal tasks, preserving result envelopes, metrics collection, file context, model-route environment variables, retries, timeout cleanup, cancellation cleanup, and resource release behavior.
 
 <br>
 
@@ -88,7 +91,19 @@ This update focuses on aligning the open-source runtime with the accepted SC26 p
    ```
    maze start --head --port HEAD_PORT
    ```
-   The head uses the `least-loaded` scheduling strategy by default, so ready tasks prefer the registered node with the fewest running Maze tasks. To force the older registration-order behavior, pass `--strategy default`.
+   The head uses the `least-loaded` node placement policy by default, so ready tasks prefer the registered node with the fewest running Maze tasks. To force the older registration-order placement behavior, pass `--strategy default`.
+
+   Task scheduling is selected separately. `FCFS` is the default task scheduling algorithm; pass `--scheduling-algorithm HACS` to enable the paper-aligned HACS queue ordering:
+
+   ```bash
+   maze start --head --port HEAD_PORT --scheduling-algorithm HACS
+   ```
+
+   To enable the optional warm standby execution path for scheduled tasks:
+
+   ```bash
+   MAZE_STANDBY_EXECUTION_ENABLED=1 maze start --head --port HEAD_PORT
+   ```
 
    If there are multiple machines, you can connect other machines as maze workers to the maze head.
    ```
@@ -110,6 +125,8 @@ This update focuses on aligning the open-source runtime with the accepted SC26 p
    maze cluster join-command --server-url http://HEAD_IP:HEAD_PORT
    maze cluster reconcile-workers --server-url http://HEAD_IP:HEAD_PORT
    ```
+
+   Queue snapshots include the active scheduling algorithm, per-resource queue counts, pending and retry reasons, prediction metadata, and HACS score details when available. Cluster resources also report standby worker pool targets and busy/idle execution state.
 ## 3. Example
 
 ### Static Workflow

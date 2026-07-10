@@ -25,6 +25,8 @@ from maze.core.application.spec import build_app_workflow
 from maze.core.runs import GlobalMetrics
 from maze.core.scheduler.scheduler import scheduler_process
 from maze.core.scheduler.result_summary import summarize_task_result
+from maze.core.scheduler.strategy import DEFAULT_PREDICTED_DURATION_SECONDS, normalize_scheduling_algorithm
+from maze.core.scheduler.runtime_estimator import RuntimeEstimator, RuntimePrediction
 from maze.core.files.artifact_store import LocalCASArtifactStore
 from maze.core.resource_history import ResourceHistoryStore
 from maze.core.workflow.resources import ResourceSpecError, normalize_task_semantics, require_schedulable_resources
@@ -32,6 +34,7 @@ from maze.utils.utils import get_available_ports
 
 logger = logging.getLogger(__name__)
 EPSILON = 1e-3
+NODE_SCHEDULING_POLICIES = {"default", "least-loaded", "prefer-gpu-free", "spread"}
 
 class MaPath:
     def __init__(self):
@@ -51,11 +54,11 @@ class MaPath:
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
         self.worker_registration_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_control_requests: Dict[str, asyncio.Queue] = {}
-        self.atlas_enqueue_index = 0
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
         self.global_metrics = GlobalMetrics()
         self.resource_history = ResourceHistoryStore()
+        self.runtime_estimator = RuntimeEstimator()
         for snapshot in self.static_run_store.list_runs():
             status = snapshot.get("status")
             if status in ("submitted", "running"):
@@ -167,16 +170,6 @@ class MaPath:
         
         return tasks
 
-    async def _get_daps_priority(self, task_name:str, features:Dict, remaining_task_num:int, total_task_num:int, w1:int, w2:int):
-        payload = {"task_name": task_name, "features": features}
-        async with httpx.AsyncClient() as client:
-            response = await client.post("http://127.0.0.1:8001/predict", json=payload)
-        predict_time = response.json()['predict_time']
-
-        score_urgency = 1.0 - (remaining_task_num / total_task_num)
-        return w1 * score_urgency + w2 * predict_time
-
-    
     def _get_hacs_priority(self, workflow: Workflow, task_id: str):
         node_info = workflow.graph.nodes[task_id]
         n_desc = node_info.get("n_desc", 0)
@@ -185,34 +178,77 @@ class MaPath:
         omega = math.log2(2.0 + 2.0 * n_desc)
         return (omega, pred_time, is_dynamic)
 
-    def _get_atlas_priority(self, workflow: Workflow, task_id: str):
-        attained_service = workflow.graph.nodes[task_id].get("attained_service", 0.0)
-        submission_time = workflow.graph.graph.get("submission_time", 0.0)
-        priority = (attained_service, submission_time, self.atlas_enqueue_index)
-        self.atlas_enqueue_index += 1
-        return priority
+    def _get_runtime_estimator(self) -> RuntimeEstimator:
+        estimator = getattr(self, "runtime_estimator", None)
+        if estimator is None:
+            estimator = RuntimeEstimator()
+            self.runtime_estimator = estimator
+        return estimator
+
+    def _runtime_prediction(
+        self,
+        task: CodeTask,
+        task_kind: str,
+        default_duration: float,
+        default_source: str,
+    ) -> RuntimePrediction:
+        if not getattr(task, "task_kind", None):
+            task.task_kind = task_kind
+        prediction = self._get_runtime_estimator().predict(task)
+        if prediction.predicted_duration > 0:
+            return prediction
+        return RuntimePrediction(
+            predicted_duration=default_duration,
+            prediction_source=default_source,
+            confidence=0.0,
+            sample_count=0,
+            task_kind=task_kind,
+            code_hash=prediction.code_hash,
+        )
+
+    def _static_scheduling_context(self, workflow: Workflow, task_id: str, submit_id: str) -> Dict[str, Any]:
+        node_info = workflow.graph.nodes[task_id]
+        task_kind = node_info.get("task_kind") or node_info.get("task_type") or workflow._get_task_type(task_id)
+        default_duration = float(
+            node_info.get("predicted_duration")
+            or node_info.get("pred_time")
+            or DEFAULT_PREDICTED_DURATION_SECONDS.get(task_kind, DEFAULT_PREDICTED_DURATION_SECONDS["cpu"])
+        )
+        prediction_source = node_info.get("prediction_source") or "task_kind_default"
+        prediction = self._runtime_prediction(
+            workflow.tasks[task_id],
+            task_kind,
+            default_duration,
+            prediction_source,
+        )
+        predicted_duration = prediction.predicted_duration
+        prediction_source = prediction.prediction_source
+        node_info["predicted_duration"] = predicted_duration
+        node_info["pred_time"] = predicted_duration
+        node_info["prediction_source"] = prediction_source
+        node_info["prediction_confidence"] = prediction.confidence
+        node_info["prediction_sample_count"] = prediction.sample_count
+        node_info["code_hash"] = prediction.code_hash
+        return {
+            "mode": "static",
+            "workflow_id": submit_id,
+            "workflow_submitted_time": workflow.graph.graph.get("submission_time") or time.time(),
+            "task_id": task_id,
+            "task_kind": task_kind,
+            "predicted_duration": predicted_duration,
+            "prediction_source": prediction_source,
+            "prediction_confidence": prediction.confidence,
+            "prediction_sample_count": prediction.sample_count,
+            "code_hash": prediction.code_hash,
+            "n_desc": node_info.get("n_desc", 0),
+            "n_anc": node_info.get("n_anc", 0),
+            "total_value_tasks": workflow.graph.graph.get("total_value_tasks", 0),
+            "remaining_value_tasks": workflow.graph.graph.get("remaining_value_tasks", 0),
+        }
 
     async def _get_task_priority(self, workflow: Workflow, task: CodeTask):
-        if self.strategy == "Default":
-            return 0
-
-        if task.can_predict and self.strategy == "DAPS":
-            remaining_task_num: int = workflow.remaining_task_num
-            total_task_num: int = len(workflow.tasks)
-            return await self._get_daps_priority(
-                task.task_name,
-                task.predict_feature,
-                remaining_task_num,
-                total_task_num,
-                0.5,
-                0.5,
-            )
-
         if self.strategy == "HACS":
             return self._get_hacs_priority(workflow, task.task_id)
-
-        if self.strategy == "ATLAS":
-            return self._get_atlas_priority(workflow, task.task_id)
 
         return 0
 
@@ -255,6 +291,8 @@ class MaPath:
                 "parent_task_ids": list(workflow.graph.predecessors(task.task_id)),
                 "parent_file_manifests": parent_file_manifests,
             }
+
+        data["scheduling_context"] = self._static_scheduling_context(workflow, task.task_id, submit_id)
 
         return data
 
@@ -341,8 +379,6 @@ class MaPath:
             data = self._task_run_payload(submit_workflow, task, submit_id, file_context)
             if self.strategy == "HACS":
                 data['priority'] = self._get_hacs_priority(submit_workflow, task.task_id)
-            elif self.strategy == "ATLAS":
-                data['priority'] = self._get_atlas_priority(submit_workflow, task.task_id)
             else:
                 data['priority'] = 0
             message = {
@@ -706,6 +742,50 @@ class MaPath:
         self._stop_dynamic_runtime(run_id)
         return True
 
+    def _dynamic_scheduling_context(self, dynamic_run: DynamicRun, task: CodeTask) -> Dict[str, Any]:
+        depths = getattr(dynamic_run, "_hacs_depths", None)
+        if not isinstance(depths, dict):
+            depths = {}
+            setattr(dynamic_run, "_hacs_depths", depths)
+
+        parent_depths = [
+            int(depths.get(parent_id, 0))
+            for parent_id in dynamic_run.task_parents.get(task.task_id, set())
+        ]
+        n_anc = (max(parent_depths) + 1) if parent_depths else 0
+        depths[task.task_id] = n_anc
+
+        task_kind = task.task_kind or "cpu"
+        predicted_duration = DEFAULT_PREDICTED_DURATION_SECONDS.get(
+            task_kind,
+            DEFAULT_PREDICTED_DURATION_SECONDS["cpu"],
+        )
+        prediction_source = "task_kind_default"
+        prediction = self._runtime_prediction(
+            task,
+            task_kind,
+            predicted_duration,
+            prediction_source,
+        )
+        predicted_duration = prediction.predicted_duration
+        prediction_source = prediction.prediction_source
+        return {
+            "mode": "dynamic",
+            "workflow_id": dynamic_run.run_id,
+            "workflow_submitted_time": dynamic_run.created_time,
+            "task_id": task.task_id,
+            "task_kind": task_kind,
+            "predicted_duration": predicted_duration,
+            "prediction_source": prediction_source,
+            "prediction_confidence": prediction.confidence,
+            "prediction_sample_count": prediction.sample_count,
+            "code_hash": prediction.code_hash,
+            "n_desc": 0,
+            "n_anc": n_anc,
+            "total_value_tasks": 0,
+            "remaining_value_tasks": 0,
+        }
+
     def _dynamic_task_run_payload(self, dynamic_run: DynamicRun, task: CodeTask):
         data = task.to_json()
         data['workflow_id'] = task.workflow_id
@@ -744,6 +824,7 @@ class MaPath:
                 "parent_task_ids": parent_task_ids,
                 "parent_file_manifests": parent_file_manifests,
             }
+        data["scheduling_context"] = self._dynamic_scheduling_context(dynamic_run, task)
         return data
 
     def _submit_dynamic_task(self, task: CodeTask):
@@ -846,6 +927,35 @@ class MaPath:
             metrics=metrics,
             error=error,
             selected_node=selected_node,
+        )
+
+    def _duration_seconds_from_message(self, task: CodeTask | None, message_data: Dict[str, Any]) -> float | None:
+        duration_ms = message_data.get("duration_ms")
+        if duration_ms is not None:
+            try:
+                return max(0.0, float(duration_ms) / 1000.0)
+            except (TypeError, ValueError):
+                pass
+
+        started_at = message_data.get("started_at") or getattr(task, "start_time", None)
+        finished_at = message_data.get("finished_at") or getattr(task, "finish_time", None) or time.time()
+        if started_at is None:
+            return None
+        try:
+            return max(0.0, float(finished_at) - float(started_at))
+        except (TypeError, ValueError):
+            return None
+
+    def _observe_task_runtime(self, task: CodeTask | None, message_data: Dict[str, Any], *, success: bool) -> None:
+        if task is None:
+            return
+        duration_seconds = self._duration_seconds_from_message(task, message_data)
+        if duration_seconds is None:
+            return
+        self._get_runtime_estimator().observe_task(
+            task,
+            duration_seconds,
+            success=success,
         )
 
     def get_global_metrics_snapshot(self) -> Dict[str, Any]:
@@ -1195,20 +1305,26 @@ class MaPath:
             return
 
         if message_type == "finish_task":
+            message_data = message.get("data", {})
             observation = self._resource_observation_from_message(
                 run_id,
                 task_id,
                 status="succeeded",
-                metrics=message.get("data", {}).get("metrics") or {},
-                schedule_decision=message.get("data", {}).get("schedule_decision"),
-                node_id=message.get("data", {}).get("node_id"),
+                metrics=message_data.get("metrics") or {},
+                schedule_decision=message_data.get("schedule_decision"),
+                node_id=message_data.get("node_id"),
             )
             message.setdefault("data", {})["resource_observation"] = observation
             await self._emit_dynamic_event(run_id, message)
-            dynamic_run.set_task_file_manifest(task_id, message.get("data", {}).get("file_manifest"))
+            dynamic_run.set_task_file_manifest(task_id, message_data.get("file_manifest"))
+            self._observe_task_runtime(
+                dynamic_run.tasks.get(task_id),
+                message_data,
+                success=True,
+            )
             ready_tasks = dynamic_run.mark_finished(
                 task_id,
-                message.get("data", {}).get("fault_tolerance"),
+                message_data.get("fault_tolerance"),
             )
             self._persist_dynamic_run(run_id)
             for ready_task in ready_tasks:
@@ -1359,11 +1475,27 @@ class MaPath:
         finally:
             self.worker_registration_requests.pop(request_id, None)
 
-    def init(self,ray_head_port,strategy):
+    def init(
+        self,
+        ray_head_port,
+        strategy=None,
+        node_scheduling_policy=None,
+        scheduling_algorithm=None,
+    ):
         '''
         Initialize.
         '''
-        self.strategy = strategy
+        algorithm_candidate = scheduling_algorithm if scheduling_algorithm is not None else strategy
+        if (
+            node_scheduling_policy is None
+            and str(algorithm_candidate or "").strip().lower() in NODE_SCHEDULING_POLICIES
+            and str(algorithm_candidate or "").strip().upper() not in {"FCFS", "HACS"}
+        ):
+            node_scheduling_policy = algorithm_candidate
+            algorithm_candidate = None
+
+        self.strategy = normalize_scheduling_algorithm(algorithm_candidate).value
+        self.node_scheduling_policy = node_scheduling_policy
         self.ray_head_port = ray_head_port
         available_ports = get_available_ports(2)
       
@@ -1372,7 +1504,17 @@ class MaPath:
         
         #Create the scheduler process and wait for it to be ready
         self.ready_queue = mp.Queue()
-        self.scheduler_process = mp.Process(target=scheduler_process, args=(port1,port2,self.strategy,self.ray_head_port,self.ready_queue))
+        self.scheduler_process = mp.Process(
+            target=scheduler_process,
+            args=(
+                port1,
+                port2,
+                self.strategy,
+                self.ray_head_port,
+                self.ready_queue,
+                self.node_scheduling_policy,
+            ),
+        )
         self.scheduler_process.start()
 
         self.send_context = zmq.Context()
@@ -1485,6 +1627,12 @@ class MaPath:
                                     fault_tolerance=message_data.get("fault_tolerance"),
                                 )
                                 message = self._record_static_event(submit_id, message)
+
+                            self._observe_task_runtime(
+                                self.submit_workflows[submit_id].tasks.get(message_data["task_id"]),
+                                message_data,
+                                success=True,
+                            )
 
                             self.global_metrics.on_task_finished(
                                 submit_id,

@@ -398,6 +398,27 @@ export interface ClusterScheduleDecision {
   }>;
 }
 
+export interface ClusterHacsBreakdown {
+  mode?: 'static' | 'dynamic' | string;
+  task_kind?: 'gpu' | 'cpu' | 'io' | string;
+  predicted_duration?: number;
+  prediction_source?: string;
+  prediction_confidence?: number;
+  prediction_sample_count?: number;
+  code_hash?: string | null;
+  n_desc?: number;
+  n_anc?: number;
+  topological_weight?: number;
+  workflow_wait_time?: number;
+  remaining_value_tasks?: number;
+  avg_completion_seconds?: number;
+  alpha?: number;
+  beta?: number;
+  phi?: number;
+  value_multiplier?: number;
+  score?: number;
+}
+
 export interface FaultToleranceTrace {
   enabled?: boolean;
   status?: string;
@@ -418,7 +439,19 @@ export interface ClusterQueueTask {
   task_type?: string;
   status: 'ready' | 'pending' | 'retrying' | 'running' | string;
   runtime_status?: string;
+  task_kind?: 'gpu' | 'cpu' | 'io' | string;
+  queue_name?: 'gpu' | 'cpu' | 'io' | string;
   priority?: number;
+  predicted_duration?: number | null;
+  prediction_source?: string | null;
+  prediction_confidence?: number | null;
+  prediction_sample_count?: number | null;
+  topological_weight?: number | null;
+  workflow_wait_time?: number | null;
+  remaining_value_tasks?: number | null;
+  hacs_score?: number | null;
+  hacs_breakdown?: ClusterHacsBreakdown | null;
+  code_hash?: string | null;
   attempt?: number;
   max_retries?: number;
   retry_backoff_seconds?: number;
@@ -439,10 +472,19 @@ export interface ClusterQueueTask {
   timeout_seconds?: number | null;
 }
 
+export interface ClusterQueueBucket {
+  total: number;
+  ready: number;
+  pending: number;
+  retrying: number;
+  tasks: ClusterQueueTask[];
+}
+
 export interface ClusterQueuesResponse {
   status: 'success' | string;
   queues: {
     snapshot_time?: number;
+    scheduling_algorithm?: 'FCFS' | 'HACS' | string;
     scheduling_policy?: string;
     counts: {
       ready: number;
@@ -450,7 +492,14 @@ export interface ClusterQueuesResponse {
       retrying: number;
       running: number;
       total_queued: number;
+      by_queue?: Record<string, {
+        ready: number;
+        pending: number;
+        retrying: number;
+        total: number;
+      }>;
     };
+    queues?: Record<string, ClusterQueueBucket>;
     stopped_workflow_ids?: string[];
     ready_tasks: ClusterQueueTask[];
     pending_tasks: ClusterQueueTask[];

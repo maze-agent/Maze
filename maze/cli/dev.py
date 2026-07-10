@@ -227,6 +227,8 @@ def cmd_up(args: argparse.Namespace) -> None:
             str(args.ray_head_port),
             "--strategy",
             args.strategy,
+            "--scheduling-algorithm",
+            args.scheduling_algorithm,
             "--log-level",
             args.log_level,
         ],
@@ -393,6 +395,7 @@ def add_dev_parser(subparsers) -> None:
     up.add_argument("--port", type=int, default=8000)
     up.add_argument("--ray-head-port", type=int, default=6379)
     up.add_argument("--strategy", default="least-loaded")
+    up.add_argument("--scheduling-algorithm", choices=["FCFS", "HACS"], default="FCFS")
     up.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     up.add_argument("--playground", action="store_true", help="Start Playground backend and frontend")
     up.add_argument("--timeout", type=float, default=90)

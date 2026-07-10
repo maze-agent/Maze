@@ -73,6 +73,20 @@ function formatDurationSeconds(value?: number | null): string {
   return `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`;
 }
 
+function formatNumber(value?: number | null, digits = 3): string {
+  if (value === undefined || value === null) return '-';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  return number.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function formatPercentValue(value?: number | null): string {
+  if (value === undefined || value === null) return '-';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  return `${Math.round(number * 100)}%`;
+}
+
 function cpuTotals(node: ClusterResourceNode) {
   const total = node.resources?.cpu?.total ?? node.ray_resources?.CPU ?? 0;
   const available = node.resources?.cpu?.available;
@@ -105,8 +119,11 @@ function gpuMemoryTotals(node: ClusterResourceNode) {
 
 type QueueRow = ClusterQueueTask & {
   queue_bucket: string;
+  status_bucket: string;
   row_key: string;
 };
+
+const RESOURCE_QUEUE_NAMES = ['gpu', 'cpu', 'io'];
 
 type WorkerAction = 'test' | 'start' | 'restart' | 'stop' | 'logs';
 
@@ -134,6 +151,13 @@ function queueStatusColor(status?: string): string {
   if (status === 'retrying') return 'orange';
   if (status === 'pending') return 'volcano';
   if (status === 'ready') return 'blue';
+  return 'default';
+}
+
+function queueResourceColor(queueName?: string): string {
+  if (queueName === 'gpu') return 'gold';
+  if (queueName === 'io') return 'cyan';
+  if (queueName === 'cpu') return 'blue';
   return 'default';
 }
 
@@ -292,19 +316,52 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const queueRows = useMemo<QueueRow[]>(() => {
     if (!queues) return [];
 
-    const buildRows = (bucket: string, tasks: ClusterQueueTask[] = []) => tasks.map((task, index) => ({
-      ...task,
-      queue_bucket: bucket,
-      row_key: `${bucket}:${task.workflow_id}:${task.task_id}:${index}`,
-    }));
+    if (queues.queues) {
+      return RESOURCE_QUEUE_NAMES.flatMap((queueName) => (
+        (queues.queues?.[queueName]?.tasks || []).map((task, index) => ({
+          ...task,
+          queue_bucket: queueName,
+          status_bucket: task.status || 'ready',
+          row_key: `${queueName}:${task.workflow_id}:${task.task_id}:${index}`,
+        }))
+      ));
+    }
+
+    const buildRows = (status: string, tasks: ClusterQueueTask[] = []) => tasks.map((task, index) => {
+      const queueName = task.queue_name || task.task_kind || 'cpu';
+      return {
+        ...task,
+        queue_bucket: queueName,
+        status_bucket: status,
+        row_key: `${queueName}:${status}:${task.workflow_id}:${task.task_id}:${index}`,
+      };
+    });
 
     return [
       ...buildRows('ready', queues.ready_tasks),
       ...buildRows('pending', queues.pending_tasks),
       ...buildRows('retrying', queues.retrying_tasks),
-      ...buildRows('running', queues.running_tasks),
     ];
   }, [queues]);
+
+  const resourceQueueRows = useMemo(() => (
+    RESOURCE_QUEUE_NAMES.reduce<Record<string, QueueRow[]>>((acc, queueName) => {
+      acc[queueName] = queueRows.filter((row) => row.queue_bucket === queueName);
+      return acc;
+    }, {})
+  ), [queueRows]);
+
+  const runningRows = useMemo<QueueRow[]>(() => (
+    (queues?.running_tasks || []).map((task, index) => {
+      const queueName = task.queue_name || task.task_kind || 'cpu';
+      return {
+        ...task,
+        queue_bucket: queueName,
+        status_bucket: 'running',
+        row_key: `running:${queueName}:${task.workflow_id}:${task.task_id}:${index}`,
+      };
+    })
+  ), [queues?.running_tasks]);
 
   const buildWorkerProfileFromValues = (values: any) => {
     return {
@@ -759,22 +816,108 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     },
   ];
 
+  const renderHacsBreakdown = (task: QueueRow) => {
+    const breakdown = task.hacs_breakdown;
+    if (!breakdown) {
+      return <Text type="secondary">No HACS breakdown for this task.</Text>;
+    }
+    const rows = [
+      ['mode', breakdown.mode],
+      ['task kind', breakdown.task_kind],
+      ['predicted', formatDurationSeconds(breakdown.predicted_duration)],
+      ['source', breakdown.prediction_source],
+      ['confidence', formatPercentValue(breakdown.prediction_confidence)],
+      ['samples', breakdown.prediction_sample_count],
+      ['n_desc', breakdown.n_desc],
+      ['n_anc', breakdown.n_anc],
+      ['topological', formatNumber(breakdown.topological_weight)],
+      ['wait', formatDurationSeconds(breakdown.workflow_wait_time)],
+      ['remaining value', breakdown.remaining_value_tasks],
+      ['phi', formatNumber(breakdown.phi)],
+      ['multiplier', formatNumber(breakdown.value_multiplier)],
+      ['score', formatNumber(breakdown.score, 6)],
+    ].filter(([, value]) => value !== undefined && value !== null && value !== '-');
+
+    return (
+      <Space size={[8, 6]} wrap>
+        {rows.map(([label, value]) => (
+          <Tag key={String(label)} color="default">
+            {label}: {String(value)}
+          </Tag>
+        ))}
+        {breakdown.code_hash && (
+          <Tooltip title={breakdown.code_hash}>
+            <Tag color="default">hash: {shortId(breakdown.code_hash)}</Tag>
+          </Tooltip>
+        )}
+      </Space>
+    );
+  };
+
   const queueColumns: ColumnsType<QueueRow> = [
     {
-      title: 'Queue',
+      title: 'Resource',
       dataIndex: 'queue_bucket',
       key: 'queue_bucket',
-      width: 110,
-      render: (value: string) => <Tag color={queueStatusColor(value)}>{value}</Tag>,
+      width: 120,
+      render: (value: string, task) => (
+        <Space direction="vertical" size={2}>
+          <Tag color={queueResourceColor(value)}>{value}</Tag>
+          <Tag color={queueStatusColor(task.status_bucket)}>{task.status_bucket}</Tag>
+        </Space>
+      ),
     },
     {
       title: 'Task',
       key: 'task',
-      width: 230,
+      width: 220,
       render: (_, task) => (
         <Space direction="vertical" size={2}>
           <Text copyable={{ text: task.task_id }} strong>{shortId(task.task_id)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>{shortId(task.workflow_id)}</Text>
+          <Space size={4} wrap>
+            {task.task_kind && <Tag color={queueResourceColor(task.task_kind)}>{task.task_kind}</Tag>}
+            {task.task_type && <Tag>{task.task_type}</Tag>}
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: 'Prediction',
+      key: 'prediction',
+      width: 210,
+      render: (_, task) => (
+        <Space direction="vertical" size={2}>
+          <Text>{formatDurationSeconds(task.predicted_duration)}</Text>
+          <Space size={4} wrap>
+            {task.prediction_source && <Tag color="geekblue">{task.prediction_source}</Tag>}
+            {task.prediction_sample_count !== undefined && task.prediction_sample_count !== null && (
+              <Tag>n={task.prediction_sample_count}</Tag>
+            )}
+            {task.prediction_confidence !== undefined && task.prediction_confidence !== null && (
+              <Tag>{formatPercentValue(task.prediction_confidence)}</Tag>
+            )}
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: 'HACS',
+      key: 'hacs',
+      width: 180,
+      render: (_, task) => (
+        <Space direction="vertical" size={2}>
+          <Text>{formatNumber(task.hacs_score, 6)}</Text>
+          {task.topological_weight !== undefined && task.topological_weight !== null && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              topo {formatNumber(task.topological_weight)}
+            </Text>
+          )}
+          {task.workflow_wait_time !== undefined && task.workflow_wait_time !== null && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              wait {formatDurationSeconds(task.workflow_wait_time)}
+            </Text>
+          )}
         </Space>
       ),
     },
@@ -835,6 +978,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     {
       title: 'Reason',
       key: 'reason',
+      width: 320,
       render: (_, task) => {
         const rejects = candidateRejectSummary(task);
         const reason = task.pending_reason
@@ -985,6 +1129,11 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
         <Space wrap>
           <Text strong>Scheduler Queues</Text>
+          {queues?.scheduling_algorithm && (
+            <Tag color={queues.scheduling_algorithm === 'HACS' ? 'purple' : 'blue'}>
+              algorithm: {queues.scheduling_algorithm}
+            </Tag>
+          )}
           {queues?.scheduling_policy && <Tag color="geekblue">{queues.scheduling_policy}</Tag>}
           {queues?.snapshot_time && (
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1009,15 +1158,60 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
           )}
         </Space>
       </Space>
-      <Table
-        rowKey="row_key"
-        loading={loading && !queues}
-        columns={queueColumns}
-        dataSource={queueRows}
-        pagination={queueRows.length > 8 ? { pageSize: 8, size: 'small' } : false}
-        size="small"
-        scroll={{ x: 980 }}
-      />
+      <Collapse size="small" defaultActiveKey={RESOURCE_QUEUE_NAMES}>
+        {RESOURCE_QUEUE_NAMES.map((queueName) => {
+          const rows = resourceQueueRows[queueName] || [];
+          const queueStats = queues?.queues?.[queueName] || queues?.counts.by_queue?.[queueName];
+          return (
+            <Collapse.Panel
+              key={queueName}
+              header={(
+                <Space size={6} wrap>
+                  <Tag color={queueResourceColor(queueName)}>{queueName}</Tag>
+                  <Tag color="blue">ready: {queueStats?.ready || 0}</Tag>
+                  <Tag color="volcano">pending: {queueStats?.pending || 0}</Tag>
+                  <Tag color="orange">retrying: {queueStats?.retrying || 0}</Tag>
+                  <Text type="secondary" style={{ fontSize: 12 }}>total {queueStats?.total || rows.length}</Text>
+                </Space>
+              )}
+            >
+              <Table
+                rowKey="row_key"
+                loading={loading && !queues}
+                columns={queueColumns}
+                dataSource={rows}
+                pagination={rows.length > 6 ? { pageSize: 6, size: 'small' } : false}
+                size="small"
+                scroll={{ x: 1280 }}
+                expandable={{
+                  expandedRowRender: renderHacsBreakdown,
+                  rowExpandable: (task) => Boolean(task.hacs_breakdown),
+                }}
+              />
+            </Collapse.Panel>
+          );
+        })}
+      </Collapse>
+      {runningRows.length > 0 && (
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space wrap>
+            <Text strong>Running Tasks</Text>
+            <Tag color="processing">{runningRows.length}</Tag>
+          </Space>
+          <Table
+            rowKey="row_key"
+            columns={queueColumns}
+            dataSource={runningRows}
+            pagination={runningRows.length > 6 ? { pageSize: 6, size: 'small' } : false}
+            size="small"
+            scroll={{ x: 1280 }}
+            expandable={{
+              expandedRowRender: renderHacsBreakdown,
+              rowExpandable: (task) => Boolean(task.hacs_breakdown),
+            }}
+          />
+        </Space>
+      )}
     </Space>
   );
 
