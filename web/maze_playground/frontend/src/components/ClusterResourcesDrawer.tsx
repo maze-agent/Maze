@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Collapse, Drawer, Form, Input, InputNumber, Modal, Progress, Select, Space, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Collapse, Drawer, Empty, Form, Input, InputNumber, Modal, Progress, Select, Space, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { DeleteOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
 import { api } from '@/api/client';
@@ -13,6 +13,16 @@ import type {
 } from '@/types/workflow';
 
 const { Text } = Typography;
+const RESOURCE_REFRESH_INTERVAL_MS = 3000;
+const QUEUE_REFRESH_INTERVAL_MS = 1000;
+const QUEUE_REFRESH_OPTIONS = [
+  { label: '250 ms', value: 250 },
+  { label: '500 ms', value: 500 },
+  { label: '1 s', value: 1000 },
+  { label: '2 s', value: 2000 },
+  { label: '5 s', value: 5000 },
+  { label: 'Paused', value: 0 },
+];
 
 interface ClusterResourcesDrawerProps {
   open: boolean;
@@ -105,8 +115,11 @@ function gpuMemoryTotals(node: ClusterResourceNode) {
 
 type QueueRow = ClusterQueueTask & {
   queue_bucket: string;
+  status_bucket: string;
   row_key: string;
 };
+
+const RESOURCE_QUEUE_NAMES = ['gpu', 'cpu', 'io'];
 
 type WorkerAction = 'test' | 'start' | 'restart' | 'stop' | 'logs';
 
@@ -134,6 +147,13 @@ function queueStatusColor(status?: string): string {
   if (status === 'retrying') return 'orange';
   if (status === 'pending') return 'volcano';
   if (status === 'ready') return 'blue';
+  return 'default';
+}
+
+function queueResourceColor(queueName?: string): string {
+  if (queueName === 'gpu') return 'gold';
+  if (queueName === 'io') return 'cyan';
+  if (queueName === 'cpu') return 'blue';
   return 'default';
 }
 
@@ -169,7 +189,9 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const [queues, setQueues] = useState<ClusterQueuesResponse['queues'] | null>(null);
   const [workerProfiles, setWorkerProfiles] = useState<WorkerProfile[]>([]);
   const [loading, setLoading] = useState(false);
+  const [queueLoading, setQueueLoading] = useState(false);
   const [workersLoading, setWorkersLoading] = useState(false);
+  const [manualRefreshLoading, setManualRefreshLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [queueError, setQueueError] = useState<string | null>(null);
   const [workerError, setWorkerError] = useState<string | null>(null);
@@ -185,43 +207,56 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const [consoleRunning, setConsoleRunning] = useState(false);
   const [consoleOutput, setConsoleOutput] = useState('');
   const [consoleHistory, setConsoleHistory] = useState<Array<{ command: string; ok: boolean; ranAt: string }>>([]);
+  const [queueRefreshIntervalMs, setQueueRefreshIntervalMs] = useState(QUEUE_REFRESH_INTERVAL_MS);
 
-  const loadResources = useCallback(async () => {
-    setLoading(true);
-    const [resourcesResult, queuesResult] = await Promise.allSettled([
-      api.getClusterResources(),
-      api.getClusterQueues(),
-    ]);
-
-    if (resourcesResult.status === 'fulfilled') {
-      setData(resourcesResult.value);
+  const loadResources = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setLoading(true);
+    }
+    try {
+      const result = await api.getClusterResources();
+      setData(result);
       setError(null);
-    } else {
-      console.error('Failed to load cluster resources:', resourcesResult.reason);
+    } catch (reason: any) {
+      console.error('Failed to load cluster resources:', reason);
       setError(
-        resourcesResult.reason?.response?.data?.error
-        || resourcesResult.reason?.message
+        reason?.response?.data?.error
+        || reason?.message
         || 'Failed to load cluster resources',
       );
+    } finally {
+      if (showLoading) {
+        setLoading(false);
+      }
     }
-
-    if (queuesResult.status === 'fulfilled') {
-      setQueues(queuesResult.value.queues);
-      setQueueError(null);
-    } else {
-      console.error('Failed to load cluster queues:', queuesResult.reason);
-      setQueueError(
-        queuesResult.reason?.response?.data?.error
-        || queuesResult.reason?.message
-        || 'Failed to load cluster queues',
-      );
-    }
-
-    setLoading(false);
   }, []);
 
-  const loadWorkerProfiles = useCallback(async () => {
-    setWorkersLoading(true);
+  const loadQueues = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setQueueLoading(true);
+    }
+    try {
+      const result = await api.getClusterQueues();
+      setQueues(result.queues);
+      setQueueError(null);
+    } catch (reason: any) {
+      console.error('Failed to load cluster queues:', reason);
+      setQueueError(
+        reason?.response?.data?.error
+        || reason?.message
+        || 'Failed to load cluster queues',
+      );
+    } finally {
+      if (showLoading) {
+        setQueueLoading(false);
+      }
+    }
+  }, []);
+
+  const loadWorkerProfiles = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setWorkersLoading(true);
+    }
     try {
       const result = await api.listWorkerProfiles();
       setWorkerProfiles(result.profiles || []);
@@ -230,20 +265,44 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       console.error('Failed to load worker profiles:', reason);
       setWorkerError(reason?.response?.data?.error || reason?.message || 'Failed to load worker profiles');
     } finally {
-      setWorkersLoading(false);
+      if (showLoading) {
+        setWorkersLoading(false);
+      }
     }
   }, []);
+
+  const refreshAll = useCallback(async () => {
+    setManualRefreshLoading(true);
+    try {
+      await Promise.all([
+        loadResources(true),
+        loadQueues(true),
+        loadWorkerProfiles(true),
+      ]);
+    } finally {
+      setManualRefreshLoading(false);
+    }
+  }, [loadQueues, loadResources, loadWorkerProfiles]);
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    loadResources();
-    loadWorkerProfiles();
-    const timer = window.setInterval(loadResources, 3000);
-    return () => window.clearInterval(timer);
-  }, [loadResources, loadWorkerProfiles, open]);
+    loadResources(true);
+    loadQueues(true);
+    loadWorkerProfiles(true);
+    const resourceTimer = window.setInterval(loadResources, RESOURCE_REFRESH_INTERVAL_MS);
+    const queueTimer = queueRefreshIntervalMs > 0
+      ? window.setInterval(loadQueues, queueRefreshIntervalMs)
+      : undefined;
+    return () => {
+      window.clearInterval(resourceTimer);
+      if (queueTimer !== undefined) {
+        window.clearInterval(queueTimer);
+      }
+    };
+  }, [loadQueues, loadResources, loadWorkerProfiles, open, queueRefreshIntervalMs]);
 
   const nodes = useMemo(() => {
     const registered = data?.cluster?.nodes || [];
@@ -292,19 +351,59 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const queueRows = useMemo<QueueRow[]>(() => {
     if (!queues) return [];
 
-    const buildRows = (bucket: string, tasks: ClusterQueueTask[] = []) => tasks.map((task, index) => ({
-      ...task,
-      queue_bucket: bucket,
-      row_key: `${bucket}:${task.workflow_id}:${task.task_id}:${index}`,
-    }));
+    if (queues.queues) {
+      return RESOURCE_QUEUE_NAMES.flatMap((queueName) => (
+        (queues.queues?.[queueName]?.tasks || []).map((task, index) => ({
+          ...task,
+          queue_bucket: queueName,
+          status_bucket: task.status || 'ready',
+          row_key: `${queueName}:${task.workflow_id}:${task.task_id}:${index}`,
+        }))
+      ));
+    }
+
+    const buildRows = (status: string, tasks: ClusterQueueTask[] = []) => tasks.map((task, index) => {
+      const queueName = task.queue_name || task.task_kind || 'cpu';
+      return {
+        ...task,
+        queue_bucket: queueName,
+        status_bucket: status,
+        row_key: `${queueName}:${status}:${task.workflow_id}:${task.task_id}:${index}`,
+      };
+    });
 
     return [
       ...buildRows('ready', queues.ready_tasks),
       ...buildRows('pending', queues.pending_tasks),
       ...buildRows('retrying', queues.retrying_tasks),
-      ...buildRows('running', queues.running_tasks),
     ];
   }, [queues]);
+
+  const runningRows = useMemo<QueueRow[]>(() => (
+    (queues?.running_tasks || []).map((task, index) => {
+      const queueName = task.queue_name || task.task_kind || 'cpu';
+      return {
+        ...task,
+        queue_bucket: queueName,
+        status_bucket: 'running',
+        row_key: `running:${queueName}:${task.workflow_id}:${task.task_id}:${index}`,
+      };
+    })
+  ), [queues?.running_tasks]);
+
+  const resourceQueueRows = useMemo(() => (
+    RESOURCE_QUEUE_NAMES.reduce<Record<string, QueueRow[]>>((acc, queueName) => {
+      acc[queueName] = [
+        ...queueRows.filter((row) => row.queue_bucket === queueName),
+        ...runningRows.filter((row) => row.queue_bucket === queueName),
+      ];
+      return acc;
+    }, {})
+  ), [queueRows, runningRows]);
+
+  const schedulingAlgorithm = useMemo(() => {
+    return queues?.scheduling_algorithm || '-';
+  }, [queues?.scheduling_algorithm]);
 
   const buildWorkerProfileFromValues = (values: any) => {
     return {
@@ -729,7 +828,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       ),
     },
     {
-      title: 'Scheduling',
+      title: 'Admission',
       key: 'scheduling',
       width: 150,
       render: (_, node) => {
@@ -759,109 +858,103 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     },
   ];
 
-  const queueColumns: ColumnsType<QueueRow> = [
-    {
-      title: 'Queue',
-      dataIndex: 'queue_bucket',
-      key: 'queue_bucket',
-      width: 110,
-      render: (value: string) => <Tag color={queueStatusColor(value)}>{value}</Tag>,
-    },
-    {
-      title: 'Task',
-      key: 'task',
-      width: 230,
-      render: (_, task) => (
-        <Space direction="vertical" size={2}>
-          <Text copyable={{ text: task.task_id }} strong>{shortId(task.task_id)}</Text>
+  const renderQueueTaskRow = (task: QueueRow) => {
+    const selected = task.selected_node || task.schedule_decision?.selected_node;
+    const taskResources: Record<string, any> = task.resources || {};
+    const cpuNum = taskResources.cpu_num ?? (taskResources as any).cpu;
+    const reason = task.pending_reason
+      || task.schedule_decision?.reason
+      || errorSummary(task.last_error);
+    const rejects = candidateRejectSummary(task);
+    const lastError = errorSummary(task.last_error);
+    const attempt = task.attempt ?? 0;
+    const maxRetries = task.max_retries ?? 0;
+    const attemptLabel = maxRetries > 0 ? `attempt ${attempt}/${maxRetries}` : `attempt ${attempt}`;
+    const elapsed = task.elapsed_seconds !== undefined
+      ? `elapsed ${formatDurationSeconds(task.elapsed_seconds)}`
+      : '';
+    const retryWait = task.retry_wait_seconds
+      ? `retry in ${formatDurationSeconds(task.retry_wait_seconds)}`
+      : '';
+    const nextEligible = task.next_eligible_time ? `next ${formatTime(task.next_eligible_time)}` : '';
+    const timeout = task.timeout_seconds !== undefined && task.timeout_seconds !== null
+      ? `timeout ${formatDurationSeconds(task.timeout_seconds)}`
+      : '';
+    const borderColor = task.status_bucket === 'running'
+      ? '#1677ff'
+      : task.status_bucket === 'pending'
+        ? '#fa541c'
+        : task.status_bucket === 'retrying'
+          ? '#fa8c16'
+          : '#d9d9d9';
+
+    return (
+      <div
+        key={task.row_key}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: 12,
+          alignItems: 'start',
+          padding: '12px 14px',
+          borderLeft: `3px solid ${borderColor}`,
+          borderTop: '1px solid #f0f0f0',
+          background: task.status_bucket === 'running' ? '#f6fbff' : '#fff',
+        }}
+      >
+        <Space direction="vertical" size={4}>
+          <Text type="secondary" style={{ fontSize: 11 }}>Task</Text>
+          <Text copyable={{ text: task.task_id }} strong>
+            {shortId(task.task_id)}
+          </Text>
           <Text type="secondary" style={{ fontSize: 12 }}>{shortId(task.workflow_id)}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: 'Attempt',
-      key: 'attempt',
-      width: 120,
-      render: (_, task) => (
-        <Space direction="vertical" size={2}>
-          <Text>{task.attempt ?? 0} / {task.max_retries ?? 0}</Text>
-          {task.retry_wait_seconds ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              wait {formatDurationSeconds(task.retry_wait_seconds)}
-            </Text>
-          ) : null}
-          {task.next_eligible_time ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              next {formatTime(task.next_eligible_time)}
-            </Text>
-          ) : null}
-        </Space>
-      ),
-    },
-    {
-      title: 'Placement',
-      key: 'placement',
-      width: 190,
-      render: (_, task) => {
-        const selected = task.selected_node || task.schedule_decision?.selected_node;
-        const taskResources: Record<string, any> = task.resources || {};
-        const cpuNum = taskResources.cpu_num ?? (taskResources as any).cpu;
-        return (
-          <Space direction="vertical" size={2}>
-            <Text>{selected?.node_ip || '-'}</Text>
-            <Space size={4} wrap>
-              {selected?.gpu_id !== undefined && selected?.gpu_id !== null && <Tag color="gold">GPU {selected.gpu_id}</Tag>}
-              {cpuNum !== undefined && <Tag>CPU {cpuNum}</Tag>}
-              {taskResources.gpu_mem !== undefined && <Tag>VRAM {formatGpuMemory(taskResources.gpu_mem)}</Tag>}
-              {taskResources.io_num !== undefined && <Tag>I/O {taskResources.io_num}</Tag>}
-            </Space>
+          <Space size={4} wrap>
+            <Tag color={queueResourceColor(task.queue_bucket)}>{task.queue_bucket}</Tag>
+            <Tag color={queueStatusColor(task.status_bucket)}>{task.status_bucket}</Tag>
+            {task.task_type && <Tag>{task.task_type}</Tag>}
           </Space>
-        );
-      },
-    },
-    {
-      title: 'Timing',
-      key: 'timing',
-      width: 170,
-      render: (_, task) => (
-        <Space direction="vertical" size={2}>
-          <Text>{task.elapsed_seconds !== undefined ? formatDurationSeconds(task.elapsed_seconds) : formatTime(task.next_eligible_time)}</Text>
-          {task.timeout_seconds !== undefined && task.timeout_seconds !== null && (
-            <Text type="secondary" style={{ fontSize: 12 }}>timeout {formatDurationSeconds(task.timeout_seconds)}</Text>
+        </Space>
+        <Space direction="vertical" size={4}>
+          <Text type="secondary" style={{ fontSize: 11 }}>Attempt</Text>
+          <Text>{attemptLabel}</Text>
+          {[elapsed, retryWait, nextEligible, timeout].filter(Boolean).map((item) => (
+            <Text key={item} type="secondary" style={{ fontSize: 12 }}>
+              {item}
+            </Text>
+          ))}
+        </Space>
+        <Space direction="vertical" size={4}>
+          <Text type="secondary" style={{ fontSize: 11 }}>Assigned Node</Text>
+          <Text>{selected?.node_ip || '-'}</Text>
+          <Space size={4} wrap>
+            {selected?.gpu_id !== undefined && selected?.gpu_id !== null && <Tag color="gold">GPU {selected.gpu_id}</Tag>}
+            {cpuNum !== undefined && <Tag>CPU {cpuNum}</Tag>}
+            {taskResources.gpu_mem !== undefined && <Tag>VRAM {formatGpuMemory(taskResources.gpu_mem)}</Tag>}
+            {taskResources.io_num !== undefined && <Tag>I/O {taskResources.io_num}</Tag>}
+          </Space>
+        </Space>
+        <Space direction="vertical" size={4}>
+          <Text type="secondary" style={{ fontSize: 11 }}>Status</Text>
+          <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: reason || '-' }}>
+            {reason || '-'}
+          </Text>
+          {task.runtime_status && task.runtime_status !== task.status_bucket && (
+            <Text type="secondary" style={{ fontSize: 12 }}>runtime {task.runtime_status}</Text>
+          )}
+          {rejects.map((reject) => (
+            <Text key={reject} type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: reject }}>
+              {reject}
+            </Text>
+          ))}
+          {lastError && reason !== lastError && (
+            <Text type="danger" style={{ fontSize: 12 }} ellipsis={{ tooltip: lastError }}>
+              {lastError}
+            </Text>
           )}
         </Space>
-      ),
-    },
-    {
-      title: 'Reason',
-      key: 'reason',
-      render: (_, task) => {
-        const rejects = candidateRejectSummary(task);
-        const reason = task.pending_reason
-          || task.schedule_decision?.reason
-          || errorSummary(task.last_error)
-          || '-';
-        return (
-          <Space direction="vertical" size={2} style={{ maxWidth: 360 }}>
-            <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: reason }}>{reason}</Text>
-            {task.runtime_status && (
-              <Text type="secondary" style={{ fontSize: 12 }}>runtime {task.runtime_status}</Text>
-            )}
-            {rejects.map((reject) => (
-              <Text key={reject} type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: reject }}>
-                {reject}
-              </Text>
-            ))}
-            {task.last_error && reason !== errorSummary(task.last_error) && (
-              <Text type="danger" style={{ fontSize: 12 }} ellipsis={{ tooltip: errorSummary(task.last_error) }}>
-                {errorSummary(task.last_error)}
-              </Text>
-            )}
-          </Space>
-        );
-      },
-    },
-  ];
+      </div>
+    );
+  };
 
   const workerColumns: ColumnsType<WorkerProfile> = [
     {
@@ -982,42 +1075,124 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
         size="middle"
         scroll={{ x: 880 }}
       />
-      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center">
-        <Space wrap>
-          <Text strong>Scheduler Queues</Text>
-          {queues?.scheduling_policy && <Tag color="geekblue">{queues.scheduling_policy}</Tag>}
-          {queues?.snapshot_time && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {formatTime(queues.snapshot_time)}
-            </Text>
-          )}
-        </Space>
-        <Space size={6} wrap>
-          {[
-            ['ready', queues?.counts.ready || 0],
-            ['pending', queues?.counts.pending || 0],
-            ['retrying', queues?.counts.retrying || 0],
-            ['running', queues?.counts.running || 0],
-            ['total', queues?.counts.total_queued || 0],
-          ].map(([label, value]) => (
-            <Tag key={label} color={queueStatusColor(String(label))}>
-              {label}: {value}
+      <div
+        style={{
+          border: '1px solid #f0f0f0',
+          borderRadius: 6,
+          padding: 12,
+          background: '#fafafa',
+        }}
+      >
+        <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center" wrap>
+          <Space wrap>
+            <Text strong>Scheduler Queues</Text>
+            <Tag color={schedulingAlgorithm === 'HACS' ? 'purple' : 'blue'}>
+              algorithm: {schedulingAlgorithm}
             </Tag>
-          ))}
-          {(queues?.stopped_workflow_ids?.length || 0) > 0 && (
-            <Tag color="default">stopped: {queues?.stopped_workflow_ids?.length}</Tag>
-          )}
+            {queues?.scheduling_policy && (
+              <Tag color="geekblue">node policy: {queues.scheduling_policy}</Tag>
+            )}
+          </Space>
+          <Space size={8}>
+            <Text type="secondary" style={{ fontSize: 12 }}>Queue refresh</Text>
+            <Select
+              size="small"
+              value={queueRefreshIntervalMs}
+              onChange={setQueueRefreshIntervalMs}
+              options={QUEUE_REFRESH_OPTIONS}
+              style={{ width: 108 }}
+            />
+          </Space>
         </Space>
-      </Space>
-      <Table
-        rowKey="row_key"
-        loading={loading && !queues}
-        columns={queueColumns}
-        dataSource={queueRows}
-        pagination={queueRows.length > 8 ? { pageSize: 8, size: 'small' } : false}
-        size="small"
-        scroll={{ x: 980 }}
-      />
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+            gap: 8,
+            marginTop: 12,
+          }}
+        >
+          {[
+            { label: 'ready', value: queues?.counts.ready || 0, color: '#1677ff', background: '#f0f5ff', border: '#adc6ff' },
+            { label: 'running', value: queues?.counts.running || 0, color: '#0958d9', background: '#e6f4ff', border: '#91caff' },
+            { label: 'pending', value: queues?.counts.pending || 0, color: '#d4380d', background: '#fff2e8', border: '#ffbb96' },
+            { label: 'retrying', value: queues?.counts.retrying || 0, color: '#d46b08', background: '#fff7e6', border: '#ffd591' },
+            { label: 'total', value: queues?.counts.total_queued || 0, color: '#595959', background: '#fff', border: '#d9d9d9' },
+          ].map((item) => (
+            <div
+              key={item.label}
+              style={{
+                border: `1px solid ${item.border}`,
+                borderRadius: 6,
+                background: item.background,
+                padding: '6px 10px',
+              }}
+            >
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>{item.label}</Text>
+              <Text strong style={{ color: item.color, fontSize: 18 }}>{item.value}</Text>
+            </div>
+          ))}
+        </div>
+      </div>
+      <Collapse size="small" bordered={false} defaultActiveKey={RESOURCE_QUEUE_NAMES} style={{ background: '#fff' }}>
+        {RESOURCE_QUEUE_NAMES.map((queueName) => {
+          const rows = resourceQueueRows[queueName] || [];
+          const queueStats = queues?.queues?.[queueName] || queues?.counts.by_queue?.[queueName];
+          const runningCount = rows.filter((row) => row.status_bucket === 'running').length;
+          return (
+            <Collapse.Panel
+              key={queueName}
+              header={(
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    width: '100%',
+                    paddingRight: 12,
+                  }}
+                >
+                  <Space size={8}>
+                    <Tag color={queueResourceColor(queueName)}>{queueName}</Tag>
+                    <Text strong>{rows.length}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>tasks</Text>
+                  </Space>
+                  <Space size={6} wrap>
+                    <Tag color="blue">ready {queueStats?.ready || 0}</Tag>
+                    <Tag color="processing">running {runningCount}</Tag>
+                    <Tag color="volcano">pending {queueStats?.pending || 0}</Tag>
+                    <Tag color="orange">retrying {queueStats?.retrying || 0}</Tag>
+                  </Space>
+                </div>
+              )}
+            >
+              <div
+                style={{
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                  background: '#fff',
+                }}
+              >
+                {queueLoading && !queues ? (
+                  <div style={{ padding: 16 }}>
+                    <Text type="secondary">Loading queues...</Text>
+                  </div>
+                ) : rows.length === 0 ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="No queued or running tasks"
+                    style={{ margin: '12px 0' }}
+                  />
+                ) : (
+                  rows.map(renderQueueTaskRow)
+                )}
+              </div>
+            </Collapse.Panel>
+          );
+        })}
+      </Collapse>
     </Space>
   );
 
@@ -1124,7 +1299,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       onClose={onClose}
       width="min(960px, 100vw)"
       extra={(
-        <Button icon={<ReloadOutlined />} onClick={() => Promise.all([loadResources(), loadWorkerProfiles()])} loading={loading || workersLoading}>
+        <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={manualRefreshLoading}>
           Refresh
         </Button>
       )}

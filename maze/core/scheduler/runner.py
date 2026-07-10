@@ -4,6 +4,8 @@ import time
 import binascii
 import base64
 import cloudpickle
+import json
+import os
 from maze.core.files.lineage import ArtifactError, TASK_RESULT_ENVELOPE, run_task_with_file_context
 from maze.core.scheduler.error import (
     exception_to_error_envelope,
@@ -24,6 +26,32 @@ INVOCATION_ERROR_REASONS = {
     "max_tokens_insufficient",
     "tool_invocation_args_missing",
 }
+
+
+MODEL_ROUTE_ENV_KEYS = (
+    "MAZE_MODEL_ROUTE",
+    "MAZE_MODEL_ENDPOINT",
+    "MAZE_MODEL_INSTANCE_ID",
+    "MAZE_MODEL_NAME",
+)
+
+
+def _apply_model_route_env(model_route: dict | None):
+    for key in MODEL_ROUTE_ENV_KEYS:
+        os.environ.pop(key, None)
+    if not model_route:
+        return
+    os.environ["MAZE_MODEL_ROUTE"] = json.dumps(model_route)
+    os.environ["MAZE_MODEL_ENDPOINT"] = str(model_route.get("endpoint") or "")
+    os.environ["MAZE_MODEL_INSTANCE_ID"] = str(model_route.get("instance_id") or "")
+    os.environ["MAZE_MODEL_NAME"] = str(model_route.get("model") or "")
+
+
+def _apply_cuda_visible_devices(cuda_visible_devices: str | None):
+    if cuda_visible_devices:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
 
 def _invocation_error_result(reason: str, message: str, *, details: dict | None = None):
@@ -250,17 +278,16 @@ def run_langgraph_task(code_ser: str, args: str, kwargs: str):
         )
 
 
-@ray.remote(max_retries=0)
-def remote_task_runner(
+def execute_code_task_in_worker(
     code_str: str = None,
     code_ser: str = None,
     task_input_data: dict = None,
     cuda_visible_devices: str | None = None,
     file_context: dict | None = None,
+    model_route: dict | None = None,
 ):
-    if cuda_visible_devices:
-        import os
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+    _apply_model_route_env(model_route)
+    _apply_cuda_visible_devices(cuda_visible_devices)
 
     started_at = time.time()
     with _metrics_scope() as collector:
@@ -275,13 +302,52 @@ def remote_task_runner(
     return _wrap_with_envelope(output, started_at, finished_at, reported)
 
 
-@ray.remote(max_retries=0)
-def remote_lgraph_task_runner(code_ser: str, args: str, kwargs: str, cuda_visible_devices: str | None = None):
-    if cuda_visible_devices:
-        import os
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
-
+def execute_langgraph_task_in_worker(
+    code_ser: str,
+    args: str,
+    kwargs: str,
+    cuda_visible_devices: str | None = None,
+    model_route: dict | None = None,
+):
+    _apply_model_route_env(model_route)
+    _apply_cuda_visible_devices(cuda_visible_devices)
     return run_langgraph_task(code_ser, args, kwargs)
+
+
+@ray.remote(max_retries=0)
+def remote_task_runner(
+    code_str: str = None,
+    code_ser: str = None,
+    task_input_data: dict = None,
+    cuda_visible_devices: str | None = None,
+    file_context: dict | None = None,
+    model_route: dict | None = None,
+):
+    return execute_code_task_in_worker(
+        code_str=code_str,
+        code_ser=code_ser,
+        task_input_data=task_input_data,
+        cuda_visible_devices=cuda_visible_devices,
+        file_context=file_context,
+        model_route=model_route,
+    )
+
+
+@ray.remote(max_retries=0)
+def remote_lgraph_task_runner(
+    code_ser: str,
+    args: str,
+    kwargs: str,
+    cuda_visible_devices: str | None = None,
+    model_route: dict | None = None,
+):
+    return execute_langgraph_task_in_worker(
+        code_ser=code_ser,
+        args=args,
+        kwargs=kwargs,
+        cuda_visible_devices=cuda_visible_devices,
+        model_route=model_route,
+    )
 
 
 class Runner():

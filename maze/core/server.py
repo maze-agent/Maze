@@ -1513,6 +1513,9 @@ async def get_cluster_resources():
 async def get_cluster_queues():
     try:
         queues = await mapath.get_cluster_queues()
+        if isinstance(queues, dict) and not queues.get("scheduling_algorithm"):
+            queues = dict(queues)
+            queues["scheduling_algorithm"] = getattr(mapath, "strategy", None) or "FCFS"
         return {"status": "success", "queues": queues}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler queue snapshot")

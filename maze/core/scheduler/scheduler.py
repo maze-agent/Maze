@@ -1,5 +1,4 @@
 from logging import Logger
-import heapq
 import copy
 
 
@@ -20,13 +19,17 @@ import cloudpickle
 import binascii
 import subprocess
 import multiprocessing as mp
+import uuid
 from queue import Queue
 from maze.core.scheduler.resource import SelectedNode
 from typing import Any,List,Dict
 from maze.core.scheduler.resource import ResourceManager
 from maze.core.scheduler.llm_instance import LlmInstanceManager,LlmInstanceMessage
 from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
+from maze.core.scheduler.queues import HeterogeneousTaskQueues
 from maze.core.scheduler.result_summary import summarize_task_result
+from maze.core.scheduler.standby_worker import StandbyWorkerPoolManager
+from maze.core.scheduler.strategy import create_scheduling_strategy
 from maze.core.workflow.resources import to_internal_scheduler_resources
 from maze.core.scheduler.error import (
     enrich_error_for_task,
@@ -55,68 +58,45 @@ def _int_resource(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
 
-class PriorityQueue:
-    def __init__(self):
-        self._queue = []
-        self._index = 0
-        self._lock = threading.Lock()
-        self._not_empty = threading.Condition(self._lock)
-
-    def put(self, item, priority):
-        with self._not_empty:
-            heapq.heappush(self._queue, (priority, self._index, item))
-            self._index += 1
-            self._not_empty.notify()
-
-    def get(self, block=True, timeout=None):
-        with self._not_empty:
-            if not block:
-                if self.is_empty():
-                    raise IndexError("get from empty priority queue")
-            else:
-                success = self._not_empty.wait_for(
-                    lambda: not self.is_empty(),
-                    timeout=timeout
-                )
-                if not success:
-                    raise TimeoutError("get timeout")
-
-            _, _, item = heapq.heappop(self._queue)
-            return item
-
-    def is_empty(self):
-        return len(self._queue) == 0
-
-    def size(self):
-        with self._lock:
-            return len(self._queue)
-
-    def snapshot(self):
-        with self._lock:
-            return [item for _, _, item in sorted(self._queue)]
-
-
-def scheduler_process(port1:int,port2:int,strategy:str,ray_head_port:int,ready_queue:mp.Queue):
-    scheduler = Scheduler(port1,port2,ray_head_port,ready_queue,strategy)
+def scheduler_process(
+    port1:int,
+    port2:int,
+    strategy:str,
+    ray_head_port:int,
+    ready_queue:mp.Queue,
+    node_scheduling_policy:str|None=None,
+):
+    scheduler = Scheduler(port1,port2,ray_head_port,ready_queue,strategy,node_scheduling_policy)
     scheduler.start()
 
 class Scheduler():
-    def __init__(self, port1:int, port2:int, ray_head_port:int, ready_queue:mp.Queue, strategy:str="Default"):
+    def __init__(
+        self,
+        port1:int,
+        port2:int,
+        ray_head_port:int,
+        ready_queue:mp.Queue,
+        strategy:str="FCFS",
+        node_scheduling_policy:str|None=None,
+    ):
         self.lock = threading.Lock()
         self.port1 = port1
         self.port2 = port2
         self.ray_head_port = ray_head_port
         self.ready_queue = ready_queue
-        self.strategy = strategy
 
-        self.workflow_manager = WorkflowRuntimeManager()
         self.resource_manager = ResourceManager()
-        self.resource_manager.set_scheduling_policy(self._node_scheduling_policy(strategy))
+        self.resource_manager.set_scheduling_policy(self._node_scheduling_policy(node_scheduling_policy))
         self.llm_instance_manager = LlmInstanceManager()
+        self.standby_worker_pool = StandbyWorkerPoolManager.from_env()
+        self.workflow_manager = WorkflowRuntimeManager(standby_worker_pool=self.standby_worker_pool)
 
-        self.task_queue: PriorityQueue[TaskRuntime|LanggraphTaskRuntime] = PriorityQueue()
+        self.scheduling_strategy = create_scheduling_strategy(strategy)
+        self.strategy = self.scheduling_strategy.name
+        self.task_queues = HeterogeneousTaskQueues(self.scheduling_strategy)
         self.llm_instance_queue: Queue = queue.Queue()
         self.stopped_workflow_ids: set[str] = set()
+        self.last_llm_scaling_check = 0.0
 
     def _stopped_workflows(self) -> set[str]:
         if not hasattr(self, "stopped_workflow_ids"):
@@ -129,7 +109,9 @@ class Scheduler():
             return normalized
         return "default"
 
-    def _task_queue_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float):
+    def _task_queue_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float, queue_name: str | None = None):
+        strategy = getattr(self, "scheduling_strategy", None) or create_scheduling_strategy(None)
+        metadata = strategy.refresh_task_metadata(task, now)
         retry_wait_seconds = max(0.0, getattr(task, "next_eligible_time", 0.0) - now)
         if retry_wait_seconds > 0:
             queue_status = "retrying"
@@ -143,20 +125,31 @@ class Scheduler():
             "task_id": task.task_id,
             "task_type": "langgraph" if isinstance(task, LanggraphTaskRuntime) else "code",
             "task_kind": getattr(task, "task_kind", "cpu"),
+            "queue_name": queue_name or getattr(task, "queue_name", None) or metadata.get("queue_name"),
             "status": queue_status,
             "runtime_status": task.status,
             "priority": task.priority,
+            "predicted_duration": metadata.get("predicted_duration"),
+            "prediction_source": metadata.get("prediction_source"),
+            "prediction_confidence": metadata.get("prediction_confidence"),
+            "prediction_sample_count": metadata.get("prediction_sample_count"),
+            "topological_weight": metadata.get("topological_weight"),
+            "workflow_wait_time": metadata.get("workflow_wait_time"),
+            "remaining_value_tasks": metadata.get("remaining_value_tasks"),
+            "hacs_score": metadata.get("hacs_score"),
+            "hacs_breakdown": metadata.get("hacs_breakdown"),
+            "code_hash": metadata.get("code_hash"),
             "attempt": task.attempt,
             "max_retries": task.max_retries,
             "retry_backoff_seconds": task.retry_backoff_seconds,
             "retry_wait_seconds": round(retry_wait_seconds, 6),
             "next_eligible_time": task.next_eligible_time or None,
             "pending_reason": getattr(task, "pending_reason", None),
-                "last_error": getattr(task, "last_error", None),
-                "resources": task.resources,
-                "schedule_decision": getattr(task, "last_schedule_decision", None),
-                "fault_tolerance": trace_snapshot(task),
-            }
+            "last_error": getattr(task, "last_error", None),
+            "resources": task.resources,
+            "schedule_decision": getattr(task, "last_schedule_decision", None),
+            "fault_tolerance": trace_snapshot(task),
+        }
 
     def _running_task_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float):
         selected_node = getattr(task, "selected_node", None)
@@ -185,15 +178,84 @@ class Scheduler():
         decision = copy.deepcopy(decision)
         decision["internal_requested_resources"] = decision.get("requested_resources")
         decision["requested_resources"] = copy.deepcopy(task.resources)
+        decision["queue_name"] = getattr(task, "queue_name", None)
+        if getattr(task, "scheduling_metadata", None):
+            decision["scheduling"] = copy.deepcopy(task.scheduling_metadata)
         return decision
+
+    def _assign_model_route(self, task: TaskRuntime|LanggraphTaskRuntime, decision: Dict[str, Any]):
+        route = self.llm_instance_manager.route_model_request(
+            getattr(task, "workflow_id", None),
+            getattr(task, "model_anchor", None),
+        )
+        task.model_route = route
+        if route:
+            decision["model_route"] = copy.deepcopy(route)
+        return route
+
+    def _release_model_route(self, task: TaskRuntime|LanggraphTaskRuntime):
+        route = getattr(task, "model_route", None)
+        if not route:
+            return
+        self.llm_instance_manager.release_model_route(route)
+        task.model_route = None
+
+    def _manage_llm_instance_scaling(self, now: float | None = None):
+        now = now or time.time()
+        if now - getattr(self, "last_llm_scaling_check", 0.0) < 5.0:
+            return
+        self.last_llm_scaling_check = now
+
+        for candidate in self.llm_instance_manager.lru_scale_in_candidates(now=now):
+            instance_id = candidate["instance_id"]
+            try:
+                resource_detail = self.llm_instance_manager.get_instance_resource_detail(instance_id)
+                self.resource_manager.release_instance_resource(resource_detail)
+            except Exception:
+                pass
+            self.llm_instance_manager.stop_llm_instance(instance_id)
+
+        for recommendation in self.llm_instance_manager.scale_out_recommendations():
+            model = recommendation["model"]
+            backend = recommendation["backend"]
+            instance_id = str(uuid.uuid4())
+            self.llm_instance_manager.mark_model_deploying(model, backend)
+            self.llm_instance_queue.put(LlmInstanceMessage("start_llm_instance", {
+                "instance_id": instance_id,
+                "model": model,
+                "backend": backend,
+                "cpu_nums": 1,
+                "memory": 0,
+                "gpu_nums": 1,
+                "gpu_mem": recommendation.get("gpu_mem", 0),
+                "auto_started": True,
+            }))
+
+    def _manage_standby_workers(self):
+        pool = getattr(self, "standby_worker_pool", None)
+        if pool is None:
+            return
+        pool.ensure_for_nodes(self.resource_manager.nodes)
 
     def get_queue_snapshot(self):
         now = time.time()
-        queued_items = [
-            self._task_queue_snapshot_item(task, now)
-            for task in self.task_queue.snapshot()
-            if task.workflow_id not in self._stopped_workflows()
-        ]
+        queue_tasks = self.task_queues.queue_snapshot(now)
+        queued_items = []
+        per_queue = {}
+        for queue_name, tasks in queue_tasks.items():
+            queue_items = [
+                self._task_queue_snapshot_item(task, now, queue_name)
+                for task in tasks
+                if task.workflow_id not in self._stopped_workflows()
+            ]
+            per_queue[queue_name] = {
+                "total": len(queue_items),
+                "ready": len([item for item in queue_items if item["status"] == "ready"]),
+                "pending": len([item for item in queue_items if item["status"] == "pending"]),
+                "retrying": len([item for item in queue_items if item["status"] == "retrying"]),
+                "tasks": queue_items,
+            }
+            queued_items.extend(queue_items)
         running_items = [
             self._running_task_snapshot_item(task, now)
             for task in self.workflow_manager.get_running_tasks()
@@ -205,6 +267,7 @@ class Scheduler():
 
         return {
             "snapshot_time": now,
+            "scheduling_algorithm": self.scheduling_strategy.name,
             "scheduling_policy": self.resource_manager.scheduling_policy,
             "stopped_workflow_ids": sorted(self._stopped_workflows()),
             "counts": {
@@ -213,7 +276,17 @@ class Scheduler():
                 "retrying": len(retrying_items),
                 "running": len(running_items),
                 "total_queued": len(queued_items),
+                "by_queue": {
+                    name: {
+                        "ready": data["ready"],
+                        "pending": data["pending"],
+                        "retrying": data["retrying"],
+                        "total": data["total"],
+                    }
+                    for name, data in per_queue.items()
+                },
             },
+            "queues": per_queue,
             "ready_tasks": ready_items,
             "pending_tasks": pending_items,
             "retrying_tasks": retrying_items,
@@ -229,10 +302,12 @@ class Scheduler():
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
                 "task_kind": getattr(task, "task_kind", "cpu"),
+                "queue_name": getattr(task, "queue_name", None),
                 "result": error,
                 "error": error,
                 "attempt": task.attempt,
                 "schedule_decision": getattr(task, "last_schedule_decision", None),
+                "scheduling": getattr(task, "scheduling_metadata", None),
                 "fault_tolerance": trace_snapshot(task),
             },
         }
@@ -272,12 +347,14 @@ class Scheduler():
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
                 "task_kind": getattr(task, "task_kind", "cpu"),
+                "queue_name": getattr(task, "queue_name", None),
                 "error": error,
                 "attempt": task.attempt,
                 "next_attempt": task.attempt + 1,
                 "retry_backoff_seconds": task.retry_backoff_seconds,
                 "resources": task.resources,
                 "schedule_decision": getattr(task, "last_schedule_decision", None),
+                "scheduling": getattr(task, "scheduling_metadata", None),
                 "fault_tolerance": trace_snapshot(task),
             },
         }
@@ -290,9 +367,11 @@ class Scheduler():
                 "workflow_id": task.workflow_id,
                 "task_id": task.task_id,
                 "task_kind": getattr(task, "task_kind", "cpu"),
+                "queue_name": getattr(task, "queue_name", None),
                 "pending_reason": task.pending_reason,
                 "schedule_decision": task.last_schedule_decision,
                 "attempt": task.attempt,
+                "scheduling": getattr(task, "scheduling_metadata", None),
             },
         }
         socket_to_main.send(json.dumps(message).encode("utf-8"))
@@ -308,6 +387,7 @@ class Scheduler():
         error = enrich_error_for_task(error, task)
         task.last_error = error
         task.last_metrics = metrics
+        self._release_model_route(task)
         if file_manifest:
             task.file_manifest = file_manifest
         self._stopped_workflows().add(task.workflow_id)
@@ -336,7 +416,7 @@ class Scheduler():
                 retry_scheduled=True,
                 next_attempt=task.attempt + 1,
             )
-            self.task_queue.put(task, task.priority)
+            self.task_queues.put(task)
             self._send_task_retry(socket_to_main, task, error)
             return
 
@@ -361,6 +441,7 @@ class Scheduler():
         if len(canceld_tasks) > 0:
             self.resource_manager.release_task_resource(tasks=canceld_tasks)
             self.workflow_manager.clear_workflow(task.workflow_id)
+        self.resource_manager.release_dag_context(task.workflow_id)
         self._send_task_exception(socket_to_main, task, error)
 
     def _release_task_attempt_resource(self, task: TaskRuntime|LanggraphTaskRuntime, resources: Dict[str, Any]):
@@ -442,10 +523,11 @@ class Scheduler():
                                                                     retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
                                                                     retry_on=message_data.get('retry_on'),
                                                                     timeout_seconds=message_data.get('timeout_seconds'),
+                                                                    scheduling_context=message_data.get('scheduling_context'),
                                                                     )
                             priority =  message_data.get('priority', 0)
                             task_runtime.set_priority(priority)
-                            self.task_queue.put(task_runtime,priority)
+                            self.task_queues.put(task_runtime)
                         elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
                             task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
                                                                                       task_id=message_data['task_id'],
@@ -459,10 +541,11 @@ class Scheduler():
                                                                                       retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
                                                                                       retry_on=message_data.get('retry_on'),
                                                                                       timeout_seconds=message_data.get('timeout_seconds'),
+                                                                                      scheduling_context=message_data.get('scheduling_context'),
                                                                                     )
                             priority =  message_data.get('priority', 0)
                             task_runtime.set_priority(priority)
-                            self.task_queue.put(task_runtime,0)
+                            self.task_queues.put(task_runtime)
                     except Exception as exc:
                         logger.exception(
                             "Rejecting task %s before scheduling",
@@ -473,13 +556,17 @@ class Scheduler():
                     with self.lock:
                         self._stopped_workflows().add(message_data["workflow_id"])
                         self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
+                        self.resource_manager.release_dag_context(message_data["workflow_id"])
                 elif(message_type =="stop_workflow" ):
                     with self.lock:
                         self._stopped_workflows().add(message_data["workflow_id"])
                         canceld_tasks = self.workflow_manager.cancel_workflow(workflow_id=message_data["workflow_id"])
                         if len(canceld_tasks) > 0:
+                            for task in canceld_tasks:
+                                self._release_model_route(task)
                             self.resource_manager.release_task_resource(tasks=canceld_tasks)
                             self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
+                        self.resource_manager.release_dag_context(message_data["workflow_id"])
                 elif(message_type=="start_worker"):
                     with self.lock:
                         worker = self.resource_manager.start_worker(
@@ -502,6 +589,7 @@ class Scheduler():
                     request_id = message_data.get("request_id")
                     with self.lock:
                         resources = self.resource_manager.get_cluster_resources()
+                        resources["standby_workers"] = self.standby_worker_pool.snapshot()
                     response = {
                         "type": "cluster_resources",
                         "data": {
@@ -590,19 +678,21 @@ class Scheduler():
                                                     node_id=selected_node.node_id,
                                                     gpu_id=selected_node.gpu_id,
                                                     resources=need_resources,
+                                                    backend=message_data.get("backend", "vllm"),
                                                 )
 
                     #Send message to main
-                    message = {
-                        "type":"finish_llm_instance_launch",
-                        "data":{
-                            "host":selected_node.node_ip,
-                            "port":port,
-                            "instance_id":message_data["instance_id"]
+                    if not message_data.get("auto_started"):
+                        message = {
+                            "type":"finish_llm_instance_launch",
+                            "data":{
+                                "host":selected_node.node_ip,
+                                "port":port,
+                                "instance_id":message_data["instance_id"]
+                            }
                         }
-                    }
-                    serialized_message = json.dumps(message).encode('utf-8')
-                    socket_to_main.send(serialized_message)
+                        serialized_message = json.dumps(message).encode('utf-8')
+                        socket_to_main.send(serialized_message)
 
                     self.lock.release()
                 else:
@@ -624,65 +714,88 @@ class Scheduler():
         socket_to_main.connect(f"tcp://127.0.0.1:{port2}")
 
         while True:
-            self.cur_ready_task =  self.task_queue.get()
-            if self.cur_ready_task.workflow_id in self._stopped_workflows():
-                self.cur_ready_task = None
+            if not self.task_queues.wait_for_task(timeout=0.5):
                 continue
-            retry_delay = getattr(self.cur_ready_task, "next_eligible_time", 0) - time.time()
-            if retry_delay > 0:
-                self.task_queue.put(self.cur_ready_task, self.cur_ready_task.priority)
-                time.sleep(min(retry_delay, 1))
-                continue
-            self.lock.acquire()
-            self.cur_ready_task.set_task_status("ready")
-            self.workflow_manager.add_task(self.cur_ready_task)
+            dispatched_or_removed = False
+            attempted_head = False
+            now = time.time()
 
-            #Get the node can run the task
-            selection = self.resource_manager.select_node(
-                task_need_resources=self.cur_ready_task.scheduler_resources,
-                model_anchor=getattr(self.cur_ready_task, "model_anchor", None),
-            )
-            if selection:
-                selected_node = selection.selected_node
-                self.cur_ready_task.pending_reason = None
-                selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
-                self.cur_ready_task.last_schedule_decision = selection.decision
-                #Run task
-                self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
+            for queue_name in self.task_queues.queue_names():
+                self.cur_ready_task = self.task_queues.peek(queue_name, now)
+                if self.cur_ready_task is None:
+                    continue
 
-                #Send message to main
-                message = {
-                    "type":"start_task",
-                    "data":{
-                        "workflow_id":self.cur_ready_task.workflow_id,
-                        "task_id":self.cur_ready_task.task_id,
-                        "task_kind":getattr(self.cur_ready_task, "task_kind", "cpu"),
-                        "node_ip":selected_node.node_ip,
-                        "node_id":selected_node.node_id,
-                        "gpu_id":selected_node.gpu_id,
-                        "attempt":self.cur_ready_task.attempt,
-                        "schedule_decision":selection.decision,
-                        "started_at": time.time(),
-                    }
-                }
-                serialized_message = json.dumps(message).encode('utf-8')
-                socket_to_main.send(serialized_message)
+                if self.cur_ready_task.workflow_id in self._stopped_workflows():
+                    self.task_queues.pop_head(queue_name, self.cur_ready_task)
+                    self.cur_ready_task = None
+                    dispatched_or_removed = True
+                    continue
 
-                self.cur_ready_task = None
-                self.lock.release()
-            else:
-                previous_pending_reason = self.cur_ready_task.pending_reason
-                pending_reason = selection.decision.get("reason")
-                self.cur_ready_task.set_task_status("pending")
-                self.cur_ready_task.pending_reason = pending_reason
-                selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
-                self.cur_ready_task.last_schedule_decision = selection.decision
-                if previous_pending_reason != self.cur_ready_task.pending_reason:
-                    self._send_task_pending(socket_to_main, self.cur_ready_task)
-                logger.debug("No node can run task %s: %s", self.cur_ready_task.task_id, self.cur_ready_task.pending_reason)
-                self.lock.release()
-                self.task_queue.put(self.cur_ready_task, self.cur_ready_task.priority)
-                time.sleep(1)
+                retry_delay = getattr(self.cur_ready_task, "next_eligible_time", 0) - time.time()
+                if retry_delay > 0:
+                    continue
+
+                attempted_head = True
+                self.lock.acquire()
+                try:
+                    self.cur_ready_task.set_task_status("ready")
+                    self.workflow_manager.add_task(self.cur_ready_task)
+
+                    #Get the node can run the task
+                    selection = self.resource_manager.select_node(
+                        task_need_resources=self.cur_ready_task.scheduler_resources,
+                        model_anchor=getattr(self.cur_ready_task, "model_anchor", None),
+                        workflow_id=getattr(self.cur_ready_task, "workflow_id", None),
+                    )
+                    if selection:
+                        selected_node = selection.selected_node
+                        self.task_queues.pop_head(queue_name, self.cur_ready_task)
+                        self.cur_ready_task.pending_reason = None
+                        self._assign_model_route(self.cur_ready_task, selection.decision)
+                        selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
+                        self.cur_ready_task.last_schedule_decision = selection.decision
+                        #Run task
+                        self.workflow_manager.run_task(task=self.cur_ready_task,node=selected_node)
+
+                        #Send message to main
+                        message = {
+                            "type":"start_task",
+                            "data":{
+                                "workflow_id":self.cur_ready_task.workflow_id,
+                                "task_id":self.cur_ready_task.task_id,
+                                "task_kind":getattr(self.cur_ready_task, "task_kind", "cpu"),
+                                "queue_name": queue_name,
+                                "node_ip":selected_node.node_ip,
+                                "node_id":selected_node.node_id,
+                                "gpu_id":selected_node.gpu_id,
+                                "attempt":self.cur_ready_task.attempt,
+                                "schedule_decision":selection.decision,
+                                "scheduling": getattr(self.cur_ready_task, "scheduling_metadata", None),
+                                "started_at": time.time(),
+                            }
+                        }
+                        serialized_message = json.dumps(message).encode('utf-8')
+                        socket_to_main.send(serialized_message)
+
+                        self.cur_ready_task = None
+                        dispatched_or_removed = True
+                    else:
+                        previous_pending_reason = self.cur_ready_task.pending_reason
+                        pending_reason = selection.decision.get("reason")
+                        self.cur_ready_task.set_task_status("pending")
+                        self.cur_ready_task.pending_reason = pending_reason
+                        selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
+                        self.cur_ready_task.last_schedule_decision = selection.decision
+                        if previous_pending_reason != self.cur_ready_task.pending_reason:
+                            self._send_task_pending(socket_to_main, self.cur_ready_task)
+                        logger.debug("No node can run task %s: %s", self.cur_ready_task.task_id, self.cur_ready_task.pending_reason)
+                finally:
+                    self.lock.release()
+
+            if not dispatched_or_removed and attempted_head:
+                time.sleep(0.1)
+            elif not dispatched_or_removed:
+                time.sleep(0.05)
 
     def _supervisor_thread(self, port2:int):
         logger.info(f"Supervisor start")
@@ -694,6 +807,8 @@ class Scheduler():
             with self.lock:
                 self.resource_manager.check_dead_node()
                 self.resource_manager.show_all_node_resource()
+                self._manage_standby_workers()
+                self._manage_llm_instance_scaling()
                 self._fail_timed_out_tasks(socket_to_main)
 
                 running_task_refs:List = self.workflow_manager.get_running_task_refs()
@@ -738,6 +853,7 @@ class Scheduler():
                         else:
                             result = raw_result
 
+                        self._release_model_route(finished_task)
                         self.workflow_manager.set_task_result(finished_task,result)
                         self.resource_manager.release_task_resource(tasks=[finished_task])
                         self.workflow_manager.clear_task_ref(finished_task)

@@ -4,14 +4,11 @@ from typing import Any,List,Optional
 from maze.core.workflow.task import CodeTask,LangGraphTask
 from typing import Dict
 import networkx as nx
-import httpx
 import time
 
-HACS_TASK_TYPE_AVG_TIMES = {
-    "cpu": 3.0,
-    "gpu": 60.0,
-    "io": 8.0,
-}
+from maze.core.scheduler.strategy import DEFAULT_PREDICTED_DURATION_SECONDS
+
+HACS_TASK_TYPE_AVG_TIMES = dict(DEFAULT_PREDICTED_DURATION_SECONDS)
 
 class LangGraphWorkflow:
     def __init__(self, id: str):
@@ -287,33 +284,43 @@ class Workflow:
         }
 
     def prepare_for_strategy(self, strategy: str) -> None:
-        if strategy not in ("HACS", "ATLAS"):
+        if strategy != "HACS":
             return
 
+        total_value_tasks = 0
         for node in self.graph.nodes:
-            self.graph.nodes[node]["attained_service"] = 0.0
+            task_type = self._get_task_type(node)
+            self.graph.nodes[node]["task_type"] = task_type
+            self.graph.nodes[node]["task_kind"] = task_type
+            self.graph.nodes[node]["pred_time"] = HACS_TASK_TYPE_AVG_TIMES[task_type]
+            self.graph.nodes[node]["predicted_duration"] = HACS_TASK_TYPE_AVG_TIMES[task_type]
+            self.graph.nodes[node]["prediction_source"] = "task_kind_default"
+            if task_type == "gpu":
+                total_value_tasks += 1
 
-        if strategy == "HACS":
-            total_gpu_tasks = 0
-            for node in self.graph.nodes:
-                task_type = self._get_task_type(node)
-                self.graph.nodes[node]["task_type"] = task_type
-                self.graph.nodes[node]["pred_time"] = HACS_TASK_TYPE_AVG_TIMES[task_type]
-                if task_type == "gpu":
-                    total_gpu_tasks += 1
+        self.graph.graph["total_gpu_tasks"] = total_value_tasks
+        self.graph.graph["remaining_gpu_tasks"] = total_value_tasks
+        self.graph.graph["total_value_tasks"] = total_value_tasks
+        self.graph.graph["remaining_value_tasks"] = total_value_tasks
 
-            self.graph.graph["total_gpu_tasks"] = total_gpu_tasks
-            self.graph.graph["remaining_gpu_tasks"] = total_gpu_tasks
+        topo_order = list(nx.topological_sort(self.graph))
+        for node in topo_order:
+            predecessors = list(self.graph.predecessors(node))
+            if not predecessors:
+                self.graph.nodes[node]["n_anc"] = 0
+            else:
+                self.graph.nodes[node]["n_anc"] = (
+                    max(self.graph.nodes[pred].get("n_anc", 0) for pred in predecessors) + 1
+                )
 
-            topo_order = list(nx.topological_sort(self.graph))
-            for node in reversed(topo_order):
-                successors = list(self.graph.successors(node))
-                if not successors:
-                    self.graph.nodes[node]["n_desc"] = 0
-                else:
-                    self.graph.nodes[node]["n_desc"] = (
-                        max(self.graph.nodes[succ].get("n_desc", 0) for succ in successors) + 1
-                    )
+        for node in reversed(topo_order):
+            successors = list(self.graph.successors(node))
+            if not successors:
+                self.graph.nodes[node]["n_desc"] = 0
+            else:
+                self.graph.nodes[node]["n_desc"] = (
+                    max(self.graph.nodes[succ].get("n_desc", 0) for succ in successors) + 1
+                )
 
     def finish_task(self, task_id: str,task_result:Dict,strategy:str) -> List[CodeTask]:
         """
@@ -328,28 +335,14 @@ class Workflow:
         task = self.tasks[task_id]
         task.completed = True
         task.finish_time = time.time()
-        actual_start_time = task.start_time or task.created_time
-        actual_runtime = max(0.0, task.finish_time - actual_start_time)
-
-        try:
-            if task.can_predict and strategy == "DAPS":
-                payload = {"task_name": task.task_name, "features": task.predict_feature,"execution_time": actual_runtime}
-                response = httpx.post("http://127.0.0.1:8001/collect_data", json=payload, timeout=httpx.Timeout(5.0))
-        except httpx.ReadTimeout as e:
-            pass
 
         if strategy == "HACS" and self.graph.nodes[task_id].get("task_type") == "gpu":
             remaining_gpu_tasks = self.graph.graph.get("remaining_gpu_tasks", 0)
             if remaining_gpu_tasks > 0:
                 self.graph.graph["remaining_gpu_tasks"] = remaining_gpu_tasks - 1
-
-        if strategy == "ATLAS":
-            parent_attained_service = self.graph.nodes[task_id].get("attained_service", 0.0)
-            path_attained_service = parent_attained_service + actual_runtime
-            for successor in self.graph.successors(task_id):
-                current_attained_service = self.graph.nodes[successor].get("attained_service", 0.0)
-                if path_attained_service > current_attained_service:
-                    self.graph.nodes[successor]["attained_service"] = path_attained_service
+            remaining_value_tasks = self.graph.graph.get("remaining_value_tasks", 0)
+            if remaining_value_tasks > 0:
+                self.graph.graph["remaining_value_tasks"] = remaining_value_tasks - 1
 
         ready_tasks = []
         for successor in self.graph.successors(task_id):

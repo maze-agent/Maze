@@ -3,6 +3,7 @@ import time
 import logging
 import copy
 from typing import Any,List,Dict
+from maze.core.scheduler.dag_context import DAGContextManager
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.scheduler.runtime import SelectedNode
@@ -130,6 +131,7 @@ class ResourceManager():
         self.nodes:Dict[str,Node] = {}
         self.running_task_counts: Dict[str, int] = {}
         self.disabled_node_ids: set[str] = set()
+        self.dag_context_manager = DAGContextManager()
         self.scheduling_policy = "default"
         self.worker_stale_after_seconds = 30
         
@@ -206,8 +208,10 @@ class ResourceManager():
         nodes = ray.nodes()
         for node in nodes:
             if node["NodeID"] in self.nodes and not node["Alive"]:
-                del self.nodes[node["NodeID"]]
-                self.running_task_counts.pop(node["NodeID"], None)
+                node_id = node["NodeID"]
+                del self.nodes[node_id]
+                self.running_task_counts.pop(node_id, None)
+                self.dag_context_manager.release_node_contexts(node_id)
                 
     def show_all_node_resource(self):
         '''
@@ -335,6 +339,7 @@ class ResourceManager():
             "scheduling_policy": self.scheduling_policy,
             "supported_scheduling_policies": copy.deepcopy(SUPPORTED_SCHEDULING_POLICIES),
             "disabled_node_ids": sorted(self.disabled_node_ids),
+            "dag_contexts": self.dag_context_manager.snapshot(),
             "nodes": sorted(registered_nodes, key=lambda item: (item["role"] != "head", item["node_ip"] or "")),
             "unregistered_ray_nodes": sorted(unregistered_ray_nodes, key=lambda item: item["node_ip"] or ""),
         }
@@ -361,6 +366,7 @@ class ResourceManager():
         '''
         del self.nodes[node_id]
         self.disabled_node_ids.discard(node_id)
+        self.dag_context_manager.release_node_contexts(node_id)
         
     def _node_resource_snapshot(self, node: Node) -> Dict[str, Any]:
         return {
@@ -397,10 +403,27 @@ class ResourceManager():
                 return reason
         return "resource_unavailable"
 
-    def _candidate_sort_key(self, candidate: Dict[str, Any], gpu_need: int):
+    def _candidate_sort_key(
+        self,
+        candidate: Dict[str, Any],
+        gpu_need: int,
+        workflow_id: str | None = None,
+        affinity_node_id: str | None = None,
+    ):
         node_id = candidate["node_id"]
+        dag_context_key = ()
+        if workflow_id:
+            affinity_rank = 0 if affinity_node_id and node_id == affinity_node_id else 1
+            if not affinity_node_id:
+                affinity_rank = 0
+            dag_context_key = (
+                affinity_rank,
+                self.dag_context_manager.node_context_load(node_id),
+            )
+
         if self.scheduling_policy in {"least-loaded", "spread"}:
             return (
+                *dag_context_key,
                 self.running_task_counts.get(node_id, 0),
                 -candidate.get("available_cpu", 0),
                 candidate.get("node_ip") or "",
@@ -409,11 +432,12 @@ class ResourceManager():
             gpu = candidate.get("available_resources", {}).get("gpu", {})
             has_free_gpu = gpu.get("available_count", 0) > 0
             return (
+                *dag_context_key,
                 0 if not has_free_gpu else 1,
                 self.running_task_counts.get(node_id, 0),
                 candidate.get("node_ip") or "",
             )
-        return (candidate.get("order", 0),)
+        return (*dag_context_key, candidate.get("order", 0))
 
     def select_node(
         self,
@@ -421,6 +445,7 @@ class ResourceManager():
         *,
         reservation_kind: str = "task",
         model_anchor: Dict[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> ResourceSelection:
         '''
         Select sufficient resources node
@@ -440,6 +465,8 @@ class ResourceManager():
         required_capability = task_need_resources.get("required_capability")
         required_model = (model_anchor or {}).get("local_model")
         required_backend = (model_anchor or {}).get("backend") or "transformers"
+        dag_context = self.dag_context_manager.get_context(workflow_id)
+        affinity_node_id = dag_context.preferred_node_id if dag_context else None
         self._refresh_head_local_models()
         ray_nodes = self._ray_node_index()
         candidates = []
@@ -504,6 +531,8 @@ class ResourceManager():
                 "disabled": node_id in self.disabled_node_ids,
                 "registered": True,
                 "running_task_count": self.running_task_counts.get(node_id, 0),
+                "dag_context_affinity": bool(affinity_node_id and node_id == affinity_node_id),
+                "dag_context_load": self.dag_context_manager.node_context_load(node_id),
                 "available_cpu": node.available_resources.get("cpu", 0),
                 "available_resources": self._node_resource_snapshot(node),
                 "capabilities": copy.deepcopy(node.capabilities),
@@ -520,6 +549,12 @@ class ResourceManager():
             "reason": None,
             "requested_resources": copy.deepcopy(task_need_resources),
             "scheduling_policy": self.scheduling_policy,
+            "dag_context": {
+                "workflow_id": workflow_id,
+                "preferred_node_id": affinity_node_id,
+                "preferred_node_ip": dag_context.preferred_node_ip if dag_context else None,
+                "affinity_active": affinity_node_id is not None,
+            } if workflow_id else None,
             "candidate_nodes": [
                 {key: value for key, value in candidate.items() if key not in {"order", "available_cpu"}}
                 for candidate in candidates
@@ -532,7 +567,12 @@ class ResourceManager():
 
         selected_candidate = sorted(
             runnable_candidates,
-            key=lambda candidate: self._candidate_sort_key(candidate, gpu_need),
+            key=lambda candidate: self._candidate_sort_key(
+                candidate,
+                gpu_need,
+                workflow_id,
+                affinity_node_id,
+            ),
         )[0]
         node_id = selected_candidate["node_id"]
         node = self.nodes[node_id]
@@ -547,6 +587,7 @@ class ResourceManager():
         if reservation_kind == "task":
             self.running_task_counts[node_id] = self.running_task_counts.get(node_id, 0) + 1
 
+        context, context_created = self.dag_context_manager.record_selection(workflow_id, node_id, node.node_ip)
         selected_node = SelectedNode(node_id=node_id,node_ip=node.node_ip,gpu_id=gpu_id)
         decision["selected"] = True
         decision["reason"] = "selected"
@@ -556,7 +597,17 @@ class ResourceManager():
             "gpu_id": selected_node.gpu_id,
             "capabilities": copy.deepcopy(node.capabilities),
         }
+        if context is not None:
+            decision["dag_context"] = {
+                **context.to_dict(),
+                "context_created": context_created,
+                "selected_node_id": node_id,
+                "affinity_hit": bool(affinity_node_id and node_id == affinity_node_id),
+            }
         return ResourceSelection(selected_node, decision)
+
+    def release_dag_context(self, workflow_id: str | None) -> bool:
+        return self.dag_context_manager.release_context(workflow_id)
 
     def release_task_resource(self,tasks:List[TaskRuntime]):
         '''

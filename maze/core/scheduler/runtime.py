@@ -48,6 +48,7 @@ class LanggraphTaskRuntime():
         retry_backoff_seconds:float=0,
         retry_on:List[str]|None=None,
         timeout_seconds:float|None=None,
+        scheduling_context:Dict|None=None,
     ):
         self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
@@ -64,6 +65,9 @@ class LanggraphTaskRuntime():
             model_anchor=model_anchor,
         )
         self.model_anchor: Dict[str, Any] | None = model_anchor
+        self.scheduling_context: Dict[str, Any] = dict(scheduling_context or {})
+        self.scheduling_metadata: Dict[str, Any] = {}
+        self.model_route: Dict[str, Any] | None = None
         self.priority = 0
         self.max_retries = _normalize_max_retries(max_retries)
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds or 0))
@@ -79,6 +83,8 @@ class LanggraphTaskRuntime():
         self.last_schedule_decision: Dict[str, Any] | None = None
         self.object_ref = None
         self.selected_node = None
+        self.standby_worker_lease = None
+        self.execution_backend = None
         self.fault_tolerance = {
             "enabled": True,
             "status": "idle",
@@ -138,6 +144,7 @@ class TaskRuntime():
         retry_backoff_seconds:float=0,
         retry_on:List[str]|None=None,
         timeout_seconds:float|None=None,
+        scheduling_context:Dict|None=None,
     ):
         self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
@@ -153,6 +160,9 @@ class TaskRuntime():
             model_anchor=model_anchor,
         )
         self.model_anchor: Dict[str, Any] | None = model_anchor
+        self.scheduling_context: Dict[str, Any] = dict(scheduling_context or {})
+        self.scheduling_metadata: Dict[str, Any] = {}
+        self.model_route: Dict[str, Any] | None = None
         self.code_str: str = code_str
         self.code_ser: str = code_ser 
         self.file_context: Dict[str, Any] | None = file_context
@@ -179,6 +189,8 @@ class TaskRuntime():
             "attempts": [],
         }
         self.invocation_correction_count = 0
+        self.standby_worker_lease = None
+        self.execution_backend = None
 
         self.priority = 0
     
@@ -277,9 +289,10 @@ class WorkflowRuntime():
             del self.ref_to_taskid[object_ref]
         
 class WorkflowRuntimeManager():
-    def __init__(self):
+    def __init__(self, standby_worker_pool=None):
         self.workflows = {}
         self.ref_to_workflow_id = {}
+        self.standby_worker_pool = standby_worker_pool
     
     def _get_workflow_by_ref(self, ref):
         if ref not in self.ref_to_workflow_id:
@@ -287,12 +300,80 @@ class WorkflowRuntimeManager():
 
         return self.workflows[self.ref_to_workflow_id[ref]]
 
+    def _release_task_standby_worker(self, task:TaskRuntime|LanggraphTaskRuntime):
+        lease = getattr(task, "standby_worker_lease", None)
+        if lease is None:
+            return
+        pool = getattr(self, "standby_worker_pool", None)
+        if pool is not None:
+            pool.release(lease)
+        task.standby_worker_lease = None
+
+    def _cuda_visible_devices(self, node:SelectedNode):
+        if getattr(node, "gpu_id", None) is None:
+            return None
+        return str(node.gpu_id)
+
+    def _resolve_task_input_data(self, task:TaskRuntime):
+        task_input_data = {}
+        for _,input_info in task.task_input["input_params"].items():
+            if input_info["input_schema"] == "from_user":
+                if input_info.get("has_value", True):
+                    task_input_data[input_info["key"]] = input_info["value"]
+            elif input_info["input_schema"] == "from_task":
+                task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
+        return task_input_data
+
+    def _try_standby_worker(
+        self,
+        task:TaskRuntime|LanggraphTaskRuntime,
+        node:SelectedNode,
+        task_input_data:Dict|None=None,
+    ):
+        pool = getattr(self, "standby_worker_pool", None)
+        if pool is None:
+            return None
+
+        lease = pool.acquire(node.node_id, getattr(task, "task_kind", "cpu"))
+        if lease is None:
+            return None
+
+        cuda_visible_devices = self._cuda_visible_devices(node)
+        try:
+            if isinstance(task, LanggraphTaskRuntime):
+                result_ref = lease.actor.execute_langgraph_task.remote(
+                    code_ser=task.code_ser,
+                    args=task.args,
+                    kwargs=task.kwargs,
+                    cuda_visible_devices=cuda_visible_devices,
+                    model_route=task.model_route,
+                )
+            else:
+                result_ref = lease.actor.execute_code_task.remote(
+                    code_str=task.code_str,
+                    code_ser=task.code_ser,
+                    task_input_data=task_input_data,
+                    cuda_visible_devices=cuda_visible_devices,
+                    file_context=task.file_context,
+                    model_route=task.model_route,
+                )
+        except Exception:
+            pool.release(lease)
+            return None
+
+        task.standby_worker_lease = lease
+        task.execution_backend = "standby_worker"
+        return result_ref
+
     def clear_workflow(self, workflow_id:str):
         '''
         Clear workflow.
         '''
         if workflow_id not in self.workflows:
             return
+
+        for task in self.workflows[workflow_id].tasks.values():
+            self._release_task_standby_worker(task)
 
         refs_to_del = []
         for ref,id in self.ref_to_workflow_id.items():
@@ -313,6 +394,7 @@ class WorkflowRuntimeManager():
         running_tasks = self.workflows[workflow_id].get_running_tasks()
         for task in running_tasks:
             ray.cancel(task.object_ref,force=True)
+            self._release_task_standby_worker(task)
  
         self.clear_workflow(workflow_id)
         return running_tasks
@@ -333,65 +415,52 @@ class WorkflowRuntimeManager():
         if task.workflow_id not in self.workflows:
             return 
         task.begin_attempt()
+        task.standby_worker_lease = None
+        task.execution_backend = None
+        cuda_visible_devices = self._cuda_visible_devices(node)
 
         if isinstance(task, LanggraphTaskRuntime):
-            #gpu task
-            if node.gpu_id is not None: 
-                result_ref = remote_lgraph_task_runner.options(
-                    num_cpus=task.scheduler_resources["cpu"],
-                    num_gpus=task.scheduler_resources["gpu"],
-                    memory=task.scheduler_resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(code_ser=task.code_ser,args=task.args,kwargs=task.kwargs,cuda_visible_devices=str(node.gpu_id))
-            #cpu task
-            else: 
-                result_ref = remote_lgraph_task_runner.options(
-                    num_cpus=task.scheduler_resources["cpu"],
-                    memory=task.scheduler_resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(code_ser=task.code_ser,args=task.args,kwargs=task.kwargs,cuda_visible_devices=None)
-            
+            result_ref = self._try_standby_worker(task, node)
+            if result_ref is None:
+                options = {
+                    "num_cpus": task.scheduler_resources["cpu"],
+                    "memory": task.scheduler_resources["cpu_mem"],
+                    "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False),
+                }
+                if node.gpu_id is not None:
+                    options["num_gpus"] = task.scheduler_resources["gpu"]
+                result_ref = remote_lgraph_task_runner.options(**options).remote(
+                    code_ser=task.code_ser,
+                    args=task.args,
+                    kwargs=task.kwargs,
+                    cuda_visible_devices=cuda_visible_devices,
+                    model_route=task.model_route,
+                )
+                task.execution_backend = "ray_task"
             
             self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
             self.ref_to_workflow_id[result_ref] = task.workflow_id
 
         elif isinstance(task, TaskRuntime):
-            task_input_data = {}
-            for _,input_info in task.task_input["input_params"].items():
-                if input_info["input_schema"] == "from_user":
-                    if input_info.get("has_value", True):
-                        task_input_data[input_info["key"]] = input_info["value"]
-                elif input_info["input_schema"] == "from_task":
-                    task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
-
-            #gpu task
-            if node.gpu_id is not None: 
-                result_ref = remote_task_runner.options(
-                    num_cpus=task.scheduler_resources["cpu"],
-                    num_gpus=task.scheduler_resources["gpu"],
-                    memory=task.scheduler_resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(
+            task_input_data = self._resolve_task_input_data(task)
+            result_ref = self._try_standby_worker(task, node, task_input_data)
+            if result_ref is None:
+                options = {
+                    "num_cpus": task.scheduler_resources["cpu"],
+                    "memory": task.scheduler_resources["cpu_mem"],
+                    "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False),
+                }
+                if node.gpu_id is not None:
+                    options["num_gpus"] = task.scheduler_resources["gpu"]
+                result_ref = remote_task_runner.options(**options).remote(
                     code_str=task.code_str,
                     code_ser=task.code_ser,
                     task_input_data=task_input_data,
-                    cuda_visible_devices=str(node.gpu_id),
+                    cuda_visible_devices=cuda_visible_devices,
                     file_context=task.file_context,
+                    model_route=task.model_route,
                 )
-            #cpu task
-            else: 
-                result_ref = remote_task_runner.options(
-                    num_cpus=task.scheduler_resources["cpu"],
-                    memory=task.scheduler_resources["cpu_mem"],
-                    scheduling_strategy= ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(node_id=node.node_id, soft=False)
-                ).remote(
-                    code_str=task.code_str,
-                    code_ser=task.code_ser,
-                    task_input_data=task_input_data,
-                    cuda_visible_devices=None,
-                    file_context=task.file_context,
-                )
-            
+                task.execution_backend = "ray_task"
             
             self.workflows[task.workflow_id].add_runtime_info(task.task_id,result_ref,node)
             self.ref_to_workflow_id[result_ref] = task.workflow_id
@@ -429,6 +498,7 @@ class WorkflowRuntimeManager():
             return workflow.get_task_by_ref(object_ref)
 
     def clear_task_ref(self, task:TaskRuntime|LanggraphTaskRuntime):
+        self._release_task_standby_worker(task)
         workflow = self.workflows.get(task.workflow_id)
         if workflow is not None:
             workflow.clear_task_ref(task)

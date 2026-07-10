@@ -13,6 +13,7 @@ import socket
 from pathlib import Path
 from maze.core.worker.worker import Worker
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
+from maze.core.scheduler.strategy import SchedulingAlgorithm
 from maze.cli.dev import add_dev_parser, handle_dev_command
 import asyncio
 from maze.config.logging_config import setup_logging
@@ -38,22 +39,18 @@ async def _async_start_head(
     port: int,
     ray_head_port: int,
     strategy: str = "least-loaded",
+    scheduling_algorithm: str = SchedulingAlgorithm.FCFS.value,
     playground: bool = False,
     playground_port: int = 5173,
     playground_backend_port: int | None = None,
 ):
   
     from maze.core.server import app as server_app, mapath
-    use_predictor = strategy == "DAPS"
-    if use_predictor:
-        from maze.core.predictor.server import app as predictor_app
 
     service_ports = [
         ("Maze core", port),
         ("Ray head", ray_head_port),
     ]
-    if use_predictor:
-        service_ports.append(("DAPS predictor", port + 1))
     if playground:
         resolved_playground_backend_port = (
             playground_backend_port
@@ -67,21 +64,19 @@ async def _async_start_head(
     for service_name, service_port in service_ports:
         _ensure_port_available(service_port, service_name)
 
-    mapath.init(ray_head_port=ray_head_port, strategy=strategy)  
+    mapath.init(
+        ray_head_port=ray_head_port,
+        strategy=scheduling_algorithm,
+        node_scheduling_policy=strategy,
+    )
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
 
     server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(server_config)
     server_task = asyncio.create_task(server.serve())
     
-    if use_predictor:
-        predictor_port = port + 1
-        predictor_config = uvicorn.Config(predictor_app, host="0.0.0.0", port=predictor_port, log_level="info")
-        predictor_server = uvicorn.Server(predictor_config)
-        predictor_task = asyncio.create_task(predictor_server.serve())
-    else:
-        predictor_server = None
-        predictor_task = None
+    predictor_server = None
+    predictor_task = None
 
     playground_processes = []
     if playground:
@@ -226,6 +221,7 @@ def start_head(
     port: int,
     ray_head_port: int,
     strategy: str = "least-loaded",
+    scheduling_algorithm: str = SchedulingAlgorithm.FCFS.value,
     playground: bool = False,
     playground_port: int = 5173,
     playground_backend_port: int | None = None,
@@ -235,6 +231,7 @@ def start_head(
             port,
             ray_head_port,
             strategy,
+            scheduling_algorithm,
             playground,
             playground_port,
             playground_backend_port,
@@ -725,7 +722,13 @@ def main():
     start_group.add_argument("--worker", action="store_true", help="Start as worker node")
 
     start_parser.add_argument("--port", type=int, metavar="PORT", help="Port for head node (required if --head)",default=8000)
-    start_parser.add_argument("--strategy", metavar="STRATEGY", help="Strategy for task scheduling",default="least-loaded")
+    start_parser.add_argument("--strategy", metavar="STRATEGY", help="Node placement strategy",default="least-loaded")
+    start_parser.add_argument(
+        "--scheduling-algorithm",
+        choices=[item.value for item in SchedulingAlgorithm],
+        default=SchedulingAlgorithm.FCFS.value,
+        help="Task queue scheduling algorithm",
+    )
     start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
     start_parser.add_argument("--playground", action="store_true", help="Start Maze Playground visual interface (only applicable to --head)")
@@ -854,6 +857,7 @@ def main():
                         args.port,
                         args.ray_head_port,
                         args.strategy,
+                        args.scheduling_algorithm,
                         playground=True,
                         playground_port=args.playground_port,
                         playground_backend_port=args.playground_backend_port,
@@ -863,7 +867,13 @@ def main():
                     sys.exit(1)
             else:
                 try:
-                    start_head(args.port, args.ray_head_port, args.strategy, playground=False)
+                    start_head(
+                        args.port,
+                        args.ray_head_port,
+                        args.strategy,
+                        args.scheduling_algorithm,
+                        playground=False,
+                    )
                 except RuntimeError as exc:
                     print(f"❌ {exc}", file=sys.stderr)
                     sys.exit(1)
