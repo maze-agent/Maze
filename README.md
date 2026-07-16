@@ -13,7 +13,8 @@
 ## 📰 News
 
 
-- **2026-07-10**: Maze Core added paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS`/`HACS` task scheduling, observed-runtime EMA estimates, richer queue diagnostics, and an optional zero-VRAM standby worker execution path.
+- **2026-07**: Maze hardened distributed run reliability with automatic worker-agent recovery after head/Ray restarts, current-cluster registration validation, run-level deadlines, explicit scheduler-failure states, and restart-safe run discovery. The recovery path was verified with real two-machine PDF, timeout, scheduler-death, and restart cases.
+- **2026-07**: Maze Core added paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS`/`HACS` task scheduling, observed-runtime EMA estimates, richer queue diagnostics, and an optional zero-VRAM standby worker execution path.
 - **2026-07**: Our Maze research paper has been accepted to SC26. We are aligning the open-source implementation with the paper version in small, reviewable updates.
 - **2026-06**: Maze added practical cluster and model operations in Playground: remote worker management, head-side command execution for developer debugging, local model directory scanning, model testing through Maze tasks, GPU memory visibility, model resource estimation, and runtime fault-tolerance traces for OOM retry, node-loss recovery, and LLM invocation repair.
 - **2026-06**: Maze Playground added MCP-enabled ReAct runs and Workspace Agent workflow assistance. ReAct runs can configure and test MCP servers, reuse workspace MCP profiles without exposing secrets, and inspect MCP discovery, tool calls, failures, and permission decisions in the Agent Trace. The Workspace Agent can inspect workspace files, tasks, workflows, and failed runs; create, validate, save, and run workflow drafts; promote run artifacts into workspace files; and manage persistent chat sessions.
@@ -30,7 +31,17 @@
 
 ## Latest Update Summary
 
-This update focuses on bringing Maze Core closer to the SC26 paper scheduler while keeping the implementation modular and observable:
+The latest Maze Core updates focus on distributed reliability and paper-aligned scheduling while keeping the implementation modular and observable.
+
+### Distributed Reliability
+
+- Worker agents now automatically reconnect and re-register after the Maze head recreates its Ray cluster. Registration validates the worker's Ray node ID against the current cluster, so stale or mismatched workers cannot be scheduled.
+- Static and dynamic runs now enforce run-level deadlines. A scheduler watchdog marks in-flight runs as `interrupted` when the scheduler disappears instead of leaving them permanently active.
+- Submissions made while the scheduler is unavailable return a machine-readable HTTP `503` response without creating false active-run records.
+- Dynamic snapshots and events remain discoverable after restart, including runs created in external workspace directories.
+- These paths were verified with real workloads across two machines, covering PDF processing, deadline expiry, scheduler termination, head/Ray recreation, worker recovery, and successful post-recovery execution.
+
+### Paper-Aligned Scheduling
 
 - Added real heterogeneous scheduler queues for `gpu`, `cpu`, and `io` tasks. Maze no longer lets a blocked GPU queue head stop CPU or I/O queue progress, while still preserving same-queue head order to avoid starvation.
 - Added explicit task scheduling algorithms with `FCFS` and `HACS`. `FCFS` is the default, and `HACS` is now implemented behind a pluggable strategy interface instead of being embedded directly in `scheduler.py`.
@@ -401,6 +412,19 @@ The unified `Runs` console keeps completed and active runs inspectable after sub
 The `Cluster` view shows registered workers, scheduler-visible CPU/GPU capacity, sandbox capabilities, queue state, and placement readiness.
 
 ![Maze Workbench cluster resources](./docs/imgs/workbench/maze_cluster_resources.png)
+
+## Citation
+
+Please cite our work if you find the project useful:
+
+```bibtex
+@inproceedings{gu2026maze,
+  title     = {Maze: A Distributed Framework for Large Language Model Agents},
+  author    = {Jing Gu and Zhuang Xing and Yiheng Yang and Bowen Lv and Jiale Wang and Shuo Yuan and Zijin Chen and Jin Zhao and Pengfei Zuo and Long Zheng and Xiaofei Liao and Hai Jin and Qinbin Li},
+  booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis},
+  year      = {2026}
+}
+```
 
 ## Acknowledgement
 We thank contributors from Huazhong University of Science and Technology, Huawei, and other institutions for their support and contributions to this project.

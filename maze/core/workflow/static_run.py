@@ -116,6 +116,46 @@ class StaticRun:
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATIC_RUN_STATUSES
 
+    def deadline_time(self) -> float | None:
+        if self.timeout_seconds is None:
+            return None
+        return (self.submitted_time or self.created_time) + float(self.timeout_seconds)
+
+    def seconds_until_timeout(self) -> float | None:
+        deadline = self.deadline_time()
+        if deadline is None or self.is_terminal():
+            return None
+        return max(0.0, deadline - time.time())
+
+    def mark_timed_out_if_needed(self) -> bool:
+        deadline = self.deadline_time()
+        if deadline is None or self.is_terminal() or time.time() <= deadline:
+            return False
+
+        now = time.time()
+        message = f"Run timed out after {self.timeout_seconds} seconds"
+        self.status = "timed_out"
+        self.error_summary = {
+            "error_type": "timeout",
+            "message": message,
+            "timeout_seconds": self.timeout_seconds,
+            "deadline_time": deadline,
+        }
+        self.finished_time = now
+        for task in self.task_nodes.values():
+            if task["status"] not in {"pending", "queued", "running"}:
+                continue
+            task["status"] = "timed_out"
+            task["finished_time"] = now
+            task["duration_seconds"] = _duration_seconds(task.get("started_time"), now)
+            task["pending_reason"] = None
+            task["error"] = {
+                "error_type": "timeout",
+                "message": message,
+            }
+        self._touch()
+        return True
+
     def mark_started(self):
         if self.started_time is None:
             self.started_time = time.time()
@@ -277,11 +317,22 @@ class StaticRun:
 
     def mark_interrupted(self, reason: str | None = None):
         if self.is_terminal():
-            return
+            return False
+        now = time.time()
+        message = reason or "Head process restarted before run completed"
         self.status = "interrupted"
-        self.error_summary = {"message": reason or "Head process restarted before run completed"}
-        self.finished_time = time.time()
+        self.error_summary = {"message": message}
+        self.finished_time = now
+        for task in self.task_nodes.values():
+            if task["status"] not in {"pending", "queued", "running"}:
+                continue
+            task["status"] = "cancelled"
+            task["finished_time"] = now
+            task["duration_seconds"] = _duration_seconds(task.get("started_time"), now)
+            task["pending_reason"] = None
+            task["error"] = {"error_type": "interrupted", "message": message}
         self._touch()
+        return True
 
     def append_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         event = dict(event)
@@ -329,6 +380,7 @@ class StaticRun:
             "workflow_id": self.workflow_id,
             "status": self.status,
             "timeout_seconds": self.timeout_seconds,
+            "deadline_time": self.deadline_time(),
             "tags": self.tags,
             "metadata": self.metadata,
             "created_time": self.created_time,

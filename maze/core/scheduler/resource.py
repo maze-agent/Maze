@@ -637,16 +637,63 @@ class ResourceManager():
         '''
         Start worker node
         '''
-        logger.info("New worker node join: node_id:%s,node_ip:%s", node_id,node_ip)
+        ray_nodes = self._ray_node_index()
+        ray_node = ray_nodes.get(node_id)
+        if ray_node is None or not ray_node.get("Alive", False):
+            live_node_ids = sorted(
+                current_node_id
+                for current_node_id, current_node in ray_nodes.items()
+                if current_node.get("Alive", False)
+            )
+            logger.warning(
+                "Rejecting worker from a different Ray cluster: node_id=%s node_ip=%s",
+                node_id,
+                node_ip,
+            )
+            return {
+                "registration_status": "cluster_mismatch",
+                "error_code": "ray_cluster_mismatch",
+                "error": {
+                    "code": "ray_cluster_mismatch",
+                    "message": "Worker node is not alive in the current Maze Ray cluster",
+                    "worker_node_id": node_id,
+                    "current_cluster_node_ids": live_node_ids,
+                },
+                "node_id": node_id,
+                "node_ip": node_ip,
+            }
+
+        resources = copy.deepcopy(resources)
         gpu_resource = {int(k): v for k, v in resources['gpu_resource'].items()}
         resources["gpu_resource"] = gpu_resource
         capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True, "docker_sandbox": False})
+
+        removed_node_ids = []
+        for existing_node_id, existing_node in list(self.nodes.items()):
+            if existing_node_id == node_id or existing_node.node_ip != node_ip:
+                continue
+            existing_ray_node = ray_nodes.get(existing_node_id)
+            if existing_ray_node is not None and existing_ray_node.get("Alive", False):
+                continue
+            self.nodes.pop(existing_node_id, None)
+            self.running_task_counts.pop(existing_node_id, None)
+            self.disabled_node_ids.discard(existing_node_id)
+            self.dag_context_manager.release_node_contexts(existing_node_id)
+            removed_node_ids.append(existing_node_id)
+
         if node_id in self.nodes:
             registration_status = self.nodes[node_id].update_registration(node_ip, resources, capabilities)
         else:
             self.nodes[node_id] = Node(node_id,node_ip,resources,resources,capabilities)
             registration_status = "created"
         self.running_task_counts.setdefault(node_id, 0)
+        log_registration = logger.debug if registration_status == "already_registered" else logger.info
+        log_registration(
+            "Worker registration %s: node_id=%s node_ip=%s",
+            registration_status,
+            node_id,
+            node_ip,
+        )
         return {
             "registration_status": registration_status,
             "node_id": node_id,
@@ -655,4 +702,5 @@ class ResourceManager():
             "capabilities": copy.deepcopy(self.nodes[node_id].capabilities),
             "registered_time": self.nodes[node_id].registered_time,
             "last_seen_time": self.nodes[node_id].last_seen_time,
+            "removed_stale_node_ids": removed_node_ids,
         }

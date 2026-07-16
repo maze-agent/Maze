@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 EPSILON = 1e-3
 NODE_SCHEDULING_POLICIES = {"default", "least-loaded", "prefer-gpu-free", "spread"}
 
+
+class SchedulerUnavailableError(RuntimeError):
+    error_code = "scheduler_unavailable"
+
+    def __init__(self, message: str, *, pid: int | None = None, exitcode: int | None = None):
+        super().__init__(message)
+        self.pid = pid
+        self.exitcode = exitcode
+
+    def detail(self) -> Dict[str, Any]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+            "scheduler_pid": self.pid,
+            "scheduler_exitcode": self.exitcode,
+        }
+
+
 class MaPath:
     def __init__(self):
         self.lock = lock = asyncio.Lock()
@@ -54,6 +72,7 @@ class MaPath:
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
         self.worker_registration_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_control_requests: Dict[str, asyncio.Queue] = {}
+        self._scheduler_failure_handled: tuple[int | None, int | None] | None = None
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
         self.global_metrics = GlobalMetrics()
@@ -103,11 +122,20 @@ class MaPath:
                     pass
 
     def _send_scheduler_message(self, message: Dict[str, Any]):
-        unavailable = self._scheduler_unavailable_message()
-        if unavailable:
-            raise RuntimeError(unavailable)
+        self._require_scheduler_available()
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
+
+    def _require_scheduler_available(self):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable is None:
+            return
+        scheduler_process = getattr(self, "scheduler_process", None)
+        raise SchedulerUnavailableError(
+            unavailable,
+            pid=getattr(scheduler_process, "pid", None),
+            exitcode=getattr(scheduler_process, "exitcode", None),
+        )
 
     def _scheduler_unavailable_message(self) -> str | None:
         scheduler_process = getattr(self, "scheduler_process", None)
@@ -342,6 +370,7 @@ class MaPath:
         """
         Start a workflow.
         """
+        self._require_scheduler_available()
         submit_id = str(uuid.uuid4())
         file_context = self._prepare_initial_artifacts(file_context, submit_id) if file_context else None
         submit_workflow = copy.deepcopy(self.workflows[workflow_id])
@@ -397,6 +426,7 @@ class MaPath:
         file_context:Dict[str,Any]|None=None,
         metadata:Dict[str,Any]|None=None,
     ):
+        self._require_scheduler_available()
         run_id = str(uuid.uuid4())
         file_context = self._prepare_initial_artifacts(file_context, run_id) if file_context else None
         self.dynamic_runs[run_id] = DynamicRun(
@@ -437,6 +467,7 @@ class MaPath:
         return snapshots
 
     async def register_dynamic_task_spec(self, run_id:str, task_spec_payload:Dict[str,Any]):
+        self._require_scheduler_available()
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         task_spec = dynamic_task_spec_from_payload(task_spec_payload)
@@ -465,6 +496,7 @@ class MaPath:
         request_id:str|None=None,
         resources:Dict[str,Any]|None=None,
     ):
+        self._require_scheduler_available()
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         dynamic_run.check_can_mutate("append tasks")
@@ -727,6 +759,14 @@ class MaPath:
         message = {"type":"stop_workflow","data":{"workflow_id":run_id}}
         self._send_scheduler_message(message)
 
+    def _stop_workflow_best_effort(self, run_id: str):
+        try:
+            self._send_scheduler_message({"type": "stop_workflow", "data": {"workflow_id": run_id}})
+        except SchedulerUnavailableError:
+            logger.warning("Could not stop workflow %s because the scheduler is unavailable", run_id)
+        except Exception:
+            logger.exception("Could not stop workflow %s during terminal-state cleanup", run_id)
+
     async def _refresh_dynamic_timeout(self, run_id:str) -> bool:
         dynamic_run = self.get_dynamic_run(run_id)
         if not dynamic_run.mark_timed_out_if_needed():
@@ -739,8 +779,100 @@ class MaPath:
                 "timeout_seconds": dynamic_run.timeout_seconds,
             },
         })
-        self._stop_dynamic_runtime(run_id)
+        self._stop_workflow_best_effort(run_id)
         return True
+
+    async def _sweep_run_deadlines(self):
+        for run_id, static_run in list(self.static_runs.items()):
+            previous_status = static_run.status
+            deadline = static_run.deadline_time()
+            if not static_run.mark_timed_out_if_needed():
+                continue
+
+            event = self._record_static_event(run_id, {
+                "type": "timeout_workflow",
+                "data": {
+                    "run_id": run_id,
+                    "workflow_id": static_run.workflow_id,
+                    "timeout_seconds": static_run.timeout_seconds,
+                    "deadline_time": deadline,
+                },
+            })
+            self.global_metrics.on_run_status_change(run_id, previous_status, "timed_out")
+            queue = self.async_que.get(run_id)
+            if queue is not None:
+                queue.put_nowait(event)
+            self._stop_workflow_best_effort(run_id)
+
+        for run_id, dynamic_run in list(self.dynamic_runs.items()):
+            if not dynamic_run.mark_timed_out_if_needed():
+                continue
+            await self._emit_dynamic_event(run_id, {
+                "type": "timeout_dynamic_run",
+                "data": {
+                    "run_id": run_id,
+                    "timeout_seconds": dynamic_run.timeout_seconds,
+                    "deadline_time": dynamic_run.created_time + float(dynamic_run.timeout_seconds),
+                },
+            })
+            self._stop_workflow_best_effort(run_id)
+
+    async def _handle_scheduler_exit(self):
+        scheduler_process = getattr(self, "scheduler_process", None)
+        if scheduler_process is None or scheduler_process.is_alive():
+            return
+
+        failure = (scheduler_process.pid, scheduler_process.exitcode)
+        if self._scheduler_failure_handled == failure:
+            return
+        self._scheduler_failure_handled = failure
+        reason = self._scheduler_unavailable_message() or "scheduler process is unavailable"
+        logger.error("%s", reason)
+
+        for run_id, static_run in list(self.static_runs.items()):
+            previous_status = static_run.status
+            if not static_run.mark_interrupted(reason):
+                continue
+            event = self._record_static_event(run_id, {
+                "type": "interrupt_workflow",
+                "data": {
+                    "run_id": run_id,
+                    "workflow_id": static_run.workflow_id,
+                    "reason": reason,
+                    "scheduler_pid": scheduler_process.pid,
+                    "scheduler_exitcode": scheduler_process.exitcode,
+                },
+            })
+            self.global_metrics.on_run_status_change(run_id, previous_status, "interrupted")
+            queue = self.async_que.get(run_id)
+            if queue is not None:
+                queue.put_nowait(event)
+
+        for run_id, dynamic_run in list(self.dynamic_runs.items()):
+            if not dynamic_run.interrupt(reason):
+                continue
+            await self._emit_dynamic_event(run_id, {
+                "type": "interrupt_dynamic_run",
+                "data": {
+                    "run_id": run_id,
+                    "reason": reason,
+                    "scheduler_pid": scheduler_process.pid,
+                    "scheduler_exitcode": scheduler_process.exitcode,
+                },
+            })
+
+    async def maintenance_coroutine(self, interval_seconds: float = 1.0):
+        while True:
+            try:
+                if not getattr(self, "_cleanup_started", False):
+                    await self._handle_scheduler_exit()
+                    await self._sweep_run_deadlines()
+                await asyncio.sleep(max(0.1, float(interval_seconds)))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Maze maintenance loop failed")
+                await asyncio.sleep(max(0.1, float(interval_seconds)))
 
     def _dynamic_scheduling_context(self, dynamic_run: DynamicRun, task: CodeTask) -> Dict[str, Any]:
         depths = getattr(dynamic_run, "_hacs_depths", None)
@@ -1453,9 +1585,7 @@ class MaPath:
             self.cluster_control_requests.pop(request_id, None)
     
     async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
-        unavailable = self._scheduler_unavailable_message()
-        if unavailable:
-            raise RuntimeError(unavailable)
+        self._require_scheduler_available()
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.worker_registration_requests[request_id] = response_queue
@@ -1485,6 +1615,8 @@ class MaPath:
         '''
         Initialize.
         '''
+        self._cleanup_started = False
+        self._scheduler_failure_handled = None
         algorithm_candidate = scheduling_algorithm if scheduling_algorithm is not None else strategy
         if (
             node_scheduling_policy is None
@@ -1599,6 +1731,8 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            if static_run is not None and static_run.is_terminal():
+                                continue
                             task_metrics = message_data.get("metrics") or {}
                             observation = self._resource_observation_from_message(
                                 submit_id,
@@ -1700,6 +1834,8 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            if static_run is not None and static_run.is_terminal():
+                                continue
                             if message_type == "start_task":
                                 self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
                                 if static_run is not None:
@@ -1786,9 +1922,10 @@ class MaPath:
             data = await que.get()
             await websocket.send_json(data)
 
-            if data["type"]=="finish_workflow":
-                message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
-                self._send_scheduler_message(message)
+            if data["type"] in {"finish_workflow", "timeout_workflow", "interrupt_workflow", "cancel_workflow"}:
+                if data["type"] == "finish_workflow":
+                    message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
+                    self._send_scheduler_message(message)
                 break
             elif data["type"]=="task_exception":
                 raise Exception("task_exception")

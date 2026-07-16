@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from urllib.parse import urlsplit, urlunsplit
-from maze.core.path.path import MaPath
+from maze.core.path.path import MaPath, SchedulerUnavailableError
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -848,6 +848,8 @@ async def run_workflow(req:Request):
             metadata=data.get("metadata"),
         )
         return {"status":"success","run_id": run_id}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -918,6 +920,8 @@ async def run_app(req: Request):
         }
     except AppSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -985,6 +989,8 @@ async def submit_dag_workflow(req: Request):
         }
     except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1009,6 +1015,8 @@ async def create_dynamic_run(req: Request):
             metadata=data.get("metadata"),
         )
         return {"status": "success", "run_id": run_id}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1187,6 +1195,8 @@ async def retry_run(run_id: str, req: Request):
         raise
     except AppSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1236,6 +1246,8 @@ async def register_dynamic_task_spec(run_id: str, req: Request):
             "outputs": task_spec.outputs,
             "resources": task_spec.resources,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1289,6 +1301,8 @@ async def append_dynamic_task(run_id: str, req: Request):
             "outputs": outputs,
             "idempotent": idempotent,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1668,6 +1682,8 @@ async def start_worker(req:Request):
         return {"status": "success", "worker": worker}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler worker registration")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -70,6 +70,7 @@ async def _async_start_head(
         node_scheduling_policy=strategy,
     )
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
+    maintenance_coroutine = asyncio.create_task(mapath.maintenance_coroutine())
 
     server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(server_config)
@@ -87,7 +88,7 @@ async def _async_start_head(
         )
 
     try:
-        tasks = [server_task, monitor_coroutine]
+        tasks = [server_task, monitor_coroutine, maintenance_coroutine]
         if predictor_task is not None:
             tasks.append(predictor_task)
         await asyncio.gather(*tasks)
@@ -98,11 +99,15 @@ async def _async_start_head(
         if predictor_server is not None:
             predictor_server.should_exit = True
 
-        for task in (server_task, predictor_task, monitor_coroutine):
+        for task in (server_task, predictor_task, monitor_coroutine, maintenance_coroutine):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *[task for task in (server_task, predictor_task, monitor_coroutine) if task is not None],
+            *[
+                task
+                for task in (server_task, predictor_task, monitor_coroutine, maintenance_coroutine)
+                if task is not None
+            ],
             return_exceptions=True,
         )
 

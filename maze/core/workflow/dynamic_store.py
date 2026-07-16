@@ -80,31 +80,40 @@ class DynamicRunStore:
 
     def save_run(self, snapshot: Dict[str, Any]):
         run_id = snapshot["run_id"]
-        run_dir = self.workspace_run_dir_from_snapshot(snapshot) or self.run_dir(run_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             **to_json_safe(snapshot),
             "schema": "dynamic_run",
             "schema_version": SCHEMA_VERSION,
         }
-        target_path = self.dynamic_run_json_path(run_dir) if self.workspace_run_dir_from_snapshot(snapshot) else run_dir / "run.json"
-        tmp_path = target_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(tmp_path, target_path)
+        canonical_path = self.run_json_path(run_id)
+        target_paths = [canonical_path]
+        workspace_run_dir = self.workspace_run_dir_from_snapshot(snapshot)
+        if workspace_run_dir is not None:
+            target_paths.append(self.dynamic_run_json_path(workspace_run_dir))
+
+        for target_path in dict.fromkeys(target_paths):
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = target_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp_path, target_path)
 
     def append_event(self, run_id: str, event: Dict[str, Any], snapshot: Dict[str, Any] | None = None):
-        run_dir = self.workspace_run_dir_from_snapshot(snapshot or {}) or self.locate_run_dir(run_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": SCHEMA_VERSION,
             **to_json_safe(event),
         }
-        events_path = self.dynamic_events_path(run_dir) if self.dynamic_run_json_path(run_dir).exists() or snapshot else run_dir / "events.jsonl"
-        with events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        target_paths = [self.events_path(run_id)]
+        workspace_run_dir = self.workspace_run_dir_from_snapshot(snapshot or {})
+        if workspace_run_dir is not None:
+            target_paths.append(self.dynamic_events_path(workspace_run_dir))
+
+        for events_path in dict.fromkeys(target_paths):
+            events_path.parent.mkdir(parents=True, exist_ok=True)
+            with events_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
 
     def load_run(self, run_id: str) -> Dict[str, Any]:
         path = self.located_run_json_path(run_id)
@@ -151,7 +160,14 @@ class DynamicRunStore:
         return snapshots
 
     def delete_run(self, run_id: str):
-        shutil.rmtree(self.locate_run_dir(run_id))
+        snapshot = self.load_run(run_id)
+        run_dirs = {self.run_dir(run_id)}
+        workspace_run_dir = self.workspace_run_dir_from_snapshot(snapshot)
+        if workspace_run_dir is not None:
+            run_dirs.add(workspace_run_dir)
+        for run_dir in run_dirs:
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
 
     def recover_interrupted_runs(self) -> List[Dict[str, Any]]:
         recovered = []
@@ -181,7 +197,7 @@ class DynamicRunStore:
             snapshot["event_count"] = int(snapshot.get("event_count") or 0) + 1
             snapshot["last_event_seq"] = event["seq"]
 
-            self.append_event(run_id, event)
+            self.append_event(run_id, event, snapshot=snapshot)
             self.save_run(snapshot)
             recovered.append(snapshot)
         return recovered
