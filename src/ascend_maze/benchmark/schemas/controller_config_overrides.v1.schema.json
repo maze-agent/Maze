@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/controller_config_overrides.v1.schema.json",
+  "title": "Ascend-Maze Controller Config Overrides v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "build_revision", "expected_config_fingerprint", "overrides"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.controller-config-overrides.v1"},
+    "build_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "expected_config_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "value"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "value": {}
+        }
+      }
+    }
+  }
+}

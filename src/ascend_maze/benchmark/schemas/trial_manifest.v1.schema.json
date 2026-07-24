@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/trial_manifest.v1.schema.json",
+  "title": "Ascend-Maze TrialManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "trial_attempt_id", "trial_id", "attempt_index", "state", "run_ids", "experiment_ids", "committed_files"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.trial-manifest.v1"},
+    "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+    "trial_id": {"type": "string", "pattern": "^trial_[0-9a-f]{32}$"},
+    "attempt_index": {"type": "integer", "minimum": 0},
+    "state": {"enum": ["planned", "preparing", "warming", "measuring", "draining", "flushing", "valid", "invalid", "aborted"]},
+    "run_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "experiment_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "committed_files": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/baseline_prepare_result.v1.schema.json",
+  "title": "External Baseline Prepare Result v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "trial_attempt_id", "status", "environment_fingerprint", "resource_snapshot", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1}, "trial_attempt_id": {"type": "string"}, "status": {"enum": ["ready", "not_available", "failed"]},
+    "environment_fingerprint": {"type": "string"}, "resource_snapshot": {"type": "object"}, "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

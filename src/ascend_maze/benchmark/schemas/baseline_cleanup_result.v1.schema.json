@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/baseline_cleanup_result.v1.schema.json",
+  "title": "External Baseline Cleanup Result v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "trial_attempt_id", "status", "resource_snapshot", "residual_processes", "residual_ports", "resource_recovered", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1}, "trial_attempt_id": {"type": "string"}, "status": {"enum": ["clean", "leaked", "failed"]},
+    "resource_snapshot": {"type": "object"}, "residual_processes": {"type": "array", "items": {"type": "string"}}, "residual_ports": {"type": "array", "items": {"type": "integer"}},
+    "resource_recovered": {"type": "boolean"}, "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

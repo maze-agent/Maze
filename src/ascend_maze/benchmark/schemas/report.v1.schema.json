@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/report.v1.schema.json",
+  "title": "Ascend-Maze Benchmark Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "study", "provenance", "experiment", "metrics", "comparisons", "validity", "counts", "resources", "known_warnings", "unavailable_baselines", "unsupported_conclusions", "generator", "content_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "study": {
+      "type": "object", "additionalProperties": false,
+      "required": ["study_id", "study_name", "study_kind", "cell_ids", "trial_attempt_ids"],
+      "properties": {
+        "study_id": {"type": "string"}, "study_name": {"type": "string"},
+        "study_kind": {"enum": ["pilot", "formal"]},
+        "cell_ids": {"type": "array", "items": {"type": "string"}},
+        "trial_attempt_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_commits", "config_fingerprints", "environment_fingerprints", "workflow_fingerprint", "model_artifact_digest", "baseline_fingerprints"],
+      "properties": {
+        "source_commits": {"type": "array", "items": {"type": "string"}},
+        "config_fingerprints": {"type": "array", "items": {"type": "string"}},
+        "environment_fingerprints": {"type": "array", "items": {"type": "string"}},
+        "workflow_fingerprint": {"type": "string"}, "model_artifact_digest": {"type": "string"},
+        "baseline_fingerprints": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "experiment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workload_digest", "arrival", "windows", "base_seed", "block_count", "repetition_count", "automatic_outlier_removal", "mad_sensitivity_separate"],
+      "properties": {
+        "workload_digest": {"type": "string"}, "arrival": {"type": "object"}, "windows": {"type": "object"},
+        "base_seed": {"type": "integer"}, "block_count": {"type": "integer"}, "repetition_count": {"type": "integer"},
+        "automatic_outlier_removal": {"const": false}, "mad_sensitivity_separate": {"const": true}
+      }
+    },
+    "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
+    "comparisons": {"type": "array", "items": {"$ref": "#/$defs/comparison"}},
+    "validity": {"type": "array", "items": {"$ref": "#/$defs/validity"}},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["offered", "issued", "committed", "admitted", "terminal", "succeeded", "failed", "timed_out", "backlog"],
+      "properties": {
+        "offered": {"type": "integer", "minimum": 0}, "issued": {"type": "integer", "minimum": 0},
+        "committed": {"type": "integer", "minimum": 0}, "admitted": {"type": "integer", "minimum": 0},
+        "terminal": {"type": "integer", "minimum": 0}, "succeeded": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0}, "timed_out": {"type": "integer", "minimum": 0},
+        "backlog": {"type": "integer", "minimum": 0}
+      }
+    },
+    "resources": {
+      "type": "object", "additionalProperties": false, "required": ["before", "after", "recovered"],
+      "properties": {"before": {"type": "object"}, "after": {"type": "object"}, "recovered": {"type": "boolean"}}
+    },
+    "known_warnings": {"type": "array", "items": {"type": "string"}},
+    "unavailable_baselines": {"type": "array", "items": {"type": "string"}},
+    "unsupported_conclusions": {"type": "array", "items": {"type": "string"}},
+    "generator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "aggregator_version", "reporter_version", "schema_digests", "analysis_seed", "bootstrap_algorithm", "bootstrap_samples", "quantile_method", "mad_sensitivity_algorithm"],
+      "properties": {
+        "name": {"const": "ascend-maze"}, "version": {"type": "string"},
+        "aggregator_version": {"type": "string"}, "reporter_version": {"type": "string"},
+        "schema_digests": {"type": "object", "additionalProperties": {"type": "string"}},
+        "analysis_seed": {"type": "integer"}, "bootstrap_algorithm": {"type": "string"},
+        "bootstrap_samples": {"const": 10000}, "quantile_method": {"const": "hyndman_fan_type_7"},
+        "mad_sensitivity_algorithm": {"const": "median_3mad_v1"}
+      }
+    },
+    "content_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "nullableNumber": {"type": ["number", "null"]},
+    "interval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["confidence_level", "lower", "upper", "sidedness"],
+      "properties": {
+        "confidence_level": {"type": "number"}, "lower": {"type": "number"}, "upper": {"type": "number"},
+        "sidedness": {"enum": ["two_sided", "upper"]}, "bootstrap_samples": {"type": "integer"}
+      }
+    },
+    "distribution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["median", "mean", "standard_deviation", "mad", "minimum", "maximum", "p50", "p95", "p99"],
+      "properties": {
+        "median": {"$ref": "#/$defs/nullableNumber"}, "mean": {"$ref": "#/$defs/nullableNumber"},
+        "standard_deviation": {"$ref": "#/$defs/nullableNumber"}, "mad": {"$ref": "#/$defs/nullableNumber"},
+        "minimum": {"$ref": "#/$defs/nullableNumber"}, "maximum": {"$ref": "#/$defs/nullableNumber"},
+        "p50": {"$ref": "#/$defs/nullableNumber"}, "p95": {"$ref": "#/$defs/nullableNumber"}, "p99": {"$ref": "#/$defs/nullableNumber"}
+      }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["measurement_id", "cell_id", "cell_name", "name", "definition", "unit", "valid_trial_count", "invalid_trial_count", "sample_count", "estimate", "confidence_interval", "distribution", "p99_status", "invalid_reason_counts", "mad_sensitivity", "budget"],
+      "properties": {
+        "measurement_id": {"type": "string"}, "cell_id": {"type": "string"}, "cell_name": {"type": "string"},
+        "name": {"type": "string"}, "definition": {"type": "string"}, "unit": {"type": "string"},
+        "valid_trial_count": {"type": "integer"}, "invalid_trial_count": {"type": "integer"}, "sample_count": {"type": "integer"},
+        "estimate": {"$ref": "#/$defs/nullableNumber"}, "confidence_interval": {"oneOf": [{"$ref": "#/$defs/interval"}, {"type": "null"}]},
+        "distribution": {"$ref": "#/$defs/distribution"},
+        "p99_status": {"enum": ["sufficient", "insufficient_sample", "not_applicable"]},
+        "invalid_reason_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "mad_sensitivity": {"type": "object"},
+        "budget": {"type": ["object", "null"]}
+      }
+    },
+    "comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["comparison_id", "baseline_cell_id", "baseline_cell_name", "candidate_cell_id", "candidate_cell_name", "metric_name", "unit", "direction", "paired_blocks", "effect", "effect_pct", "confidence_interval", "familywise_confidence_interval", "budget", "guard_decision", "guard_reasons", "decision"],
+      "properties": {
+        "comparison_id": {"type": "string"}, "baseline_cell_id": {"type": "string"}, "baseline_cell_name": {"type": "string"},
+        "candidate_cell_id": {"type": "string"}, "candidate_cell_name": {"type": "string"}, "metric_name": {"type": "string"}, "unit": {"type": "string"},
+        "direction": {"enum": ["higher_is_better", "lower_is_better"]}, "paired_blocks": {"type": "integer", "minimum": 0},
+        "effect": {"$ref": "#/$defs/nullableNumber"}, "effect_pct": {"$ref": "#/$defs/nullableNumber"},
+        "confidence_interval": {"oneOf": [{"$ref": "#/$defs/interval"}, {"type": "null"}]},
+        "familywise_confidence_interval": {"oneOf": [{"$ref": "#/$defs/interval"}, {"type": "null"}]},
+        "budget": {"type": ["object", "null"]},
+        "guard_decision": {"enum": ["pass", "fail", "insufficient_sample", "not_applicable"]},
+        "guard_reasons": {"type": "array", "items": {"type": "string"}},
+        "decision": {"enum": ["pass", "fail", "borderline", "insufficient_sample", "not_available"]}
+      }
+    },
+    "validity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["trial_attempt_id", "trial_id", "cell_id", "block_index", "repetition_index", "trial_valid", "metric_valid", "metric_reasons", "reasons"],
+      "properties": {
+        "trial_attempt_id": {"type": "string"}, "trial_id": {"type": "string"}, "cell_id": {"type": "string"},
+        "block_index": {"type": "integer"}, "repetition_index": {"type": "integer"}, "trial_valid": {"type": "boolean"},
+        "metric_valid": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "metric_reasons": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+        "reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

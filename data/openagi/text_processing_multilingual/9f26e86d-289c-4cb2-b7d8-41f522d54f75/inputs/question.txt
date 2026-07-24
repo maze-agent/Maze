@@ -1,1 +1,0 @@
-Given clozed English text, how to return the sentiment in German step by step?

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/baseline_description.v1.schema.json",
+  "title": "External Baseline Description v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "adapter_id", "source_commit", "environment_fingerprint", "model_artifact_digest", "capabilities", "result_schema"],
+  "properties": {
+    "schema_version": {"const": 1}, "adapter_id": {"type": "string", "minLength": 1}, "source_commit": {"type": "string", "minLength": 1},
+    "environment_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "model_artifact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}, "result_schema": {"const": "baseline_trial_result.v1"}
+  }
+}

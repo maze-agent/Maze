@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/study_plan.v1.schema.json",
+  "title": "Ascend-Maze StudyPlan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "study_id", "canonical_spec_sha256", "spec", "cells", "trials", "schema_digests"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.study-plan.v1"},
+    "study_id": {"type": "string", "pattern": "^study_[0-9a-f]{32}$"},
+    "canonical_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "spec": {"type": "object"},
+    "cells": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/cell"}},
+    "trials": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/trial"}},
+    "schema_digests": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  },
+  "$defs": {
+    "cell": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "cell_id", "factors", "confirmatory", "overrides", "config_differences", "config_fingerprint"],
+      "properties": {
+        "name": {"type": "string"}, "cell_id": {"type": "string", "pattern": "^cell_[0-9a-f]{32}$"},
+        "factors": {"type": "array", "items": {"type": "string"}}, "confirmatory": {"type": "boolean"},
+        "overrides": {"type": "array", "items": {"type": "object"}}, "config_differences": {"type": "array", "items": {"type": "object"}},
+        "config_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "trial": {
+      "type": "object", "additionalProperties": false,
+      "required": ["trial_id", "study_id", "cell_id", "cell_name", "block_index", "repetition_index", "position_in_block", "trial_seed", "pairing_seed"],
+      "properties": {
+        "trial_id": {"type": "string", "pattern": "^trial_[0-9a-f]{32}$"}, "study_id": {"type": "string"}, "cell_id": {"type": "string"}, "cell_name": {"type": "string"},
+        "block_index": {"type": "integer", "minimum": 0}, "repetition_index": {"type": "integer", "minimum": 0}, "position_in_block": {"type": "integer", "minimum": 0},
+        "trial_seed": {"type": "integer", "minimum": 0}, "pairing_seed": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

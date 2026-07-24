@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/workload_dataset.v1.schema.json",
+  "title": "Ascend-Maze Workload Dataset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workflow_fingerprint", "records"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workflow_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["record_id", "inputs"],
+        "properties": {
+          "record_id": {"type": "string", "minLength": 1},
+          "inputs": {"type": "object"}
+        }
+      }
+    }
+  }
+}

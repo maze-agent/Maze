@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/baseline_trial_result.v1.schema.json",
+  "title": "External Baseline Trial Result v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "trial_attempt_id", "time_unit", "counts", "runs", "device_samples", "artifacts", "status"],
+  "properties": {
+    "schema_version": {"const": 1}, "trial_attempt_id": {"type": "string"}, "time_unit": {"const": "ms"}, "status": {"enum": ["completed", "failed", "aborted"]},
+    "counts": {"type": "object", "additionalProperties": false, "required": ["offered", "terminal", "succeeded", "failed", "timed_out"], "properties": {"offered": {"type": "integer", "minimum": 0}, "terminal": {"type": "integer", "minimum": 0}, "succeeded": {"type": "integer", "minimum": 0}, "failed": {"type": "integer", "minimum": 0}, "timed_out": {"type": "integer", "minimum": 0}}},
+    "runs": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["run_id", "scheduled_at_ms", "issued_at_ms", "terminal_at_ms", "status"], "properties": {"run_id": {"type": "string"}, "scheduled_at_ms": {"type": "integer"}, "issued_at_ms": {"type": "integer"}, "terminal_at_ms": {"type": "integer"}, "status": {"type": "string"}}}},
+    "device_samples": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["logical_device", "sampled_at_ms", "metrics"], "properties": {"logical_device": {"type": "string"}, "sampled_at_ms": {"type": "integer"}, "metrics": {"type": "object", "additionalProperties": {"type": "number"}}}}},
+    "artifacts": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["logical_name", "size_bytes", "sha256"], "properties": {"logical_name": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}
+  }
+}

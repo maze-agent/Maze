@@ -1,50 +1,49 @@
-# Byte-compiled / optimized / DLL files
+/doc/
+/refs/
+/data/
+/tests/
+/tests_ascend/
+/tests_ray_host/
+
 __pycache__/
 *.py[cod]
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-*.pyd
-
-# Testing
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
-*.mo
-*.pot
+.venv*/
+dist/
+build/
+*.egg-info/
 
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Logs and databases
-*.log
-*.sqlite
-*.db
-
-# Environment files
 .env
-.venv/
-venv/
-env/
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
 
-# Project specific
-log.txt
+/models/
+/checkpoints/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
 
-# Not published on GitHub (kept locally for paper / artifact materials)
-docs/
-
-# Ignore sensitive configuration files
-config.py
-secrets.py
-
-# macOS
-.DS_Store
-
-# Jupyter Notebook
-.ipynb_checkpoints/
+/ray_tmp/
+/ray_results/
+/session_*/
+/session_latest
+/object_spilling/
+/logs/
+/benchmark_output/
+/experiment_output/
+/experiments/
+/artifacts/
+/kernel_meta/
+/outputs/
+*.parquet
+*.arrow
+*.pid
+*.sock

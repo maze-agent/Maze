@@ -1,0 +1,623 @@
+syntax = "proto3";
+
+package ascend_maze.control.v1;
+
+message AgentMeta {
+  uint32 schema_version = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string boot_id = 4;
+  string agent_generation = 5;
+  uint64 sequence = 6;
+  string message_id = 7;
+  int64 sent_at_ms = 8;
+  string controller_generation = 9;
+}
+
+message DataHandleMessage {
+  string owner_generation = 1;
+  string staged_handle_id = 2;
+  string stable_digest = 3;
+  bool has_stable_digest = 4;
+  int64 size_bytes = 5;
+  bool has_size_bytes = 6;
+  string backend = 7;
+  string source_node_id = 8;
+  string source_boot_id = 9;
+  uint64 source_runtime_generation = 10;
+  string ray_object_ref_id = 11;
+}
+
+message NamedDataHandle {
+  string name = 1;
+  DataHandleMessage handle = 2;
+}
+
+message ErrorMessage {
+  uint32 schema_version = 1;
+  string error_code = 2;
+  string category = 3;
+  string origin = 4;
+  string message = 5;
+  bool retryable_hint = 6;
+  string classification_confidence = 7;
+  string execution_phase = 8;
+  string run_id = 9;
+  string task_id = 10;
+  uint32 attempt = 11;
+  string dispatch_id = 12;
+  string lease_id = 13;
+  string route_lease_id = 14;
+  string node_id = 15;
+  string boot_id = 16;
+  string worker_id = 17;
+  string exception_type = 18;
+  int64 occurred_at_ms = 19;
+  string device_id = 20;
+  string platform_error_code = 21;
+  bytes canonical_details = 22;
+  string traceback_ref = 23;
+  string model_instance_id = 24;
+}
+
+message ResourceSpecMessage {
+  uint64 cpu_num = 1;
+  uint64 mem_mb = 2;
+  uint64 npu_mem_mb = 3;
+  uint64 io_num = 4;
+}
+
+message ResourceObservationMessage {
+  string run_id = 1;
+  string task_id = 2;
+  string definition_id = 3;
+  uint32 attempt = 4;
+  string code_hash = 5;
+  string environment_fingerprint = 6;
+  ResourceSpecMessage requested = 7;
+  string status = 8;
+  bytes canonical_input_features = 9;
+  uint64 peak_host_rss_mb = 10;
+  bool has_peak_host_rss_mb = 11;
+  uint64 peak_npu_allocated_mb = 12;
+  bool has_peak_npu_allocated_mb = 13;
+  uint64 peak_npu_reserved_mb = 14;
+  bool has_peak_npu_reserved_mb = 15;
+  uint64 peak_npu_process_hbm_mb = 16;
+  bool has_peak_npu_process_hbm_mb = 17;
+  string npu_metric_source = 18;
+  string npu_metric_quality = 19;
+  string error_type = 20;
+  string device_id = 21;
+  uint64 worker_pid = 22;
+  bool has_worker_pid = 23;
+  bool binding_verified = 24;
+}
+
+message RuntimeEventMessage {
+  string event_id = 1;
+  string kind = 2;
+  string dispatch_id = 3;
+  string run_id = 4;
+  string task_id = 5;
+  uint32 attempt = 6;
+  string lease_id = 7;
+  string route_lease_id = 8;
+  int64 occurred_at_ms = 9;
+  repeated NamedDataHandle output_handles = 10;
+  ErrorMessage error = 11;
+  bool has_error = 12;
+  uint64 worker_pid = 13;
+  bool has_worker_pid = 14;
+  string device_id = 15;
+  bool binding_verified = 16;
+  ResourceObservationMessage resource_observation = 17;
+  bool has_resource_observation = 18;
+  bytes canonical_inference_payload = 19;
+}
+
+message RegisterNode {
+  AgentMeta meta = 1;
+  string ray_node_id = 2;
+  string agent_endpoint = 3;
+  string producer_id = 4;
+  string environment_fingerprint = 5;
+  bytes authorization_token = 6;
+  bool records_locally = 7;
+  repeated string active_lease_ids = 8;
+  repeated string service_handle_ids = 9;
+  NodeCapacityMessage capacity = 10;
+  bool has_capacity = 11;
+  repeated RuntimeDeviceMappingMessage device_mappings = 12;
+}
+
+message RuntimeDeviceMappingMessage {
+  string physical_device_id = 1;
+  string runtime_visible_device_id = 2;
+  uint32 visible_device_index = 3;
+}
+
+message NpuCapacityMessage {
+  string device_id = 1;
+  string chip_type = 2;
+  uint64 total_hbm_mb = 3;
+  uint64 system_reserved_hbm_mb = 4;
+  uint64 task_slots_total = 5;
+  uint64 observed_free_hbm_mb = 6;
+  bool has_observed_free_hbm_mb = 7;
+  bool healthy = 8;
+}
+
+message NodeCapacityMessage {
+  string node_id = 1;
+  string boot_id = 2;
+  string node_ip = 3;
+  uint64 cpu_total = 4;
+  uint64 mem_total_mb = 5;
+  uint64 cpu_system_reserved = 6;
+  uint64 mem_system_reserved_mb = 7;
+  uint64 io_slots_total = 8;
+  repeated NpuCapacityMessage npus = 9;
+  uint64 observed_free_mem_mb = 10;
+  bool has_observed_free_mem_mb = 11;
+  bytes canonical_capabilities = 12;
+}
+
+message NodeBootstrapRequest {
+  uint32 schema_version = 1;
+  string request_id = 2;
+  string cluster_id = 3;
+  string node_id = 4;
+  bytes authorization_token = 5;
+}
+
+message NodeBootstrapResponse {
+  uint32 schema_version = 1;
+  string request_id = 2;
+  string status_code = 3;
+  string error_code = 4;
+  string message = 5;
+  string cluster_id = 6;
+  string controller_generation = 7;
+  string config_fingerprint = 8;
+  string environment_fingerprint = 9;
+  string ray_address = 10;
+  string ray_namespace = 11;
+  uint64 task_slots_total = 12;
+  bool allow_colocation = 13;
+  uint64 npu_system_reserved_hbm_mb = 14;
+  uint64 npu_hbm_headroom_mb = 15;
+  uint64 host_mem_headroom_mb = 16;
+  uint64 io_slots_total = 17;
+  uint64 hbm_recovery_tolerance_mb = 18;
+  string recording_backend = 19;
+  uint64 recording_control_queue_capacity = 20;
+  uint64 recording_telemetry_queue_capacity = 21;
+  uint64 recording_batch_size = 22;
+  uint64 recording_flush_interval_ms = 23;
+  string recording_compression = 24;
+  uint64 recording_max_page_size = 25;
+}
+
+message RunRecordingContextMessage {
+  uint32 schema_version = 1;
+  string experiment_id = 2;
+  string run_id = 3;
+  string workflow_fingerprint = 4;
+  string config_fingerprint = 5;
+  string environment_fingerprint = 6;
+  string build_revision = 7;
+  int64 started_wall_time_ms = 8;
+  repeated string initial_expected_producer_ids = 9;
+}
+
+message OpenRunRecordingRequest {
+  uint32 schema_version = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string boot_id = 4;
+  string agent_generation = 5;
+  string controller_generation = 6;
+  uint64 runtime_generation = 7;
+  bytes authorization_token = 8;
+  RunRecordingContextMessage context = 9;
+}
+
+message RecorderControlAck {
+  string run_id = 1;
+  bool accepted = 2;
+  string error_code = 3;
+  string message = 4;
+}
+
+message FlushRunRecordingRequest {
+  uint32 schema_version = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string boot_id = 4;
+  string agent_generation = 5;
+  string controller_generation = 6;
+  uint64 runtime_generation = 7;
+  bytes authorization_token = 8;
+  string run_id = 9;
+  uint64 timeout_ms = 10;
+}
+
+message FlushResultMessage {
+  string run_id = 1;
+  repeated string committed_files = 2;
+  uint64 dropped_control_event_count = 3;
+  uint64 dropped_telemetry_count = 4;
+  uint64 sequence_gap_count = 5;
+  uint64 missing_producer_count = 6;
+  repeated string writer_errors = 7;
+  bool recording_complete = 8;
+  uint64 flush_duration_ms = 9;
+  bool accepted = 10;
+  string error_code = 11;
+  string message = 12;
+}
+
+message NpuObservationMessage {
+  string device_id = 1;
+  string health = 2;
+  uint64 observed_free_hbm_mb = 3;
+  double utilization = 4;
+  bool has_utilization = 5;
+}
+
+message NodeHeartbeat {
+  AgentMeta meta = 1;
+  bool has_observation = 2;
+  uint64 observed_free_mem_mb = 3;
+  repeated NpuObservationMessage npus = 4;
+  repeated string active_lease_ids = 5;
+  repeated string service_handle_ids = 6;
+}
+
+message NodeRuntimeEvent {
+  AgentMeta meta = 1;
+  RuntimeEventMessage event = 2;
+  uint64 producer_sequence = 3;
+}
+
+message AgentStreamMessage {
+  oneof body {
+    RegisterNode register = 1;
+    NodeHeartbeat heartbeat = 2;
+    NodeRuntimeEvent runtime_event = 3;
+    ServiceProcessExitMessage service_process_exit = 4;
+  }
+}
+
+message RegistrationAccepted {
+  string request_id = 1;
+  string controller_generation = 2;
+  uint64 runtime_generation = 3;
+  string status_code = 4;
+  string message = 5;
+}
+
+message NodeMessageAck {
+  string message_id = 1;
+  string controller_generation = 2;
+  string status_code = 3;
+  string message = 4;
+}
+
+message NodeCommand {
+  string request_id = 1;
+  string command = 2;
+  uint64 target_runtime_generation = 3;
+  int64 deadline_ms = 4;
+}
+
+message ControllerStreamMessage {
+  oneof body {
+    RegistrationAccepted registration = 1;
+    NodeMessageAck ack = 2;
+    NodeCommand command = 3;
+  }
+}
+
+message WorkerEventRequest {
+  uint32 schema_version = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string boot_id = 4;
+  string agent_generation = 5;
+  RuntimeEventMessage event = 6;
+  string controller_generation = 7;
+  uint64 runtime_generation = 8;
+}
+
+message WorkerEventAck {
+  string event_id = 1;
+  bool accepted = 2;
+  string error_code = 3;
+  string message = 4;
+}
+
+message GetControllerStatusRequest {
+  uint32 schema_version = 1;
+  string request_id = 2;
+  string client_version = 3;
+  int64 deadline_ms = 4;
+}
+
+message GetControllerStatusResponse {
+  string request_id = 1;
+  string controller_generation = 2;
+  string status_code = 3;
+  string message = 4;
+  string build_revision = 5;
+  string environment_fingerprint = 6;
+  uint64 healthy_node_count = 7;
+}
+
+message ControlRequestMetaMessage {
+  uint32 schema_version = 1;
+  string request_id = 2;
+  string client_version = 3;
+  string config_fingerprint = 4;
+  int64 deadline_ms = 5;
+  string controller_generation = 6;
+}
+
+message ControlResponseMessage {
+  uint32 schema_version = 1;
+  string request_id = 2;
+  string controller_generation = 3;
+  string status_code = 4;
+  string error_code = 5;
+  string message = 6;
+  uint64 snapshot_version = 7;
+  string resulting_event_id = 8;
+  bytes json_payload = 9;
+}
+
+message ControlQueryRequest {
+  ControlRequestMetaMessage meta = 1;
+  string resource_id = 2;
+  string filter = 3;
+  uint64 limit = 4;
+}
+
+message WatchRunRequest {
+  ControlRequestMetaMessage meta = 1;
+  string run_id = 2;
+  uint64 after_sequence = 3;
+  uint64 limit = 4;
+}
+
+message WatchClusterRequest {
+  ControlRequestMetaMessage meta = 1;
+  uint64 after_snapshot_version = 2;
+  uint64 limit = 3;
+}
+
+message GetRunEventsRequest {
+  ControlRequestMetaMessage meta = 1;
+  string run_id = 2;
+  string cursor = 3;
+  uint64 limit = 4;
+}
+
+message RunActionRequest {
+  ControlRequestMetaMessage meta = 1;
+  string run_id = 2;
+  string reason = 3;
+  bool force = 4;
+}
+
+message NodeActionRequest {
+  ControlRequestMetaMessage meta = 1;
+  string node_id = 2;
+  string boot_id = 3;
+  bool force = 4;
+}
+
+message ShutdownControllerRequest {
+  ControlRequestMetaMessage meta = 1;
+  bool force = 2;
+  uint64 drain_timeout_ms = 3;
+}
+
+message SubmitWorkflowRequest {
+  ControlRequestMetaMessage meta = 1;
+  string submission_id = 2;
+  string serialized_payload_sha256 = 3;
+  bytes serialized_payload = 4;
+}
+
+message ServiceControlMeta {
+  uint32 schema_version = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string boot_id = 4;
+  string agent_generation = 5;
+  string controller_generation = 6;
+  uint64 runtime_generation = 7;
+  bytes authorization_token = 8;
+}
+
+message PortLeaseMessage {
+  string port_lease_id = 1;
+  string node_id = 2;
+  string boot_id = 3;
+  uint32 port = 4;
+  string owner_instance_id = 5;
+  uint64 generation = 6;
+}
+
+message AcquireServicePortRequest {
+  ServiceControlMeta meta = 1;
+  string owner_instance_id = 2;
+  uint64 generation = 3;
+}
+
+message ReleaseServicePortRequest {
+  ServiceControlMeta meta = 1;
+  PortLeaseMessage lease = 2;
+}
+
+message PortLeaseResponse {
+  bool accepted = 1;
+  string error_code = 2;
+  string message = 3;
+  PortLeaseMessage lease = 4;
+  bool has_lease = 5;
+}
+
+message ServiceEnvironmentEntry {
+  string name = 1;
+  string value = 2;
+}
+
+message ServiceLaunchSpecMessage {
+  string instance_id = 1;
+  uint64 generation = 2;
+  string model_id = 3;
+  string artifact_revision = 4;
+  string endpoint_id = 5;
+  string port_lease_id = 6;
+  uint32 port = 7;
+  repeated string argv = 8;
+  string working_directory = 9;
+  bool has_working_directory = 10;
+  repeated ServiceEnvironmentEntry environment = 11;
+}
+
+message ModelPlacementLeaseMessage {
+  string lease_id = 1;
+  string node_id = 2;
+  string boot_id = 3;
+  string npu_device_id = 4;
+  uint64 npu_hbm_mb = 5;
+  uint64 npu_slots = 6;
+  uint64 created_at_ms = 7;
+  uint64 dispatch_deadline_ms = 8;
+  string model_instance_id = 9;
+}
+
+message LaunchServiceRequestMessage {
+  ServiceControlMeta meta = 1;
+  ServiceLaunchSpecMessage request = 2;
+  ModelPlacementLeaseMessage lease = 3;
+}
+
+message ServiceHandleMessage {
+  string service_handle_id = 1;
+  string instance_id = 2;
+  uint64 generation = 3;
+  string endpoint_id = 4;
+  string node_id = 5;
+  string boot_id = 6;
+  string npu_device_id = 7;
+  uint64 process_id = 8;
+  string port_lease_id = 9;
+  uint32 port = 10;
+}
+
+message ServiceLaunchResponse {
+  bool accepted = 1;
+  string error_code = 2;
+  string message = 3;
+  ServiceHandleMessage handle = 4;
+  bool has_handle = 5;
+}
+
+message ProbeServiceRequest {
+  ServiceControlMeta meta = 1;
+  ServiceHandleMessage handle = 2;
+  uint64 timeout_ms = 3;
+}
+
+message ServiceProcessProbeMessage {
+  bool accepted = 1;
+  string error_code = 2;
+  string message = 3;
+  bool process_alive = 4;
+  bool port_open = 5;
+  bool binding_verified = 6;
+  string physical_device_id = 7;
+  uint64 process_hbm_mb = 8;
+  bool has_process_hbm_mb = 9;
+  int32 exit_code = 10;
+  bool has_exit_code = 11;
+}
+
+message StopServiceRequest {
+  ServiceControlMeta meta = 1;
+  ServiceHandleMessage handle = 2;
+  uint64 timeout_ms = 3;
+}
+
+message ServiceStopResultMessage {
+  bool accepted = 1;
+  string error_code = 2;
+  string message = 3;
+  bool process_exited = 4;
+  bool port_released = 5;
+  bool hbm_recovered = 6;
+  int32 exit_code = 7;
+  bool has_exit_code = 8;
+  bool forced_termination = 9;
+  uint64 final_hbm_mb = 10;
+  bool has_final_hbm_mb = 11;
+}
+
+message ServiceProcessExitMessage {
+  AgentMeta meta = 1;
+  string service_handle_id = 2;
+  string instance_id = 3;
+  uint64 generation = 4;
+  uint64 process_id = 5;
+  int32 exit_code = 6;
+}
+
+service NodeControl {
+  rpc GetBootstrap(NodeBootstrapRequest) returns (NodeBootstrapResponse);
+  rpc Connect(stream AgentStreamMessage) returns (stream ControllerStreamMessage);
+}
+
+service WorkerEventSink {
+  rpc Report(WorkerEventRequest) returns (WorkerEventAck);
+  rpc OpenRunRecording(OpenRunRecordingRequest) returns (RecorderControlAck);
+  rpc FlushRunRecording(FlushRunRecordingRequest) returns (FlushResultMessage);
+}
+
+service LocalControl {
+  rpc GetVersion(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetControllerStatus(GetControllerStatusRequest)
+      returns (GetControllerStatusResponse);
+  rpc GetSystemSnapshot(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc SubmitWorkflow(SubmitWorkflowRequest) returns (ControlResponseMessage);
+  rpc GetSubmission(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetClusterSnapshot(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc WatchCluster(WatchClusterRequest) returns (stream ControlResponseMessage);
+  rpc GetWorkerPools(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc ListRuns(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetRun(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc WatchRun(WatchRunRequest) returns (stream ControlResponseMessage);
+  rpc GetRunEvents(GetRunEventsRequest) returns (ControlResponseMessage);
+  rpc CancelRun(RunActionRequest) returns (ControlResponseMessage);
+  rpc DestroyRun(RunActionRequest) returns (ControlResponseMessage);
+  rpc GetTaskResultHandles(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetModelCatalog(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetModelInstances(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc WaitModelReady(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc GetRecorderStatus(ControlQueryRequest) returns (ControlResponseMessage);
+  rpc FlushRun(RunActionRequest) returns (ControlResponseMessage);
+  rpc DrainNode(NodeActionRequest) returns (ControlResponseMessage);
+  rpc ResumeNode(NodeActionRequest) returns (ControlResponseMessage);
+  rpc ShutdownController(ShutdownControllerRequest) returns (ControlResponseMessage);
+}
+
+service ServiceProcessControl {
+  rpc AcquirePort(AcquireServicePortRequest) returns (PortLeaseResponse);
+  rpc ReleasePort(ReleaseServicePortRequest) returns (PortLeaseResponse);
+  rpc Launch(LaunchServiceRequestMessage) returns (ServiceLaunchResponse);
+  rpc Probe(ProbeServiceRequest) returns (ServiceProcessProbeMessage);
+  rpc Stop(StopServiceRequest) returns (ServiceStopResultMessage);
+}

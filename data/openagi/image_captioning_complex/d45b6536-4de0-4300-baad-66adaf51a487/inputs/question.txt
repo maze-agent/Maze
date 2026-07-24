@@ -1,1 +1,0 @@
-Given noisy image, how to return the caption in German step by step?

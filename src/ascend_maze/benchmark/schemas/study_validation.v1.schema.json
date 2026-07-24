@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/study_validation.v1.schema.json",
+  "title": "Ascend-Maze StudyValidation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "study_id", "study_valid", "trial_count", "valid_trial_count", "invalid_trial_count", "trials", "validation_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.study-validation.v1"},
+    "study_id": {"type": "string", "pattern": "^study_[0-9a-f]{32}$"},
+    "study_valid": {"type": "boolean"},
+    "trial_count": {"type": "integer", "minimum": 0},
+    "valid_trial_count": {"type": "integer", "minimum": 0},
+    "invalid_trial_count": {"type": "integer", "minimum": 0},
+    "trials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["trial_id", "trial_attempt_id", "trial_valid", "reason_codes", "raw_files_digest", "validation_digest"],
+        "properties": {
+          "trial_id": {"type": "string", "pattern": "^trial_[0-9a-f]{32}$"},
+          "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+          "trial_valid": {"type": "boolean"},
+          "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "raw_files_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "validation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "validation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

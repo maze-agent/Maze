@@ -1,1 +1,0 @@
-Given noisy blurry image, how to return the object names in English step by step?

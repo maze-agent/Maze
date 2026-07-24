@@ -1,1 +1,0 @@
-Given low-resolutioned noisy blurry grayscale image, how to return the class label in German step by step?

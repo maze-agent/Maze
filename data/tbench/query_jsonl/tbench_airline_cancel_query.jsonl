@@ -1,7 +1,0 @@
-{"dag_id": "0a3f0429-68e2-4343-94d1-d7e0b30abb39", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "a372fc0d-2389-499f-ba71-a6c794d48a8d", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "e0af8737-91ab-42d3-9c3a-20fafc51cf99", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "261a199b-7702-4518-b197-16e5d61820a8", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "87b2d554-6059-4e11-aff1-ac202e533c9b", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "31a654f7-1af9-4c39-bf65-bf80ae936c53", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}
-{"dag_id": "5ccab871-79f8-4a74-adcd-490d809670d7", "dag_source": "tbench", "dag_type": "airline_cancel", "dag_supplementary_files": ["flights.json", "users.json", "reservations.json"]}

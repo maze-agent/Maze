@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/run_manifest.v1.schema.json",
+  "title": "Ascend-Maze Run Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "trial_attempt_id", "runs", "warmup_excluded_from_measurement", "warmup_counters", "measurement_counters"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.run-manifest.v1"},
+    "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+    "runs": {"type": "array", "items": {"type": "object"}},
+    "warmup_excluded_from_measurement": {"const": true},
+    "warmup_counters": {"type": "object"},
+    "measurement_counters": {"type": "object"}
+  }
+}

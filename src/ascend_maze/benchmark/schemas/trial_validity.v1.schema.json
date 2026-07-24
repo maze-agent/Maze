@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/trial_validity.v1.schema.json",
+  "title": "Ascend-Maze TrialValidity v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "trial_attempt_id", "trial_id", "trial_valid", "reason_codes", "reasons", "metric_valid", "raw_files_digest", "analysis_inputs", "analysis_inputs_digest", "index_counts", "validation_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.trial-validity.v1"},
+    "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+    "trial_id": {"type": "string", "pattern": "^trial_[0-9a-f]{32}$"},
+    "trial_valid": {"type": "boolean"},
+    "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reason_code", "run_id", "subject", "source"],
+        "properties": {
+          "reason_code": {"type": "string", "minLength": 1},
+          "run_id": {"type": ["string", "null"]},
+          "subject": {"type": ["string", "null"]},
+          "source": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "metric_valid": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric_name", "valid", "reason_codes"],
+        "properties": {
+          "metric_name": {"type": "string", "minLength": 1},
+          "valid": {"type": "boolean"},
+          "reason_codes": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "raw_files_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "analysis_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["logical_name", "size_bytes", "sha256"],
+        "properties": {
+          "logical_name": {"enum": ["arrival_schedule.parquet", "flush_results.json", "resource_after.json", "resource_before.json", "run_manifest.json"]},
+          "size_bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "analysis_inputs_digest": {"type": "string", "pattern": "^([0-9a-f]{64})?$"},
+    "index_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "validation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

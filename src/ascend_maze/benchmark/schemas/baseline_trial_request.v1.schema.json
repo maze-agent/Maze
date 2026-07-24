@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/baseline_trial_request.v1.schema.json",
+  "title": "External Baseline Trial Request v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "study_id", "cell_id", "trial_id", "trial_attempt_id", "workload", "input_manifest", "arrival_schedule", "seed", "logical_devices", "output_directory"],
+  "properties": {
+    "schema_version": {"const": 1}, "study_id": {"type": "string"}, "cell_id": {"type": "string"}, "trial_id": {"type": "string"}, "trial_attempt_id": {"type": "string"},
+    "workload": {"type": "object"}, "input_manifest": {"type": "array", "items": {"type": "object"}}, "arrival_schedule": {"type": "array", "items": {"type": "object"}},
+    "seed": {"type": "integer", "minimum": 0}, "logical_devices": {"type": "array", "items": {"type": "string"}}, "output_directory": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/experiment_spec.v1.schema.json",
+  "title": "Ascend-Maze ExperimentSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "study_name", "study_kind", "base_seed",
+    "block_count", "repetition_count", "build_revision", "base_config",
+    "base_config_sha256", "workload", "arrival", "windows", "analysis", "matrix"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "study_name": {"$ref": "#/$defs/name"},
+    "study_kind": {"enum": ["pilot", "formal"]},
+    "base_seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "block_count": {"type": "integer", "minimum": 1},
+    "repetition_count": {"const": 1},
+    "build_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "base_config": {"type": "string", "minLength": 1},
+    "base_config_sha256": {"$ref": "#/$defs/sha256"},
+    "workload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "workflow_factory", "workflow_fingerprint", "model_catalog_revision", "model_artifact_digest", "required_environment_fingerprint", "inputs"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "workflow_factory": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*$"},
+        "workflow_fingerprint": {"$ref": "#/$defs/sha256"},
+        "model_catalog_revision": {"type": "string", "minLength": 1},
+        "model_artifact_digest": {"$ref": "#/$defs/sha256"},
+        "required_environment_fingerprint": {"$ref": "#/$defs/sha256"},
+        "inputs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/input"}}
+      }
+    },
+    "arrival": {
+      "type": "object", "additionalProperties": false, "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["closed_loop", "fixed_rate", "poisson", "trace_replay"]},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "rate_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "trace_input": {"$ref": "#/$defs/name"}
+      }
+    },
+    "windows": {
+      "type": "object", "additionalProperties": false,
+      "required": ["warmup_runs", "warmup_duration_ms", "measurement_run_count", "measurement_duration_ms", "drain_deadline_ms"],
+      "properties": {
+        "warmup_runs": {"type": "integer", "minimum": 0},
+        "warmup_duration_ms": {"type": "integer", "minimum": 0},
+        "measurement_run_count": {"type": "integer", "minimum": 0},
+        "measurement_duration_ms": {"type": "integer", "minimum": 0},
+        "drain_deadline_ms": {"type": "integer", "minimum": 1}
+      }
+    },
+    "analysis": {
+      "type": "object", "additionalProperties": false, "required": ["metric_set"],
+      "properties": {
+        "metric_set": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/name"}},
+        "validity_policy": {"const": "c14_v1"},
+        "statistics_policy": {"const": "c14_v1"},
+        "performance_budget_set": {"const": "c14_v1"},
+        "quantile_method": {"const": "hyndman_fan_type_7"},
+        "bootstrap_samples": {"const": 10000},
+        "confidence_level": {"const": 0.95},
+        "familywise_confidence_level": {"const": 0.9875},
+        "automatic_outlier_removal": {"const": false}
+      }
+    },
+    "matrix": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "baseline_cell", "factors", "cells"],
+      "properties": {
+        "kind": {"enum": ["internal_ablation_v1", "custom_v1"]},
+        "baseline_cell": {"$ref": "#/$defs/name"},
+        "factors": {"type": "array", "items": {"$ref": "#/$defs/factor"}},
+        "cells": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/cell"}}
+      }
+    },
+    "baselines": {"type": "array", "items": {"$ref": "#/$defs/baseline"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_name", "path", "sha256", "size_bytes"],
+      "properties": {
+        "logical_name": {"$ref": "#/$defs/name"}, "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "factor": {
+      "type": "object", "additionalProperties": false, "required": ["name", "allowed_paths"],
+      "properties": {"name": {"$ref": "#/$defs/name"}, "allowed_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}}
+    },
+    "override": {
+      "type": "object", "additionalProperties": false, "required": ["path", "value"],
+      "properties": {"path": {"type": "string"}, "value": {"type": ["null", "boolean", "integer", "number", "string", "array", "object"]}}
+    },
+    "cell": {
+      "type": "object", "additionalProperties": false, "required": ["name", "factors"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"}, "factors": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/name"}},
+        "confirmatory": {"type": "boolean"}, "overrides": {"type": "array", "items": {"$ref": "#/$defs/override"}}
+      }
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false, "required": ["id", "argv", "executable_sha256"],
+      "properties": {"id": {"$ref": "#/$defs/name"}, "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "executable_sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}

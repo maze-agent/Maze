@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/trial_state.v1.schema.json",
+  "title": "Ascend-Maze Trial State v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "trial_attempt_id", "trial_id", "attempt_index", "state", "revision", "created_at_wall_ms", "updated_at_wall_ms", "warmup_started_monotonic_ms", "measurement_started_monotonic_ms", "drain_deadline_monotonic_ms", "warmup_counters", "measurement_counters", "runs", "flush_results", "resource_before", "resource_after", "recovery", "invalid_reasons", "last_error"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.trial-state.v1"},
+    "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+    "trial_id": {"type": "string", "pattern": "^trial_[0-9a-f]{32}$"},
+    "attempt_index": {"type": "integer", "minimum": 0},
+    "state": {"enum": ["planned", "preparing", "warming", "measuring", "draining", "flushing", "valid", "invalid", "aborted"]},
+    "revision": {"type": "integer", "minimum": 0},
+    "created_at_wall_ms": {"type": "integer", "minimum": 0},
+    "updated_at_wall_ms": {"type": "integer", "minimum": 0},
+    "warmup_started_monotonic_ms": {"type": ["integer", "null"], "minimum": 0},
+    "measurement_started_monotonic_ms": {"type": ["integer", "null"], "minimum": 0},
+    "drain_deadline_monotonic_ms": {"type": ["integer", "null"], "minimum": 0},
+    "warmup_counters": {"$ref": "#/$defs/counters"},
+    "measurement_counters": {"$ref": "#/$defs/counters"},
+    "runs": {"type": "array", "items": {"type": "object"}},
+    "flush_results": {"type": "array", "items": {"type": "object"}},
+    "resource_before": {"type": ["object", "null"]},
+    "resource_after": {"type": ["object", "null"]},
+    "recovery": {"type": ["object", "null"]},
+    "invalid_reasons": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "last_error": {"type": ["string", "null"]}
+  },
+  "$defs": {
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offered", "issued", "committed", "terminal", "succeeded", "failed", "timed_out"],
+      "properties": {
+        "offered": {"type": "integer", "minimum": 0},
+        "issued": {"type": "integer", "minimum": 0},
+        "committed": {"type": "integer", "minimum": 0},
+        "terminal": {"type": "integer", "minimum": 0},
+        "succeeded": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "timed_out": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

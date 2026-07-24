@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/study_manifest.v1.schema.json",
+  "title": "Ascend-Maze Study Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "study_id", "state", "source_spec_path", "source_spec_sha256", "plan_sha256", "trial_count", "completed_trials", "trials", "blocked_reason"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.study-manifest.v1"},
+    "study_id": {"type": "string", "pattern": "^study_[0-9a-f]{32}$"},
+    "state": {"enum": ["planned", "running", "completed", "blocked"]},
+    "source_spec_path": {"type": "string", "minLength": 1},
+    "source_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trial_count": {"type": "integer", "minimum": 1},
+    "completed_trials": {"type": "integer", "minimum": 0},
+    "trials": {"type": "array", "items": {"type": "object"}},
+    "blocked_reason": {"type": ["string", "null"]}
+  }
+}

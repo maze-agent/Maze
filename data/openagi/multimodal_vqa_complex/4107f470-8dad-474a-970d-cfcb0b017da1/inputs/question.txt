@@ -1,1 +1,0 @@
-Given noisy image, how to return the object names in German step by step?

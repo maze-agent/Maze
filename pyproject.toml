@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascend-maze"
+version = "0.1.0"
+description = "Task-level workflow runtime contracts for Ascend clusters"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = "MIT"
+authors = [
+    {name = "guchengzhong"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "cloudpickle>=3.1,<4",
+    "pyarrow>=19,<25",
+    "tomli>=2.0,<3; python_version < '3.11'",
+]
+
+[project.scripts]
+maze = "ascend_maze.cli.main:main"
+maze-bench = "ascend_maze.benchmark.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools==1.82.1",
+    "mypy>=1.14,<2",
+    "ruff>=0.9,<1",
+]
+ray-host = [
+    "cloudpickle==3.1.2",
+    "grpcio>=1.82.1,<2",
+    "protobuf>=7.35,<8",
+    "ray[default]==2.55.1",
+]
+inference-vllm = [
+    "httpx>=0.28,<1",
+    "prometheus-client>=0.21,<1",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ascend_maze*"]
+
+[tool.setuptools.package-data]
+ascend_maze = [
+    "py.typed",
+    "benchmark/schemas/*.json",
+    "control/proto/*.proto",
+]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+disallow_untyped_defs = true
+files = ["src/ascend_maze"]
+
+[[tool.mypy.overrides]]
+module = [
+    "ray",
+    "ray.*",
+    "grpc",
+    "grpc.*",
+    "httpx",
+    "httpx.*",
+    "prometheus_client",
+    "prometheus_client.*",
+    "pyarrow",
+    "pyarrow.*",
+    "tomli",
+    "tomllib",
+    "cloudpickle",
+    "torch",
+    "torch.*",
+    "torch_npu",
+    "torch_npu.*",
+    "transformers",
+    "transformers.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "ascend_maze.control.proto.control_pb2",
+    "ascend_maze.control.proto.control_pb2_grpc",
+]
+ignore_errors = true
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = [
+    "src/ascend_maze/control/proto/control_pb2.py",
+    "src/ascend_maze/control/proto/control_pb2_grpc.py",
+]

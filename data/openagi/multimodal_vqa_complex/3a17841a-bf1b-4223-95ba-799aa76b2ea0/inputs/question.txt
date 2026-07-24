@@ -1,1 +1,0 @@
-Given low-resolutioned blurry grayscale image, how to return the object names in English step by step?

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ascend-maze.local/schemas/raw_files.v1.schema.json",
+  "title": "Ascend-Maze RawFiles v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "trial_attempt_id", "committed_paths", "files", "ignored_files", "content_digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "ascend-maze.raw-files.v1"},
+    "trial_attempt_id": {"type": "string", "pattern": "^trial_attempt_[0-9a-f]{32}$"},
+    "committed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["logical_name", "run_id", "source_path", "size_bytes", "sha256", "parquet_kind", "row_count"],
+        "properties": {
+          "logical_name": {"type": "string", "pattern": "^c8_[0-9]{6}$"},
+          "run_id": {"type": "string", "minLength": 1},
+          "source_path": {"type": "string", "minLength": 1},
+          "size_bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "parquet_kind": {"enum": ["context", "event", "invalid"]},
+          "row_count": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "ignored_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_path", "reason_code"],
+        "properties": {
+          "source_path": {"type": "string", "minLength": 1},
+          "reason_code": {"const": "unlisted_trial_file"}
+        }
+      }
+    },
+    "content_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
