@@ -13,8 +13,6 @@ site_dir: site
 theme:
   name: material
   language: zh
-  logo: assets/logo.png
-  favicon: assets/logo.png
   icon:
     repo: fontawesome/brands/github
   features:
@@ -53,7 +51,7 @@ theme:
 nav:
   - 首页: index.md
   - Maze 边界: maze_boundary.md
-  - API 文档: api_zh.md
+  - Server Route 边界: server_route_boundary.md
 
 markdown_extensions:
   - abbr
@@ -108,6 +106,3 @@ extra:
       link: https://mazeagent.net/
     - icon: fontawesome/solid/book
       link: https://maze-doc-new.readthedocs.io/
-
-extra_css:
-  - assets/extra.css

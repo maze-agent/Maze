@@ -6,13 +6,11 @@ hide:
 
 <div class="hero-block" markdown>
 
-![Maze](assets/logo.png)
-
 # Maze 文档
 
 **分布式智能体 Workflow Runtime**
 
-[开始阅读 API 文档 →](api_zh.md){ .md-button .md-button--primary }
+[快速开始 →](#30-秒上手){ .md-button .md-button--primary }
 [Maze 边界 →](maze_boundary.md){ .md-button }
 [Server Route 边界 →](server_route_boundary.md){ .md-button }
 [GitHub 仓库](https://github.com/maze-agent/Maze){ .md-button }
@@ -39,53 +37,11 @@ Phase 1 删除的是旧 `WorkspaceAgentPanel`，不是 Workflow Agent。未来�
 
 Server route 边界见：[server_route_boundary.md](server_route_boundary.md)。Workbench 后端公开主线只保留 workflow、run、artifact、cluster/resource/queue、task authoring 相关 route；Skills/MCP/Workspace Agent routes 不属于主线 public boundary。
 
-本站点提供 Maze 的 **完整中文 API 文档**，按以下层级组织：
+## 文档导航
 
-<div class="grid cards" markdown>
-
--   :material-language-python:{ .lg .middle } **Python SDK**
-
-    ---
-    `@task` 装饰器、`MaClient`、静态 / 动态 workflow、WorkflowSpec…
-
-    [→ 跳转](api_zh.md#一python-sdk-api)
-
--   :material-api:{ .lg .middle } **HTTP & WebSocket API**
-
-    ---
-    Head 服务的 30+ FastAPI 端点，含完整请求 / 响应 JSON 示例。
-
-    [→ 跳转](api_zh.md#二head-服务-http--websocket-api)
-
--   :material-console:{ .lg .middle } **CLI**
-
-    ---
-    `maze start --head | --worker`、`maze stop` 全部参数。
-
-    [→ 跳转](api_zh.md#三cli-命令)
-
--   :material-puzzle:{ .lg .middle } **Playground 后端**
-
-    ---
-    可视化界面的 40+ Node.js REST 端点。
-
-    [→ 跳转](api_zh.md#四maze-playground-后端-rest-api)
-
--   :material-broadcast:{ .lg .middle } **事件协议**
-
-    ---
-    调度器、run/task 状态、日志、artifact 和资源观测事件。
-
-    [→ 跳转](api_zh.md#五事件协议event-protocol)
-
--   :material-book-open-page-variant:{ .lg .middle } **完整示例**
-
-    ---
-    静态 / 动态 / app spec / curl 等 Maze-native 使用形态。
-
-    [→ 跳转](api_zh.md#八完整示例)
-
-</div>
+- [Maze 边界](maze_boundary.md)：Core Runtime、Workflow Agent 和 Workflow Workbench 的主线职责。
+- [Server Route 边界](server_route_boundary.md)：Head 与 Workbench 后端保留的公开路由范围。
+- [GitHub README](https://github.com/maze-agent/Maze#readme)：安装、运行和 API 使用示例。
 
 ## 30 秒上手
 
@@ -108,4 +64,4 @@ run_id = wf.run()
 wf.show_results(run_id)
 ```
 
-更多示例与完整 API：[API 文档](api_zh.md)
+更多用法请参阅 [GitHub README](https://github.com/maze-agent/Maze#readme)。
