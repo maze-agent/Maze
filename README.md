@@ -13,6 +13,7 @@
 ## News
 
 
+- **2026-07**: Maze improved multi-node execution for real batch workloads: local model startup, placement, API access, and cleanup now follow one consistent flow across vLLM and Transformers; multiple jobs can run concurrently without mixing inputs, files, or results; and Worker loss, model interruption, or Head restart no longer repeats completed work or leaves stale processes behind.
 - **2026-06**: Maze began its Core Purification work to reset the public boundary around Core Runtime, Workflow Agent, and Workflow Workbench.
 - **2026-06**: Maze added application hardening for production-style runs: unified run/task APIs, persisted static/dynamic/app run history, structured errors, retry/timeout/cancel controls, artifact queries, queue diagnostics, worker re-registration, and a unified Workbench `Runs` console.
 - **2026-05**: Maze added a cluster resource API and Playground `Cluster` view for inspecting registered Maze nodes, Ray-only nodes, CPU/GPU availability, and distributed placement.

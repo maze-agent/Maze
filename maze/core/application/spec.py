@@ -18,7 +18,6 @@ DEFAULT_RESOURCES = {
     "gpu_mem": 0,
 }
 
-
 class AppSpecError(ValueError):
     """Raised when a Maze application spec is invalid."""
 
@@ -76,8 +75,43 @@ def _normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:
 
     if normalized["cpu"] < 0 or normalized["gpu"] < 0:
         raise AppSpecError("resources.cpu and resources.gpu must be non-negative")
+    if normalized["gpu"] > 1:
+        raise AppSpecError("resources.gpu must be at most 1")
     if normalized["cpu_mem"] < 0 or normalized["gpu_mem"] < 0:
         raise AppSpecError("resources.cpu_mem and resources.gpu_mem must be non-negative")
+
+    target_node_id = resources.get("target_node_id")
+    node_id = resources.get("node_id")
+    if target_node_id is not None and node_id is not None and str(target_node_id) != str(node_id):
+        raise AppSpecError("resources.target_node_id and resources.node_id must match")
+    target_node_id = target_node_id if target_node_id is not None else node_id
+    if target_node_id is not None:
+        target_node_id = str(target_node_id).strip()
+        if not target_node_id:
+            raise AppSpecError("resources.target_node_id must not be empty")
+        normalized["target_node_id"] = target_node_id
+
+    required_capability = resources.get("required_capability")
+    if required_capability is not None:
+        required_capability = str(required_capability).strip()
+        if not required_capability:
+            raise AppSpecError("resources.required_capability must not be empty")
+        normalized["required_capability"] = required_capability
+
+    avoid_node_ids = resources.get("avoid_node_ids")
+    if avoid_node_ids is not None:
+        if not isinstance(avoid_node_ids, list):
+            raise AppSpecError("resources.avoid_node_ids must be a list")
+        normalized_avoid_node_ids = []
+        for value in avoid_node_ids:
+            node_id_value = str(value).strip()
+            if not node_id_value:
+                raise AppSpecError("resources.avoid_node_ids must not contain empty values")
+            if node_id_value not in normalized_avoid_node_ids:
+                normalized_avoid_node_ids.append(node_id_value)
+        if target_node_id and target_node_id in normalized_avoid_node_ids:
+            raise AppSpecError("resources.target_node_id cannot also be avoided")
+        normalized["avoid_node_ids"] = normalized_avoid_node_ids
     return normalized
 
 

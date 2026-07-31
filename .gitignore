@@ -40,6 +40,10 @@ env/
 # Project specific
 log.txt
 model_cache/
+/.agent/
+/.maze_runtime.json
+/updates/
+/workspaces/
 workspace/workspace.json
 workspace/policies/
 workspace/files/
@@ -50,7 +54,6 @@ workspace/workflow_runs/
 /files/
 /skills/
 /tasks/
-/workflows/
 /workflow_runs/
 web/maze_playground/backend/D*/
 

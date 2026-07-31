@@ -1,7 +1,7 @@
 import time
 from typing import Any,Dict
 from enum import Enum
-from maze.core.predictor.predictor import FEATURES
+from maze.core.predictor.features import FEATURES
 
 class TaskType(Enum):
     CODE = "code"

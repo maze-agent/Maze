@@ -295,6 +295,8 @@ export interface ClusterQueueTask {
   runtime_status?: string;
   priority?: number;
   attempt?: number;
+  dispatch_id?: string | null;
+  lease_id?: string | null;
   max_retries?: number;
   retry_backoff_seconds?: number;
   retry_wait_seconds?: number;
@@ -318,6 +320,8 @@ export interface ClusterQueuesResponse {
   queues: {
     snapshot_time?: number;
     scheduling_policy?: string;
+    active_lease_count: number;
+    active_lease_counts_by_kind: Record<string, number>;
     counts: {
       ready: number;
       pending: number;

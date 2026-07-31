@@ -127,7 +127,19 @@ class DynamicRun:
         if time.time() - self.created_time <= self.timeout_seconds:
             return False
 
+        active_task_ids = set(self.pending_tasks) | self.submitted_tasks | self.running_tasks
+        error = {
+            "error_type": "timeout",
+            "message": f"Dynamic run timed out after {self.timeout_seconds} seconds",
+        }
+        for task_id in active_task_ids:
+            self.task_errors[task_id] = error
+        self.failed_tasks.update(active_task_ids)
+        self.pending_tasks.clear()
+        self.submitted_tasks.clear()
+        self.running_tasks.clear()
         self.status = "timed_out"
+        self.failure_reason = error
         self.finished_time = time.time()
         self._touch()
         return True
@@ -253,6 +265,8 @@ class DynamicRun:
     def mark_finished(self, task_id: str) -> List[CodeTask]:
         if self.is_terminal():
             return []
+        if task_id in self.completed_tasks:
+            return []
         self.running_tasks.discard(task_id)
         self.completed_tasks.add(task_id)
         if task_id in self.tasks:
@@ -323,6 +337,17 @@ class DynamicRun:
     def interrupt(self, reason: str | None = None):
         if self.is_terminal():
             return False
+        active_task_ids = set(self.pending_tasks) | self.submitted_tasks | self.running_tasks
+        error = {
+            "error_type": "interrupted",
+            "message": reason or "Scheduler process exited before the dynamic run completed",
+        }
+        for task_id in active_task_ids:
+            self.task_errors[task_id] = error
+        self.failed_tasks.update(active_task_ids)
+        self.pending_tasks.clear()
+        self.submitted_tasks.clear()
+        self.running_tasks.clear()
         self.status = "interrupted"
         self.failure_reason = reason
         self.finished_time = time.time()

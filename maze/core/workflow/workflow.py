@@ -322,6 +322,9 @@ class Workflow:
         """
         if task_id not in self.tasks:
             raise ValueError(f"Task {task_id} not found in workflow.")
+        if self.tasks[task_id].completed:
+            return []
+
         
         self.remaining_task_num -= 1
 

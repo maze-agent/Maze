@@ -1,0 +1,38 @@
+FEATURES: dict[str, list[str]] = {
+    "llm_process": [
+        "text_length",
+        "token_count",
+        "batch_size",
+        "reason",
+    ],
+    "vlm_process": [
+        "image_height",
+        "image_width",
+        "image_area",
+        "image_aspect_ratio",
+        "batch_size",
+        "image_entropy",
+        "edge_density",
+        "text_area_ratio",
+        "text_block_count",
+        "avg_brightness",
+        "brightness_variance",
+        "prompt_length",
+        "prompt_token_count",
+    ],
+    "llm_fuse": [
+        "prompt_length",
+        "prompt_token_count",
+        "text1_length",
+        "text2_length",
+        "text1_token_count",
+        "text2_token_count",
+        "reason",
+    ],
+    "speech_process": [
+        "duration",
+        "audio_array_len",
+        "audio_entropy",
+        "audio_energy",
+    ],
+}

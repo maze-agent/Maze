@@ -101,10 +101,40 @@ class DynamicRunStore:
             "schema_version": SCHEMA_VERSION,
             **to_json_safe(event),
         }
-        events_path = self.dynamic_events_path(run_dir) if self.dynamic_run_json_path(run_dir).exists() or snapshot else run_dir / "events.jsonl"
+        dynamic_events_path = self.dynamic_events_path(run_dir)
+        legacy_events_path = run_dir / "events.jsonl"
+        if dynamic_events_path.exists() or self.dynamic_run_json_path(run_dir).exists():
+            events_path = dynamic_events_path
+        elif legacy_events_path.exists():
+            events_path = legacy_events_path
+        else:
+            events_path = dynamic_events_path if snapshot else legacy_events_path
         with events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
+
+    def append_event_once(
+        self,
+        run_id: str,
+        event: Dict[str, Any],
+        snapshot: Dict[str, Any] | None = None,
+    ) -> bool:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            **to_json_safe(event),
+        }
+        sequence = payload.get("seq")
+        if sequence is not None:
+            for stored_event in self.load_events(run_id, after=int(sequence) - 1):
+                if int(stored_event.get("seq", 0)) != int(sequence):
+                    continue
+                if stored_event != payload:
+                    raise ValueError(
+                        f"Dynamic run {run_id} already has a different event at sequence {sequence}"
+                    )
+                return False
+        self.append_event(run_id, event, snapshot=snapshot)
+        return True
 
     def load_run(self, run_id: str) -> Dict[str, Any]:
         path = self.located_run_json_path(run_id)
@@ -160,28 +190,61 @@ class DynamicRunStore:
                 continue
 
             run_id = snapshot["run_id"]
+            default_reason = "Head process restarted before run completed"
+            persisted_events = self.load_events(run_id)
+            snapshot_last_seq = int(snapshot.get("last_event_seq") or 0)
+            event = next(
+                (
+                    stored_event
+                    for stored_event in persisted_events
+                    if int(stored_event.get("seq", 0)) > snapshot_last_seq
+                    and stored_event.get("type") == "interrupt_dynamic_run"
+                    and (stored_event.get("data") or {}).get("run_id") == run_id
+                ),
+                None,
+            )
+            reason = (
+                (event.get("data") or {}).get("reason")
+                if event is not None
+                else default_reason
+            ) or default_reason
             now = time.time()
             snapshot["status"] = "interrupted"
             snapshot["finished_time"] = snapshot.get("finished_time") or now
             snapshot["updated_time"] = now
-            snapshot["failure_reason"] = snapshot.get("failure_reason") or "Head process restarted before run completed"
+            snapshot["failure_reason"] = snapshot.get("failure_reason") or reason
 
-            last_seq = int(snapshot.get("last_event_seq") or 0)
-            event = {
-                "type": "interrupt_dynamic_run",
-                "seq": last_seq + 1,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "schema_version": SCHEMA_VERSION,
-                "data": {
-                    "run_id": run_id,
-                    "run_status": "interrupted",
-                    "reason": "Head process restarted before run completed",
-                },
-            }
-            snapshot["event_count"] = int(snapshot.get("event_count") or 0) + 1
-            snapshot["last_event_seq"] = event["seq"]
+            if event is None:
+                persisted_last_seq = max(
+                    (int(item.get("seq", 0)) for item in persisted_events),
+                    default=snapshot_last_seq,
+                )
+                event = {
+                    "type": "interrupt_dynamic_run",
+                    "seq": max(snapshot_last_seq, persisted_last_seq) + 1,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "schema_version": SCHEMA_VERSION,
+                    "data": {
+                        "run_id": run_id,
+                        "run_status": "interrupted",
+                        "reason": reason,
+                    },
+                }
+                self.append_event_once(run_id, event, snapshot=snapshot)
+                persisted_events.append(event)
 
-            self.append_event(run_id, event)
+            events_after_snapshot = sum(
+                int(item.get("seq", 0)) > snapshot_last_seq
+                for item in persisted_events
+            )
+            snapshot["event_count"] = max(
+                int(snapshot.get("event_count") or 0) + events_after_snapshot,
+                len(persisted_events),
+            )
+            snapshot["last_event_seq"] = max([
+                snapshot_last_seq,
+                *(int(item.get("seq", 0)) for item in persisted_events),
+            ])
             self.save_run(snapshot)
             recovered.append(snapshot)
         return recovered

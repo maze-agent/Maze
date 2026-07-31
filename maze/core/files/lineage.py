@@ -72,24 +72,12 @@ def _snapshot_files(root: Path) -> Dict[str, Dict[str, Any]]:
 def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     files_by_path: Dict[str, Dict[str, Any]] = {}
 
-    parent_manifests = file_context.get("parent_file_manifests")
-    if parent_manifests is None:
-        run_id = file_context["run_id"]
-        parent_task_ids = file_context.get("parent_task_ids") or []
-        parent_manifests = []
-
-        for parent_task_id in parent_task_ids:
-            for manifests_dir in _task_manifest_dirs(file_context, run_id):
-                manifest_path = manifests_dir / f"{parent_task_id}.json"
-                if not manifest_path.exists():
-                    continue
-
-                import json
-
-                parent_manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
-                break
-
+    parent_manifests = file_context.get("parent_file_manifests") or []
     for manifest in parent_manifests:
+        if manifest.get("published") is not True:
+            raise ArtifactError(
+                f"Parent task manifest is not published: {manifest.get('task_id')}"
+            )
         for file_info in manifest.get("files", []):
             relative_path = file_info.get("path")
             if not relative_path:
@@ -123,20 +111,17 @@ def _run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
     return workspace_dir / "runs" / (run_id or file_context["run_id"])
 
 
-def _legacy_static_run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
-    workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
-    return workspace_dir / "workflow_runs" / "static" / (run_id or file_context["run_id"])
-
-
-def _task_manifest_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
-    return _run_dir(file_context, run_id) / "file_manifests" / "tasks"
-
-
-def _task_manifest_dirs(file_context: Dict[str, Any], run_id: str | None = None) -> list[Path]:
-    return [
-        _task_manifest_dir(file_context, run_id),
-        _legacy_static_run_dir(file_context, run_id) / "file_manifests" / "tasks",
-    ]
+def _attempt_path(file_context: Dict[str, Any]) -> Path:
+    attempt = file_context.get("attempt")
+    dispatch_id = file_context.get("dispatch_id")
+    if attempt is None or not dispatch_id:
+        raise ArtifactError(
+            "Task file context requires attempt and dispatch_id"
+        )
+    dispatch_path = _safe_relative_path(str(dispatch_id))
+    if len(dispatch_path.parts) != 1:
+        raise ValueError(f"Unsafe dispatch id: {dispatch_id}")
+    return Path(f"attempt-{int(attempt)}") / dispatch_path
 
 
 def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], target: Path):
@@ -198,27 +183,17 @@ def _stage_parent_files(file_context: Dict[str, Any], work_dir: Path):
         shutil.copy2(source, target)
 
 
-def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
-    import json
-
-    if _artifact_mode(file_context) and not file_context.get("write_local_manifest", False):
-        return
-
-    run_id = file_context["run_id"]
-    task_id = file_context["task_id"]
-    manifests_dir = _task_manifest_dir(file_context, run_id)
-    manifests_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = manifests_dir / f"{task_id}.json"
-    tmp_path = manifest_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
-    tmp_path.write_text(f"{json.dumps(manifest, indent=2, ensure_ascii=False)}\n", encoding="utf-8")
-    os.replace(tmp_path, manifest_path)
-
-
 def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, before: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
     after = _snapshot_files(work_dir)
-    artifacts_dir = _run_dir(file_context, run_id) / "artifacts" / "tasks" / task_id
+    artifacts_dir = (
+        _run_dir(file_context, run_id)
+        / "artifacts"
+        / "tasks"
+        / task_id
+        / _attempt_path(file_context)
+    )
     files = []
 
     for relative_path, file_info in sorted(after.items()):
@@ -264,12 +239,14 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
         "schema_version": 1,
         "run_id": run_id,
         "task_id": task_id,
+        "attempt": file_context.get("attempt"),
+        "dispatch_id": file_context.get("dispatch_id"),
+        "published": False,
         "node_id": file_context.get("node_id"),
         "created_time": time.time(),
         "files": files,
         "deleted_files": deleted_files,
     }
-    _write_manifest(file_context, manifest)
     return manifest
 
 
@@ -305,7 +282,13 @@ def run_task_with_file_context(
     workspace_dir = Path(file_context["workspace_dir"]).resolve()
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
-    work_dir = _run_dir(file_context, run_id) / "work" / "tasks" / task_id
+    work_dir = (
+        _run_dir(file_context, run_id)
+        / "work"
+        / "tasks"
+        / task_id
+        / _attempt_path(file_context)
+    )
 
     if work_dir.exists():
         shutil.rmtree(work_dir)

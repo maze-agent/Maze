@@ -7,10 +7,14 @@ import httpx
 import json
 import copy
 import logging
+import ray
 import zmq
 import zmq.asyncio
 import asyncio
 import multiprocessing as mp
+import queue
+import socket
+import subprocess
 from fastapi import WebSocket
 from pathlib import Path
 from typing import Any,Dict,List
@@ -20,16 +24,159 @@ from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
 from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES, dynamic_task_spec_from_payload
 from maze.core.workflow.dynamic_store import DynamicRunStore
 from maze.core.workflow.dag_spec import build_dag_workflow
-from maze.core.workflow.static_run import StaticRun, StaticRunStore, static_run_summary
+from maze.core.workflow.static_run import (
+    FINAL_OUTPUT_REFS_UNSET,
+    StaticRun,
+    StaticRunStore,
+    static_run_summary,
+)
 from maze.core.application.spec import build_app_workflow
 from maze.core.runs import GlobalMetrics
-from maze.core.scheduler.scheduler import scheduler_process
+from maze.core.scheduler.scheduler import scheduler_process, stop_ray_runtime
+from maze.core.scheduler.llm_instance import (
+    stop_llm_owner_processes_locally,
+    stop_llm_owner_processes_on_cluster,
+)
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.files.artifact_store import LocalCASArtifactStore
+from maze.core.files.lineage import ArtifactError
 from maze.utils.utils import get_available_ports
 
 logger = logging.getLogger(__name__)
 EPSILON = 1e-3
+RUN_INPUT_REF_MARKER = "__maze_run_input__"
+SCHEDULER_START_TIMEOUT_SECONDS = 60.0
+SCHEDULER_START_POLL_SECONDS = 0.1
+SCHEDULER_RESPONSE_TIMEOUT_SECONDS = 600.0
+SCHEDULER_FATAL_EXIT_GRACE_SECONDS = 90.0
+SCHEDULER_FATAL_TERMINATE_TIMEOUT_SECONDS = 5.0
+SCHEDULER_FATAL_KILL_TIMEOUT_SECONDS = 5.0
+SCHEDULER_PROCESS_EXIT_POLL_SECONDS = 0.05
+
+
+class SchedulerUnavailableError(RuntimeError):
+    error_code = "scheduler_unavailable"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pid: int | None = None,
+        exitcode: int | None = None,
+    ):
+        super().__init__(message)
+        self.pid = pid
+        self.exitcode = exitcode
+
+    def detail(self) -> Dict[str, Any]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+            "scheduler_pid": self.pid,
+            "scheduler_exitcode": self.exitcode,
+        }
+
+
+def _run_input_ref(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, dict) or RUN_INPUT_REF_MARKER not in value:
+        return None
+    if (
+        value.get(RUN_INPUT_REF_MARKER) is not True
+        or set(value) != {RUN_INPUT_REF_MARKER, "key"}
+        or not isinstance(value.get("key"), str)
+        or not value["key"]
+    ):
+        raise ValueError("Malformed workflow run input reference")
+    return value
+
+
+def _resolve_run_input_refs(
+    value: Any,
+    inputs: Dict[str, Any],
+) -> tuple[Any, set[str]]:
+    reference = _run_input_ref(value)
+    if reference is not None:
+        key = reference["key"]
+        if key not in inputs:
+            raise ValueError(f"Workflow run input contract mismatch: {key}")
+        return copy.deepcopy(inputs[key]), {key}
+    if isinstance(value, dict):
+        resolved = {}
+        referenced = set()
+        for key, item in value.items():
+            resolved_item, item_references = _resolve_run_input_refs(item, inputs)
+            resolved[key] = resolved_item
+            referenced.update(item_references)
+        return resolved, referenced
+    elif isinstance(value, (list, tuple)):
+        resolved = []
+        referenced = set()
+        for item in value:
+            resolved_item, item_references = _resolve_run_input_refs(item, inputs)
+            resolved.append(resolved_item)
+            referenced.update(item_references)
+        return resolved, referenced
+    return copy.deepcopy(value), set()
+
+
+def _bind_workflow_run_inputs(workflow: Workflow, inputs: Dict[str, Any] | None) -> Dict[str, Any]:
+    if inputs is None:
+        inputs = {}
+    if not isinstance(inputs, dict):
+        raise TypeError("run inputs must be a dictionary")
+    if not all(isinstance(key, str) for key in inputs):
+        raise TypeError("run input names must be strings")
+
+    contract = workflow.graph.graph.get("workflow_input_contract")
+    if contract is None:
+        constants = set()
+        runtime = {}
+    else:
+        constants = set(contract["constants"])
+        runtime = contract["runtime"]
+
+    provided = set(inputs)
+    conflicts = sorted(provided & constants)
+    unknown = sorted(provided - constants - set(runtime))
+    missing = sorted(
+        key
+        for key, spec in runtime.items()
+        if spec["required"] and key not in provided
+    )
+    if conflicts:
+        raise ValueError(
+            "Run inputs cannot override template constants: " + ", ".join(conflicts)
+        )
+    if unknown:
+        raise ValueError("Unknown workflow run inputs: " + ", ".join(unknown))
+    if missing:
+        raise ValueError("Missing workflow run inputs: " + ", ".join(missing))
+
+    effective_inputs = {
+        key: copy.deepcopy(inputs[key] if key in inputs else spec["default"])
+        for key, spec in runtime.items()
+    }
+    referenced = set()
+    for task in workflow.tasks.values():
+        for input_info in (task.task_input or {}).get("input_params", {}).values():
+            if input_info.get("input_schema") != "from_run":
+                continue
+            resolved, references = _resolve_run_input_refs(
+                input_info["value"],
+                effective_inputs,
+            )
+            if not references:
+                raise ValueError("Malformed workflow run input reference")
+            referenced.update(references)
+            input_info["value"] = resolved
+            input_info["input_schema"] = "from_user"
+            input_info["has_value"] = True
+    mismatched = sorted(referenced ^ set(runtime))
+    if mismatched:
+        raise ValueError(
+            "Workflow run input contract mismatch: " + ", ".join(mismatched)
+        )
+    return effective_inputs
 
 class MaPath:
     def __init__(self):
@@ -44,11 +191,14 @@ class MaPath:
         self.dynamic_run_store = DynamicRunStore()
         self.dynamic_run_store.recover_interrupted_runs()
         self.async_que: Dict[str, asyncio.Queue] = {} 
+        self.langgraph_task_requests: Dict[str, asyncio.Queue] = {}
         self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
         self.cluster_resource_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
         self.worker_registration_requests: Dict[str, asyncio.Queue] = {}
+        self.task_attempts: Dict[tuple[str, str], Dict[str, Any]] = {}
         self.atlas_enqueue_index = 0
+        self._scheduler_failure_handled: tuple[int | None, int | None] | None = None
 
         self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
         self.global_metrics = GlobalMetrics()
@@ -65,27 +215,46 @@ class MaPath:
         '''
         Clean up the main process and scheduler process.
         '''
-        if getattr(self, "_cleanup_started", False):
-            return
+        if getattr(self, "_cleanup_complete", False):
+            return True
         self._cleanup_started = True
 
-        try:
-            self._send_scheduler_message({"type": "shutdown"})
-        except Exception:
-            pass
+        self.request_scheduler_shutdown()
 
         scheduler_process = getattr(self, "scheduler_process", None)
         if scheduler_process is not None:
             try:
                 if scheduler_process.pid and scheduler_process.pid != os.getpid():
-                    scheduler_process.join(timeout=10)
+                    scheduler_process.join(timeout=75)
                     if scheduler_process.is_alive():
                         scheduler_process.terminate()
+                        scheduler_process.join(timeout=5)
+                    if scheduler_process.is_alive() and hasattr(scheduler_process, "kill"):
+                        scheduler_process.kill()
                         scheduler_process.join(timeout=5)
             except AssertionError:
                 pass
             except Exception:
                 pass
+
+        cleanup_complete = self._stop_local_ray_best_effort()
+
+        self._close_scheduler_channels()
+        self._cleanup_complete = cleanup_complete
+        if not cleanup_complete:
+            self._cleanup_started = False
+        return cleanup_complete
+
+    def request_scheduler_shutdown(self) -> None:
+        if getattr(self, "_scheduler_shutdown_requested", False):
+            return
+        self._scheduler_shutdown_requested = True
+        try:
+            self._send_scheduler_message({"type": "shutdown"})
+        except Exception:
+            pass
+
+    def _close_scheduler_channels(self):
 
         for socket_name in ("socket_to_scheduler", "socket_from_scheduler"):
             socket = getattr(self, socket_name, None)
@@ -95,9 +264,300 @@ class MaPath:
                 except Exception:
                     pass
 
+    def _drain_scheduler_owner_nodes(self) -> Dict[str, str]:
+        owner_nodes = getattr(self, "_scheduler_owner_nodes", None)
+        if owner_nodes is None:
+            owner_nodes = {}
+            self._scheduler_owner_nodes = owner_nodes
+        receiver = getattr(self, "_scheduler_owner_node_receiver", None)
+        if receiver is None:
+            return dict(owner_nodes)
+        while receiver.poll():
+            try:
+                placement = receiver.recv()
+            except (EOFError, OSError):
+                break
+            if not isinstance(placement, dict):
+                logger.error("Ignoring invalid Scheduler owner placement receipt")
+                continue
+            node_id = placement.get("node_id")
+            node_ip = placement.get("node_ip")
+            if node_id and node_ip:
+                owner_nodes[str(node_id)] = str(node_ip)
+        return dict(owner_nodes)
+
+    def _stop_local_ray_best_effort(self) -> bool:
+        self._drain_scheduler_owner_nodes()
+        owner_cleanup_event = getattr(
+            self,
+            "_scheduler_owner_cleanup_complete_event",
+            None,
+        )
+        ray_cleanup_event = getattr(
+            self,
+            "_scheduler_ray_cleanup_complete_event",
+            None,
+        )
+        owner_cleanup_complete = bool(
+            owner_cleanup_event is not None and owner_cleanup_event.is_set()
+        )
+        if not owner_cleanup_complete:
+            cluster_cleanup = self._stop_owned_llm_processes_via_ray_best_effort()
+            if cluster_cleanup is True:
+                owner_cleanup_complete = True
+                if owner_cleanup_event is not None:
+                    owner_cleanup_event.set()
+        else:
+            cluster_cleanup = True
+
+        if not owner_cleanup_complete:
+            logger.warning(
+                "Preserving the Ray runtime because cluster owner cleanup is unverified"
+            )
+
+        ray_cleanup_complete = bool(
+            ray_cleanup_event is not None and ray_cleanup_event.is_set()
+        )
+        if owner_cleanup_complete and not ray_cleanup_complete:
+            try:
+                result = stop_ray_runtime(force=True)
+                if result.returncode != 0:
+                    logger.warning(
+                        "Ray cleanup exited with status %s: %s",
+                        result.returncode,
+                        (result.stderr or result.stdout or "unknown error").strip(),
+                    )
+                else:
+                    ray_cleanup_complete = True
+                    if ray_cleanup_event is not None:
+                        ray_cleanup_event.set()
+            except Exception as exc:
+                logger.warning("Unable to stop the local Ray runtime: %s", exc)
+        local_cleanup = self._stop_owned_llm_processes_locally_best_effort()
+        return (
+            owner_cleanup_complete
+            and ray_cleanup_complete
+            and local_cleanup is True
+        )
+
+    def _stop_owned_llm_processes_via_ray_best_effort(self) -> bool | None:
+        owner_id = getattr(self, "_scheduler_owner_id", None)
+        if not owner_id:
+            return True
+
+        connected_here = False
+        try:
+            if not ray.is_initialized():
+                try:
+                    with socket.create_connection(
+                        ("127.0.0.1", int(self.ray_head_port)),
+                        timeout=0.25,
+                    ):
+                        pass
+                except (OSError, TypeError, ValueError):
+                    logger.info(
+                        "Skipping Ray model cleanup because the local Ray head is unavailable"
+                    )
+                    return None
+                ray.init(
+                    address=f"127.0.0.1:{self.ray_head_port}",
+                    ignore_reinit_error=True,
+                    logging_level=logging.ERROR,
+                )
+                connected_here = True
+            expected_nodes = self._drain_scheduler_owner_nodes()
+            if expected_nodes:
+                stop_llm_owner_processes_on_cluster(
+                    owner_id,
+                    expected_nodes=expected_nodes,
+                )
+            else:
+                stop_llm_owner_processes_on_cluster(owner_id)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Unable to clean Scheduler-owned model processes through Ray: %s",
+                exc,
+            )
+            return False
+        finally:
+            if connected_here:
+                try:
+                    ray.shutdown()
+                except Exception:
+                    logger.exception("Unable to disconnect from Ray after model cleanup")
+
+    def _stop_owned_llm_processes_locally_best_effort(self) -> bool:
+        owner_id = getattr(self, "_scheduler_owner_id", None)
+        if not owner_id:
+            return True
+        try:
+            stop_llm_owner_processes_locally(owner_id)
+            return True
+        except Exception as exc:
+            logger.warning("Unable to clean local Scheduler-owned model processes: %s", exc)
+            return False
+
+    def _abort_scheduler_start(self):
+        scheduler_process = getattr(self, "scheduler_process", None)
+        if scheduler_process is not None:
+            try:
+                scheduler_process.join(timeout=1)
+                if scheduler_process.is_alive():
+                    scheduler_process.terminate()
+                    scheduler_process.join(timeout=5)
+                if scheduler_process.is_alive() and hasattr(scheduler_process, "kill"):
+                    scheduler_process.kill()
+                    scheduler_process.join(timeout=5)
+            except (AssertionError, OSError):
+                pass
+        self._stop_local_ray_best_effort()
+        self._close_scheduler_channels()
+
+    def _wait_for_scheduler_ready(self, timeout: float = SCHEDULER_START_TIMEOUT_SECONDS):
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Scheduler did not become ready within {float(timeout):g} seconds"
+                )
+            try:
+                message = self.ready_queue.get(
+                    timeout=min(SCHEDULER_START_POLL_SECONDS, remaining)
+                )
+            except queue.Empty:
+                if self.scheduler_process.is_alive():
+                    continue
+                self.scheduler_process.join(timeout=0)
+                raise RuntimeError(
+                    "Scheduler exited before becoming ready "
+                    f"(pid={self.scheduler_process.pid}, "
+                    f"exitcode={self.scheduler_process.exitcode})"
+                )
+
+            if message == "ready":
+                return
+            if isinstance(message, dict) and message.get("status") == "error":
+                raise RuntimeError(
+                    f"Scheduler failed to start: {message.get('error', 'unknown error')}"
+                )
+            raise RuntimeError(f"Unexpected scheduler readiness message: {message!r}")
+
     def _send_scheduler_message(self, message: Dict[str, Any]):
+        self._require_scheduler_available()
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
+
+    def _require_scheduler_available(self):
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable is None:
+            return
+        scheduler_process = getattr(self, "scheduler_process", None)
+        raise SchedulerUnavailableError(
+            unavailable,
+            pid=getattr(scheduler_process, "pid", None),
+            exitcode=getattr(scheduler_process, "exitcode", None),
+        )
+
+    def _scheduler_unavailable_message(self) -> str | None:
+        scheduler_process = getattr(self, "scheduler_process", None)
+        if scheduler_process is None:
+            return "scheduler process is not initialized"
+        fatal_event = getattr(self, "_scheduler_fatal_event", None)
+        if fatal_event is not None and fatal_event.is_set():
+            pid = scheduler_process.pid
+            process_detail = f"pid={pid}" if pid else "pid=unknown"
+            return (
+                f"scheduler reported a fatal failure ({process_detail}). "
+                "Restart Maze core to recover the scheduler."
+            )
+        if scheduler_process.is_alive():
+            return None
+
+        exitcode = scheduler_process.exitcode
+        pid = scheduler_process.pid
+        process_detail = f"pid={pid}, exitcode={exitcode}" if pid else f"exitcode={exitcode}"
+        return (
+            f"scheduler process exited ({process_detail}). "
+            "Restart Maze core to recover the scheduler."
+        )
+
+    def _validate_task_file_manifest(self, data: Dict[str, Any]) -> Dict[str, Any] | None:
+        manifest = data.get("file_manifest")
+        if not manifest:
+            return None
+
+        expected = {
+            "run_id": data.get("workflow_id"),
+            "task_id": data.get("task_id"),
+            "attempt": data.get("attempt"),
+            "dispatch_id": data.get("dispatch_id"),
+            "published": False,
+        }
+        for field, value in expected.items():
+            if manifest.get(field) != value:
+                raise ArtifactError(
+                    f"Task manifest {field} does not match the finishing attempt"
+                )
+        return manifest
+
+    def _accept_task_attempt_event(self, message_type: str, data: Dict[str, Any]) -> bool:
+        key = (data.get("workflow_id"), data.get("task_id"))
+        attempt = data.get("attempt")
+        dispatch_id = data.get("dispatch_id")
+        lease_id = data.get("lease_id")
+        if None in key or attempt is None or not dispatch_id or not lease_id:
+            return False
+        if message_type == "finish_task":
+            self._validate_task_file_manifest(data)
+
+        identity = (attempt, dispatch_id, lease_id)
+        next_state = "running" if message_type == "start_task" else (
+            "retrying" if message_type == "task_retry" else "terminal"
+        )
+        current = self.task_attempts.get(key)
+        if current is not None and current["state"] == "terminal":
+            return False
+        if current is None or attempt > current["identity"][0]:
+            self.task_attempts[key] = {
+                "identity": identity,
+                "state": next_state,
+                "event_type": message_type,
+            }
+            return True
+        if attempt < current["identity"][0] or identity != current["identity"]:
+            return False
+        if current["state"] != "running" or message_type == "start_task":
+            return False
+
+        current["state"] = next_state
+        current["event_type"] = message_type
+        return True
+
+    def _publish_task_file_manifest(
+        self,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        manifest = self._validate_task_file_manifest(data)
+        if not manifest:
+            return None
+
+        key = (data.get("workflow_id"), data.get("task_id"))
+        identity = (data.get("attempt"), data.get("dispatch_id"), data.get("lease_id"))
+        accepted = self.task_attempts.get(key)
+        if (
+            accepted is None
+            or accepted["identity"] != identity
+            or accepted.get("event_type") != "finish_task"
+        ):
+            raise ArtifactError("Cannot publish a manifest from an unaccepted task attempt")
+
+        published = copy.deepcopy(manifest)
+        published["published"] = True
+        published["published_time"] = time.time()
+        data["file_manifest"] = published
+        return published
         
     def create_workflow(self,workflow_id:str):
         '''
@@ -200,6 +660,7 @@ class MaPath:
     def _task_run_payload(self, workflow: Workflow, task: CodeTask, submit_id: str, file_context: Dict[str, Any] | None = None):
         data = task.to_json()
         data['workflow_id'] = submit_id
+        file_context = file_context or task.file_context
 
         if file_context and file_context.get("enabled"):
             task_node_ids = file_context.get("task_node_ids") or {}
@@ -211,7 +672,7 @@ class MaPath:
             data["file_context"] = {
                 **file_context,
                 "enabled": True,
-                "run_id": file_context.get("run_id") or submit_id,
+                "run_id": submit_id,
                 "submit_id": submit_id,
                 "task_id": task.task_id,
                 "node_id": task_node_ids.get(task.task_id),
@@ -222,19 +683,31 @@ class MaPath:
         return data
 
     def _prepare_initial_artifacts(self, file_context: Dict[str, Any], submit_id: str) -> Dict[str, Any]:
-        if not file_context or not file_context.get("enabled") or not file_context.get("artifact_store"):
-            return file_context
+        prepared_context = copy.deepcopy(file_context)
+        if (
+            not prepared_context
+            or not prepared_context.get("enabled")
+            or not prepared_context.get("artifact_store")
+        ):
+            return prepared_context
 
         from pathlib import Path
 
-        workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
+        workspace_dir = Path(prepared_context["workspace_dir"]).expanduser().resolve()
         files_dir = workspace_dir / "files"
-        artifact_root = file_context.get("artifact_store", {}).get("root")
+        artifact_root = prepared_context.get("artifact_store", {}).get("root")
         store = LocalCASArtifactStore(artifact_root)
         initial_files = []
 
+        if files_dir.is_symlink():
+            raise ValueError("Workspace files directory cannot be a symbolic link")
         if files_dir.exists():
             for file_path in sorted(files_dir.rglob("*")):
+                if file_path.is_symlink():
+                    relative_path = file_path.relative_to(files_dir).as_posix()
+                    raise ValueError(
+                        f"Workspace files cannot contain symbolic links: {relative_path}"
+                    )
                 if not file_path.is_file() or "__pycache__" in file_path.parts or file_path.suffix == ".pyc":
                     continue
                 relative_path = file_path.relative_to(files_dir).as_posix()
@@ -250,9 +723,8 @@ class MaPath:
                     "uri": f"maze://runs/{submit_id}/workspace/files/{relative_path}",
                 })
 
-        prepared_context = copy.deepcopy(file_context)
         prepared_context["workspace_dir"] = str(workspace_dir)
-        prepared_context["run_id"] = file_context.get("run_id") or submit_id
+        prepared_context["run_id"] = submit_id
         prepared_context["initial_files"] = initial_files
         return prepared_context
 
@@ -263,19 +735,21 @@ class MaPath:
         timeout_seconds:float|None=None,
         tags:List[str]|None=None,
         metadata:Dict[str,Any]|None=None,
+        final_output_refs:Any=FINAL_OUTPUT_REFS_UNSET,
+        inputs:Dict[str,Any]|None=None,
     ):
         """
         Start a workflow.
         """
+        self._require_scheduler_available()
+        submit_workflow = copy.deepcopy(self.workflows[workflow_id])
+        run_inputs = _bind_workflow_run_inputs(submit_workflow, inputs)
         submit_id = str(uuid.uuid4())
         file_context = self._prepare_initial_artifacts(file_context, submit_id) if file_context else None
-        submit_workflow = copy.deepcopy(self.workflows[workflow_id])
         if file_context:
             submit_workflow.graph.graph["file_context"] = file_context
         submit_workflow.prepare_for_strategy(self.strategy)
         submit_workflow.graph.graph["submission_time"] = time.time()
-        self.submit_workflows[submit_id] = submit_workflow
-        self.async_que[submit_id] = asyncio.Queue()
         static_run = StaticRun(
             submit_id,
             workflow_id,
@@ -283,7 +757,11 @@ class MaPath:
             timeout_seconds=timeout_seconds,
             tags=tags,
             metadata=metadata,
+            final_output_refs=final_output_refs,
+            run_inputs=run_inputs,
         )
+        self.submit_workflows[submit_id] = submit_workflow
+        self.async_que[submit_id] = asyncio.Queue()
         self.static_runs[submit_id] = static_run
         self._persist_static_run(submit_id)
         self.global_metrics.on_run_submitted(submit_id)
@@ -323,6 +801,7 @@ class MaPath:
         file_context:Dict[str,Any]|None=None,
         metadata:Dict[str,Any]|None=None,
     ):
+        self._require_scheduler_available()
         run_id = str(uuid.uuid4())
         file_context = self._prepare_initial_artifacts(file_context, run_id) if file_context else None
         self.dynamic_runs[run_id] = DynamicRun(
@@ -363,6 +842,7 @@ class MaPath:
         return snapshots
 
     async def register_dynamic_task_spec(self, run_id:str, task_spec_payload:Dict[str,Any]):
+        self._require_scheduler_available()
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         task_spec = dynamic_task_spec_from_payload(task_spec_payload)
@@ -390,6 +870,7 @@ class MaPath:
         request_id:str|None=None,
         resources:Dict[str,Any]|None=None,
     ):
+        self._require_scheduler_available()
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         dynamic_run.check_can_mutate("append tasks")
@@ -429,6 +910,7 @@ class MaPath:
         return task, idempotent
 
     async def finalize_dynamic_run(self, run_id:str, result:Any=None):
+        self._require_scheduler_available()
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         dynamic_run.finalize(result)
@@ -623,8 +1105,24 @@ class MaPath:
         return cleanup_result
 
     def _stop_dynamic_runtime(self, run_id:str):
-        message = {"type":"stop_workflow","data":{"workflow_id":run_id}}
-        self._send_scheduler_message(message)
+        self._stop_workflow_best_effort(run_id)
+
+    def _stop_workflow_best_effort(self, run_id: str):
+        try:
+            self._send_scheduler_message({
+                "type": "stop_workflow",
+                "data": {"workflow_id": run_id},
+            })
+        except SchedulerUnavailableError:
+            logger.warning(
+                "Could not stop workflow %s because the scheduler is unavailable",
+                run_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not stop workflow %s during terminal-state cleanup",
+                run_id,
+            )
 
     async def _refresh_dynamic_timeout(self, run_id:str) -> bool:
         dynamic_run = self.get_dynamic_run(run_id)
@@ -636,10 +1134,495 @@ class MaPath:
             "data": {
                 "run_id": run_id,
                 "timeout_seconds": dynamic_run.timeout_seconds,
+                "deadline_time": dynamic_run.created_time + float(dynamic_run.timeout_seconds),
             },
         })
-        self._stop_dynamic_runtime(run_id)
+        self._stop_workflow_best_effort(run_id)
         return True
+
+    async def _sweep_run_deadlines(self):
+        for run_id, static_run in list(self.static_runs.items()):
+            previous_status = static_run.status
+            deadline = static_run.deadline_time()
+            if not static_run.mark_timed_out_if_needed():
+                continue
+
+            event = self._record_static_event(run_id, {
+                "type": "timeout_workflow",
+                "data": {
+                    "run_id": run_id,
+                    "workflow_id": static_run.workflow_id,
+                    "timeout_seconds": static_run.timeout_seconds,
+                    "deadline_time": deadline,
+                },
+            })
+            metrics_status = "submitted" if previous_status == "created" else previous_status
+            self.global_metrics.on_run_status_change(
+                run_id,
+                metrics_status,
+                "timed_out",
+            )
+            queue = self.async_que.get(run_id)
+            if queue is not None:
+                queue.put_nowait(event)
+            self._stop_workflow_best_effort(run_id)
+
+        for run_id, dynamic_run in list(self.dynamic_runs.items()):
+            if not dynamic_run.mark_timed_out_if_needed():
+                continue
+            await self._emit_dynamic_event(run_id, {
+                "type": "timeout_dynamic_run",
+                "data": {
+                    "run_id": run_id,
+                    "timeout_seconds": dynamic_run.timeout_seconds,
+                    "deadline_time": (
+                        dynamic_run.created_time + float(dynamic_run.timeout_seconds)
+                    ),
+                },
+            })
+            self._stop_workflow_best_effort(run_id)
+
+    def _scheduler_event_is_persisted(self, store, run_id: str, event: Dict[str, Any]) -> bool:
+        load_events = getattr(store, "load_events", None)
+        sequence = event.get("seq")
+        if load_events is None or sequence is None:
+            return False
+
+        for stored_event in load_events(run_id, after=int(sequence) - 1):
+            if int(stored_event.get("seq", 0)) != int(sequence):
+                continue
+            if stored_event != event:
+                raise RuntimeError(
+                    f"Persisted event sequence conflict for run {run_id}: {sequence}"
+                )
+            return True
+        return False
+
+    def _persist_scheduler_exit_entry(
+        self,
+        store,
+        run_id: str,
+        entry: Dict[str, Any],
+        *,
+        dynamic: bool,
+    ):
+        event = entry["event"]
+        snapshot = entry["snapshot"]
+        if not entry["event_persisted"]:
+            append_event_once = getattr(store, "append_event_once", None)
+            if append_event_once is not None:
+                if dynamic:
+                    append_event_once(run_id, event, snapshot=snapshot)
+                else:
+                    append_event_once(run_id, event)
+            elif not self._scheduler_event_is_persisted(store, run_id, event):
+                if dynamic:
+                    store.append_event(run_id, event, snapshot=snapshot)
+                else:
+                    store.append_event(run_id, event)
+            entry["event_persisted"] = True
+        if not entry["snapshot_persisted"]:
+            store.save_run(snapshot)
+            entry["snapshot_persisted"] = True
+
+    def _scheduler_exit_progress_for(
+        self,
+        failure: tuple[int | None, int | None],
+        reason: str,
+    ) -> Dict[str, Any]:
+        progress = getattr(self, "_scheduler_exit_progress", None)
+        if progress is not None and progress.get("failure") == failure:
+            return progress
+
+        progress = {
+            "failure": failure,
+            "reason": reason,
+            "static": {},
+            "dynamic": {},
+            "waiters_notified": False,
+            "ray_cleanup_complete": False,
+        }
+        for run_id, static_run in list(self.static_runs.items()):
+            progress["static"][run_id] = {
+                "run": static_run,
+                "previous_status": static_run.status,
+                "interrupted": None,
+                "event": None,
+                "snapshot": None,
+                "event_persisted": False,
+                "snapshot_persisted": False,
+                "metrics_recorded": False,
+                "queue_notified": False,
+                "complete": False,
+            }
+        for run_id, dynamic_run in list(self.dynamic_runs.items()):
+            progress["dynamic"][run_id] = {
+                "run": dynamic_run,
+                "interrupted": None,
+                "event": None,
+                "snapshot": None,
+                "event_persisted": False,
+                "snapshot_persisted": False,
+                "queue_notified": False,
+                "complete": False,
+            }
+        self._scheduler_exit_progress = progress
+        logger.error("%s", reason)
+        return progress
+
+    @staticmethod
+    def _raise_scheduler_unavailable_response(response: Dict[str, Any]) -> None:
+        if response.get("type") != "scheduler_unavailable":
+            return
+        data = response.get("data") or {}
+        raise SchedulerUnavailableError(
+            data.get("message") or "scheduler process is unavailable",
+            pid=data.get("scheduler_pid"),
+            exitcode=data.get("scheduler_exitcode"),
+        )
+
+    async def _wait_for_scheduler_response(
+        self,
+        response_queue: asyncio.Queue,
+        *,
+        timeout: float,
+        operation: str,
+    ) -> Dict[str, Any]:
+        timeout = max(0.0, float(timeout))
+        try:
+            response = await asyncio.wait_for(response_queue.get(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            scheduler_process = getattr(self, "scheduler_process", None)
+            message = self._scheduler_unavailable_message()
+            if message is None:
+                message = (
+                    f"Timed out after {timeout:g} seconds while waiting for "
+                    f"the scheduler to {operation}"
+                )
+            raise SchedulerUnavailableError(
+                message,
+                pid=getattr(scheduler_process, "pid", None),
+                exitcode=getattr(scheduler_process, "exitcode", None),
+            ) from exc
+        self._raise_scheduler_unavailable_response(response)
+        unavailable = self._scheduler_unavailable_message()
+        if unavailable is not None:
+            scheduler_process = getattr(self, "scheduler_process", None)
+            raise SchedulerUnavailableError(
+                unavailable,
+                pid=getattr(scheduler_process, "pid", None),
+                exitcode=getattr(scheduler_process, "exitcode", None),
+            )
+        return response
+
+    def _notify_scheduler_exit_waiters(
+        self,
+        reason: str,
+        scheduler_process,
+    ) -> None:
+        unavailable = SchedulerUnavailableError(
+            reason,
+            pid=getattr(scheduler_process, "pid", None),
+            exitcode=getattr(scheduler_process, "exitcode", None),
+        ).detail()
+        message = {
+            "type": "scheduler_unavailable",
+            "data": {**unavailable, "status": "interrupted"},
+        }
+        for attribute in (
+            "langgraph_task_requests",
+            "llm_instance_async_que",
+            "cluster_resource_requests",
+            "cluster_queue_requests",
+            "worker_registration_requests",
+        ):
+            requests = getattr(self, attribute, None)
+            if requests is None:
+                continue
+            for response_queue in list(requests.values()):
+                response_queue.put_nowait(message)
+            requests.clear()
+
+    async def _wait_for_scheduler_process_exit(
+        self,
+        scheduler_process,
+        timeout: float,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while scheduler_process.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(SCHEDULER_PROCESS_EXIT_POLL_SECONDS, remaining))
+        try:
+            scheduler_process.join(timeout=0)
+        except (AssertionError, OSError):
+            pass
+        return True
+
+    async def _stop_fatal_scheduler_process(self, scheduler_process) -> bool:
+        scheduler_pid = getattr(scheduler_process, "pid", None)
+        if not scheduler_process.is_alive():
+            return True
+        if scheduler_pid is None or scheduler_pid == os.getpid():
+            logger.critical(
+                "Refusing to terminate invalid Scheduler pid %s after fatal failure",
+                scheduler_pid,
+            )
+            return False
+
+        logger.critical(
+            "Scheduler pid %s remained alive after its fatal cleanup grace period; "
+            "terminating it",
+            scheduler_pid,
+        )
+        try:
+            scheduler_process.terminate()
+        except (AssertionError, OSError):
+            logger.exception("Unable to terminate fatal Scheduler pid %s", scheduler_pid)
+        terminate_timeout = getattr(
+            self,
+            "_scheduler_fatal_terminate_timeout_seconds",
+            SCHEDULER_FATAL_TERMINATE_TIMEOUT_SECONDS,
+        )
+        if await self._wait_for_scheduler_process_exit(
+            scheduler_process,
+            terminate_timeout,
+        ):
+            return True
+
+        kill = getattr(scheduler_process, "kill", None)
+        if kill is None:
+            logger.critical(
+                "Scheduler pid %s ignored termination and cannot be killed",
+                scheduler_pid,
+            )
+            return False
+        logger.critical(
+            "Scheduler pid %s ignored termination; killing it",
+            scheduler_pid,
+        )
+        try:
+            kill()
+        except (AssertionError, OSError):
+            logger.exception("Unable to kill fatal Scheduler pid %s", scheduler_pid)
+        kill_timeout = getattr(
+            self,
+            "_scheduler_fatal_kill_timeout_seconds",
+            SCHEDULER_FATAL_KILL_TIMEOUT_SECONDS,
+        )
+        stopped = await self._wait_for_scheduler_process_exit(
+            scheduler_process,
+            kill_timeout,
+        )
+        if not stopped:
+            logger.critical(
+                "Scheduler pid %s remained alive after kill",
+                scheduler_pid,
+            )
+        return stopped
+
+    async def _handle_scheduler_exit(self):
+        scheduler_process = getattr(self, "scheduler_process", None)
+        if scheduler_process is None:
+            return
+
+        if scheduler_process.is_alive():
+            fatal_event = getattr(self, "_scheduler_fatal_event", None)
+            if fatal_event is None or not fatal_event.is_set():
+                return
+            scheduler_pid = getattr(scheduler_process, "pid", None)
+            fatal_state = getattr(self, "_scheduler_fatal_exit_state", None)
+            if fatal_state is None or fatal_state.get("pid") != scheduler_pid:
+                grace_seconds = max(
+                    0.0,
+                    float(getattr(
+                        self,
+                        "_scheduler_fatal_exit_grace_seconds",
+                        SCHEDULER_FATAL_EXIT_GRACE_SECONDS,
+                    )),
+                )
+                fatal_state = {
+                    "pid": scheduler_pid,
+                    "deadline": time.monotonic() + grace_seconds,
+                }
+                self._scheduler_fatal_exit_state = fatal_state
+
+            if getattr(self, "_scheduler_fatal_waiters_notified", None) != scheduler_pid:
+                reason = (
+                    self._scheduler_unavailable_message()
+                    or "scheduler process is unavailable"
+                )
+                try:
+                    self._notify_scheduler_exit_waiters(reason, scheduler_process)
+                except Exception:
+                    logger.exception("Could not notify fatal Scheduler waiters; will retry")
+                else:
+                    self._scheduler_fatal_waiters_notified = scheduler_pid
+
+            if time.monotonic() < fatal_state["deadline"]:
+                return
+            if not await self._stop_fatal_scheduler_process(scheduler_process):
+                return
+
+        self._scheduler_fatal_exit_state = None
+
+        failure = (scheduler_process.pid, scheduler_process.exitcode)
+        if self._scheduler_failure_handled == failure:
+            return
+
+        reason = self._scheduler_unavailable_message() or "scheduler process is unavailable"
+        progress = self._scheduler_exit_progress_for(
+            failure,
+            reason,
+        )
+        reason = progress["reason"]
+
+        if not progress["waiters_notified"]:
+            try:
+                self._notify_scheduler_exit_waiters(reason, scheduler_process)
+            except Exception:
+                logger.exception("Could not notify scheduler waiters; will retry")
+            else:
+                progress["waiters_notified"] = True
+
+        try:
+            for run_id, entry in progress["static"].items():
+                if entry["complete"]:
+                    continue
+                try:
+                    static_run = entry["run"]
+                    if entry["interrupted"] is None:
+                        entry["interrupted"] = static_run.mark_interrupted(reason)
+                    if not entry["interrupted"]:
+                        entry["complete"] = True
+                        continue
+                    if entry["event"] is None:
+                        entry["event"] = static_run.append_event({
+                            "type": "interrupt_workflow",
+                            "data": {
+                                "run_id": run_id,
+                                "workflow_id": static_run.workflow_id,
+                                "reason": reason,
+                                "scheduler_pid": scheduler_process.pid,
+                                "scheduler_exitcode": scheduler_process.exitcode,
+                            },
+                        })
+                    if entry["snapshot"] is None:
+                        entry["snapshot"] = static_run.snapshot()
+                    self._persist_scheduler_exit_entry(
+                        self.static_run_store,
+                        run_id,
+                        entry,
+                        dynamic=False,
+                    )
+                    if not entry["metrics_recorded"]:
+                        metrics_status = (
+                            "submitted"
+                            if entry["previous_status"] == "created"
+                            else entry["previous_status"]
+                        )
+                        self.global_metrics.on_run_status_change(
+                            run_id,
+                            metrics_status,
+                            "interrupted",
+                        )
+                        entry["metrics_recorded"] = True
+                    if not entry["queue_notified"]:
+                        queue = self.async_que.get(run_id)
+                        if queue is not None:
+                            queue.put_nowait(entry["event"])
+                        entry["queue_notified"] = True
+                    entry["complete"] = True
+                except Exception:
+                    logger.exception(
+                        "Could not finish scheduler-exit persistence for static run %s; will retry",
+                        run_id,
+                    )
+
+            for run_id, entry in progress["dynamic"].items():
+                if entry["complete"]:
+                    continue
+                try:
+                    dynamic_run = entry["run"]
+                    if entry["interrupted"] is None:
+                        entry["interrupted"] = dynamic_run.interrupt(reason)
+                    if not entry["interrupted"]:
+                        entry["complete"] = True
+                        continue
+                    if entry["event"] is None:
+                        entry["event"] = dynamic_run.append_event({
+                            "type": "interrupt_dynamic_run",
+                            "data": {
+                                "run_id": run_id,
+                                "reason": reason,
+                                "scheduler_pid": scheduler_process.pid,
+                                "scheduler_exitcode": scheduler_process.exitcode,
+                            },
+                        })
+                    if entry["snapshot"] is None:
+                        entry["snapshot"] = dynamic_run.snapshot(
+                            lambda result: summarize_task_result(result, run_id=run_id)
+                        )
+                    self._persist_scheduler_exit_entry(
+                        self.dynamic_run_store,
+                        run_id,
+                        entry,
+                        dynamic=True,
+                    )
+                    if not entry["queue_notified"]:
+                        queue = self.async_que.get(run_id)
+                        if queue is not None:
+                            await queue.put({"type": "dynamic_event"})
+                        entry["queue_notified"] = True
+                    entry["complete"] = True
+                except Exception:
+                    logger.exception(
+                        "Could not finish scheduler-exit persistence for dynamic run %s; will retry",
+                        run_id,
+                    )
+        finally:
+            if not progress["ray_cleanup_complete"]:
+                try:
+                    cleanup_succeeded = await asyncio.to_thread(
+                        self._stop_local_ray_best_effort
+                    )
+                except Exception:
+                    logger.exception("Could not clean up Ray after scheduler exit; will retry")
+                else:
+                    if not cleanup_succeeded:
+                        logger.error(
+                            "Ray or Scheduler-owned model cleanup remained incomplete; will retry"
+                        )
+                    else:
+                        progress["ray_cleanup_complete"] = True
+
+        runs_complete = all(
+            entry["complete"]
+            for entries in (progress["static"], progress["dynamic"])
+            for entry in entries.values()
+        )
+        if (
+            runs_complete
+            and progress["waiters_notified"]
+            and progress["ray_cleanup_complete"]
+        ):
+            self._scheduler_failure_handled = failure
+            self._scheduler_exit_progress = None
+
+    async def maintenance_coroutine(self, interval_seconds: float = 1.0):
+        interval_seconds = max(0.1, float(interval_seconds))
+        while True:
+            try:
+                if not getattr(self, "_cleanup_started", False):
+                    await self._handle_scheduler_exit()
+                    await self._sweep_run_deadlines()
+                await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Maze maintenance loop failed")
+                await asyncio.sleep(interval_seconds)
 
     def _dynamic_task_run_payload(self, dynamic_run: DynamicRun, task: CodeTask):
         data = task.to_json()
@@ -655,7 +1638,7 @@ class MaPath:
             data["file_context"] = {
                 **file_context,
                 "enabled": True,
-                "run_id": file_context.get("run_id") or dynamic_run.run_id,
+                "run_id": dynamic_run.run_id,
                 "submit_id": dynamic_run.run_id,
                 "task_id": task.task_id,
                 "parent_task_ids": parent_task_ids,
@@ -1067,9 +2050,10 @@ class MaPath:
             return
 
         if message_type == "finish_task":
-            await self._emit_dynamic_event(run_id, message)
-            dynamic_run.set_task_file_manifest(task_id, message.get("data", {}).get("file_manifest"))
+            file_manifest = self._publish_task_file_manifest(message["data"])
+            dynamic_run.set_task_file_manifest(task_id, file_manifest)
             ready_tasks = dynamic_run.mark_finished(task_id)
+            await self._emit_dynamic_event(run_id, message)
             self._persist_dynamic_run(run_id)
             for ready_task in ready_tasks:
                 await self._emit_dynamic_event(run_id, {
@@ -1094,7 +2078,6 @@ class MaPath:
 
         if message_type == "task_exception":
             error = message.get("data", {}).get("error", message.get("data", {}).get("result"))
-            dynamic_run.set_task_file_manifest(task_id, message.get("data", {}).get("file_manifest"))
             dynamic_run.mark_failed(task_id, error)
             await self._emit_dynamic_event(run_id, message)
             return
@@ -1107,6 +2090,7 @@ class MaPath:
         return self.ray_head_port
 
     async def get_cluster_resources(self, timeout: float = 5.0):
+        self._require_scheduler_available()
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.cluster_resource_requests[request_id] = response_queue
@@ -1117,14 +2101,18 @@ class MaPath:
                 "request_id": request_id,
             },
         }
-        self._send_scheduler_message(message)
-
         try:
-            return await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            self._send_scheduler_message(message)
+            return await self._wait_for_scheduler_response(
+                response_queue,
+                timeout=timeout,
+                operation="return cluster resources",
+            )
         finally:
             self.cluster_resource_requests.pop(request_id, None)
 
     async def get_cluster_queues(self, timeout: float = 5.0):
+        self._require_scheduler_available()
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.cluster_queue_requests[request_id] = response_queue
@@ -1135,14 +2123,18 @@ class MaPath:
                 "request_id": request_id,
             },
         }
-        self._send_scheduler_message(message)
-
         try:
-            return await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            self._send_scheduler_message(message)
+            return await self._wait_for_scheduler_response(
+                response_queue,
+                timeout=timeout,
+                operation="return cluster queues",
+            )
         finally:
             self.cluster_queue_requests.pop(request_id, None)
     
     async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
+        self._require_scheduler_available()
         request_id = str(uuid.uuid4())
         response_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.worker_registration_requests[request_id] = response_queue
@@ -1156,9 +2148,13 @@ class MaPath:
                 "capabilities":capabilities or {"workspace_sandbox": True, "docker_sandbox": False},
             }
         }
-        self._send_scheduler_message(message)
         try:
-            return await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            self._send_scheduler_message(message)
+            return await self._wait_for_scheduler_response(
+                response_queue,
+                timeout=timeout,
+                operation="register the worker",
+            )
         finally:
             self.worker_registration_requests.pop(request_id, None)
 
@@ -1166,6 +2162,22 @@ class MaPath:
         '''
         Initialize.
         '''
+        self._cleanup_started = False
+        self._cleanup_complete = False
+        self._scheduler_failure_handled = None
+        self._scheduler_exit_progress = None
+        self._scheduler_fatal_waiters_notified = None
+        self._scheduler_fatal_exit_state = None
+        self._scheduler_shutdown_requested = False
+        self._scheduler_fatal_event = mp.Event()
+        self._scheduler_owner_cleanup_complete_event = mp.Event()
+        self._scheduler_ray_cleanup_complete_event = mp.Event()
+        self._scheduler_owner_id = uuid.uuid4().hex
+        self._scheduler_owner_nodes = {}
+        (
+            self._scheduler_owner_node_receiver,
+            owner_node_sender,
+        ) = mp.Pipe(duplex=False)
         self.strategy = strategy
         self.ray_head_port = ray_head_port
         available_ports = get_available_ports(2)
@@ -1175,8 +2187,25 @@ class MaPath:
         
         #Create the scheduler process and wait for it to be ready
         self.ready_queue = mp.Queue()
-        self.scheduler_process = mp.Process(target=scheduler_process, args=(port1,port2,self.strategy,self.ray_head_port,self.ready_queue))
-        self.scheduler_process.start()
+        self.scheduler_process = mp.Process(
+            target=scheduler_process,
+            args=(
+                port1,
+                port2,
+                self.strategy,
+                self.ray_head_port,
+                self.ready_queue,
+                self._scheduler_fatal_event,
+                self._scheduler_owner_id,
+                self._scheduler_owner_cleanup_complete_event,
+                self._scheduler_ray_cleanup_complete_event,
+                owner_node_sender,
+            ),
+        )
+        try:
+            self.scheduler_process.start()
+        finally:
+            owner_node_sender.close()
 
         self.send_context = zmq.Context()
         self.socket_to_scheduler = self.send_context.socket(zmq.DEALER)
@@ -1186,11 +2215,11 @@ class MaPath:
         self.socket_from_scheduler = self.context.socket(zmq.ROUTER)
         self.socket_from_scheduler.bind(f"tcp://127.0.0.1:{port2}")
 
-        message = self.ready_queue.get()
-        if message == 'ready':
-            pass
-        else:
-            raise Exception('scheduler process error')
+        try:
+            self._wait_for_scheduler_ready()
+        except Exception:
+            self._abort_scheduler_start()
+            raise
  
     async def monitor_coroutine(self):
         '''
@@ -1228,9 +2257,13 @@ class MaPath:
                             await response_queue.put(message_data.get("worker", {}))
                         continue
 
+                    if message_type in {"start_task", "finish_task", "task_retry", "task_exception"}:
+                        if not self._accept_task_attempt_event(message_type, message_data):
+                            continue
+
                     if(message_type=="finish_task"):
-                        if message_data["task_id"] in self.async_que: #langgraph task
-                            que: Queue[Any] = self.async_que[message_data['task_id']]
+                        if message_data["task_id"] in self.langgraph_task_requests:
+                            que: Queue[Any] = self.langgraph_task_requests[message_data['task_id']]
                             await que.put(message)
                         else:
                             submit_id = message_data['workflow_id']
@@ -1241,12 +2274,17 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            if static_run is not None and static_run.is_terminal():
+                                continue
                             task_metrics = message_data.get("metrics") or {}
+                            file_manifest = self._publish_task_file_manifest(
+                                message_data,
+                            )
                             if static_run is not None:
                                 static_run.mark_task_finished(
                                     message_data["task_id"],
                                     result=message_data.get("result"),
-                                    file_manifest=message_data.get("file_manifest"),
+                                    file_manifest=file_manifest,
                                     metrics=task_metrics,
                                     started_at=message_data.get("started_at"),
                                     finished_at=message_data.get("finished_at"),
@@ -1265,8 +2303,8 @@ class MaPath:
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
  
-                            if message_data.get("file_manifest"):
-                                self.submit_workflows[submit_id].graph.nodes[message_data["task_id"]]["file_manifest"] = message_data["file_manifest"]
+                            if file_manifest:
+                                self.submit_workflows[submit_id].graph.nodes[message_data["task_id"]]["file_manifest"] = file_manifest
 
                             new_ready_tasks  = self.submit_workflows[submit_id].finish_task(task_id=message_data["task_id"],task_result=message_data["result"],strategy=self.strategy)
                             if len(new_ready_tasks) > 0:
@@ -1309,8 +2347,8 @@ class MaPath:
                                 self._send_scheduler_message(clear_message)
 
                     elif(message_type=="start_task" or message_type=="task_pending" or message_type=="task_retry" or message_type=="task_exception"):
-                        if message_data["task_id"] in self.async_que: #langgraph task
-                            que: Queue[Any] = self.async_que[message_data['task_id']]
+                        if message_data["task_id"] in self.langgraph_task_requests:
+                            que: Queue[Any] = self.langgraph_task_requests[message_data['task_id']]
                             await que.put(message)
                         else:
                             submit_id = message_data['workflow_id']
@@ -1321,6 +2359,8 @@ class MaPath:
                                 continue
 
                             static_run = self.static_runs.get(submit_id)
+                            if static_run is not None and static_run.is_terminal():
+                                continue
                             if message_type == "start_task":
                                 self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
                                 if static_run is not None:
@@ -1358,7 +2398,6 @@ class MaPath:
                                     static_run.mark_task_failed(
                                         message_data["task_id"],
                                         error,
-                                        message_data.get("file_manifest"),
                                     )
                                     message = self._record_static_event(submit_id, message)
                                     if static_run.status == "failed":
@@ -1377,9 +2416,16 @@ class MaPath:
                             que: Queue[Any] = self.async_que[submit_id]
                             await que.put(message)
                     
-                    elif(message_type=="finish_llm_instance_launch"):
-                        que: Queue[Any] = self.llm_instance_async_que[message_data['instance_id']]
-                        await que.put(message_data)
+                    elif message_type in {
+                        "finish_llm_instance_launch",
+                        "fail_llm_instance_launch",
+                        "finish_llm_instance_stop",
+                        "fail_llm_instance_stop",
+                    }:
+                        queue_id = message_data.get("request_id") or message_data["instance_id"]
+                        que = self.llm_instance_async_que.get(queue_id)
+                        if que is not None:
+                            await que.put(message)
 
             except Exception as e:
                 print(f"Error in monitor: {e}")
@@ -1395,9 +2441,15 @@ class MaPath:
             data = await que.get()
             await websocket.send_json(data)
 
-            if data["type"]=="finish_workflow":
-                message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
-                self._send_scheduler_message(message)
+            if data["type"] in {
+                "finish_workflow",
+                "timeout_workflow",
+                "interrupt_workflow",
+                "cancel_workflow",
+            }:
+                if data["type"] == "finish_workflow":
+                    message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
+                    self._send_scheduler_message(message)
                 break
             elif data["type"]=="task_exception":
                 raise Exception("task_exception")
@@ -1445,15 +2497,22 @@ class MaPath:
                     },
                 })
 
-        message = {"type":"stop_workflow","data":{"workflow_id":submit_id}}
-        self._send_scheduler_message(message)
+        self._stop_workflow_best_effort(submit_id)
     
-    async def run_langgraph_task(self,workflow_id:str,task_id:str,args:str,kwargs:str):
+    async def run_langgraph_task(
+        self,
+        workflow_id: str,
+        task_id: str,
+        args: str,
+        kwargs: str,
+        timeout: float = SCHEDULER_RESPONSE_TIMEOUT_SECONDS,
+    ):
         """
         Run langgraph task
         """
+        self._require_scheduler_available()
         que: Queue[Any] = asyncio.Queue()
-        self.async_que[task_id] = que #we use task_id in langgraph task
+        self.langgraph_task_requests[task_id] = que
 
         task: LangGraphTask = self.workflows[workflow_id].get_task(task_id)
         task.set_args(args)
@@ -1463,36 +2522,92 @@ class MaPath:
         message: dict[str, str] = {
             "type":"run_task",
             "data":data,
-         }
-        self._send_scheduler_message(message)
+        }
+        try:
+            self._send_scheduler_message(message)
+            result = None
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while True:
+                message = await self._wait_for_scheduler_response(
+                    que,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    operation="finish the LangGraph task",
+                )
+                message_type = message["type"]
+                message_data = message["data"]
 
-        result = None
-        while True:
-            message = await que.get()
-            message_type = message["type"]
-            message_data = message["data"]
-            
-            if message_type=="finish_task":
-                result = message_data["result"]
-                break              
-            elif message_type=="task_exception":
-                result = message_data["result"]
-                break
-
-        del self.async_que[task_id]
+                if message_type=="finish_task":
+                    result = message_data["result"]
+                    break
+                elif message_type=="task_exception":
+                    result = message_data["result"]
+                    break
+        finally:
+            self.langgraph_task_requests.pop(task_id, None)
         return result
     
-    async def start_llm_instance(self, instance_id:str, model: str, cpu_nums: int, gpu_nums: int, memory:int, gpu_mem: int):
-        self.llm_instance_async_que[instance_id] = asyncio.Queue()
+    async def start_llm_instance(
+        self,
+        instance_id: str,
+        model: str,
+        cpu_nums: int,
+        gpu_nums: int,
+        memory: int,
+        gpu_mem: int,
+        backend: str = "vllm",
+        backend_args: dict | None = None,
+        timeout: float = SCHEDULER_RESPONSE_TIMEOUT_SECONDS,
+    ):
+        response_queue = asyncio.Queue()
+        self.llm_instance_async_que[instance_id] = response_queue
+        message = {
+            "type": "start_llm_instance",
+            "data": {
+                "instance_id": instance_id,
+                "model": model,
+                "backend": backend,
+                "cpu_nums": cpu_nums,
+                "gpu_nums": gpu_nums,
+                "gpu_mem": gpu_mem,
+                "memory": memory,
+                "backend_args": backend_args or {},
+            },
+        }
+        try:
+            self._send_scheduler_message(message)
+            response = await self._wait_for_scheduler_response(
+                response_queue,
+                timeout=timeout,
+                operation="start the model instance",
+            )
+        finally:
+            self.llm_instance_async_que.pop(instance_id, None)
+        data = response["data"]
+        if response["type"] == "fail_llm_instance_launch":
+            raise RuntimeError(data["error"])
+        return data
 
-        message = {"type":"start_llm_instance","data":{"instance_id":instance_id,"model":model,"cpu_nums":cpu_nums,"gpu_nums":gpu_nums,"gpu_mem":gpu_mem,"memory":memory}}
-        self._send_scheduler_message(message)
-
-        while True:
-            data = await self.llm_instance_async_que[instance_id].get()
-            del self.llm_instance_async_que[instance_id]
-            return data['host'],data['port']
-
-    async def stop_llm_instance(self, instance_id:str):
-        message = {"type":"stop_llm_instance","data":{"instance_id":instance_id}}
-        self._send_scheduler_message(message)
+    async def stop_llm_instance(
+        self,
+        instance_id: str,
+        timeout: float = SCHEDULER_RESPONSE_TIMEOUT_SECONDS,
+    ):
+        request_id = str(uuid.uuid4())
+        response_queue = asyncio.Queue()
+        self.llm_instance_async_que[request_id] = response_queue
+        message = {
+            "type": "stop_llm_instance",
+            "data": {"instance_id": instance_id, "request_id": request_id},
+        }
+        try:
+            self._send_scheduler_message(message)
+            response = await self._wait_for_scheduler_response(
+                response_queue,
+                timeout=timeout,
+                operation="stop the model instance",
+            )
+        finally:
+            self.llm_instance_async_que.pop(request_id, None)
+        if response["type"] == "fail_llm_instance_stop":
+            raise RuntimeError(response["data"]["error"])
+        return response["data"]

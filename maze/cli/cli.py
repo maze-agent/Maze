@@ -8,7 +8,6 @@ import logging
 import signal
 import json
 import requests
-import contextlib
 from pathlib import Path
 from maze.core.worker.worker import Worker
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
@@ -16,6 +15,38 @@ import asyncio
 from maze.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+HEAD_CLEANUP_MAX_ATTEMPTS = 3
+
+
+async def _cleanup_mapath_with_retries(mapath, max_attempts: int = HEAD_CLEANUP_MAX_ATTEMPTS) -> bool:
+    max_attempts = max(1, int(max_attempts))
+    request_shutdown = getattr(mapath, "request_scheduler_shutdown", None)
+    if request_shutdown is not None:
+        request_shutdown()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            cleanup_complete = await asyncio.to_thread(mapath.cleanup)
+        except Exception:
+            logger.exception(
+                "Maze head cleanup attempt %s/%s failed",
+                attempt,
+                max_attempts,
+            )
+            continue
+        if cleanup_complete:
+            return True
+        logger.warning(
+            "Maze head cleanup attempt %s/%s remained incomplete",
+            attempt,
+            max_attempts,
+        )
+
+    logger.error(
+        "Maze head cleanup did not complete after %s attempts; "
+        "Scheduler-owned resources may require manual cleanup",
+        max_attempts,
+    )
+    return False
 
 async def _async_start_head(port: int, ray_head_port: int, strategy: str = "least-loaded", playground: bool = False):
   
@@ -26,6 +57,7 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "leas
 
     mapath.init(ray_head_port=ray_head_port, strategy=strategy)  
     monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
+    maintenance_coroutine = asyncio.create_task(mapath.maintenance_coroutine())
 
     server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(server_config)
@@ -45,7 +77,7 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "leas
         playground_processes = start_playground()
 
     try:
-        tasks = [server_task, monitor_coroutine]
+        tasks = [server_task, monitor_coroutine, maintenance_coroutine]
         if predictor_task is not None:
             tasks.append(predictor_task)
         await asyncio.gather(*tasks)
@@ -56,16 +88,29 @@ async def _async_start_head(port: int, ray_head_port: int, strategy: str = "leas
         if predictor_server is not None:
             predictor_server.should_exit = True
 
-        for task in (server_task, predictor_task, monitor_coroutine):
+        for task in (
+            server_task,
+            predictor_task,
+            monitor_coroutine,
+            maintenance_coroutine,
+        ):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *[task for task in (server_task, predictor_task, monitor_coroutine) if task is not None],
+            *[
+                task
+                for task in (
+                    server_task,
+                    predictor_task,
+                    monitor_coroutine,
+                    maintenance_coroutine,
+                )
+                if task is not None
+            ],
             return_exceptions=True,
         )
 
-        with contextlib.suppress(Exception):
-            mapath.cleanup()
+        await _cleanup_mapath_with_retries(mapath)
 
         if playground_processes:
             stop_playground(playground_processes)
@@ -157,14 +202,15 @@ def _server_url(args) -> str:
 
 def _request_core(method: str, server_url: str, path: str, **kwargs):
     url = server_url.rstrip("/") + path
+    request_timeout = kwargs.pop("timeout", 10)
     try:
-        response = requests.request(method, url, timeout=10, **kwargs)
+        response = requests.request(method, url, timeout=request_timeout, **kwargs)
     except requests.RequestException as exc:
         raise SystemExit(f"Failed to connect to Maze core at {server_url}: {exc}") from exc
     if response.status_code >= 400:
         raise SystemExit(f"Maze core request failed: {response.status_code} {response.text}")
     payload = response.json()
-    if payload.get("status") not in (None, "success"):
+    if payload.get("status") not in (None, "success", "ready"):
         raise SystemExit(f"Maze core returned error: {payload}")
     return payload
 
@@ -268,8 +314,16 @@ def _print_cluster_queues(args):
         f"pending={counts.get('pending', 0)} "
         f"retrying={counts.get('retrying', 0)} "
         f"running={counts.get('running', 0)} "
-        f"total={counts.get('total_queued', 0)}"
+        f"total={counts.get('total_queued', 0)} "
+        f"leases={queues.get('active_lease_count', 'unknown')}"
     )
+    lease_counts_by_kind = queues.get("active_lease_counts_by_kind") or {}
+    if lease_counts_by_kind:
+        lease_summary = " ".join(
+            f"{kind}={count}"
+            for kind, count in sorted(lease_counts_by_kind.items())
+        )
+        print(f"Lease kinds: {lease_summary}")
     stopped = queues.get("stopped_workflow_ids") or []
     if stopped:
         print(f"Stopped workflows: {len(stopped)}")
@@ -523,6 +577,53 @@ def _validate_app(args):
     _print_payload({"status": "success", "spec": spec}, args.json)
 
 
+def _model_serve(args):
+    payload = {
+        "model": args.model,
+        "backend": args.backend,
+        "cpu_nums": args.cpu,
+        "memory_mib": args.memory,
+        "gpu_nums": 1,
+        "gpu_mem": args.gpu_memory,
+    }
+    if args.gpu_memory_utilization is not None:
+        payload["gpu_memory_utilization"] = args.gpu_memory_utilization
+    if args.max_model_len is not None:
+        payload["max_model_len"] = args.max_model_len
+    response = _request_core(
+        "POST",
+        _server_url(args),
+        "/start_llm_instance",
+        json=payload,
+        timeout=args.timeout,
+    )
+    if response.get("backend") != args.backend:
+        raise SystemExit(
+            f"Maze core started backend {response.get('backend')!r}, expected {args.backend!r}"
+        )
+    if args.json:
+        _print_payload(response, True)
+        return
+    print(f"Instance: {response['instance_id']}")
+    print(f"Model: {response['model']}")
+    print(f"Backend: {response['backend']}")
+    print(f"Endpoint: {response['endpoint']}")
+
+
+def _model_stop(args):
+    response = _request_core(
+        "POST",
+        _server_url(args),
+        "/stop_llm_instance",
+        json={"instance_id": args.instance_id},
+        timeout=args.timeout,
+    )
+    if args.json:
+        _print_payload(response, True)
+        return
+    print(f"Stopped instance: {args.instance_id}")
+
+
 def _format_status(metrics: dict, runs: list) -> str:
     lines = []
     uptime = metrics.get("uptime_sec", 0)
@@ -712,6 +813,26 @@ def main():
     app_validate.add_argument("--workspace-dir", default=None)
     app_validate.add_argument("--json", action="store_true")
 
+    model_parser = subparsers.add_parser("model", help="Serve local models through Maze")
+    model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
+    model_serve = model_subparsers.add_parser("serve")
+    model_serve.add_argument("model", help="Local chat model path or model identifier")
+    model_serve.add_argument("--backend", choices=("vllm", "transformers"), default="vllm")
+    model_serve.add_argument("--server-url", default=os.environ.get("MAZE_CORE_URL", "http://localhost:8000"))
+    model_serve.add_argument("--cpu", type=int, default=5)
+    model_serve.add_argument("--memory", type=int, default=1024, help="CPU memory reservation in MiB")
+    model_serve.add_argument("--gpu-memory", type=int, default=0, help="GPU memory reservation in MiB")
+    model_serve.add_argument("--gpu-memory-utilization", type=float, default=None)
+    model_serve.add_argument("--max-model-len", type=int, default=None)
+    model_serve.add_argument("--timeout", type=float, default=600)
+    model_serve.add_argument("--json", action="store_true")
+
+    model_stop = model_subparsers.add_parser("stop")
+    model_stop.add_argument("instance_id")
+    model_stop.add_argument("--server-url", default=os.environ.get("MAZE_CORE_URL", "http://localhost:8000"))
+    model_stop.add_argument("--timeout", type=float, default=30)
+    model_stop.add_argument("--json", action="store_true")
+
     status_parser = subparsers.add_parser("status", help="Show cluster status (/v1/metrics)")
     status_parser.add_argument(
         "--addr",
@@ -788,6 +909,11 @@ def main():
     elif args.command == "app":
         if args.app_command == "validate":
             _validate_app(args)
+    elif args.command == "model":
+        if args.model_command == "serve":
+            _model_serve(args)
+        elif args.model_command == "stop":
+            _model_stop(args)
     elif args.command == "status":
         cmd_status(args.addr, args.watch, args.status_filter, args.run_id)
     else:

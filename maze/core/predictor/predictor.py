@@ -1,4 +1,3 @@
-from typing import Dict
 import os
 import threading
 import os
@@ -17,30 +16,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import LinearRegression
 from pathlib import Path
 
-
-FEATURES:Dict = {
-    "llm_process": [
-        "text_length",
-        "token_count",
-        "batch_size",
-        "reason",
-    ],
-    "vlm_process": [
-        "image_height", "image_width", "image_area", "image_aspect_ratio", "batch_size",
-        "image_entropy", "edge_density", "text_area_ratio", "text_block_count",
-        "avg_brightness", "brightness_variance", "prompt_length", "prompt_token_count"
-    ],
-    "llm_fuse": [
-        "prompt_length", "prompt_token_count", "text1_length", "text2_length",
-        "text1_token_count", "text2_token_count", "reason"
-    ],
-    "speech_process":[
-        "duration",
-        "audio_array_len",
-        "audio_entropy",
-        "audio_energy"
-    ],
-}
+from maze.core.predictor.features import FEATURES
 
 class ExecTimePredictor:
     def __init__(self,task_name,model_dir,min_sample4train,min_sample4incremental):

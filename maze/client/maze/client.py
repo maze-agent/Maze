@@ -65,7 +65,7 @@ class MaClient:
             raise TypeError("create_workflow_from expects a @workflow definition")
 
         workflow = self.create_workflow()
-        workflow_def.build(workflow, inputs=inputs or {})
+        workflow_def.build(workflow, inputs=inputs)
         return workflow
 
     def create_dynamic_run(
@@ -516,17 +516,34 @@ class MaClient:
             raise Exception(f"Failed to get cluster queues: {data.get('message', 'Unknown error')}")
         return data.get("queues", {})
 
-    def start_llm_instance(self, model: str):
+    def start_llm_instance(
+        self,
+        model: str,
+        *,
+        backend: str = "vllm",
+        cpu_nums: int = 5,
+        memory: int = 1024,
+        gpu_nums: int = 1,
+        gpu_mem: int = 0,
+        gpu_memory_utilization: float | None = None,
+        max_model_len: int | None = None,
+    ):
         """
         Start LLM instance
         """
         url = f"{self.server_url}/start_llm_instance"
         payload = {
             "model": model,
-            "cpu_nums": 5,
-            "memory": 1024,
-            "gpu_nums": 1,
+            "backend": backend,
+            "cpu_nums": cpu_nums,
+            "memory_mib": memory,
+            "gpu_nums": gpu_nums,
+            "gpu_mem": gpu_mem,
         }
+        if gpu_memory_utilization is not None:
+            payload["gpu_memory_utilization"] = gpu_memory_utilization
+        if max_model_len is not None:
+            payload["max_model_len"] = max_model_len
 
         response = requests.post(url, json=payload)
 
@@ -535,10 +552,16 @@ class MaClient:
             host = data['host']
             port = data['port']
             instance_id = data['instance_id']
-            self.llm_instance[instance_id] = {"model": model, "host": host, "port": port}
+            if data.get("backend") != backend:
+                raise Exception(
+                    f"Maze core started backend {data.get('backend')!r}, expected {backend!r}"
+                )
+            self.llm_instance[instance_id] = dict(data)
             return instance_id
         else:
-            raise Exception(f"Failed to start LLM instance, status code: {response.status_code}")
+            raise Exception(
+                f"Failed to start LLM instance: {response.status_code}, {response.text}"
+            )
 
     def stop_llm_instance(self, instance_id: str):
         """

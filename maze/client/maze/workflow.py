@@ -4,7 +4,22 @@ import time
 from typing import Optional, Iterator, Dict, Any, List, Callable, Union
 from maze.client.maze.models import MaTask, TaskOutput
 from maze.client.maze.decorator import get_task_metadata
+from maze.client.maze.workflow_authoring import encode_run_inputs
 import warnings
+
+
+def _encode_output_refs(value: Any) -> Any:
+    if isinstance(value, TaskOutput):
+        return {
+            "__maze_output_ref__": True,
+            "task_id": value.task_id,
+            "output_key": value.output_key,
+        }
+    if isinstance(value, dict):
+        return {key: _encode_output_refs(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_output_refs(item) for item in value]
+    return value
 
 
 class MaWorkflow:
@@ -142,6 +157,11 @@ class MaWorkflow:
             'retry_on': metadata.retry_on,
             'timeout_seconds': metadata.timeout_seconds,
         }
+        if hasattr(self, "_workflow_input_contract"):
+            save_data["workflow_input_contract"] = {
+                "constants": sorted(self._workflow_input_contract["constants"]),
+                "runtime": self._workflow_input_contract["runtime"],
+            }
         
         save_response = requests.post(save_url, json=save_data)
         
@@ -192,9 +212,13 @@ class MaWorkflow:
                 value = input_value.to_reference_string()
                 has_value = True
             else:
-                input_schema = "from_user"
-                value = input_value
-                has_value = has_input_value
+                value, has_run_input = encode_run_inputs(input_value)
+                if has_run_input:
+                    input_schema = "from_run"
+                    has_value = False
+                else:
+                    input_schema = "from_user"
+                    has_value = has_input_value
             
             task_input["input_params"][str(idx)] = {
                 "key": input_key,
@@ -350,6 +374,7 @@ class MaWorkflow:
         timeout_seconds: Optional[float] = None,
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        inputs: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Run workflow
@@ -366,6 +391,10 @@ class MaWorkflow:
         data = {
             'workflow_id': self.workflow_id,
         }
+        if inputs is not None:
+            data["inputs"] = inputs
+        if hasattr(self, "final_output_refs"):
+            data["final_output_refs"] = _encode_output_refs(self.final_output_refs)
         if timeout_seconds is not None:
             data['timeout_seconds'] = timeout_seconds
         if tags is not None:

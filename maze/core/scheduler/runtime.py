@@ -2,6 +2,7 @@
 import ray
 import cloudpickle
 import time
+import uuid
 from typing import Any, List,Dict,Callable
 from maze.core.scheduler.runner import remote_task_runner,remote_lgraph_task_runner
 
@@ -54,6 +55,8 @@ class LanggraphTaskRuntime():
         self.retry_on = _normalize_retry_on(retry_on)
         self.timeout_seconds = None if timeout_seconds is None else float(timeout_seconds)
         self.attempt = 0
+        self.dispatch_id = None
+        self.lease_id = None
         self.last_error: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
         self.started_time = None
@@ -69,8 +72,10 @@ class LanggraphTaskRuntime():
     def set_task_status(self, status):
         self.status = status
 
-    def begin_attempt(self):
+    def begin_attempt(self, dispatch_id: str | None = None, lease_id: str | None = None):
         self.attempt += 1
+        self.dispatch_id = dispatch_id or str(uuid.uuid4())
+        self.lease_id = lease_id
         self.started_time = time.time()
         self.pending_reason = None
 
@@ -92,6 +97,14 @@ class LanggraphTaskRuntime():
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
+
+    def clear_attempt_identity(self):
+        self.dispatch_id = None
+        self.lease_id = None
+        self.started_time = None
+        self.object_ref = None
+        self.selected_node = None
+        self.last_schedule_decision = None
 
 class TaskRuntime():
     def __init__(
@@ -128,6 +141,8 @@ class TaskRuntime():
         self.file_manifest: Dict[str, Any] | None = None
         self.selected_node = None
         self.attempt = 0
+        self.dispatch_id = None
+        self.lease_id = None
         self.last_error: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
         self.started_time = None
@@ -143,8 +158,11 @@ class TaskRuntime():
     def set_task_status(self, status):
         self.status = status
 
-    def begin_attempt(self):
+    def begin_attempt(self, dispatch_id: str | None = None, lease_id: str | None = None):
         self.attempt += 1
+        self.dispatch_id = dispatch_id or str(uuid.uuid4())
+        self.lease_id = lease_id
+        self.file_manifest = None
         self.started_time = time.time()
         self.pending_reason = None
 
@@ -166,6 +184,14 @@ class TaskRuntime():
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
+
+    def clear_attempt_identity(self):
+        self.dispatch_id = None
+        self.lease_id = None
+        self.started_time = None
+        self.object_ref = None
+        self.selected_node = None
+        self.last_schedule_decision = None
         
 class WorkflowRuntime():
     def __init__(self,workflow_id):
@@ -177,8 +203,11 @@ class WorkflowRuntime():
         '''
         Add task to workflow.
         '''
-        if task.task_id not in self.tasks:
+        existing_task = self.tasks.get(task.task_id)
+        if existing_task is None:
             self.tasks[task.task_id] = task
+            return True
+        return existing_task is task
      
          
     def get_task_result(self,key):
@@ -274,15 +303,21 @@ class WorkflowRuntimeManager():
         if task.workflow_id not in self.workflows:
             self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-        self.workflows[task.workflow_id].add_task(task)
+        return self.workflows[task.workflow_id].add_task(task)
     
-    def run_task(self,task:TaskRuntime|LanggraphTaskRuntime,node:SelectedNode):
+    def run_task(
+        self,
+        task:TaskRuntime|LanggraphTaskRuntime,
+        node:SelectedNode,
+        dispatch_id: str | None = None,
+        lease_id: str | None = None,
+    ):
         '''
         Run task in node.
         '''
         if task.workflow_id not in self.workflows:
             return 
-        task.begin_attempt()
+        task.begin_attempt(dispatch_id, lease_id)
 
         if isinstance(task, LanggraphTaskRuntime):
             #gpu task
@@ -314,6 +349,14 @@ class WorkflowRuntimeManager():
                 elif input_info["input_schema"] == "from_task":
                     task_input_data[input_info["key"]] = self.workflows[task.workflow_id].get_task_result(input_info["value"])
 
+            attempt_file_context = task.file_context
+            if attempt_file_context and attempt_file_context.get("enabled"):
+                attempt_file_context = {
+                    **attempt_file_context,
+                    "attempt": task.attempt,
+                    "dispatch_id": task.dispatch_id,
+                }
+
             #gpu task
             if node.gpu_id is not None: 
                 result_ref = remote_task_runner.options(
@@ -326,7 +369,7 @@ class WorkflowRuntimeManager():
                     code_ser=task.code_ser,
                     task_input_data=task_input_data,
                     cuda_visible_devices=str(node.gpu_id),
-                    file_context=task.file_context,
+                    file_context=attempt_file_context,
                 )
             #cpu task
             else: 
@@ -339,7 +382,7 @@ class WorkflowRuntimeManager():
                     code_ser=task.code_ser,
                     task_input_data=task_input_data,
                     cuda_visible_devices=None,
-                    file_context=task.file_context,
+                    file_context=attempt_file_context,
                 )
             
             

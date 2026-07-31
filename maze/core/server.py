@@ -7,7 +7,7 @@ import contextlib
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from urllib.parse import urlsplit, urlunsplit
-from maze.core.path.path import MaPath
+from maze.core.path.path import MaPath, SchedulerUnavailableError
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
 import cloudpickle
@@ -17,6 +17,10 @@ from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
+from maze.core.scheduler.llm_instance import (
+    validate_model_backend,
+    validate_transformers_model,
+)
 
 
 app = FastAPI()
@@ -38,6 +42,39 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 def _is_local_host(host: str | None) -> bool:
     return (host or "").strip().lower().strip("[]") in LOCAL_HOSTS
+
+
+def _store_workflow_input_contract(workflow, input_contract: Any):
+    if input_contract is None:
+        return
+    if not isinstance(input_contract, dict):
+        raise ValueError("workflow_input_contract must be an object")
+    constants = input_contract.get("constants")
+    runtime = input_contract.get("runtime")
+    if not isinstance(constants, list) or not all(
+        isinstance(key, str) for key in constants
+    ):
+        raise ValueError("workflow input constants must be a list of names")
+    if len(constants) != len(set(constants)) or not isinstance(runtime, dict):
+        raise ValueError("Malformed workflow input contract")
+    if not all(isinstance(key, str) for key in runtime):
+        raise ValueError("Workflow runtime input names must be strings")
+    if set(constants) & set(runtime):
+        raise ValueError("Workflow input cannot be both constant and runtime-bound")
+    for key, spec in runtime.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("required"), bool):
+            raise ValueError(f"Malformed workflow runtime input: {key}")
+        expected_keys = {"required"} if spec["required"] else {"required", "default"}
+        if set(spec) != expected_keys:
+            raise ValueError(f"Malformed workflow runtime input: {key}")
+    normalized_contract = {
+        "constants": sorted(constants),
+        "runtime": copy.deepcopy(runtime),
+    }
+    existing_contract = workflow.graph.graph.get("workflow_input_contract")
+    if existing_contract is not None and existing_contract != normalized_contract:
+        raise ValueError("Workflow input contract changed while building the DAG")
+    workflow.graph.graph["workflow_input_contract"] = normalized_contract
 
 
 def _request_host(req: Request) -> str | None:
@@ -162,7 +199,7 @@ async def save_task(req:Request):
         resources = data["resources"]
 
         task = mapath.get_workflow(workflow_id).get_task(task_id)
-        if(task.task_type == TaskType.CODE.value):    
+        if(task.task_type == TaskType.CODE.value):
             task_input = data["task_input"]
             task_output = data["task_output"]
             code_str = data.get("code_str")
@@ -198,7 +235,11 @@ async def save_task_and_add_edge(req:Request):
 
         workflow = mapath.get_workflow(workflow_id)
         task = workflow.get_task(task_id)
-        if(task.task_type == TaskType.CODE.value):    
+        if(task.task_type == TaskType.CODE.value):
+            _store_workflow_input_contract(
+                workflow,
+                data.get("workflow_input_contract"),
+            )
             task_input = data["task_input"]
             task_output = data["task_output"]
             code_str = data.get("code_str")
@@ -264,16 +305,25 @@ async def run_workflow(req:Request):
         data = await req.json()
         workflow_id = data["workflow_id"]
         
-        run_id = mapath.run_workflow(
-            workflow_id,
-            file_context=await _worker_reachable_file_context(req, data.get("file_context")),
-            timeout_seconds=data.get("timeout_seconds"),
-            tags=data.get("tags"),
-            metadata=data.get("metadata"),
-        )
+        run_kwargs = {
+            "file_context": await _worker_reachable_file_context(req, data.get("file_context")),
+            "timeout_seconds": data.get("timeout_seconds"),
+            "tags": data.get("tags"),
+            "metadata": data.get("metadata"),
+        }
+        if "inputs" in data:
+            run_kwargs["inputs"] = data["inputs"]
+        if "final_output_refs" in data:
+            run_kwargs["final_output_refs"] = data["final_output_refs"]
+        run_id = mapath.run_workflow(workflow_id, **run_kwargs)
         return {"status":"success","run_id": run_id}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/apps/validate")
@@ -340,6 +390,8 @@ async def run_app(req: Request):
             "workflow_id": workflow_id,
             "spec": spec,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except AppSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -403,6 +455,8 @@ async def submit_dag_workflow(req: Request):
             "run_id": run_id,
             "spec": spec,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -429,6 +483,8 @@ async def create_dynamic_run(req: Request):
             metadata=data.get("metadata"),
         )
         return {"status": "success", "run_id": run_id}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -605,6 +661,8 @@ async def retry_run(run_id: str, req: Request):
         }
     except HTTPException:
         raise
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except AppSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -656,6 +714,8 @@ async def register_dynamic_task_spec(run_id: str, req: Request):
             "outputs": task_spec.outputs,
             "resources": task_spec.resources,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -709,6 +769,8 @@ async def append_dynamic_task(run_id: str, req: Request):
             "outputs": outputs,
             "idempotent": idempotent,
         }
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -718,6 +780,8 @@ async def finalize_dynamic_run(run_id: str, req: Request):
         data = await req.json()
         await mapath.finalize_dynamic_run(run_id, data.get("result"))
         return {"status": "success", "run_id": run_id}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -861,6 +925,8 @@ async def run_langgraph_task(req:Request):
         kwargs = data["kwargs"]
         result = await mapath.run_langgraph_task(workflow_id=workflow_id,task_id=task_id,args=args,kwargs=kwargs)
         return {"status": "success","result": result}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
          
@@ -879,6 +945,8 @@ async def get_cluster_resources():
         return {"status": "success", "cluster": resources}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -889,6 +957,8 @@ async def get_cluster_queues():
         return {"status": "success", "queues": queues}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler queue snapshot")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -910,6 +980,8 @@ async def get_cluster_join_command(req: Request, host: Optional[str] = None):
         }
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -946,6 +1018,8 @@ async def reconcile_workers(req: Request):
         }
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler cluster resources")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1008,6 +1082,8 @@ async def start_worker(req:Request):
         return {"status": "success", "worker": worker}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for scheduler worker registration")
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1016,9 +1092,54 @@ async def start_worker(req:Request):
 async def start_llm_instance(req:Request):
     try:
         data = await req.json()
+        model = str(data.get("model") or "").strip()
+        backend = data.get("backend", "vllm")
+        cpu_nums = int(data.get("cpu_nums", 5))
+        gpu_nums = int(data.get("gpu_nums", 1))
+        gpu_mem = int(data.get("gpu_mem", 0))
+        if "memory_mib" in data:
+            memory = int(data["memory_mib"]) * 1024 * 1024
+        elif "memory" in data:
+            memory = int(data["memory"])
+        else:
+            memory = 1024 * 1024 * 1024
+        if not model:
+            raise ValueError("model is required")
+        if cpu_nums < 0 or memory < 0 or gpu_mem < 0:
+            raise ValueError("resource reservations must not be negative")
+        if gpu_nums != 1:
+            raise ValueError("Model instances currently require exactly one GPU")
+
+        backend_args = {}
+        if data.get("gpu_memory_utilization") is not None:
+            utilization = float(data["gpu_memory_utilization"])
+            if not 0 < utilization <= 1:
+                raise ValueError("gpu_memory_utilization must be between 0 and 1")
+            backend_args["gpu_memory_utilization"] = utilization
+        if data.get("max_model_len") is not None:
+            max_model_len = int(data["max_model_len"])
+            if max_model_len <= 0:
+                raise ValueError("max_model_len must be positive")
+            backend_args["max_model_len"] = max_model_len
+        backend, backend_args = validate_model_backend(backend, backend_args)
+        if backend == "transformers":
+            validate_transformers_model(model)
         instance_id = str(uuid.uuid4())
-        host,port = await mapath.start_llm_instance(instance_id, data["model"], data["cpu_nums"], data["gpu_nums"], data["memory"], data.get("gpu_mem",0))
-        return {"status": "success","host": host,"port": port,"instance_id": instance_id}
+        instance_info = await mapath.start_llm_instance(
+            instance_id,
+            model,
+            cpu_nums,
+            gpu_nums,
+            memory,
+            gpu_mem,
+            backend=backend,
+            backend_args=backend_args,
+        )
+        return instance_info
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1028,6 +1149,8 @@ async def stop_llm_instance(req:Request):
         data = await req.json()
         await mapath.stop_llm_instance(data["instance_id"])
         return {"status": "success"}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
