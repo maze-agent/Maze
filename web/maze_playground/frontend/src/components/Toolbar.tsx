@@ -35,6 +35,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     workflowSaveState,
     workflowDraftError,
     workflowSavedAt,
+    workflowOperation,
     setWorkflowId,
     setWorkflowName,
     setNodes,
@@ -48,6 +49,8 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     clearRunResults,
     setIsRunning,
     setActiveRun,
+    acquireWorkflowOperation,
+    releaseWorkflowOperation,
   } = useWorkflowStore();
   const [editingWorkflowName, setEditingWorkflowName] = useState(false);
   const [workflowNameDraft, setWorkflowNameDraft] = useState(workflowName);
@@ -76,43 +79,57 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
 
   const commitWorkflowName = async () => {
     const nextName = workflowNameDraft.trim() || 'Untitled Workflow';
-    setEditingWorkflowName(false);
-    setWorkflowNameDraft(nextName);
 
     if (nextName === workflowName) {
+      setEditingWorkflowName(false);
+      setWorkflowNameDraft(nextName);
       return;
     }
 
-    setWorkflowName(nextName);
-
-    if (workflowId) {
-      try {
-        await api.saveWorkflow(workflowId, {
-          name: nextName,
-          nodes,
-          edges,
-        });
-      } catch (error) {
-        console.error('Failed to update workflow name:', error);
-        message.error('Failed to update workflow name');
-      }
+    const operationToken = acquireWorkflowOperation('Renaming workflow');
+    if (!operationToken) {
+      setEditingWorkflowName(false);
+      setWorkflowNameDraft(workflowName);
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
+      return;
     }
 
-    if (currentWorkspaceWorkflowPath && workspaceDir) {
-      try {
-        await api.saveWorkspaceWorkflow({
-          workspaceDir,
-          relativePath: currentWorkspaceWorkflowPath,
-          name: nextName,
-          workflowId,
-          nodes,
-          edges,
-        });
-        await refreshWorkspaceWorkflows();
-      } catch (error) {
-        console.error('Failed to update workspace workflow file:', error);
-        message.error('Failed to update workspace workflow file');
+    setEditingWorkflowName(false);
+    setWorkflowNameDraft(nextName);
+    setWorkflowName(nextName);
+
+    try {
+      if (workflowId) {
+        try {
+          await api.saveWorkflow(workflowId, {
+            name: nextName,
+            nodes,
+            edges,
+          });
+        } catch (error) {
+          console.error('Failed to update workflow name:', error);
+          message.error('Failed to update workflow name');
+        }
       }
+
+      if (currentWorkspaceWorkflowPath && workspaceDir) {
+        try {
+          await api.saveWorkspaceWorkflow({
+            workspaceDir,
+            relativePath: currentWorkspaceWorkflowPath,
+            name: nextName,
+            workflowId,
+            nodes,
+            edges,
+          });
+          await refreshWorkspaceWorkflows();
+        } catch (error) {
+          console.error('Failed to update workspace workflow file:', error);
+          message.error('Failed to update workspace workflow file');
+        }
+      }
+    } finally {
+      releaseWorkflowOperation(operationToken);
     }
   };
 
@@ -256,6 +273,12 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       return;
     }
 
+    const operationToken = acquireWorkflowOperation('Importing workflow');
+    if (!operationToken) {
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
+      return;
+    }
+
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
@@ -297,12 +320,20 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     } catch (error) {
       console.error('Failed to import workflow:', error);
       message.error(error instanceof Error ? error.message : 'Failed to import workflow');
+    } finally {
+      releaseWorkflowOperation(operationToken);
     }
   };
 
   const handleSaveWorkflow = async () => {
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before saving');
+      return;
+    }
+
+    const operationToken = acquireWorkflowOperation('Saving workflow');
+    if (!operationToken) {
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
       return;
     }
 
@@ -340,6 +371,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       message.error(error.response?.data?.error || 'Failed to save workflow');
     } finally {
       setSavingWorkflow(false);
+      releaseWorkflowOperation(operationToken);
     }
   };
 
@@ -379,6 +411,12 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     const unconfiguredNodes = nodes.filter((node) => !node.data.configured);
     if (unconfiguredNodes.length > 0) {
       message.warning(`${unconfiguredNodes.length} task node${unconfiguredNodes.length === 1 ? '' : 's'} need configuration`);
+      return;
+    }
+
+    const operationToken = acquireWorkflowOperation('Starting workflow run');
+    if (!operationToken) {
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
       return;
     }
 
@@ -424,6 +462,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       message.error(error.response?.data?.error || error.message || 'Failed to run workflow');
     } finally {
       setRunningWorkflow(false);
+      releaseWorkflowOperation(operationToken);
     }
   };
 
@@ -470,13 +509,13 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       key: 'import',
       icon: <UploadOutlined />,
       label: 'Import workflow',
-      disabled: isRunning,
+      disabled: isRunning || Boolean(workflowOperation),
     },
     {
       key: 'export',
       icon: <DownloadOutlined />,
       label: 'Export workflow',
-      disabled: isRunning || nodes.length === 0,
+      disabled: isRunning || Boolean(workflowOperation) || nodes.length === 0,
     },
   ];
 
@@ -501,12 +540,14 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
             onBlur={commitWorkflowName}
             onKeyDown={handleWorkflowNameKeyDown}
             className="workbench-workflow-name-input"
+            disabled={Boolean(workflowOperation)}
           />
         ) : (
           <button
             type="button"
             className="workbench-workflow-name"
             onClick={() => setEditingWorkflowName(true)}
+            disabled={Boolean(workflowOperation)}
             title="Click to rename workflow"
           >
             <span>{workflowName}</span>
@@ -550,7 +591,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<SaveOutlined />}
           onClick={handleSaveWorkflow}
           loading={savingWorkflow}
-          disabled={isRunning || nodes.length === 0}
+          disabled={isRunning || Boolean(workflowOperation) || nodes.length === 0}
         >
           Save
         </Button>
@@ -559,7 +600,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<CheckOutlined />}
           onClick={handleValidateWorkflow}
           loading={validatingWorkflow}
-          disabled={isRunning || runningWorkflow || nodes.length === 0}
+          disabled={isRunning || Boolean(workflowOperation) || runningWorkflow || nodes.length === 0}
         >
           Validate
         </Button>
@@ -569,7 +610,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<PlayCircleOutlined />}
           onClick={handleRunWorkflow}
           loading={runningWorkflow}
-          disabled={isRunning || nodes.length === 0}
+          disabled={isRunning || Boolean(workflowOperation) || nodes.length === 0}
           className="workbench-run-button"
         >
           Run
@@ -590,7 +631,11 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           trigger={['click']}
           placement="bottomRight"
         >
-          <Button icon={<MoreOutlined />} aria-label="More workflow actions" />
+          <Button
+            icon={<MoreOutlined />}
+            aria-label="More workflow actions"
+            disabled={isRunning || Boolean(workflowOperation)}
+          />
         </Dropdown>
       </div>
     </div>

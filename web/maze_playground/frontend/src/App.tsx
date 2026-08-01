@@ -20,7 +20,6 @@ function workflowDraftFingerprint(name: string, nodes: any[], edges: any[]) {
 }
 
 function App() {
-  const saveShortcutInFlightRef = useRef(false);
   const autosaveRequestRef = useRef(0);
   const latestWorkflowFingerprintRef = useRef('');
   const [workspaceReady, setWorkspaceReady] = useState(false);
@@ -39,6 +38,7 @@ function App() {
     activeRunId,
     staticRuns,
     workflowSaveState,
+    workflowOperation,
     setWorkflowId,
     setWorkflowName,
     setWorkspaceContext,
@@ -48,6 +48,8 @@ function App() {
     setNodes,
     setEdges,
     setWorkflowSaveState,
+    acquireWorkflowOperation,
+    releaseWorkflowOperation,
     setIsRunning,
     upsertStaticRun,
     setStaticRunEvents,
@@ -65,6 +67,7 @@ function App() {
 
   useEffect(() => {
     let canceled = false;
+    const operationToken = acquireWorkflowOperation('Initializing workspace');
     const storageKey = 'maze.playground.workspaceId';
     const restoreOrCreateWorkspace = async () => {
       const existingWorkspaceId = window.sessionStorage.getItem(storageKey);
@@ -123,14 +126,31 @@ function App() {
         if (!canceled) {
           setWorkspaceReady(true);
         }
+      })
+      .finally(() => {
+        if (operationToken) {
+          releaseWorkflowOperation(operationToken);
+        }
       });
     return () => {
       canceled = true;
+      if (operationToken) {
+        releaseWorkflowOperation(operationToken);
+      }
     };
-  }, [setEdges, setNodes, setWorkflowId, setWorkflowName, setWorkflowSaveState, setWorkspaceContext]);
+  }, [
+    acquireWorkflowOperation,
+    releaseWorkflowOperation,
+    setEdges,
+    setNodes,
+    setWorkflowId,
+    setWorkflowName,
+    setWorkflowSaveState,
+    setWorkspaceContext,
+  ]);
 
   useEffect(() => {
-    if (!workspaceReady || !workspaceDir) {
+    if (!workspaceReady || !workspaceDir || workflowOperation) {
       return undefined;
     }
 
@@ -155,6 +175,10 @@ function App() {
     const saveFingerprint = workflowFingerprint;
 
     const timer = window.setTimeout(async () => {
+      const operationToken = acquireWorkflowOperation('Autosaving workflow');
+      if (!operationToken) {
+        return;
+      }
       setWorkflowSaveState({
         status: 'saving_draft',
         draftPath: WORKFLOW_DRAFT_PATH,
@@ -190,18 +214,23 @@ function App() {
             error: error.response?.data?.error || error.message || 'Failed to autosave workflow draft',
           });
         }
+      } finally {
+        releaseWorkflowOperation(operationToken);
       }
     }, 900);
 
     return () => window.clearTimeout(timer);
   }, [
     edges,
+    acquireWorkflowOperation,
     nodes,
+    releaseWorkflowOperation,
     setWorkflowSaveState,
     setWorkspaceContext,
     workflowFingerprint,
     workflowId,
     workflowName,
+    workflowOperation,
     workflowSaveState,
     workspaceDir,
     workspaceId,
@@ -209,10 +238,6 @@ function App() {
   ]);
 
   const saveWorkflowToWorkspace = useCallback(async () => {
-    if (saveShortcutInFlightRef.current) {
-      return;
-    }
-
     if (isRunning) {
       message.warning('Workflow is running, please save after it finishes');
       return;
@@ -223,7 +248,11 @@ function App() {
       return;
     }
 
-    saveShortcutInFlightRef.current = true;
+    const operationToken = acquireWorkflowOperation('Saving workflow');
+    if (!operationToken) {
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
+      return;
+    }
     const hideLoading = message.loading('Saving workflow...', 0);
 
     try {
@@ -270,13 +299,15 @@ function App() {
       message.error(error.response?.data?.error || 'Failed to save workflow');
     } finally {
       hideLoading();
-      saveShortcutInFlightRef.current = false;
+      releaseWorkflowOperation(operationToken);
     }
   }, [
+    acquireWorkflowOperation,
     currentWorkspaceWorkflowPath,
     edges,
     isRunning,
     nodes,
+    releaseWorkflowOperation,
     setCurrentWorkspaceWorkflowPath,
     setEdges,
     setNodes,
@@ -355,7 +386,12 @@ function App() {
             onOpenClusterResources={() => setClusterResourcesOpen(true)}
           />
         )}
-        leftSidebar={<BuiltinTasksSidebar onOpenRuns={() => setRunsOpen(true)} />}
+        leftSidebar={(
+          <BuiltinTasksSidebar
+            onOpenRuns={() => setRunsOpen(true)}
+            workspaceReady={workspaceReady}
+          />
+        )}
         canvas={<WorkflowCanvas />}
         nodePanel={<NodePanel open={nodePanelOpen} onClose={() => setNodePanelOpen(false)} />}
         resultsModal={<ResultsModal />}

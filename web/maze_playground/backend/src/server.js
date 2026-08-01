@@ -39,6 +39,7 @@ const SYSTEM_CATALOG_DIR = path.resolve(process.env.MAZE_SYSTEM_CATALOG_DIR || p
 const MAZE_CORE_URL = process.env.MAZE_CORE_URL || 'http://localhost:8000';
 const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled', 'interrupted']);
 const staticRunWriteQueues = new Map();
+const systemWorkflowLoadQueues = new Map();
 const recoveredStaticRunWorkspaces = new Set();
 const workspaceTasksCache = new Map();
 const activeWorkerProfileSecrets = new Map();
@@ -571,6 +572,10 @@ async function fileExists(filePath) {
 }
 
 function statusForFileError(error) {
+  const explicitStatus = Number(error?.status);
+  if (Number.isInteger(explicitStatus) && explicitStatus >= 400 && explicitStatus <= 599) {
+    return explicitStatus;
+  }
   return error?.code === 'ENOENT' ? 404 : 500;
 }
 
@@ -4555,6 +4560,27 @@ function withStaticRunWriteQueue(workspaceDir, runId, operation) {
   return current;
 }
 
+function withSystemWorkflowLoadQueue(workspaceDir, operation) {
+  const key = path.resolve(workspaceDir);
+  const previous = systemWorkflowLoadQueues.get(key) || Promise.resolve();
+  const current = previous
+    .catch(() => {})
+    .then(operation);
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  systemWorkflowLoadQueues.set(key, tail);
+  tail.finally(() => {
+    if (systemWorkflowLoadQueues.get(key) === tail) {
+      systemWorkflowLoadQueues.delete(key);
+    }
+  });
+
+  return current;
+}
+
 async function saveStaticRun(workspaceDir, snapshot) {
   await writeJsonAtomic(staticRunPath(workspaceDir, snapshot.run_id, { write: true }), {
     ...snapshot,
@@ -5030,12 +5056,12 @@ async function nextImportedTaskPath(workspaceDir, workflowName, relativePath, co
     const { fullPath } = resolveTaskDefinitionFile(workspaceDir, candidate);
 
     if (!await fileExists(fullPath)) {
-      return candidate;
+      return { relativePath: candidate, existsSame: false };
     }
 
     const existingCode = await fs.readFile(fullPath, 'utf-8');
     if (hashTaskCode(existingCode) === hashTaskCode(code)) {
-      return candidate;
+      return { relativePath: candidate, existsSame: true };
     }
 
     suffix += 1;
@@ -5104,10 +5130,23 @@ async function importTaskDefinitions(
       if (hashTaskCode(existingCode) === hashTaskCode(definition.code)) {
         skipped.push({ relativePath, reason: 'exists-same' });
       } else {
-        targetRelativePath = await nextImportedTaskPath(workspaceDir, workflowName, relativePath, definition.code);
-        await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition, { parse });
-        imported.push({ relativePath: targetRelativePath, sourceRelativePath: relativePath });
-        remapped.push({ from: relativePath, to: targetRelativePath, reason: 'conflict' });
+        const target = await nextImportedTaskPath(workspaceDir, workflowName, relativePath, definition.code);
+        targetRelativePath = target.relativePath;
+        if (target.existsSame) {
+          skipped.push({
+            relativePath: targetRelativePath,
+            sourceRelativePath: relativePath,
+            reason: 'exists-same',
+          });
+        } else {
+          await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition, { parse });
+          imported.push({ relativePath: targetRelativePath, sourceRelativePath: relativePath });
+        }
+        remapped.push({
+          from: relativePath,
+          to: targetRelativePath,
+          reason: target.existsSame ? 'conflict-reused' : 'conflict',
+        });
       }
     } else {
       await saveImportedTaskDefinition(workspaceDir, targetRelativePath, definition, { parse });
@@ -5685,6 +5724,53 @@ function resolveCatalogSource(type, sourceId) {
   return { type: normalizedType, sourceId: normalizedSource, sourcePath };
 }
 
+function badRequestError(errorOrMessage) {
+  const error = errorOrMessage instanceof Error
+    ? errorOrMessage
+    : new Error(String(errorOrMessage || 'Bad request'));
+  error.status = 400;
+  return error;
+}
+
+function resolveSystemWorkflowSource(sourceId) {
+  const rawSourceId = String(sourceId || '').trim();
+  const posixSourceId = rawSourceId.replace(/\\/g, '/');
+  if (!rawSourceId || path.posix.isAbsolute(posixSourceId) || isWindowsDrivePath(rawSourceId)) {
+    throw badRequestError('System workflow sourceId must be a relative catalog path');
+  }
+
+  try {
+    return resolveCatalogSource('workflows', rawSourceId);
+  } catch (error) {
+    throw badRequestError(error);
+  }
+}
+
+async function readSystemWorkflow(sourcePath) {
+  let raw;
+  try {
+    raw = await fs.readFile(sourcePath, 'utf-8');
+  } catch (error) {
+    if (error?.code === 'EISDIR') {
+      throw badRequestError(error);
+    }
+    throw error;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (error) {
+    throw badRequestError(error);
+  }
+
+  try {
+    return normalizeWorkflowPayload(payload);
+  } catch (error) {
+    throw badRequestError(error);
+  }
+}
+
 async function copyCatalogItemToWorkspace({ workspaceDir, type, sourceId, targetPath }) {
   await ensureSystemCatalogDirs();
   const { type: normalizedType, sourceId: normalizedSourceId, sourcePath } = resolveCatalogSource(type, sourceId);
@@ -5837,51 +5923,53 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
     }
 
     await ensureSystemCatalogDirs();
-    const { sourceId: normalizedSourceId, sourcePath } = resolveCatalogSource('workflows', sourceId);
-    const raw = await fs.readFile(sourcePath, 'utf-8');
-    const payload = JSON.parse(raw);
+    const { sourceId: normalizedSourceId, sourcePath } = resolveSystemWorkflowSource(sourceId);
+    const workflow = await readSystemWorkflow(sourcePath);
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
     const workspaceDir = context.workspaceDir;
-    const workflow = normalizeWorkflowPayload(payload);
-    const importResult = await importTaskDefinitions(
-      workspaceDir,
-      workflow.includedTasks,
-      workflow.name,
-      { parse: false },
-    );
-    workflow.nodes = await hydrateWorkspaceWorkflowNodes(
-      workflow.nodes,
-      workspaceDir,
-      workflow.includedTasks,
-      importResult.taskPathMap,
-    );
+    const result = await withSystemWorkflowLoadQueue(workspaceDir, async () => {
+      const lockedContext = await resolveWorkspaceContext({ workspaceDir });
+      const importResult = await importTaskDefinitions(
+        workspaceDir,
+        workflow.includedTasks,
+        workflow.name,
+        { parse: false },
+      );
+      workflow.nodes = await hydrateWorkspaceWorkflowNodes(
+        workflow.nodes,
+        workspaceDir,
+        workflow.includedTasks,
+        importResult.taskPathMap,
+      );
 
-    let manifest = context.manifest;
-    if (importResult.imported.length > 0 || importResult.remapped.length > 0) {
-      manifest = await recordWorkspaceMutation(workspaceDir, 'system_workflow_template_loaded', {
-        source_id: normalizedSourceId,
-        workflow_name: workflow.name,
-        imported_count: importResult.imported.length,
-        remapped_count: importResult.remapped.length,
-      });
-    }
+      let manifest = lockedContext.manifest;
+      if (importResult.imported.length > 0) {
+        manifest = await recordWorkspaceMutation(workspaceDir, 'system_workflow_template_loaded', {
+          source_id: normalizedSourceId,
+          workflow_name: workflow.name,
+          imported_count: importResult.imported.length,
+          remapped_count: importResult.remapped.length,
+        });
+      }
 
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      sourceId: normalizedSourceId,
-      workflow,
-      importedTaskDefinitions: {
-        imported: importResult.imported,
-        skipped: importResult.skipped,
-        remapped: importResult.remapped,
-      },
+      return {
+        success: true,
+        workspaceId: manifest.workspace_id,
+        workspaceDir,
+        workspaceManifestVersion: Number(manifest.manifest_version || lockedContext.workspaceManifestVersion),
+        sourceId: normalizedSourceId,
+        workflow,
+        importedTaskDefinitions: {
+          imported: importResult.imported,
+          skipped: importResult.skipped,
+          remapped: importResult.remapped,
+        },
+      };
     });
+    res.json(result);
   } catch (error) {
     console.error('❌ 加载 system workflow 失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(statusForFileError(error)).json({ error: error.message });
   }
 });
 
@@ -6782,7 +6870,7 @@ app.post('/api/workspace-workflows/load', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 加载工作区工作流失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(statusForFileError(error)).json({ error: error.message });
   }
 });
 

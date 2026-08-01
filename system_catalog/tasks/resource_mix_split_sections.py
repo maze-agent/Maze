@@ -9,7 +9,7 @@ def _section_title(text: str, index: int) -> str:
     return f"Section {index}"
 
 
-@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
+@task(task_kind="cpu", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def resource_mix_split_sections(corpus: str = "", max_sections: str = "7"):
     """Split the corpus into bounded sections for parallel downstream work."""
     try:

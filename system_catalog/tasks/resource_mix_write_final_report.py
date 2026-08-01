@@ -4,14 +4,14 @@ from pathlib import Path
 from maze import task
 
 
-@task(task_kind="io", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 1})
+@task(task_kind="cpu", resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def resource_mix_write_final_report(
     source_path: str = "",
     token_stats: dict = None,
     graph_stats: dict = None,
     embedding_summary: dict = None,
     scorecard: dict = None,
-    routing_plan: list = None,
+    signal_summary: list = None,
     quality_gate: dict = None,
     quality_notes: list = None,
     section_manifest_path: str = "",
@@ -23,7 +23,7 @@ def resource_mix_write_final_report(
     graph_stats = graph_stats or {}
     embedding_summary = embedding_summary or {}
     scorecard = scorecard or {}
-    routing_plan = routing_plan or []
+    signal_summary = signal_summary or []
     quality_gate = quality_gate or {}
     quality_notes = quality_notes or []
 
@@ -45,11 +45,11 @@ def resource_mix_write_final_report(
         f"- Accelerator: `{embedding_summary.get('accelerator', 'unknown')}` on `{embedding_summary.get('device_name', 'unknown')}`",
         f"- Total score: `{scorecard.get('total_score', 0)}`",
         "",
-        "## Routing Plan",
+        "## Demo Content Signals",
         "",
     ]
-    for item in routing_plan:
-        report_lines.append(f"- **{item.get('lane')}**: {item.get('reason')} (weight={item.get('weight')})")
+    for item in signal_summary:
+        report_lines.append(f"- **{item.get('signal')}**: {item.get('description')} (value={item.get('value')})")
 
     report_lines.extend([
         "",
@@ -70,7 +70,7 @@ def resource_mix_write_final_report(
         "graph_stats": graph_stats,
         "embedding_summary": embedding_summary,
         "scorecard": scorecard,
-        "routing_plan": routing_plan,
+        "signal_summary": signal_summary,
         "quality_gate": quality_gate,
         "section_manifest": manifest,
         "artifacts": [output.as_posix(), summary.as_posix(), section_manifest_path],

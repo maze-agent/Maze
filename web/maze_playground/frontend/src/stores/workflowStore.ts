@@ -20,6 +20,13 @@ export type WorkflowSaveState =
   | 'saved_workflow'
   | 'error';
 
+export type WorkflowOperationToken = symbol;
+
+export interface WorkflowOperation {
+  token: WorkflowOperationToken;
+  label: string;
+}
+
 interface WorkflowStore {
   // Workflow state
   workflowId: string | null;
@@ -31,6 +38,7 @@ interface WorkflowStore {
   workflowDraftPath: string | null;
   workflowSavedAt: string | null;
   workflowDraftError: string | null;
+  workflowOperation: WorkflowOperation | null;
   
   // Builtin tasks
   builtinTasks: BuiltinTaskMeta[];
@@ -85,6 +93,8 @@ interface WorkflowStore {
     savedAt?: string | null;
     error?: string | null;
   }) => void;
+  acquireWorkflowOperation: (label: string) => WorkflowOperationToken | null;
+  releaseWorkflowOperation: (token: WorkflowOperationToken) => void;
   setLocalWorkspace: (workspace: {
     id: string;
     name: string;
@@ -120,6 +130,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   workflowDraftPath: null,
   workflowSavedAt: null,
   workflowDraftError: null,
+  workflowOperation: null,
   builtinTasks: [],
   workspaceId: '',
   workspaceDir: '',
@@ -219,6 +230,24 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     workflowSavedAt: next.savedAt === undefined ? state.workflowSavedAt : next.savedAt,
     workflowDraftError: next.error === undefined ? null : next.error,
   })),
+
+  acquireWorkflowOperation: (label) => {
+    let token: WorkflowOperationToken | null = null;
+    set((state) => {
+      if (state.workflowOperation) {
+        return state;
+      }
+      token = Symbol(label);
+      return { workflowOperation: { token, label } };
+    });
+    return token;
+  },
+
+  releaseWorkflowOperation: (token) => set((state) => (
+    state.workflowOperation?.token === token
+      ? { workflowOperation: null }
+      : state
+  )),
 
   setLocalWorkspace: (workspace) => set({
     localWorkspaceId: workspace.id,

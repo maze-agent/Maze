@@ -263,6 +263,11 @@ button.workbench-nav-row {
   cursor: pointer;
 }
 
+button.workbench-nav-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .workbench-nav-row.is-current-draft {
   min-height: 44px;
   border: 1px dashed #fedf89;
@@ -273,6 +278,11 @@ button.workbench-nav-row {
 .workbench-nav-row.is-selected {
   background: #eef4ff;
   color: #155eef;
+}
+
+button.workbench-nav-row:disabled:hover:not(.is-selected) {
+  background: transparent;
+  color: #344054;
 }
 
 .workbench-nav-row.is-current-draft.is-selected,
@@ -383,6 +393,11 @@ button.workbench-nav-row {
   cursor: pointer;
   font-size: 12px;
   padding: 7px 0 0;
+}
+
+.workbench-nav-link:disabled {
+  color: #98a2b3;
+  cursor: not-allowed;
 }
 
 .workbench-task-kind-icon {

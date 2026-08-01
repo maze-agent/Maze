@@ -14,7 +14,7 @@ def _section_seed(section: dict, terms: list[dict]) -> float:
 
 @task(task_kind="gpu", resources={"cpu_num": 1, "gpu_mem": 512, "io_num": 0}, timeout_seconds=180)
 def resource_mix_gpu_embedding_probe(sections: list = None, top_terms: list = None, vector_width: str = "128", rounds: str = "120"):
-    """Run a GPU-declared vector probe, falling back to deterministic CPU math if CUDA is unavailable."""
+    """Run a GPU-declared vector probe and report an explicit CPU fallback when CUDA is unavailable."""
     sections = sections or []
     top_terms = top_terms or []
     width = max(16, min(512, int(vector_width or 128)))

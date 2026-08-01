@@ -1,22 +1,20 @@
 {
   "schema": "maze-playground-bundle",
   "version": 3,
-  "description": "Complex demo workflow mixing CPU analysis, GPU-declared vector probing, and file I/O artifacts for an uploaded .txt corpus.",
+  "description": "Demo workflow with eight CPU tasks for text analysis and artifact file operations, plus one GPU task for a CUDA vector probe.",
   "tags": [
     "demo",
     "CPU",
     "GPU",
-    "I/O",
     "artifact"
   ],
   "workflow": {
-    "name": "Resource Mix CPU GPU IO Demo",
-    "description": "Complex demo workflow mixing CPU analysis, GPU-declared vector probing, and file I/O artifacts for an uploaded .txt corpus.",
+    "name": "Resource Mix CPU GPU Artifact Demo",
+    "description": "Demo workflow with eight CPU tasks for text analysis and artifact file operations, plus one GPU task for a CUDA vector probe.",
     "tags": [
       "demo",
       "CPU",
       "GPU",
-      "I/O",
       "artifact"
     ],
     "sourceWorkflowId": "system-resource-mix-demo",
@@ -31,7 +29,7 @@
         "data": {
           "category": "workspace",
           "nodeType": "task",
-          "label": "I/O Load Uploaded Text",
+          "label": "CPU File: Load Uploaded Text",
           "taskPath": "tasks/resource_mix_load_text.py",
           "functionName": "resource_mix_load_text",
           "inputs": [
@@ -45,7 +43,7 @@
               "name": "fallback_text",
               "dataType": "str",
               "source": "user",
-              "value": "Maze resource mix demo\n\nQuestion: How should a distributed workflow balance CPU parsing, GPU ranking, and file I/O?\nObservation: CPU tasks build deterministic text statistics and section graphs.\nObservation: GPU tasks run vector-style scoring and fall back safely when CUDA is unavailable.\nObservation: I/O tasks turn intermediate state into inspectable artifacts."
+              "value": "Maze resource mix demo\n\nQuestion: How should a distributed workflow combine CPU parsing, GPU ranking, and artifact file operations?\nObservation: CPU tasks build deterministic text statistics and section graphs.\nObservation: GPU tasks run vector-style scoring, and the quality gate requires CUDA execution.\nObservation: CPU file-operation tasks turn intermediate state into inspectable artifacts."
             }
           ],
           "outputs": [
@@ -73,10 +71,10 @@
           "resources": {
             "cpu_num": 1,
             "gpu_mem": 0,
-            "io_num": 1
+            "io_num": 0
           },
           "configured": true,
-          "task_kind": "io"
+          "task_kind": "cpu"
         }
       },
       {
@@ -142,7 +140,7 @@
         "data": {
           "category": "workspace",
           "nodeType": "task",
-          "label": "I/O Materialize Sections",
+          "label": "CPU File: Materialize Sections",
           "taskPath": "tasks/resource_mix_write_section_files.py",
           "functionName": "resource_mix_write_section_files",
           "inputs": [
@@ -183,10 +181,10 @@
           "resources": {
             "cpu_num": 1,
             "gpu_mem": 0,
-            "io_num": 1
+            "io_num": 0
           },
           "configured": true,
-          "task_kind": "io"
+          "task_kind": "cpu"
         }
       },
       {
@@ -448,7 +446,7 @@
               "dataType": "any"
             },
             {
-              "name": "routing_plan",
+              "name": "signal_summary",
               "dataType": "any"
             },
             {
@@ -545,7 +543,7 @@
         "data": {
           "category": "workspace",
           "nodeType": "task",
-          "label": "I/O Write Final Report",
+          "label": "CPU File: Write Final Report",
           "taskPath": "tasks/resource_mix_write_final_report.py",
           "functionName": "resource_mix_write_final_report",
           "inputs": [
@@ -595,12 +593,12 @@
               }
             },
             {
-              "name": "routing_plan",
+              "name": "signal_summary",
               "dataType": "list",
               "source": "task",
               "taskSource": {
                 "taskId": "node-merge-signals",
-                "outputKey": "routing_plan"
+                "outputKey": "signal_summary"
               }
             },
             {
@@ -664,10 +662,10 @@
           "resources": {
             "cpu_num": 1,
             "gpu_mem": 0,
-            "io_num": 1
+            "io_num": 0
           },
           "configured": true,
-          "task_kind": "io"
+          "task_kind": "cpu"
         }
       }
     ],
@@ -788,7 +786,7 @@
     {
       "relativePath": "tasks/resource_mix_load_text.py",
       "functionName": "resource_mix_load_text",
-      "displayName": "I/O Load Uploaded Text",
+      "displayName": "CPU File: Load Uploaded Text",
       "inputs": [
         {
           "name": "input_path",
@@ -824,11 +822,11 @@
       "resources": {
         "cpu_num": 1,
         "gpu_mem": 0,
-        "io_num": 1
+        "io_num": 0
       },
-      "code": "from pathlib import Path\n\nfrom maze import task\n\n\nSAMPLE_TEXT = \"\"\"\nMaze resource mix demo\n\nQuestion: How should a distributed workflow balance CPU parsing, GPU ranking, and file I/O?\nObservation: CPU tasks are good at deterministic text statistics and graph scoring.\nObservation: GPU tasks are useful for vector-style scoring even when this demo falls back to CPU math.\nObservation: I/O tasks should turn intermediate state into artifacts that later tasks can inspect.\n\nQuestion: What should the final report show?\nAnswer: It should show the source text, token signals, section graph, accelerator mode, and artifact paths.\nAnswer: It should be safe to run even when the uploaded .txt file is missing.\n\"\"\"\n\n\ndef _pick_text_file(input_path: str) -> Path | None:\n    configured = Path(input_path or \"questions.txt\")\n    if configured.is_file():\n        return configured\n\n    txt_files = [\n        path\n        for path in sorted(Path(\".\").rglob(\"*.txt\"))\n        if path.is_file() and \"resource_mix_demo\" not in path.parts\n    ]\n    return txt_files[0] if txt_files else None\n\n\n@task(task_kind=\"io\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 1})\ndef resource_mix_load_text(input_path: str = \"questions.txt\", fallback_text: str = SAMPLE_TEXT):\n    \"\"\"Read an uploaded text file, or create a deterministic sample when none exists.\"\"\"\n    source = _pick_text_file(input_path)\n    created_sample = False\n\n    if source is None:\n        source = Path(input_path or \"questions.txt\")\n        source.parent.mkdir(parents=True, exist_ok=True)\n        source.write_text(fallback_text.strip() + \"\\n\", encoding=\"utf-8\")\n        created_sample = True\n\n    text = source.read_text(encoding=\"utf-8\", errors=\"replace\")\n    lines = text.splitlines()\n\n    return {\n        \"corpus\": text,\n        \"source_path\": source.as_posix(),\n        \"line_count\": len(lines),\n        \"byte_count\": len(text.encode(\"utf-8\")),\n        \"created_sample\": created_sample,\n    }\n",
+      "code": "from pathlib import Path\n\nfrom maze import task\n\n\nSAMPLE_TEXT = \"\"\"\nMaze resource mix demo\n\nQuestion: How should a distributed workflow combine CPU parsing, GPU ranking, and artifact file operations?\nObservation: CPU tasks are good at deterministic text statistics and graph scoring.\nObservation: GPU tasks run vector-style scoring, and the quality gate requires CUDA execution.\nObservation: CPU file-operation tasks turn intermediate state into artifacts that later tasks can inspect.\n\nQuestion: What should the final report show?\nAnswer: It should show the source text, token signals, section graph, accelerator mode, and artifact paths.\nAnswer: It should be safe to run even when the uploaded .txt file is missing.\n\"\"\"\n\n\ndef _pick_text_file(input_path: str) -> Path | None:\n    configured = Path(input_path or \"questions.txt\")\n    if configured.is_file():\n        return configured\n\n    txt_files = [\n        path\n        for path in sorted(Path(\".\").rglob(\"*.txt\"))\n        if path.is_file() and \"resource_mix_demo\" not in path.parts\n    ]\n    return txt_files[0] if txt_files else None\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_load_text(input_path: str = \"questions.txt\", fallback_text: str = SAMPLE_TEXT):\n    \"\"\"Read an uploaded text file, or create a deterministic sample when none exists.\"\"\"\n    source = _pick_text_file(input_path)\n    created_sample = False\n\n    if source is None:\n        source = Path(input_path or \"questions.txt\")\n        source.parent.mkdir(parents=True, exist_ok=True)\n        source.write_text(fallback_text.strip() + \"\\n\", encoding=\"utf-8\")\n        created_sample = True\n\n    text = source.read_text(encoding=\"utf-8\", errors=\"replace\")\n    lines = text.splitlines()\n\n    return {\n        \"corpus\": text,\n        \"source_path\": source.as_posix(),\n        \"line_count\": len(lines),\n        \"byte_count\": len(text.encode(\"utf-8\")),\n        \"created_sample\": created_sample,\n    }\n",
       "type": "workspace",
-      "task_kind": "io"
+      "task_kind": "cpu"
     },
     {
       "relativePath": "tasks/resource_mix_split_sections.py",
@@ -870,7 +868,7 @@
     {
       "relativePath": "tasks/resource_mix_write_section_files.py",
       "functionName": "resource_mix_write_section_files",
-      "displayName": "I/O Materialize Sections",
+      "displayName": "CPU File: Materialize Sections",
       "inputs": [
         {
           "name": "sections",
@@ -902,11 +900,11 @@
       "resources": {
         "cpu_num": 1,
         "gpu_mem": 0,
-        "io_num": 1
+        "io_num": 0
       },
-      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(task_kind=\"io\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 1})\ndef resource_mix_write_section_files(sections: list = None, output_dir: str = \"resource_mix_demo/sections\"):\n    \"\"\"Write section text files and a manifest artifact.\"\"\"\n    sections = sections or []\n    root = Path(output_dir)\n    root.mkdir(parents=True, exist_ok=True)\n\n    files = []\n    total_bytes = 0\n    for index, section in enumerate(sections, start=1):\n        path = root / f\"{index:02d}_{section.get('id', f's{index:02d}')}.txt\"\n        text = section.get(\"text\", \"\")\n        path.write_text(text, encoding=\"utf-8\")\n        size = len(text.encode(\"utf-8\"))\n        total_bytes += size\n        files.append({\n            \"path\": path.as_posix(),\n            \"title\": section.get(\"title\", path.stem),\n            \"bytes\": size,\n        })\n\n    manifest_path = root / \"manifest.json\"\n    manifest_path.write_text(json.dumps({\n        \"section_count\": len(files),\n        \"total_bytes\": total_bytes,\n        \"files\": files,\n    }, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"section_paths\": [item[\"path\"] for item in files],\n        \"section_manifest_path\": manifest_path.as_posix(),\n        \"section_file_count\": len(files),\n        \"section_total_bytes\": total_bytes,\n    }\n",
+      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_write_section_files(sections: list = None, output_dir: str = \"resource_mix_demo/sections\"):\n    \"\"\"Write section text files and a manifest artifact.\"\"\"\n    sections = sections or []\n    root = Path(output_dir)\n    root.mkdir(parents=True, exist_ok=True)\n\n    files = []\n    total_bytes = 0\n    for index, section in enumerate(sections, start=1):\n        path = root / f\"{index:02d}_{section.get('id', f's{index:02d}')}.txt\"\n        text = section.get(\"text\", \"\")\n        path.write_text(text, encoding=\"utf-8\")\n        size = len(text.encode(\"utf-8\"))\n        total_bytes += size\n        files.append({\n            \"path\": path.as_posix(),\n            \"title\": section.get(\"title\", path.stem),\n            \"bytes\": size,\n        })\n\n    manifest_path = root / \"manifest.json\"\n    manifest_path.write_text(json.dumps({\n        \"section_count\": len(files),\n        \"total_bytes\": total_bytes,\n        \"files\": files,\n    }, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"section_paths\": [item[\"path\"] for item in files],\n        \"section_manifest_path\": manifest_path.as_posix(),\n        \"section_file_count\": len(files),\n        \"section_total_bytes\": total_bytes,\n    }\n",
       "type": "workspace",
-      "task_kind": "io"
+      "task_kind": "cpu"
     },
     {
       "relativePath": "tasks/resource_mix_cpu_token_stats.py",
@@ -945,7 +943,7 @@
         "gpu_mem": 0,
         "io_num": 0
       },
-      "code": "import math\nimport re\nfrom collections import Counter\n\nfrom maze import task\n\n\nSTOP_WORDS = {\n    \"a\", \"an\", \"and\", \"are\", \"as\", \"at\", \"be\", \"by\", \"for\", \"from\", \"how\",\n    \"in\", \"into\", \"is\", \"it\", \"of\", \"on\", \"or\", \"should\", \"that\", \"the\",\n    \"this\", \"to\", \"what\", \"when\", \"with\",\n}\n\n\ndef _tokens(text: str) -> list[str]:\n    return [\n        token\n        for token in re.findall(r\"[A-Za-z][A-Za-z0-9_'-]*\", text.lower())\n        if token not in STOP_WORDS and len(token) > 2\n    ]\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 2, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_cpu_token_stats(corpus: str = \"\", sections: list = None):\n    \"\"\"Compute CPU-heavy token counts and per-section densities.\"\"\"\n    sections = sections or []\n    tokens = _tokens(corpus)\n    counts = Counter(tokens)\n    top_terms = [\n        {\"term\": term, \"count\": count}\n        for term, count in counts.most_common(12)\n    ]\n\n    densities = []\n    for section in sections:\n        section_tokens = _tokens(section.get(\"text\", \"\"))\n        char_count = max(1, section.get(\"char_count\") or len(section.get(\"text\", \"\")) or 1)\n        densities.append({\n            \"section_id\": section.get(\"id\"),\n            \"title\": section.get(\"title\"),\n            \"token_count\": len(section_tokens),\n            \"density\": round(len(section_tokens) / math.sqrt(char_count), 4),\n        })\n\n    keyword_scores = {\n        \"cpu\": counts.get(\"cpu\", 0),\n        \"gpu\": counts.get(\"gpu\", 0),\n        \"io\": counts.get(\"io\", 0) + counts.get(\"file\", 0) + counts.get(\"artifact\", 0),\n        \"workflow\": counts.get(\"workflow\", 0) + counts.get(\"task\", 0),\n    }\n\n    return {\n        \"token_stats\": {\n            \"total_tokens\": len(tokens),\n            \"unique_tokens\": len(counts),\n            \"lexical_diversity\": round(len(counts) / max(1, len(tokens)), 4),\n            \"keyword_scores\": keyword_scores,\n        },\n        \"top_terms\": top_terms,\n        \"section_density\": densities,\n        \"keyword_scores\": keyword_scores,\n    }\n",
+      "code": "import math\nimport re\nfrom collections import Counter\n\nfrom maze import task\n\n\nSTOP_WORDS = {\n    \"a\", \"an\", \"and\", \"are\", \"as\", \"at\", \"be\", \"by\", \"for\", \"from\", \"how\",\n    \"in\", \"into\", \"is\", \"it\", \"of\", \"on\", \"or\", \"should\", \"that\", \"the\",\n    \"this\", \"to\", \"what\", \"when\", \"with\",\n}\n\n\ndef _tokens(text: str) -> list[str]:\n    return [\n        token\n        for token in re.findall(r\"[A-Za-z][A-Za-z0-9_'-]*\", text.lower())\n        if token not in STOP_WORDS and len(token) > 2\n    ]\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 2, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_cpu_token_stats(corpus: str = \"\", sections: list = None):\n    \"\"\"Compute CPU-heavy token counts and per-section densities.\"\"\"\n    sections = sections or []\n    tokens = _tokens(corpus)\n    counts = Counter(tokens)\n    top_terms = [\n        {\"term\": term, \"count\": count}\n        for term, count in counts.most_common(12)\n    ]\n\n    densities = []\n    for section in sections:\n        section_tokens = _tokens(section.get(\"text\", \"\"))\n        char_count = max(1, section.get(\"char_count\") or len(section.get(\"text\", \"\")) or 1)\n        densities.append({\n            \"section_id\": section.get(\"id\"),\n            \"title\": section.get(\"title\"),\n            \"token_count\": len(section_tokens),\n            \"density\": round(len(section_tokens) / math.sqrt(char_count), 4),\n        })\n\n    keyword_scores = {\n        \"cpu\": counts.get(\"cpu\", 0),\n        \"gpu\": counts.get(\"gpu\", 0),\n        \"artifact\": counts.get(\"io\", 0) + counts.get(\"file\", 0) + counts.get(\"artifact\", 0),\n        \"workflow\": counts.get(\"workflow\", 0) + counts.get(\"task\", 0),\n    }\n\n    return {\n        \"token_stats\": {\n            \"total_tokens\": len(tokens),\n            \"unique_tokens\": len(counts),\n            \"lexical_diversity\": round(len(counts) / max(1, len(tokens)), 4),\n            \"keyword_scores\": keyword_scores,\n        },\n        \"top_terms\": top_terms,\n        \"section_density\": densities,\n        \"keyword_scores\": keyword_scores,\n    }\n",
       "type": "workspace",
       "task_kind": "cpu"
     },
@@ -1027,7 +1025,7 @@
         "gpu_mem": 512,
         "io_num": 0
       },
-      "code": "import hashlib\nimport math\nimport os\nimport time\n\nfrom maze import task\n\n\ndef _section_seed(section: dict, terms: list[dict]) -> float:\n    text = section.get(\"text\", \"\") + \" \" + \" \".join(item.get(\"term\", \"\") for item in terms)\n    digest = hashlib.sha256(text.encode(\"utf-8\", errors=\"replace\")).hexdigest()\n    return int(digest[:8], 16) / 0xFFFFFFFF\n\n\n@task(task_kind=\"gpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 512, \"io_num\": 0}, timeout_seconds=180)\ndef resource_mix_gpu_embedding_probe(sections: list = None, top_terms: list = None, vector_width: str = \"128\", rounds: str = \"120\"):\n    \"\"\"Run a GPU-declared vector probe, falling back to deterministic CPU math if CUDA is unavailable.\"\"\"\n    sections = sections or []\n    top_terms = top_terms or []\n    width = max(16, min(512, int(vector_width or 128)))\n    loops = max(20, min(500, int(rounds or 120)))\n    started = time.time()\n    accelerator = \"cpu-fallback\"\n    device_name = \"python-math\"\n    checksum_source = []\n\n    try:\n        import torch\n\n        if torch.cuda.is_available():\n            accelerator = \"cuda\"\n            device = torch.device(\"cuda\")\n            device_name = torch.cuda.get_device_name(device)\n            rows = max(1, len(sections))\n            base = torch.arange(rows * width, dtype=torch.float32, device=device).reshape(rows, width)\n            seed = torch.tensor([_section_seed(section, top_terms) for section in sections] or [0.5], device=device)\n            values = base / (width + 1) + seed.reshape(-1, 1)\n            for _ in range(loops):\n                values = torch.sin(values) * 0.73 + torch.cos(values * 0.37)\n            reduced = values.mean(dim=1).detach().cpu().tolist()\n            checksum_source = [round(float(item), 6) for item in reduced]\n    except Exception as exc:\n        device_name = f\"python-math ({type(exc).__name__})\"\n\n    if not checksum_source:\n        for section in sections or [{\"text\": \"\"}]:\n            seed = _section_seed(section, top_terms)\n            value = seed\n            for index in range(width * loops // 16):\n                value = math.sin(value + index * 0.013) * 0.73 + math.cos(value * 0.37)\n            checksum_source.append(round(value, 6))\n\n    checksum = hashlib.sha256(repr(checksum_source).encode(\"utf-8\")).hexdigest()[:16]\n\n    return {\n        \"embedding_summary\": {\n            \"accelerator\": accelerator,\n            \"device_name\": device_name,\n            \"cuda_visible_devices\": os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"\"),\n            \"section_vectors\": len(checksum_source),\n            \"vector_width\": width,\n            \"rounds\": loops,\n            \"elapsed_ms\": int((time.time() - started) * 1000),\n            \"checksum\": checksum,\n        },\n        \"accelerator\": accelerator,\n        \"embedding_checksum\": checksum,\n    }\n",
+      "code": "import hashlib\nimport math\nimport os\nimport time\n\nfrom maze import task\n\n\ndef _section_seed(section: dict, terms: list[dict]) -> float:\n    text = section.get(\"text\", \"\") + \" \" + \" \".join(item.get(\"term\", \"\") for item in terms)\n    digest = hashlib.sha256(text.encode(\"utf-8\", errors=\"replace\")).hexdigest()\n    return int(digest[:8], 16) / 0xFFFFFFFF\n\n\n@task(task_kind=\"gpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 512, \"io_num\": 0}, timeout_seconds=180)\ndef resource_mix_gpu_embedding_probe(sections: list = None, top_terms: list = None, vector_width: str = \"128\", rounds: str = \"120\"):\n    \"\"\"Run a GPU-declared vector probe and report an explicit CPU fallback when CUDA is unavailable.\"\"\"\n    sections = sections or []\n    top_terms = top_terms or []\n    width = max(16, min(512, int(vector_width or 128)))\n    loops = max(20, min(500, int(rounds or 120)))\n    started = time.time()\n    accelerator = \"cpu-fallback\"\n    device_name = \"python-math\"\n    checksum_source = []\n\n    try:\n        import torch\n\n        if torch.cuda.is_available():\n            accelerator = \"cuda\"\n            device = torch.device(\"cuda\")\n            device_name = torch.cuda.get_device_name(device)\n            rows = max(1, len(sections))\n            base = torch.arange(rows * width, dtype=torch.float32, device=device).reshape(rows, width)\n            seed = torch.tensor([_section_seed(section, top_terms) for section in sections] or [0.5], device=device)\n            values = base / (width + 1) + seed.reshape(-1, 1)\n            for _ in range(loops):\n                values = torch.sin(values) * 0.73 + torch.cos(values * 0.37)\n            reduced = values.mean(dim=1).detach().cpu().tolist()\n            checksum_source = [round(float(item), 6) for item in reduced]\n    except Exception as exc:\n        device_name = f\"python-math ({type(exc).__name__})\"\n\n    if not checksum_source:\n        for section in sections or [{\"text\": \"\"}]:\n            seed = _section_seed(section, top_terms)\n            value = seed\n            for index in range(width * loops // 16):\n                value = math.sin(value + index * 0.013) * 0.73 + math.cos(value * 0.37)\n            checksum_source.append(round(value, 6))\n\n    checksum = hashlib.sha256(repr(checksum_source).encode(\"utf-8\")).hexdigest()[:16]\n\n    return {\n        \"embedding_summary\": {\n            \"accelerator\": accelerator,\n            \"device_name\": device_name,\n            \"cuda_visible_devices\": os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"\"),\n            \"section_vectors\": len(checksum_source),\n            \"vector_width\": width,\n            \"rounds\": loops,\n            \"elapsed_ms\": int((time.time() - started) * 1000),\n            \"checksum\": checksum,\n        },\n        \"accelerator\": accelerator,\n        \"embedding_checksum\": checksum,\n    }\n",
       "type": "workspace",
       "task_kind": "gpu"
     },
@@ -1067,7 +1065,7 @@
           "dataType": "any"
         },
         {
-          "name": "routing_plan",
+          "name": "signal_summary",
           "dataType": "any"
         },
         {
@@ -1080,7 +1078,7 @@
         "gpu_mem": 0,
         "io_num": 0
       },
-      "code": "from maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_merge_signals(\n    token_stats: dict = None,\n    keyword_scores: dict = None,\n    graph_stats: dict = None,\n    ranked_sections: list = None,\n    embedding_summary: dict = None,\n    section_file_count: int = 0,\n):\n    \"\"\"Merge CPU, GPU, and I/O signals into a compact scorecard.\"\"\"\n    token_stats = token_stats or {}\n    keyword_scores = keyword_scores or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    ranked_sections = ranked_sections or []\n\n    cpu_signal = token_stats.get(\"unique_tokens\", 0) + graph_stats.get(\"edge_count\", 0) * 3\n    gpu_signal = 10 if embedding_summary.get(\"accelerator\") == \"cuda\" else 4\n    io_signal = int(section_file_count or 0) * 2\n    total_score = cpu_signal + gpu_signal + io_signal\n\n    routing_plan = [\n        {\"lane\": \"I/O\", \"reason\": \"load text, materialize section files, and write final artifacts\", \"weight\": io_signal},\n        {\"lane\": \"CPU\", \"reason\": \"token statistics, section graph, and deterministic quality gates\", \"weight\": cpu_signal},\n        {\"lane\": \"GPU\", \"reason\": \"vector-style section embedding probe with CPU fallback\", \"weight\": gpu_signal},\n    ]\n    routing_plan.sort(key=lambda item: item[\"weight\"], reverse=True)\n\n    top_section = ranked_sections[0] if ranked_sections else {\"section_id\": None, \"title\": \"n/a\", \"score\": 0}\n    findings = [\n        f\"Top section: {top_section.get('title')} ({top_section.get('section_id')})\",\n        f\"Top lane: {routing_plan[0]['lane']}\",\n        f\"Keyword balance: CPU={keyword_scores.get('cpu', 0)}, GPU={keyword_scores.get('gpu', 0)}, IO={keyword_scores.get('io', 0)}\",\n    ]\n\n    return {\n        \"scorecard\": {\n            \"total_score\": total_score,\n            \"cpu_signal\": cpu_signal,\n            \"gpu_signal\": gpu_signal,\n            \"io_signal\": io_signal,\n            \"accelerator\": embedding_summary.get(\"accelerator\", \"unknown\"),\n        },\n        \"routing_plan\": routing_plan,\n        \"findings\": findings,\n    }\n",
+      "code": "from maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_merge_signals(\n    token_stats: dict = None,\n    keyword_scores: dict = None,\n    graph_stats: dict = None,\n    ranked_sections: list = None,\n    embedding_summary: dict = None,\n    section_file_count: int = 0,\n):\n    \"\"\"Merge CPU/GPU analysis and artifact counts into a compact demo scorecard.\"\"\"\n    token_stats = token_stats or {}\n    keyword_scores = keyword_scores or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    ranked_sections = ranked_sections or []\n\n    cpu_signal = token_stats.get(\"unique_tokens\", 0) + graph_stats.get(\"edge_count\", 0) * 3\n    gpu_signal = 10 if embedding_summary.get(\"accelerator\") == \"cuda\" else 4\n    artifact_signal = int(section_file_count or 0) * 2\n    total_score = cpu_signal + gpu_signal + artifact_signal\n\n    signal_summary = [\n        {\"signal\": \"artifact_files\", \"description\": \"materialized section files\", \"value\": artifact_signal},\n        {\"signal\": \"cpu_analysis\", \"description\": \"token statistics and section graph\", \"value\": cpu_signal},\n        {\"signal\": \"gpu_probe\", \"description\": \"vector-style section embedding probe\", \"value\": gpu_signal},\n    ]\n    signal_summary.sort(key=lambda item: item[\"value\"], reverse=True)\n\n    top_section = ranked_sections[0] if ranked_sections else {\"section_id\": None, \"title\": \"n/a\", \"score\": 0}\n    findings = [\n        f\"Top section: {top_section.get('title')} ({top_section.get('section_id')})\",\n        f\"Dominant demo signal: {signal_summary[0]['signal']}\",\n        f\"Keyword mentions: CPU={keyword_scores.get('cpu', 0)}, GPU={keyword_scores.get('gpu', 0)}, artifact={keyword_scores.get('artifact', 0)}\",\n    ]\n\n    return {\n        \"scorecard\": {\n            \"total_score\": total_score,\n            \"cpu_signal\": cpu_signal,\n            \"gpu_signal\": gpu_signal,\n            \"artifact_signal\": artifact_signal,\n            \"accelerator\": embedding_summary.get(\"accelerator\", \"unknown\"),\n        },\n        \"signal_summary\": signal_summary,\n        \"findings\": findings,\n    }\n",
       "type": "workspace",
       "task_kind": "cpu"
     },
@@ -1121,14 +1119,14 @@
         "gpu_mem": 0,
         "io_num": 0
       },
-      "code": "from maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_quality_gate(scorecard: dict = None, findings: list = None, graph_stats: dict = None, embedding_summary: dict = None):\n    \"\"\"Apply a deterministic quality gate before the report task runs.\"\"\"\n    scorecard = scorecard or {}\n    findings = findings or []\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n\n    checks = [\n        {\"name\": \"has_tokens\", \"passed\": scorecard.get(\"cpu_signal\", 0) > 0},\n        {\"name\": \"has_artifacts\", \"passed\": scorecard.get(\"io_signal\", 0) > 0},\n        {\"name\": \"has_embedding_checksum\", \"passed\": bool(embedding_summary.get(\"checksum\"))},\n        {\"name\": \"graph_built\", \"passed\": graph_stats.get(\"node_count\", 0) > 0},\n    ]\n    passed = sum(1 for check in checks if check[\"passed\"])\n    decision = \"pass\" if passed == len(checks) else \"review\"\n    notes = list(findings)\n    if decision != \"pass\":\n        notes.append(\"One or more demo checks require review.\")\n\n    return {\n        \"quality_gate\": {\n            \"decision\": decision,\n            \"passed\": passed,\n            \"total\": len(checks),\n            \"checks\": checks,\n        },\n        \"quality_notes\": notes,\n    }\n",
+      "code": "from maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_quality_gate(scorecard: dict = None, findings: list = None, graph_stats: dict = None, embedding_summary: dict = None):\n    \"\"\"Apply a deterministic quality gate before the report task runs.\"\"\"\n    scorecard = scorecard or {}\n    findings = findings or []\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n\n    accelerator = embedding_summary.get(\"accelerator\", \"unknown\")\n    checks = [\n        {\"name\": \"has_tokens\", \"passed\": scorecard.get(\"cpu_signal\", 0) > 0},\n        {\"name\": \"has_artifacts\", \"passed\": scorecard.get(\"artifact_signal\", 0) > 0},\n        {\"name\": \"has_embedding_checksum\", \"passed\": bool(embedding_summary.get(\"checksum\"))},\n        {\"name\": \"gpu_queue_task_executed_on_cuda\", \"passed\": accelerator == \"cuda\"},\n        {\"name\": \"graph_built\", \"passed\": graph_stats.get(\"node_count\", 0) > 0},\n    ]\n    passed = sum(1 for check in checks if check[\"passed\"])\n    decision = \"pass\" if passed == len(checks) else \"fail\"\n    notes = list(findings)\n    if accelerator != \"cuda\":\n        notes.append(f\"GPU queue task must execute on CUDA; observed accelerator={accelerator}.\")\n    elif decision != \"pass\":\n        notes.append(\"One or more demo checks failed.\")\n\n    return {\n        \"quality_gate\": {\n            \"decision\": decision,\n            \"passed\": passed,\n            \"total\": len(checks),\n            \"checks\": checks,\n        },\n        \"quality_notes\": notes,\n    }\n",
       "type": "workspace",
       "task_kind": "cpu"
     },
     {
       "relativePath": "tasks/resource_mix_write_final_report.py",
       "functionName": "resource_mix_write_final_report",
-      "displayName": "I/O Write Final Report",
+      "displayName": "CPU File: Write Final Report",
       "inputs": [
         {
           "name": "source_path",
@@ -1151,7 +1149,7 @@
           "dataType": "dict"
         },
         {
-          "name": "routing_plan",
+          "name": "signal_summary",
           "dataType": "list"
         },
         {
@@ -1196,11 +1194,11 @@
       "resources": {
         "cpu_num": 1,
         "gpu_mem": 0,
-        "io_num": 1
+        "io_num": 0
       },
-      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(task_kind=\"io\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 1})\ndef resource_mix_write_final_report(\n    source_path: str = \"\",\n    token_stats: dict = None,\n    graph_stats: dict = None,\n    embedding_summary: dict = None,\n    scorecard: dict = None,\n    routing_plan: list = None,\n    quality_gate: dict = None,\n    quality_notes: list = None,\n    section_manifest_path: str = \"\",\n    output_path: str = \"resource_mix_demo/final_report.md\",\n    summary_path: str = \"resource_mix_demo/summary.json\",\n):\n    \"\"\"Write the final Markdown and JSON artifacts for the resource mix demo.\"\"\"\n    token_stats = token_stats or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    scorecard = scorecard or {}\n    routing_plan = routing_plan or []\n    quality_gate = quality_gate or {}\n    quality_notes = quality_notes or []\n\n    manifest = {}\n    manifest_file = Path(section_manifest_path) if section_manifest_path else None\n    if manifest_file and manifest_file.exists():\n        manifest = json.loads(manifest_file.read_text(encoding=\"utf-8\"))\n\n    output = Path(output_path)\n    output.parent.mkdir(parents=True, exist_ok=True)\n    summary = Path(summary_path)\n    summary.parent.mkdir(parents=True, exist_ok=True)\n\n    report_lines = [\n        \"# Maze Resource Mix Demo Report\",\n        \"\",\n        f\"- Source text: `{source_path}`\",\n        f\"- Quality gate: `{quality_gate.get('decision', 'unknown')}` ({quality_gate.get('passed', 0)}/{quality_gate.get('total', 0)})\",\n        f\"- Accelerator: `{embedding_summary.get('accelerator', 'unknown')}` on `{embedding_summary.get('device_name', 'unknown')}`\",\n        f\"- Total score: `{scorecard.get('total_score', 0)}`\",\n        \"\",\n        \"## Routing Plan\",\n        \"\",\n    ]\n    for item in routing_plan:\n        report_lines.append(f\"- **{item.get('lane')}**: {item.get('reason')} (weight={item.get('weight')})\")\n\n    report_lines.extend([\n        \"\",\n        \"## Signals\",\n        \"\",\n        f\"- Tokens: {token_stats.get('total_tokens', 0)} total, {token_stats.get('unique_tokens', 0)} unique\",\n        f\"- Graph: {graph_stats.get('node_count', 0)} nodes, {graph_stats.get('edge_count', 0)} edges\",\n        f\"- Section files: {manifest.get('section_count', 0)}\",\n        \"\",\n        \"## Notes\",\n        \"\",\n    ])\n    report_lines.extend(f\"- {note}\" for note in quality_notes)\n\n    payload = {\n        \"source_path\": source_path,\n        \"token_stats\": token_stats,\n        \"graph_stats\": graph_stats,\n        \"embedding_summary\": embedding_summary,\n        \"scorecard\": scorecard,\n        \"routing_plan\": routing_plan,\n        \"quality_gate\": quality_gate,\n        \"section_manifest\": manifest,\n        \"artifacts\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n\n    report = \"\\n\".join(report_lines) + \"\\n\"\n    output.write_text(report, encoding=\"utf-8\")\n    summary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"report_path\": output.as_posix(),\n        \"summary_json_path\": summary.as_posix(),\n        \"report_preview\": report[:900],\n        \"artifact_paths\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n",
+      "code": "import json\nfrom pathlib import Path\n\nfrom maze import task\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef resource_mix_write_final_report(\n    source_path: str = \"\",\n    token_stats: dict = None,\n    graph_stats: dict = None,\n    embedding_summary: dict = None,\n    scorecard: dict = None,\n    signal_summary: list = None,\n    quality_gate: dict = None,\n    quality_notes: list = None,\n    section_manifest_path: str = \"\",\n    output_path: str = \"resource_mix_demo/final_report.md\",\n    summary_path: str = \"resource_mix_demo/summary.json\",\n):\n    \"\"\"Write the final Markdown and JSON artifacts for the resource mix demo.\"\"\"\n    token_stats = token_stats or {}\n    graph_stats = graph_stats or {}\n    embedding_summary = embedding_summary or {}\n    scorecard = scorecard or {}\n    signal_summary = signal_summary or []\n    quality_gate = quality_gate or {}\n    quality_notes = quality_notes or []\n\n    manifest = {}\n    manifest_file = Path(section_manifest_path) if section_manifest_path else None\n    if manifest_file and manifest_file.exists():\n        manifest = json.loads(manifest_file.read_text(encoding=\"utf-8\"))\n\n    output = Path(output_path)\n    output.parent.mkdir(parents=True, exist_ok=True)\n    summary = Path(summary_path)\n    summary.parent.mkdir(parents=True, exist_ok=True)\n\n    report_lines = [\n        \"# Maze Resource Mix Demo Report\",\n        \"\",\n        f\"- Source text: `{source_path}`\",\n        f\"- Quality gate: `{quality_gate.get('decision', 'unknown')}` ({quality_gate.get('passed', 0)}/{quality_gate.get('total', 0)})\",\n        f\"- Accelerator: `{embedding_summary.get('accelerator', 'unknown')}` on `{embedding_summary.get('device_name', 'unknown')}`\",\n        f\"- Total score: `{scorecard.get('total_score', 0)}`\",\n        \"\",\n        \"## Demo Content Signals\",\n        \"\",\n    ]\n    for item in signal_summary:\n        report_lines.append(f\"- **{item.get('signal')}**: {item.get('description')} (value={item.get('value')})\")\n\n    report_lines.extend([\n        \"\",\n        \"## Signals\",\n        \"\",\n        f\"- Tokens: {token_stats.get('total_tokens', 0)} total, {token_stats.get('unique_tokens', 0)} unique\",\n        f\"- Graph: {graph_stats.get('node_count', 0)} nodes, {graph_stats.get('edge_count', 0)} edges\",\n        f\"- Section files: {manifest.get('section_count', 0)}\",\n        \"\",\n        \"## Notes\",\n        \"\",\n    ])\n    report_lines.extend(f\"- {note}\" for note in quality_notes)\n\n    payload = {\n        \"source_path\": source_path,\n        \"token_stats\": token_stats,\n        \"graph_stats\": graph_stats,\n        \"embedding_summary\": embedding_summary,\n        \"scorecard\": scorecard,\n        \"signal_summary\": signal_summary,\n        \"quality_gate\": quality_gate,\n        \"section_manifest\": manifest,\n        \"artifacts\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n\n    report = \"\\n\".join(report_lines) + \"\\n\"\n    output.write_text(report, encoding=\"utf-8\")\n    summary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n\n    return {\n        \"report_path\": output.as_posix(),\n        \"summary_json_path\": summary.as_posix(),\n        \"report_preview\": report[:900],\n        \"artifact_paths\": [output.as_posix(), summary.as_posix(), section_manifest_path],\n    }\n",
       "type": "workspace",
-      "task_kind": "io"
+      "task_kind": "cpu"
     }
   ]
 }
