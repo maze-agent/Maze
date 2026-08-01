@@ -1447,7 +1447,6 @@ class MaPath:
                 node_id=message_data.get("node_id"),
             )
             message.setdefault("data", {})["resource_observation"] = observation
-            await self._emit_dynamic_event(run_id, message)
             dynamic_run.set_task_file_manifest(task_id, message_data.get("file_manifest"))
             self._observe_task_runtime(
                 dynamic_run.tasks.get(task_id),
@@ -1458,6 +1457,7 @@ class MaPath:
                 task_id,
                 message_data.get("fault_tolerance"),
             )
+            await self._emit_dynamic_event(run_id, message)
             self._persist_dynamic_run(run_id)
             for ready_task in ready_tasks:
                 await self._emit_dynamic_event(run_id, {
