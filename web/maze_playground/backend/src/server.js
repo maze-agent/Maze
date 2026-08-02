@@ -37,10 +37,35 @@ const DEFAULT_WORKSPACE_DIR = path.join(WORKSPACES_DIR, DEFAULT_WORKSPACE_ID);
 const LEGACY_WORKSPACE_DIR = WORKSPACE_ROOT_DIR;
 const SYSTEM_CATALOG_DIR = path.resolve(process.env.MAZE_SYSTEM_CATALOG_DIR || path.join(PROJECT_ROOT, 'system_catalog'));
 const MAZE_CORE_URL = process.env.MAZE_CORE_URL || 'http://localhost:8000';
-const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled', 'interrupted']);
+const GAIA_STAGING_ROOT = path.resolve(
+  process.env.MAZE_GAIA_STAGING_ROOT
+    || path.join(os.homedir(), '.maze', 'playground', 'gaia-staging'),
+);
+const MAZE_CORE_REQUEST_TIMEOUT_MS = Math.min(
+  5 * 60 * 1000,
+  Math.max(100, Number(process.env.MAZE_CORE_REQUEST_TIMEOUT_MS) || 30 * 1000),
+);
+const TERMINAL_STATIC_RUN_STATUSES = new Set(['completed', 'failed', 'canceled', 'timed_out', 'interrupted']);
+const GAIA_TRACE_WORKFLOWS = new Set(['reason', 'file']);
+const GAIA_SAMPLE_REF_PATTERN = /^gaia-[0-9a-f]{32}$/;
+const GAIA_SUBMISSION_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const GAIA_FILE_EXTENSIONS = new Set(['.txt', '.md', '.pdf']);
+const GAIA_MAX_FILE_BYTES = Math.min(
+  32 * 1024 * 1024,
+  Math.max(1, Number(process.env.MAZE_GAIA_MAX_FILE_BYTES) || 32 * 1024 * 1024),
+);
+const GAIA_TERMINAL_EVENTS = {
+  succeeded: { type: 'benchmark_run_succeeded', status: 'completed' },
+  failed: { type: 'benchmark_run_failed', status: 'failed' },
+  cancelled: { type: 'benchmark_run_canceled', status: 'canceled' },
+  canceled: { type: 'benchmark_run_canceled', status: 'canceled' },
+  timed_out: { type: 'benchmark_run_timed_out', status: 'timed_out' },
+  interrupted: { type: 'benchmark_run_interrupted', status: 'interrupted' },
+};
 const staticRunWriteQueues = new Map();
 const systemWorkflowLoadQueues = new Map();
-const recoveredStaticRunWorkspaces = new Set();
+const recoveredStaticRunWorkspaces = new Map();
+const activeGaiaSubmissions = new Set();
 const workspaceTasksCache = new Map();
 const activeWorkerProfileSecrets = new Map();
 
@@ -1160,6 +1185,918 @@ function createStaticRunSnapshot({ runId, workflow, workspaceDir, workspaceConte
   };
 }
 
+function stableJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(stableJsonValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, stableJsonValue(value[key])]),
+    );
+  }
+  return value;
+}
+
+function sha256Text(value) {
+  return crypto.createHash('sha256').update(String(value), 'utf-8').digest('hex');
+}
+
+function gaiaSubmissionFingerprint({
+  workflow,
+  sampleRef,
+  workspaceId,
+  mazeWorkflowId,
+  timeoutSeconds,
+  inputs,
+  finalOutputRefs,
+  executionFile,
+}) {
+  return sha256Text(JSON.stringify(stableJsonValue({
+    workflow,
+    sample_ref: sampleRef,
+    playground_workspace_id: workspaceId,
+    maze_workflow_id: mazeWorkflowId,
+    timeout_seconds: timeoutSeconds,
+    inputs,
+    final_output_refs: finalOutputRefs,
+    execution_file: executionFile ? {
+      name: executionFile.name,
+      sha256: executionFile.sha256,
+      size: executionFile.content.length,
+    } : null,
+  })));
+}
+
+function normalizeGaiaSubmissionToken(value) {
+  const token = String(value || '');
+  if (!GAIA_SUBMISSION_TOKEN_PATTERN.test(token)) {
+    const error = new Error('submissionToken must be 64 lowercase hexadecimal characters');
+    error.status = 400;
+    throw error;
+  }
+  return token;
+}
+
+function validateGaiaExecutionFile(workflow, rawFile) {
+  if (workflow !== 'file') {
+    if (rawFile !== undefined && rawFile !== null) {
+      const error = new Error('executionFile is only valid for the file workflow');
+      error.status = 400;
+      throw error;
+    }
+    return null;
+  }
+  if (!rawFile || typeof rawFile !== 'object' || Array.isArray(rawFile)) {
+    const error = new Error('file workflow requires executionFile');
+    error.status = 400;
+    throw error;
+  }
+
+  const name = String(rawFile.name || '').trim();
+  if (
+    !name
+    || name === '.'
+    || name === '..'
+    || name.includes('/')
+    || name.includes('\\')
+    || name.includes('\0')
+    || Buffer.byteLength(name, 'utf-8') > 255
+  ) {
+    const error = new Error('executionFile.name must be a single safe file name');
+    error.status = 400;
+    throw error;
+  }
+  const extension = path.extname(name).toLowerCase();
+  if (!GAIA_FILE_EXTENSIONS.has(extension)) {
+    const error = new Error('executionFile must be a .txt, .md, or .pdf file');
+    error.status = 400;
+    throw error;
+  }
+
+  const contentBase64 = rawFile.contentBase64 ?? rawFile.content_base64;
+  if (
+    typeof contentBase64 !== 'string'
+    || !contentBase64
+    || contentBase64.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64)
+  ) {
+    const error = new Error('executionFile.contentBase64 must be strict base64');
+    error.status = 400;
+    throw error;
+  }
+  const content = Buffer.from(contentBase64, 'base64');
+  if (content.toString('base64') !== contentBase64) {
+    const error = new Error('executionFile.contentBase64 is not canonical base64');
+    error.status = 400;
+    throw error;
+  }
+  if (content.length > GAIA_MAX_FILE_BYTES) {
+    const error = new Error(`executionFile exceeds the ${GAIA_MAX_FILE_BYTES} byte limit`);
+    error.status = 413;
+    throw error;
+  }
+
+  const expectedSha256 = String(rawFile.sha256 || '');
+  if (!/^[0-9a-f]{64}$/.test(expectedSha256)) {
+    const error = new Error('executionFile.sha256 must be a lowercase SHA-256 digest');
+    error.status = 400;
+    throw error;
+  }
+  const actualSha256 = crypto.createHash('sha256').update(content).digest('hex');
+  if (actualSha256 !== expectedSha256) {
+    const error = new Error('executionFile.sha256 does not match its content');
+    error.status = 400;
+    throw error;
+  }
+  return { name, sha256: actualSha256, content };
+}
+
+function pathIsInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function lstatOrNull(filePath) {
+  return fs.lstat(filePath).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+}
+
+function gaiaPathError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  error.code = 'GAIA_PATH_UNSAFE';
+  return error;
+}
+
+async function requireRealDirectoryWithin(root, candidate, label) {
+  if (!pathIsInside(root, candidate)) {
+    throw gaiaPathError(`${label} escaped its managed root`);
+  }
+  const stat = await lstatOrNull(candidate);
+  if (!stat?.isDirectory() || stat.isSymbolicLink()) {
+    throw gaiaPathError(`${label} must be a real directory`);
+  }
+  const [canonicalRoot, canonicalCandidate] = await Promise.all([
+    fs.realpath(root),
+    fs.realpath(candidate),
+  ]);
+  if (!pathIsInside(canonicalRoot, canonicalCandidate)) {
+    throw gaiaPathError(`${label} escaped its managed root`);
+  }
+  return canonicalCandidate;
+}
+
+async function ensureRealDirectoryWithin(root, candidate, label, mode = 0o700) {
+  if (!pathIsInside(root, candidate)) {
+    throw gaiaPathError(`${label} escaped its managed root`);
+  }
+  try {
+    await fs.mkdir(candidate, { mode });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  }
+  const canonical = await requireRealDirectoryWithin(root, candidate, label);
+  await fs.chmod(canonical, mode);
+  return canonical;
+}
+
+async function rejectSymlinkIfPresent(filePath, label) {
+  const stat = await lstatOrNull(filePath);
+  if (stat?.isSymbolicLink()) {
+    throw gaiaPathError(`${label} cannot be a symbolic link`);
+  }
+}
+
+async function requireManagedGaiaWorkspace(context) {
+  const managedRoot = await fs.realpath(WORKSPACES_DIR);
+  const workspaceStat = await fs.lstat(context.workspaceDir);
+  if (workspaceStat.isSymbolicLink()) {
+    const error = new Error('GAIA workspace cannot be a symbolic link');
+    error.status = 400;
+    throw error;
+  }
+  const workspaceDir = await fs.realpath(context.workspaceDir);
+  if (!pathIsInside(managedRoot, workspaceDir)) {
+    const error = new Error('GAIA workspace must stay inside the managed workspaces directory');
+    error.status = 400;
+    throw error;
+  }
+  return workspaceDir;
+}
+
+async function ensureManagedGaiaWorkspaceContext(workspaceIdInput) {
+  const requestedWorkspaceId = String(workspaceIdInput || DEFAULT_WORKSPACE_ID).trim();
+  const workspaceId = safeWorkspaceId(requestedWorkspaceId || DEFAULT_WORKSPACE_ID, DEFAULT_WORKSPACE_ID);
+  await fs.mkdir(WORKSPACES_DIR, { recursive: true });
+  const managedRoot = await fs.realpath(WORKSPACES_DIR);
+  const workspaceDir = await ensureRealDirectoryWithin(
+    managedRoot,
+    path.join(managedRoot, workspaceId),
+    'GAIA workspace',
+  );
+  const directoryNames = [
+    'tasks',
+    'workflows',
+    'files',
+    'skills',
+    'mcp_profiles',
+    'cluster_workers',
+    'agent_sessions',
+    'agent_drafts',
+    'agent_runs',
+    'policies',
+    'runs',
+  ];
+  for (const name of directoryNames) {
+    await ensureRealDirectoryWithin(
+      workspaceDir,
+      path.join(workspaceDir, name),
+      `GAIA workspace ${name} directory`,
+    );
+  }
+  const legacyRunsRoot = path.join(workspaceDir, 'workflow_runs');
+  if (await lstatOrNull(legacyRunsRoot)) {
+    const canonicalLegacyRoot = await requireRealDirectoryWithin(
+      workspaceDir,
+      legacyRunsRoot,
+      'GAIA legacy runs directory',
+    );
+    for (const legacyDir of legacyStaticRunsDirs(workspaceDir)) {
+      if (await lstatOrNull(legacyDir)) {
+        await requireRealDirectoryWithin(
+          canonicalLegacyRoot,
+          legacyDir,
+          'GAIA legacy static runs directory',
+        );
+      }
+    }
+  }
+  await rejectSymlinkIfPresent(workspaceManifestPath(workspaceDir), 'GAIA workspace manifest');
+  await rejectSymlinkIfPresent(workspacePolicyPath(workspaceDir), 'GAIA workspace policy');
+  await ensureWorkspacePolicy(workspaceDir);
+  const manifest = await ensureWorkspaceManifest(workspaceDir, { workspaceId });
+  await rejectSymlinkIfPresent(workspaceManifestPath(workspaceDir), 'GAIA workspace manifest');
+  await rejectSymlinkIfPresent(workspacePolicyPath(workspaceDir), 'GAIA workspace policy');
+  await recoverInterruptedStaticRuns(workspaceDir);
+  return {
+    workspaceId: manifest.workspace_id,
+    workspaceDir,
+    manifest,
+    workspaceManifestVersion: Number(manifest.manifest_version || 1),
+  };
+}
+
+async function requirePrivateGaiaStagingRoot() {
+  const existing = await lstatOrNull(GAIA_STAGING_ROOT);
+  if (existing?.isSymbolicLink()) {
+    throw gaiaPathError('GAIA private staging root cannot be a symbolic link');
+  }
+  await fs.mkdir(GAIA_STAGING_ROOT, { recursive: true, mode: 0o700 });
+  const stat = await fs.lstat(GAIA_STAGING_ROOT);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw gaiaPathError('GAIA private staging root must be a real directory');
+  }
+  await fs.chmod(GAIA_STAGING_ROOT, 0o700);
+  return fs.realpath(GAIA_STAGING_ROOT);
+}
+
+function gaiaStagingPrefix(workspaceDir, runId) {
+  return `${sha256Text(`${path.resolve(workspaceDir)}::${runId}`)}-`;
+}
+
+async function clearGaiaInputStaging(stagingRoot) {
+  const stagingStat = await lstatOrNull(stagingRoot);
+  if (!stagingStat) return;
+  if (!stagingStat.isDirectory() || stagingStat.isSymbolicLink()) {
+    throw gaiaPathError('Refusing to remove unsafe GAIA input staging');
+  }
+  const privateRoot = await requirePrivateGaiaStagingRoot();
+  const canonicalStagingRoot = await fs.realpath(stagingRoot);
+  if (
+    canonicalStagingRoot === privateRoot
+    || !pathIsInside(privateRoot, canonicalStagingRoot)
+  ) {
+    throw gaiaPathError('Refusing to remove GAIA input staging outside its private root');
+  }
+  await fs.rm(canonicalStagingRoot, { recursive: true, force: true });
+}
+
+async function ensureGaiaRunDirectory(workspaceDir, runId) {
+  const runsDir = await requireRealDirectoryWithin(
+    workspaceDir,
+    staticRunsDir(workspaceDir),
+    'GAIA runs directory',
+  );
+  return ensureRealDirectoryWithin(
+    runsDir,
+    staticRunDir(workspaceDir, runId, { write: true }),
+    'GAIA run directory',
+  );
+}
+
+async function cleanupRecoveredGaiaStaging(workspaceDir, runId) {
+  const activeKey = `${path.resolve(workspaceDir)}::${runId}`;
+  if (activeGaiaSubmissions.has(activeKey)) return;
+  const privateRoot = await requirePrivateGaiaStagingRoot();
+  const prefix = gaiaStagingPrefix(workspaceDir, runId);
+  const entries = await fs.readdir(privateRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.name.startsWith(prefix)) continue;
+    await clearGaiaInputStaging(path.join(privateRoot, entry.name));
+  }
+}
+
+async function stageGaiaExecutionFile(context, runId, executionFile) {
+  const workspaceDir = await requireManagedGaiaWorkspace(context);
+  const privateRoot = await requirePrivateGaiaStagingRoot();
+  const stagingRoot = await fs.mkdtemp(
+    path.join(privateRoot, gaiaStagingPrefix(workspaceDir, runId)),
+  );
+  await fs.chmod(stagingRoot, 0o700);
+  const filesDir = path.join(stagingRoot, 'files');
+
+  try {
+    const canonicalStagingRoot = await requireRealDirectoryWithin(
+      privateRoot,
+      stagingRoot,
+      'GAIA private staging directory',
+    );
+    const canonicalFilesDir = await ensureRealDirectoryWithin(
+      canonicalStagingRoot,
+      filesDir,
+      'GAIA staging files directory',
+    );
+    if (executionFile) {
+      const filePath = path.join(canonicalFilesDir, executionFile.name);
+      const flags = (
+        fsSync.constants.O_WRONLY
+        | fsSync.constants.O_CREAT
+        | fsSync.constants.O_EXCL
+        | (fsSync.constants.O_NOFOLLOW || 0)
+      );
+      const fileHandle = await fs.open(filePath, flags, 0o600);
+      try {
+        await fileHandle.writeFile(executionFile.content);
+        await fileHandle.chmod(0o600);
+      } finally {
+        await fileHandle.close();
+      }
+    }
+  } catch (error) {
+    await clearGaiaInputStaging(stagingRoot).catch(() => {});
+    throw error;
+  }
+
+  return {
+    workspaceDir: stagingRoot,
+    async clearInput() {
+      await clearGaiaInputStaging(stagingRoot);
+    },
+  };
+}
+
+function isGaiaTrace(snapshot) {
+  return snapshot?.metadata?.benchmark === 'gaia';
+}
+
+function publicGaiaMetadata(snapshot) {
+  return {
+    benchmark: 'gaia',
+    workflow: snapshot?.metadata?.workflow,
+    sample_ref: snapshot?.metadata?.sample_ref,
+    playground_run_id: snapshot?.run_id || snapshot?.metadata?.playground_run_id,
+  };
+}
+
+function publicStaticRunSnapshot(snapshot) {
+  if (!isGaiaTrace(snapshot)) return snapshot;
+  return {
+    schema: snapshot.schema || 'static_workflow_run',
+    schema_version: snapshot.schema_version || 1,
+    kind: 'static',
+    ...(snapshot.summary ? { summary: true } : {}),
+    run_id: snapshot.run_id,
+    workflow_id: snapshot.workflow_id,
+    workflow_name: snapshot.workflow_name,
+    workspace_id: snapshot.workspace_id,
+    workspace_manifest_version: snapshot.workspace_manifest_version,
+    status: snapshot.status,
+    created_time: snapshot.created_time,
+    updated_time: snapshot.updated_time,
+    finished_time: snapshot.finished_time,
+    task_counts: snapshot.task_counts || {},
+    task_nodes: snapshot.summary ? undefined : {},
+    graph: snapshot.summary ? undefined : { nodes: [], edges: [] },
+    events: snapshot.events || { count: 0, last_seq: 0 },
+    final_result: null,
+    error: null,
+    metadata: publicGaiaMetadata(snapshot),
+  };
+}
+
+function publicStaticRunWorkspaceFields(context, snapshot) {
+  if (!isGaiaTrace(snapshot)) return workspaceResponseFields(context);
+  return {
+    workspaceId: context.workspaceId,
+    workspaceManifestVersion: context.workspaceManifestVersion,
+  };
+}
+
+function publicStaticRunEvent(snapshot, event) {
+  if (!isGaiaTrace(snapshot)) return event;
+  return {
+    type: event.type,
+    schema_version: event.schema_version,
+    seq: event.seq,
+    timestamp: event.timestamp,
+    data: {
+      workflow_run_id: snapshot.run_id,
+    },
+  };
+}
+
+function createGaiaTraceSnapshot({
+  runId,
+  workflow,
+  sampleRef,
+  context,
+  mazeWorkflowId,
+  submissionTokenHash,
+  idempotencyKey,
+  submissionFingerprint,
+}) {
+  const snapshot = createStaticRunSnapshot({
+    runId,
+    workflow: {
+      id: `benchmark:gaia:${workflow}`,
+      name: `GAIA ${workflow}`,
+      nodes: [],
+      edges: [],
+    },
+    workspaceDir: context.workspaceDir,
+    workspaceContext: context,
+  });
+  snapshot.metadata = {
+    benchmark: 'gaia',
+    workflow,
+    sample_ref: sampleRef,
+    playground_run_id: runId,
+    maze_run_id: null,
+  };
+  snapshot.gaia_private = {
+    submission_token_sha256: submissionTokenHash,
+    maze_workflow_id: mazeWorkflowId,
+    idempotency_key: idempotencyKey,
+    submission_fingerprint: submissionFingerprint,
+    submission_state: 'prepared',
+  };
+  return snapshot;
+}
+
+function requireGaiaTraceRun(snapshot) {
+  if (snapshot?.metadata?.benchmark !== 'gaia') {
+    const error = new Error('Playground run is not a GAIA benchmark run');
+    error.status = 400;
+    throw error;
+  }
+  return snapshot;
+}
+
+function requireGaiaSubmissionToken(snapshot, token) {
+  const actual = sha256Text(normalizeGaiaSubmissionToken(token));
+  const expected = String(snapshot?.gaia_private?.submission_token_sha256 || '');
+  if (!expected || actual !== expected) {
+    const error = new Error('GAIA submission capability is invalid');
+    error.status = 403;
+    throw error;
+  }
+}
+
+function gaiaTraceResponse(snapshot, { includeMazeRunId = false } = {}) {
+  const response = {
+    playgroundRunId: snapshot.run_id,
+    status: snapshot.status,
+    trace: publicGaiaMetadata(snapshot),
+  };
+  if (includeMazeRunId) {
+    response.mazeRunId = snapshot.maze_run_id || null;
+  }
+  return response;
+}
+
+function gaiaTerminalForCoreStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'canceled') return GAIA_TERMINAL_EVENTS.cancelled;
+  return GAIA_TERMINAL_EVENTS[normalized] || null;
+}
+
+function requireMappedCoreGaiaRun(snapshot, coreRun) {
+  if (
+    !snapshot.maze_run_id
+    || String(coreRun?.run_id || '') !== String(snapshot.maze_run_id)
+    || !coreGaiaRunMatchesTrace(coreRun, snapshot)
+  ) {
+    const error = new Error('Maze run binding does not match the GAIA Playground trace');
+    error.status = 409;
+    throw error;
+  }
+  return coreRun;
+}
+
+function coreGaiaRunMatchesTrace(coreRun, snapshot) {
+  const metadata = coreRun?.metadata || {};
+  const privateBinding = snapshot?.gaia_private || {};
+  return (
+    metadata.benchmark === 'gaia'
+    && metadata.playground_run_id === snapshot.run_id
+    && metadata.sample_ref === snapshot.metadata?.sample_ref
+    && metadata.workflow === snapshot.metadata?.workflow
+    && String(coreRun?.workflow_id || '') === String(privateBinding.maze_workflow_id || '')
+    && String(coreRun?.idempotency_key || '') === String(privateBinding.idempotency_key || '')
+    && String(coreRun?.idempotency_fingerprint || '') === String(privateBinding.submission_fingerprint || '')
+  );
+}
+
+function coreRunFromDetailPayload(payload) {
+  const coreRun = payload?.run;
+  if (!coreRun || typeof coreRun !== 'object' || Array.isArray(coreRun)) {
+    const error = new Error('Maze Core returned a malformed run response');
+    error.status = 502;
+    throw error;
+  }
+  return coreRun;
+}
+
+async function loadCoreRun(runId) {
+  const payload = await callMazeCore(`/runs/${encodeURIComponent(runId)}`);
+  return coreRunFromDetailPayload(payload);
+}
+
+async function listCoreStaticRuns() {
+  const payload = await callMazeCore('/runs?kind=static&detail=true');
+  if (!Array.isArray(payload?.runs)) {
+    const error = new Error('Maze Core returned a malformed static run list');
+    error.status = 502;
+    throw error;
+  }
+  return payload.runs;
+}
+
+async function findGaiaTraceBySampleRef(workspaceDir, sampleRef) {
+  const matches = (await listStaticRunFilesForWorkspace(workspaceDir)).filter((run) => (
+    isGaiaTrace(run) && run.metadata?.sample_ref === sampleRef
+  ));
+  if (matches.length > 1) {
+    const error = new Error('Multiple Playground traces use this GAIA sample reference');
+    error.status = 409;
+    throw error;
+  }
+  return matches[0] || null;
+}
+
+async function interruptGaiaTraceUnlocked(workspaceDir, runId, reason) {
+  const { snapshot } = await appendAndApplyStaticRunEventUnlocked(workspaceDir, runId, {
+    type: GAIA_TERMINAL_EVENTS.interrupted.type,
+    data: { reason },
+    timestamp: new Date().toISOString(),
+  });
+  return snapshot;
+}
+
+async function reconcileGaiaTraceUnlocked(
+  workspaceDir,
+  runId,
+  coreRuns,
+  { markMissing = false } = {},
+) {
+  let snapshot = requireGaiaTraceRun(await loadStaticRun(workspaceDir, runId));
+  if (TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+    await saveStaticRun(workspaceDir, snapshot);
+    return snapshot;
+  }
+
+  let coreRun = null;
+  if (snapshot.maze_run_id) {
+    const byId = coreRuns.filter((candidate) => (
+      String(candidate?.run_id || '') === String(snapshot.maze_run_id)
+    ));
+    if (byId.length === 1 && coreGaiaRunMatchesTrace(byId[0], snapshot)) {
+      coreRun = byId[0];
+    } else if (markMissing) {
+      return interruptGaiaTraceUnlocked(
+        workspaceDir,
+        runId,
+        byId.length ? 'core_mapping_mismatch' : 'core_mapping_missing',
+      );
+    } else {
+      const error = new Error('Maze run mapping does not match the GAIA Playground trace');
+      error.status = 409;
+      throw error;
+    }
+  } else {
+    const matches = coreRuns.filter((candidate) => coreGaiaRunMatchesTrace(candidate, snapshot));
+    if (matches.length === 1) {
+      coreRun = matches[0];
+      const mazeRunId = String(coreRun.run_id || '').trim();
+      if (!mazeRunId) {
+        const error = new Error('Maze Core run is missing its run id');
+        error.status = 502;
+        throw error;
+      }
+      ({ snapshot } = await appendAndApplyStaticRunEventUnlocked(workspaceDir, runId, {
+        type: 'maze_run_created',
+        data: { maze_run_id: mazeRunId },
+        timestamp: new Date().toISOString(),
+      }));
+    } else if (matches.length > 1) {
+      if (markMissing) {
+        return interruptGaiaTraceUnlocked(workspaceDir, runId, 'duplicate_core_metadata_match');
+      }
+      const error = new Error('Multiple Maze runs match the GAIA Playground trace');
+      error.status = 409;
+      throw error;
+    } else if (markMissing) {
+      return interruptGaiaTraceUnlocked(workspaceDir, runId, 'core_run_missing_after_restart');
+    } else {
+      await saveStaticRun(workspaceDir, snapshot);
+      return snapshot;
+    }
+  }
+
+  const normalizedStatus = String(coreRun?.status || '').trim().toLowerCase();
+  const terminal = gaiaTerminalForCoreStatus(normalizedStatus);
+  if (terminal) {
+    ({ snapshot } = await appendAndApplyStaticRunEventUnlocked(workspaceDir, runId, {
+      type: terminal.type,
+      data: {},
+      timestamp: new Date().toISOString(),
+    }));
+    return snapshot;
+  }
+  if (!['created', 'running'].includes(normalizedStatus)) {
+    const error = new Error(`Maze Core returned an unknown static run status: ${normalizedStatus || '<empty>'}`);
+    error.status = 502;
+    throw error;
+  }
+  await saveStaticRun(workspaceDir, snapshot);
+  return snapshot;
+}
+
+async function ensureGaiaTraceMappingUnlocked(workspaceDir, runId) {
+  let snapshot = requireGaiaTraceRun(await loadStaticRun(workspaceDir, runId));
+  if (!snapshot.maze_run_id && !TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+    snapshot = await reconcileGaiaTraceUnlocked(
+      workspaceDir,
+      runId,
+      await listCoreStaticRuns(),
+      { markMissing: false },
+    );
+  }
+  if (!snapshot.maze_run_id) {
+    const error = new Error('Playground run has no verified Maze run mapping');
+    error.status = 409;
+    throw error;
+  }
+  return snapshot;
+}
+
+function gaiaLocalStatusMatchesCoreTerminal(snapshot, terminal) {
+  return (
+    snapshot.status === terminal?.status
+    || (snapshot.status === 'timed_out' && terminal?.status === 'canceled')
+  );
+}
+
+function rejectGaiaWorkspacePathFields(body, { includeExecutionWorkspace = false } = {}) {
+  const forbidden = [
+    'playgroundWorkspaceDir',
+    'playground_workspace_dir',
+    'workspaceDir',
+    'workspace_dir',
+  ];
+  if (includeExecutionWorkspace) {
+    forbidden.push('executionWorkspaceDir', 'execution_workspace_dir');
+  }
+  if (forbidden.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+    const error = new Error('GAIA requests accept a managed playgroundWorkspaceId, not a workspace path');
+    error.status = 400;
+    throw error;
+  }
+}
+
+async function resolveGaiaWorkspaceContext(body, options = {}) {
+  rejectGaiaWorkspacePathFields(body, options);
+  return ensureManagedGaiaWorkspaceContext(
+    body.playgroundWorkspaceId || body.playground_workspace_id,
+  );
+}
+
+function gaiaCoreIdempotencyKey(submissionToken) {
+  return `gaia-${sha256Text(submissionToken)}`;
+}
+
+function redactGaiaRunIdentifiers(value, gaiaRunIds, pseudonyms = new Map()) {
+  if (typeof value === 'string' && gaiaRunIds.has(value)) {
+    if (!pseudonyms.has(value)) {
+      pseudonyms.set(value, `gaia-${sha256Text(value).slice(0, 32)}`);
+    }
+    return pseudonyms.get(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactGaiaRunIdentifiers(item, gaiaRunIds, pseudonyms));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactGaiaRunIdentifiers(item, gaiaRunIds, pseudonyms),
+      ]),
+    );
+  }
+  return value;
+}
+
+function requireGaiaSubmissionReceipt(receipt, snapshot) {
+  const mazeRunId = String(receipt?.run_id || '').trim();
+  const privateBinding = snapshot.gaia_private || {};
+  if (
+    !mazeRunId
+    || receipt?.idempotency_key !== privateBinding.idempotency_key
+    || receipt?.idempotency_fingerprint !== privateBinding.submission_fingerprint
+  ) {
+    const error = new Error('Maze Core returned a malformed idempotent submission receipt');
+    error.status = 502;
+    error.code = 'MAZE_CORE_MALFORMED_RECEIPT';
+    throw error;
+  }
+  return mazeRunId;
+}
+
+async function bindGaiaCoreRun(workspaceDir, playgroundRunId, coreRun) {
+  return withStaticRunWriteQueue(workspaceDir, playgroundRunId, async () => {
+    let snapshot = requireGaiaTraceRun(await loadStaticRun(workspaceDir, playgroundRunId));
+    if (snapshot.maze_run_id) {
+      return requireMappedCoreGaiaRun(snapshot, coreRun) && snapshot;
+    }
+    if (!coreGaiaRunMatchesTrace(coreRun, snapshot)) {
+      const error = new Error('Maze run binding does not match the GAIA Playground trace');
+      error.status = 409;
+      throw error;
+    }
+    ({ snapshot } = await appendAndApplyStaticRunEventUnlocked(
+      workspaceDir,
+      playgroundRunId,
+      {
+        type: 'maze_run_created',
+        data: { maze_run_id: String(coreRun.run_id) },
+        timestamp: new Date().toISOString(),
+      },
+    ));
+    return snapshot;
+  });
+}
+
+async function submitGaiaTraceToCore({
+  context,
+  snapshot,
+  inputs,
+  finalOutputRefs,
+  timeoutSeconds,
+  executionFile,
+}) {
+  const playgroundRunId = snapshot.run_id;
+  const activeKey = `${path.resolve(context.workspaceDir)}::${playgroundRunId}`;
+  activeGaiaSubmissions.add(activeKey);
+  let stagedExecution = null;
+  let submittedCoreRun = null;
+  let submissionError = null;
+  let cleanupError = null;
+
+  try {
+    ({ snapshot } = await appendAndApplyStaticRunEvent(
+      context.workspaceDir,
+      playgroundRunId,
+      {
+        type: 'benchmark_submission_started',
+        data: {},
+        timestamp: new Date().toISOString(),
+      },
+    ));
+    stagedExecution = await stageGaiaExecutionFile(context, playgroundRunId, executionFile);
+    const corePayload = {
+      workflow_id: snapshot.gaia_private.maze_workflow_id,
+      inputs,
+      final_output_refs: finalOutputRefs,
+      timeout_seconds: timeoutSeconds,
+      metadata: snapshot.metadata,
+      idempotency_key: snapshot.gaia_private.idempotency_key,
+      idempotency_fingerprint: snapshot.gaia_private.submission_fingerprint,
+    };
+    if (stagedExecution) {
+      corePayload.file_context = {
+        enabled: true,
+        private: true,
+        workspace_dir: stagedExecution.workspaceDir,
+        artifact_store: {
+          type: 'head_http',
+          base_url: MAZE_CORE_URL,
+          private: true,
+        },
+      };
+    }
+
+    const receipt = await callMazeCore('/run_workflow', {
+      method: 'POST',
+      body: corePayload,
+    });
+    const mazeRunId = requireGaiaSubmissionReceipt(receipt, snapshot);
+    submittedCoreRun = requireMappedCoreGaiaRun(
+      { ...snapshot, maze_run_id: mazeRunId },
+      await loadCoreRun(mazeRunId),
+    );
+  } catch (error) {
+    submissionError = error;
+  } finally {
+    if (stagedExecution) {
+      try {
+        await stagedExecution.clearInput();
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    activeGaiaSubmissions.delete(activeKey);
+  }
+
+  if (!submittedCoreRun) {
+    let reconciled = null;
+    let listSucceeded = false;
+    try {
+      const coreRuns = await listCoreStaticRuns();
+      listSucceeded = true;
+      reconciled = await withStaticRunWriteQueue(
+        context.workspaceDir,
+        playgroundRunId,
+        () => reconcileGaiaTraceUnlocked(
+          context.workspaceDir,
+          playgroundRunId,
+          coreRuns,
+          { markMissing: false },
+        ),
+      );
+    } catch (error) {
+      console.error(`Maze submission reconciliation remains retryable for ${playgroundRunId}:`, error.message);
+    }
+    if (reconciled?.maze_run_id) {
+      if (cleanupError) throw cleanupError;
+      return { snapshot: reconciled, recovered: true };
+    }
+
+    const locallyTimedOut = ['MAZE_CORE_TIMEOUT', 'MAZE_CORE_ABORTED'].includes(
+      submissionError?.code,
+    );
+    const localPathFailure = submissionError?.code === 'GAIA_PATH_UNSAFE';
+    if (listSucceeded && submissionError?.status && !locallyTimedOut) {
+      await appendAndApplyStaticRunEvent(context.workspaceDir, playgroundRunId, {
+        type: 'benchmark_submission_failed',
+        data: {},
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
+    }
+    console.error(`Maze submission failed for retained Playground run ${playgroundRunId}`);
+    const error = new Error(
+      localPathFailure
+        ? 'GAIA staging path is unsafe'
+        : (
+            submissionError?.status === 409
+              ? 'Maze workflow submission conflicts with an existing idempotency binding'
+              : 'Maze workflow submission failed'
+          ),
+    );
+    error.status = localPathFailure
+      ? 400
+      : (
+          submissionError?.status === 409
+            ? 409
+            : (locallyTimedOut ? 504 : 502)
+        );
+    error.playgroundRunId = playgroundRunId;
+    error.mazeRunId = null;
+    throw error;
+  }
+
+  snapshot = await bindGaiaCoreRun(context.workspaceDir, playgroundRunId, submittedCoreRun);
+  if (cleanupError) {
+    const error = new Error('GAIA input staging cleanup failed');
+    error.status = 500;
+    error.playgroundRunId = playgroundRunId;
+    error.mazeRunId = snapshot.maze_run_id;
+    throw error;
+  }
+  return { snapshot, recovered: false };
+}
+
 function recomputeStaticRunTaskCounts(snapshot) {
   const counts = {
     total: 0,
@@ -1180,10 +2117,19 @@ function recomputeStaticRunTaskCounts(snapshot) {
   snapshot.task_counts = counts;
 }
 
-async function writeJsonAtomic(filePath, payload) {
+async function writeJsonAtomic(filePath, payload, options = {}) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  await fs.writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+  await fs.writeFile(
+    tmpPath,
+    `${JSON.stringify(payload, null, 2)}\n`,
+    options.mode
+      ? { encoding: 'utf-8', mode: options.mode }
+      : 'utf-8',
+  );
+  if (options.mode) {
+    await fs.chmod(tmpPath, options.mode);
+  }
   await fs.rename(tmpPath, filePath);
 }
 
@@ -3375,7 +4321,7 @@ function staticRunStorageRoots(workspaceDir, runId) {
   return Array.from(new Set(roots));
 }
 
-async function promoteArtifactIntoWorkspace(context, input = {}) {
+async function promoteArtifactIntoWorkspace(context, input = {}, options = {}) {
   const {
     targetPath,
     artifact = {},
@@ -3447,14 +4393,16 @@ async function promoteArtifactIntoWorkspace(context, input = {}) {
     }
     await fs.copyFile(resolvedStoragePath, fullPath);
   } else {
-    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(sourceSha)}`);
+    const { response, body } = await fetchMazeCoreBody(
+      `/artifacts/sha256/${encodeURIComponent(sourceSha)}`,
+      { signal: options.signal },
+    );
     if (!response.ok) {
       const error = new Error(`Failed to download artifact: HTTP ${response.status}`);
       error.status = response.status;
       throw error;
     }
-    const data = Buffer.from(await response.arrayBuffer());
-    await fs.writeFile(fullPath, data);
+    await fs.writeFile(fullPath, body);
   }
 
   const file = await describeWorkspaceFile(filesDir, fullPath);
@@ -3648,7 +4596,8 @@ async function inspectWorkflowRunForAgent(context, input = {}) {
     } catch (dynamicError) {
       try {
         const detail = await callMazeCore(`/runs/${encodeURIComponent(runId)}`);
-        return { ok: true, run: await buildDynamicRunDiagnostic(detail.run || { run_id: runId }, options) };
+        const coreRun = requirePublicCoreRun(detail.run || { run_id: runId });
+        return { ok: true, run: await buildDynamicRunDiagnostic(coreRun, options) };
       } catch (coreError) {
         if (kind === 'dynamic') {
           throw new Error(`Dynamic workflow run not found: ${runId}`);
@@ -3975,6 +4924,7 @@ async function executeAgentTool(context, name, input = {}, runtime = {}) {
     try {
       const payload = await callMazeCore('/runs?limit=30&detail=false');
       dynamicRuns = (payload.runs || [])
+        .filter((run) => run?.metadata?.benchmark !== 'gaia')
         .filter((run) => run.status === 'failed' || run.error_summary || run.failure_reason)
         .slice(0, limit)
         .sort((left, right) => Number(right.updated_time || 0) - Number(left.updated_time || 0));
@@ -4548,14 +5498,17 @@ function withStaticRunWriteQueue(workspaceDir, runId, operation) {
   const current = previous
     .catch(() => {})
     .then(operation);
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
 
-  const queued = current.finally(() => {
-    if (staticRunWriteQueues.get(key) === queued) {
+  staticRunWriteQueues.set(key, tail);
+  tail.finally(() => {
+    if (staticRunWriteQueues.get(key) === tail) {
       staticRunWriteQueues.delete(key);
     }
   });
-
-  staticRunWriteQueues.set(key, queued);
 
   return current;
 }
@@ -4582,19 +5535,25 @@ function withSystemWorkflowLoadQueue(workspaceDir, operation) {
 }
 
 async function saveStaticRun(workspaceDir, snapshot) {
-  await writeJsonAtomic(staticRunPath(workspaceDir, snapshot.run_id, { write: true }), {
-    ...snapshot,
-    workspace_id: snapshot.workspace_id || workspaceIdFromDir(workspaceDir),
-  });
+  await writeJsonAtomic(
+    staticRunPath(workspaceDir, snapshot.run_id, { write: true }),
+    {
+      ...snapshot,
+      workspace_id: snapshot.workspace_id || workspaceIdFromDir(workspaceDir),
+    },
+    isGaiaTrace(snapshot) ? { mode: 0o600 } : {},
+  );
 }
 
 async function loadStaticRun(workspaceDir, runId) {
   const raw = await fs.readFile(staticRunPath(workspaceDir, runId), 'utf-8');
-  return JSON.parse(raw);
+  const snapshot = JSON.parse(raw);
+  const events = await loadStaticRunEvents(workspaceDir, runId);
+  return replayStaticRunSnapshot(snapshot, events);
 }
 
 function staticRunSummary(snapshot) {
-  return {
+  const summary = {
     schema: snapshot.schema || 'static_workflow_run',
     schema_version: snapshot.schema_version || 1,
     kind: 'static',
@@ -4622,12 +5581,19 @@ function staticRunSummary(snapshot) {
         }
       : snapshot.final_result,
   };
+  return publicStaticRunSnapshot(summary);
 }
 
 async function appendStaticRunEvent(workspaceDir, runId, event) {
   const runDir = staticRunDir(workspaceDir, runId);
   await fs.mkdir(runDir, { recursive: true });
-  await fs.appendFile(staticRunEventsPath(workspaceDir, runId), `${JSON.stringify(event)}\n`, 'utf-8');
+  const eventsPath = staticRunEventsPath(workspaceDir, runId);
+  await fs.appendFile(
+    eventsPath,
+    `${JSON.stringify(event)}\n`,
+    { encoding: 'utf-8', mode: 0o600 },
+  );
+  await fs.chmod(eventsPath, 0o600);
 }
 
 async function loadStaticRunEvents(workspaceDir, runId, after = null) {
@@ -4643,32 +5609,56 @@ async function loadStaticRunEvents(workspaceDir, runId, after = null) {
     .filter((event) => after === null || Number(event.seq || 0) > Number(after));
 }
 
-async function appendAndApplyStaticRunEvent(workspaceDir, runId, incomingEvent) {
-  return withStaticRunWriteQueue(workspaceDir, runId, async () => {
-    const snapshot = await loadStaticRun(workspaceDir, runId);
-    const nextSeq = Number(snapshot.events?.last_seq || 0) + 1;
-    const event = {
-      ...incomingEvent,
-      schema_version: 1,
-      seq: incomingEvent.seq || nextSeq,
-      timestamp: incomingEvent.timestamp || new Date().toISOString(),
-    };
-    event.data = {
-      ...(event.data || {}),
-      workflow_run_id: runId,
-    };
-
+function replayStaticRunSnapshot(snapshot, events = []) {
+  let count = Number(snapshot.events?.count || 0);
+  let lastSeq = Number(snapshot.events?.last_seq || 0);
+  for (const event of events) {
+    const eventSeq = Number(event.seq || 0);
+    if (!eventSeq || eventSeq <= lastSeq) continue;
     applyStaticRunEvent(snapshot, event);
-    snapshot.events = {
-      count: Number(snapshot.events?.count || 0) + 1,
-      last_seq: Number(event.seq || nextSeq),
-    };
-    snapshot.updated_time = nowEpochSeconds();
+    count += 1;
+    lastSeq = eventSeq;
+    snapshot.updated_time = Math.max(
+      Number(snapshot.updated_time || 0),
+      Date.parse(event.timestamp || '') / 1000 || 0,
+    );
+  }
+  snapshot.events = { count, last_seq: lastSeq };
+  return snapshot;
+}
 
-    await appendStaticRunEvent(workspaceDir, runId, event);
-    await saveStaticRun(workspaceDir, snapshot);
-    return { snapshot, event };
-  });
+async function appendAndApplyStaticRunEventUnlocked(workspaceDir, runId, incomingEvent) {
+  const snapshot = await loadStaticRun(workspaceDir, runId);
+  const nextSeq = Number(snapshot.events?.last_seq || 0) + 1;
+  const event = {
+    ...incomingEvent,
+    schema_version: 1,
+    seq: incomingEvent.seq || nextSeq,
+    timestamp: incomingEvent.timestamp || new Date().toISOString(),
+  };
+  event.data = {
+    ...(event.data || {}),
+    workflow_run_id: runId,
+  };
+
+  applyStaticRunEvent(snapshot, event);
+  snapshot.events = {
+    count: Number(snapshot.events?.count || 0) + 1,
+    last_seq: Number(event.seq || nextSeq),
+  };
+  snapshot.updated_time = nowEpochSeconds();
+
+  await appendStaticRunEvent(workspaceDir, runId, event);
+  await saveStaticRun(workspaceDir, snapshot);
+  return { snapshot, event };
+}
+
+async function appendAndApplyStaticRunEvent(workspaceDir, runId, incomingEvent) {
+  return withStaticRunWriteQueue(
+    workspaceDir,
+    runId,
+    () => appendAndApplyStaticRunEventUnlocked(workspaceDir, runId, incomingEvent),
+  );
 }
 
 function applyStaticRunEvent(snapshot, event) {
@@ -4736,8 +5726,31 @@ function applyStaticRunEvent(snapshot, event) {
     snapshot.status = 'failed';
     snapshot.finished_time = snapshot.finished_time || eventTime;
     snapshot.error = node.error;
+  } else if (event.type === 'benchmark_submission_started') {
+    if (snapshot.gaia_private) {
+      snapshot.gaia_private.submission_state = 'submitting';
+    }
   } else if (event.type === 'maze_run_created') {
     snapshot.maze_run_id = data.maze_run_id || snapshot.maze_run_id;
+    if (snapshot.metadata?.benchmark === 'gaia') {
+      snapshot.metadata.maze_run_id = snapshot.maze_run_id;
+      if (snapshot.gaia_private) {
+        snapshot.gaia_private.submission_state = 'bound';
+      }
+    }
+  } else if (
+    Object.values(GAIA_TERMINAL_EVENTS).some(({ type }) => type === event.type)
+    && !TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)
+  ) {
+    const terminal = Object.values(GAIA_TERMINAL_EVENTS).find(({ type }) => type === event.type);
+    snapshot.status = terminal.status;
+    snapshot.finished_time = snapshot.finished_time || eventTime;
+  } else if (event.type === 'benchmark_submission_failed' && !TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+    snapshot.status = 'failed';
+    snapshot.finished_time = snapshot.finished_time || eventTime;
+    if (snapshot.gaia_private) {
+      snapshot.gaia_private.submission_state = 'failed';
+    }
   }
 
   recomputeStaticRunTaskCounts(snapshot);
@@ -4752,7 +5765,15 @@ async function listStaticRunFiles(dir, options = {}) {
     const runPath = path.join(dir, entry.name, 'run.json');
     try {
       const raw = await fs.readFile(runPath, 'utf-8');
-      const snapshot = JSON.parse(raw);
+      const eventsRaw = await fs.readFile(path.join(dir, entry.name, 'events.jsonl'), 'utf-8').catch((error) => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      const events = eventsRaw
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const snapshot = replayStaticRunSnapshot(JSON.parse(raw), events);
       runs.push(summary ? staticRunSummary(snapshot) : snapshot);
     } catch {
       // Ignore malformed run records in the list view.
@@ -4865,6 +5886,14 @@ async function listArtifactBlobFiles() {
 
 async function cleanupWorkspaceArtifacts(workspaceDir, options = {}) {
   const dryRun = options.dryRun !== false;
+  if (!dryRun) {
+    const error = new Error(
+      'Destructive artifact cleanup is disabled; Maze Core owns CAS references and deletion',
+    );
+    error.status = 403;
+    error.code = 'CORE_OWNED_ARTIFACT_CLEANUP';
+    throw error;
+  }
   const olderThanDays = options.olderThanDays === null || options.olderThanDays === undefined
     ? 7
     : Number(options.olderThanDays);
@@ -4893,19 +5922,13 @@ async function cleanupWorkspaceArtifacts(workspaceDir, options = {}) {
   }
 
   const deletedSha256 = [];
-  if (!dryRun) {
-    for (const item of candidates) {
-      await fs.unlink(artifactBlobPath(item.sha256)).catch((error) => {
-        if (error.code !== 'ENOENT') throw error;
-      });
-      deletedSha256.push(item.sha256);
-    }
-  }
 
   return {
     dry_run: dryRun,
     older_than_days: olderThanDays,
     scope: 'global-orphan-cas',
+    deletion_owner: 'maze-core',
+    destructive_cleanup_enabled: false,
     referenced_count: referenced.size,
     matched_count: candidates.length,
     deleted_count: deletedSha256.length,
@@ -4914,14 +5937,12 @@ async function cleanupWorkspaceArtifacts(workspaceDir, options = {}) {
   };
 }
 
-async function recoverInterruptedStaticRuns(workspaceDir) {
-  if (recoveredStaticRunWorkspaces.has(workspaceDir)) {
-    return;
-  }
-  recoveredStaticRunWorkspaces.add(workspaceDir);
-
+async function recoverStaticRunsInWorkspace(workspaceDir) {
   const runs = await listStaticRunFilesForWorkspace(workspaceDir);
-  const staleRuns = runs.filter((run) => run.status === 'running');
+  const staleRuns = runs.filter((run) => (
+    run.status === 'running' && run.metadata?.benchmark !== 'gaia'
+  ));
+  let recoveryError = null;
   for (const run of staleRuns) {
     try {
       await appendAndApplyStaticRunEvent(workspaceDir, run.run_id, {
@@ -4935,8 +5956,95 @@ async function recoverInterruptedStaticRuns(workspaceDir) {
       console.log(`↯ Static workflow run interrupted after backend restart: ${run.run_id}`);
     } catch (error) {
       console.error(`❌ 恢复 static workflow run 失败: ${run.run_id}`, error);
+      recoveryError = recoveryError || error;
     }
   }
+
+  const allGaiaRuns = runs.filter((run) => run.metadata?.benchmark === 'gaia');
+  for (const run of allGaiaRuns) {
+    try {
+      await cleanupRecoveredGaiaStaging(workspaceDir, run.run_id);
+    } catch (error) {
+      console.error(`Failed to clean recovered GAIA staging for ${run.run_id}:`, error.message);
+      recoveryError = recoveryError || error;
+    }
+  }
+
+  const activeGaiaRuns = allGaiaRuns.filter((run) => !TERMINAL_STATIC_RUN_STATUSES.has(run.status));
+  if (activeGaiaRuns.length) {
+    const coreRuns = await listCoreStaticRuns();
+    for (const run of activeGaiaRuns) {
+      try {
+        await withStaticRunWriteQueue(
+          workspaceDir,
+          run.run_id,
+          () => reconcileGaiaTraceUnlocked(
+            workspaceDir,
+            run.run_id,
+            coreRuns,
+            { markMissing: run.gaia_private?.submission_state === 'bound' },
+          ),
+        );
+      } catch (error) {
+        console.error(`Failed to reconcile GAIA Playground run ${run.run_id}:`, error);
+        recoveryError = recoveryError || error;
+      }
+    }
+  }
+
+  if (recoveryError) {
+    throw recoveryError;
+  }
+}
+
+function recoverInterruptedStaticRuns(workspaceDir) {
+  const key = path.resolve(workspaceDir);
+  const existing = recoveredStaticRunWorkspaces.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  let recovery;
+  recovery = recoverStaticRunsInWorkspace(key).catch((error) => {
+    if (recoveredStaticRunWorkspaces.get(key) === recovery) {
+      recoveredStaticRunWorkspaces.delete(key);
+    }
+    console.error(`Static workflow recovery remains retryable for ${key}:`, error.message);
+  });
+  recoveredStaticRunWorkspaces.set(key, recovery);
+  return recovery;
+}
+
+async function reconcileActiveGaiaRunsOnRead(workspaceDir, runs) {
+  const activeRuns = (runs || []).filter((run) => (
+    isGaiaTrace(run) && !TERMINAL_STATIC_RUN_STATUSES.has(run.status)
+  ));
+  if (!activeRuns.length) return false;
+
+  let coreRuns;
+  try {
+    coreRuns = await listCoreStaticRuns();
+  } catch (error) {
+    console.error('GAIA read reconciliation remains retryable:', error.message);
+    return false;
+  }
+  for (const run of activeRuns) {
+    try {
+      await withStaticRunWriteQueue(
+        workspaceDir,
+        run.run_id,
+        () => reconcileGaiaTraceUnlocked(
+          workspaceDir,
+          run.run_id,
+          coreRuns,
+          { markMissing: run.gaia_private?.submission_state === 'bound' },
+        ),
+      );
+    } catch (error) {
+      console.error(`GAIA read reconciliation failed for ${run.run_id}:`, error.message);
+    }
+  }
+  return true;
 }
 
 async function migrateLegacyStaticRuns(workspaceDir, { dryRun = true } = {}) {
@@ -5194,36 +6302,160 @@ async function hydrateWorkspaceWorkflowNodes(nodes, workspaceDir, taskDefinition
   }));
 }
 
-async function callMazeCore(pathname, options = {}) {
-  const url = `${MAZE_CORE_URL}${pathname}`;
-  const response = await fetch(url, {
-    method: options.method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+function createClientDisconnectAbort(req, res) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const abortOnResponseClose = () => {
+    if (!res.writableEnded) {
+      controller.abort();
+    }
+  };
 
-  const text = await response.text();
-  let payload = {};
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = { error: text };
+  if (req.aborted || res.destroyed) {
+    controller.abort();
+  } else {
+    req.once('aborted', abort);
+    res.once('close', abortOnResponseClose);
+  }
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      req.off('aborted', abort);
+      res.off('close', abortOnResponseClose);
+    },
+  };
+}
+
+async function fetchMazeCoreBody(pathname, options = {}) {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', abortFromExternal, { once: true });
     }
   }
 
-  if (!response.ok) {
-    const message = payload?.detail || payload?.error || `Maze core request failed: ${response.status}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.payload = payload;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, MAZE_CORE_REQUEST_TIMEOUT_MS);
+  timeout.unref?.();
+
+  try {
+    const response = await fetch(`${MAZE_CORE_URL}${pathname}`, {
+      signal: controller.signal,
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    return { response, body };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const requestError = new Error(
+        timedOut
+          ? `Maze Core request timed out after ${MAZE_CORE_REQUEST_TIMEOUT_MS}ms`
+          : 'Maze Core request was canceled',
+      );
+      requestError.status = timedOut ? 504 : 499;
+      requestError.code = timedOut ? 'MAZE_CORE_TIMEOUT' : 'MAZE_CORE_ABORTED';
+      throw requestError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', abortFromExternal);
+    }
+  }
+}
+
+async function callMazeCore(pathname, options = {}) {
+  const url = `${MAZE_CORE_URL}${pathname}`;
+  const timeoutMs = Math.min(
+    MAZE_CORE_REQUEST_TIMEOUT_MS,
+    Math.max(100, Number(options.timeoutMs) || MAZE_CORE_REQUEST_TIMEOUT_MS),
+  );
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+    }
+  }
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  timeout.unref?.();
+
+  try {
+    const response = await fetch(url, {
+      method: options.method || 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    let payload = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = { error: text };
+      }
+    }
+
+    if (!response.ok) {
+      const message = payload?.detail || payload?.error || `Maze core request failed: ${response.status}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const requestError = new Error(
+        timedOut
+          ? `Maze Core request timed out after ${timeoutMs}ms`
+          : 'Maze Core request was canceled',
+      );
+      requestError.status = timedOut ? 504 : 499;
+      requestError.code = timedOut ? 'MAZE_CORE_TIMEOUT' : 'MAZE_CORE_ABORTED';
+      throw requestError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', abortFromExternal);
+    }
+  }
+}
+
+function requirePublicCoreRun(coreRun) {
+  if (coreRun?.metadata?.benchmark === 'gaia') {
+    const error = new Error('Run not found');
+    error.status = 404;
     throw error;
   }
+  return coreRun;
+}
 
-  return payload;
+async function requirePublicCoreRunId(runId) {
+  return requirePublicCoreRun(await loadCoreRun(runId));
 }
 
 // ========== Python 桥接函数 ==========
@@ -6399,16 +7631,24 @@ app.post('/api/workspace-files/upload', async (req, res) => {
 });
 
 app.post('/api/artifacts/promote', async (req, res) => {
+  const clientRequest = createClientDisconnectAbort(req, res);
   try {
     const {
       workspaceId,
       workspaceDir: requestedWorkspaceDir,
     } = req.body || {};
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    res.json(await promoteArtifactIntoWorkspace(context, req.body || {}));
+    res.json(await promoteArtifactIntoWorkspace(
+      context,
+      req.body || {},
+      { signal: clientRequest.signal },
+    ));
   } catch (error) {
     console.error('❌ Promote artifact 失败:', error);
+    if (res.destroyed) return;
     res.status(error.status || 500).json({ error: error.message });
+  } finally {
+    clientRequest.dispose();
   }
 });
 
@@ -6432,7 +7672,7 @@ app.post('/api/artifacts/cleanup', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 清理 artifacts 失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -6950,7 +8190,7 @@ app.get('/api/runs', async (req, res) => {
     const result = await callMazeCore(`/runs${query ? `?${query}` : ''}`);
     res.json({
       success: true,
-      runs: result.runs || [],
+      runs: (result.runs || []).filter((run) => run?.metadata?.benchmark !== 'gaia'),
     });
   } catch (error) {
     console.error('Failed to get runs:', error);
@@ -7173,8 +8413,17 @@ app.get('/api/cluster/resources', async (req, res) => {
 
 app.get('/api/cluster/queues', async (req, res) => {
   try {
-    const result = await callMazeCore('/cluster/queues');
-    res.json(result);
+    const [result, coreRuns] = await Promise.all([
+      callMazeCore('/cluster/queues'),
+      listCoreStaticRuns(),
+    ]);
+    const gaiaRunIds = new Set(
+      coreRuns
+        .filter((run) => run?.metadata?.benchmark === 'gaia')
+        .map((run) => String(run.run_id || ''))
+        .filter(Boolean),
+    );
+    res.json(redactGaiaRunIdentifiers(result, gaiaRunIds));
   } catch (error) {
     console.error('Failed to get cluster queues:', error);
     res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster queues' });
@@ -7247,7 +8496,7 @@ app.get('/api/runs/:runId', async (req, res) => {
     const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}`);
     res.json({
       success: true,
-      run: result.run,
+      run: requirePublicCoreRun(result.run),
     });
   } catch (error) {
     console.error('Failed to get run:', error);
@@ -7257,6 +8506,7 @@ app.get('/api/runs/:runId', async (req, res) => {
 
 app.get('/api/runs/:runId/tasks', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/tasks`);
     res.json({
       success: true,
@@ -7271,6 +8521,7 @@ app.get('/api/runs/:runId/tasks', async (req, res) => {
 
 app.get('/api/runs/:runId/tasks/:taskId', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(
       `/runs/${encodeURIComponent(req.params.runId)}/tasks/${encodeURIComponent(req.params.taskId)}`
     );
@@ -7287,6 +8538,7 @@ app.get('/api/runs/:runId/tasks/:taskId', async (req, res) => {
 
 app.get('/api/runs/:runId/events', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const params = new URLSearchParams();
     if (req.query.after !== undefined) params.set('after', String(req.query.after));
     const query = params.toString();
@@ -7304,6 +8556,7 @@ app.get('/api/runs/:runId/events', async (req, res) => {
 
 app.get('/api/runs/:runId/logs', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const params = new URLSearchParams();
     if (req.query.tail !== undefined) params.set('tail', String(req.query.tail));
     if (req.query.taskId !== undefined) params.set('task_id', String(req.query.taskId));
@@ -7324,6 +8577,7 @@ app.get('/api/runs/:runId/logs', async (req, res) => {
 
 app.get('/api/runs/:runId/artifacts', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/artifacts`);
     res.json({
       success: true,
@@ -7338,6 +8592,7 @@ app.get('/api/runs/:runId/artifacts', async (req, res) => {
 
 app.get('/api/runs/:runId/tasks/:taskId/artifacts', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(
       `/runs/${encodeURIComponent(req.params.runId)}/tasks/${encodeURIComponent(req.params.taskId)}/artifacts`
     );
@@ -7367,26 +8622,33 @@ app.get('/api/artifacts/sha256/:sha256/metadata', async (req, res) => {
 });
 
 app.get('/api/artifacts/sha256/:sha256', async (req, res) => {
+  const clientRequest = createClientDisconnectAbort(req, res);
   try {
-    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(req.params.sha256)}`);
+    const { response, body } = await fetchMazeCoreBody(
+      `/artifacts/sha256/${encodeURIComponent(req.params.sha256)}`,
+      { signal: clientRequest.signal },
+    );
     if (!response.ok) {
-      const message = await response.text();
+      const message = body.toString('utf-8');
       return res.status(response.status).send(message || `Maze core request failed: ${response.status}`);
     }
     const contentType = response.headers.get('content-type') || 'application/octet-stream';
     const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `${disposition}; filename="${req.params.sha256}"`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.send(buffer);
+    res.send(body);
   } catch (error) {
     console.error('Failed to download artifact:', error);
+    if (res.destroyed) return;
     res.status(error.status || 500).json({ error: error.message || 'Failed to download artifact' });
+  } finally {
+    clientRequest.dispose();
   }
 });
 
 app.post('/api/runs/:runId/cancel', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/cancel`, {
       method: 'POST',
       body: req.body || {},
@@ -7404,6 +8666,7 @@ app.post('/api/runs/:runId/cancel', async (req, res) => {
 
 app.post('/api/runs/:runId/retry', async (req, res) => {
   try {
+    await requirePublicCoreRunId(req.params.runId);
     const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/retry`, {
       method: 'POST',
       body: req.body || {},
@@ -8217,13 +9480,389 @@ app.post('/api/mcp/discover', async (req, res) => {
   }
 });
 
-// 1.8 Static workflow run history
+// 1.8 GAIA benchmark submission and public trace
+app.post('/api/benchmarks/gaia/runs', async (req, res) => {
+  const body = req.body || {};
+  const workflow = String(body.workflow || '').trim();
+  const sampleRef = String(body.sampleRef || body.sample_ref || '').trim();
+  const mazeWorkflowId = String(body.mazeWorkflowId || body.maze_workflow_id || '').trim();
+  const timeoutSeconds = Number(body.timeoutSeconds ?? body.timeout_seconds);
+  const inputs = body.inputs;
+  const finalOutputRefs = body.finalOutputRefs ?? body.final_output_refs;
+
+  if (!GAIA_TRACE_WORKFLOWS.has(workflow)) {
+    return res.status(400).json({ error: 'workflow must be reason or file' });
+  }
+  if (!GAIA_SAMPLE_REF_PATTERN.test(sampleRef)) {
+    return res.status(400).json({ error: 'sampleRef must be an opaque GAIA sample reference' });
+  }
+  if (!mazeWorkflowId || mazeWorkflowId.length > 200) {
+    return res.status(400).json({ error: 'mazeWorkflowId is required' });
+  }
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return res.status(400).json({ error: 'inputs must be an object' });
+  }
+  if (!finalOutputRefs || typeof finalOutputRefs !== 'object' || Array.isArray(finalOutputRefs)) {
+    return res.status(400).json({ error: 'finalOutputRefs must be an object' });
+  }
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+    return res.status(400).json({ error: 'timeoutSeconds must be positive' });
+  }
+  let context;
+  let submissionToken;
+  let executionFile;
+  try {
+    context = await resolveGaiaWorkspaceContext(body, { includeExecutionWorkspace: true });
+    submissionToken = normalizeGaiaSubmissionToken(
+      body.submissionToken || body.submission_token,
+    );
+    executionFile = validateGaiaExecutionFile(
+      workflow,
+      body.executionFile ?? body.execution_file,
+    );
+    if (
+      executionFile
+      && String(inputs.supplementary_path || '') !== executionFile.name
+    ) {
+      const error = new Error('inputs.supplementary_path must match executionFile.name');
+      error.status = 400;
+      throw error;
+    }
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+
+  const submissionFingerprint = gaiaSubmissionFingerprint({
+    workflow,
+    sampleRef,
+    workspaceId: context.workspaceId,
+    mazeWorkflowId,
+    timeoutSeconds,
+    inputs,
+    finalOutputRefs,
+    executionFile,
+  });
+  const idempotencyKey = gaiaCoreIdempotencyKey(submissionToken);
+
+  try {
+    const outcome = await withStaticRunWriteQueue(
+      context.workspaceDir,
+      `gaia-sample:${sampleRef}`,
+      async () => {
+        const existing = await findGaiaTraceBySampleRef(context.workspaceDir, sampleRef);
+        let snapshot = existing;
+        let isExisting = Boolean(existing);
+        if (existing) {
+          requireGaiaSubmissionToken(existing, submissionToken);
+          if (
+            existing.gaia_private?.submission_fingerprint !== submissionFingerprint
+            || existing.gaia_private?.idempotency_key !== idempotencyKey
+          ) {
+            const error = new Error('GAIA sample reference was already used for a different submission');
+            error.status = 409;
+            throw error;
+          }
+
+          if (!snapshot.maze_run_id && !TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+            try {
+              snapshot = await withStaticRunWriteQueue(
+                context.workspaceDir,
+                snapshot.run_id,
+                async () => reconcileGaiaTraceUnlocked(
+                  context.workspaceDir,
+                  snapshot.run_id,
+                  await listCoreStaticRuns(),
+                  { markMissing: false },
+                ),
+              );
+            } catch (error) {
+              console.error(`GAIA pre-submit reconciliation remains retryable for ${snapshot.run_id}:`, error.message);
+            }
+          }
+          if (snapshot.maze_run_id || TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+            if (!snapshot.maze_run_id) {
+              const error = new Error('Maze workflow submission previously failed');
+              error.status = snapshot.status === 'failed' ? 502 : 409;
+              error.playgroundRunId = snapshot.run_id;
+              error.mazeRunId = null;
+              throw error;
+            }
+            return {
+              statusCode: 200,
+              payload: {
+                success: true,
+                idempotent: true,
+                ...gaiaTraceResponse(snapshot, { includeMazeRunId: true }),
+              },
+            };
+          }
+        } else {
+          isExisting = false;
+          const playgroundRunId = uuidv4();
+          snapshot = createGaiaTraceSnapshot({
+            runId: playgroundRunId,
+            workflow,
+            sampleRef,
+            context,
+            mazeWorkflowId,
+            submissionTokenHash: sha256Text(submissionToken),
+            idempotencyKey,
+            submissionFingerprint,
+          });
+          try {
+            await ensureGaiaRunDirectory(context.workspaceDir, playgroundRunId);
+            await saveStaticRun(context.workspaceDir, snapshot);
+            ({ snapshot } = await appendAndApplyStaticRunEvent(
+              context.workspaceDir,
+              playgroundRunId,
+              {
+                type: 'workflow_started',
+                data: {},
+                timestamp: new Date().toISOString(),
+              },
+            ));
+          } catch (error) {
+            console.error('Failed to persist GAIA Playground run before submission');
+            const persistError = new Error('Failed to persist Playground run');
+            persistError.status = 500;
+            throw persistError;
+          }
+        }
+
+        const submission = await submitGaiaTraceToCore({
+          context,
+          snapshot,
+          inputs,
+          finalOutputRefs,
+          timeoutSeconds,
+          executionFile,
+        });
+        return {
+          statusCode: isExisting ? 200 : 201,
+          payload: {
+            success: true,
+            ...(isExisting ? { idempotent: true } : {}),
+            ...(submission.recovered ? { recovered: true } : {}),
+            ...gaiaTraceResponse(submission.snapshot, { includeMazeRunId: true }),
+          },
+        };
+      },
+    );
+    return res.status(outcome.statusCode).json(outcome.payload);
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      error: error.message,
+      ...(error.playgroundRunId ? { playgroundRunId: error.playgroundRunId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(error, 'mazeRunId')
+        ? { mazeRunId: error.mazeRunId }
+        : {}),
+    });
+  }
+});
+
+app.post('/api/benchmarks/gaia/runs/lookup', async (req, res) => {
+  const body = req.body || {};
+  const sampleRef = String(body.sampleRef || body.sample_ref || '').trim();
+  if (!GAIA_SAMPLE_REF_PATTERN.test(sampleRef)) {
+    return res.status(400).json({ error: 'sampleRef must be an opaque GAIA sample reference' });
+  }
+  try {
+    const context = await resolveGaiaWorkspaceContext(body);
+    const submissionToken = normalizeGaiaSubmissionToken(
+      body.submissionToken || body.submission_token,
+    );
+    const existing = await findGaiaTraceBySampleRef(context.workspaceDir, sampleRef);
+    if (!existing) {
+      return res.status(404).json({ error: 'GAIA Playground run not found' });
+    }
+    requireGaiaSubmissionToken(existing, submissionToken);
+    let snapshot = existing;
+    if (!TERMINAL_STATIC_RUN_STATUSES.has(snapshot.status)) {
+      snapshot = await withStaticRunWriteQueue(
+        context.workspaceDir,
+        snapshot.run_id,
+        async () => reconcileGaiaTraceUnlocked(
+          context.workspaceDir,
+          snapshot.run_id,
+          await listCoreStaticRuns(),
+          { markMissing: false },
+        ),
+      );
+    }
+    return res.json({
+      success: true,
+      ...gaiaTraceResponse(snapshot, { includeMazeRunId: true }),
+    });
+  } catch (error) {
+    return res.status(error.status || statusForFileError(error)).json({ error: error.message });
+  }
+});
+
+app.post('/api/benchmarks/gaia/runs/:runId/finish', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const context = await resolveGaiaWorkspaceContext(body);
+    const expectedStatus = String(body.status || '').trim().toLowerCase();
+    const expectedTerminal = expectedStatus ? GAIA_TERMINAL_EVENTS[expectedStatus] : null;
+    if (expectedStatus && !expectedTerminal) {
+      return res.status(400).json({ error: 'status is not a terminal Maze run status' });
+    }
+    const snapshot = await withStaticRunWriteQueue(
+      context.workspaceDir,
+      req.params.runId,
+      async () => {
+        let current = requireGaiaTraceRun(
+          await loadStaticRun(context.workspaceDir, req.params.runId),
+        );
+        requireGaiaSubmissionToken(current, body.submissionToken || body.submission_token);
+        current = await ensureGaiaTraceMappingUnlocked(context.workspaceDir, req.params.runId);
+        const coreRun = requireMappedCoreGaiaRun(
+          current,
+          await loadCoreRun(current.maze_run_id),
+        );
+        const actualTerminal = gaiaTerminalForCoreStatus(coreRun.status);
+        if (!actualTerminal) {
+          const error = new Error('Maze run is not terminal');
+          error.status = 409;
+          throw error;
+        }
+        if (expectedTerminal && expectedTerminal.status !== actualTerminal.status) {
+          const error = new Error('Maze run terminal status does not match the expected status');
+          error.status = 409;
+          throw error;
+        }
+        if (TERMINAL_STATIC_RUN_STATUSES.has(current.status)) {
+          if (!gaiaLocalStatusMatchesCoreTerminal(current, actualTerminal)) {
+            const error = new Error('Playground and Maze terminal statuses conflict');
+            error.status = 409;
+            throw error;
+          }
+          return current;
+        }
+        ({ snapshot: current } = await appendAndApplyStaticRunEventUnlocked(
+          context.workspaceDir,
+          current.run_id,
+          {
+            type: actualTerminal.type,
+            data: {},
+            timestamp: new Date().toISOString(),
+          },
+        ));
+        return current;
+      },
+    );
+    res.json({ success: true, ...gaiaTraceResponse(snapshot) });
+  } catch (error) {
+    res.status(error.status || statusForFileError(error)).json({ error: error.message });
+  }
+});
+
+app.post('/api/benchmarks/gaia/runs/:runId/cancel', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const context = await resolveGaiaWorkspaceContext(body);
+    const requestedOutcome = String(body.outcome || 'canceled').trim().toLowerCase();
+    if (!['canceled', 'cancelled', 'timed_out'].includes(requestedOutcome)) {
+      return res.status(400).json({ error: 'outcome must be canceled or timed_out' });
+    }
+    const outcome = await withStaticRunWriteQueue(
+      context.workspaceDir,
+      req.params.runId,
+      async () => {
+        let current = requireGaiaTraceRun(
+          await loadStaticRun(context.workspaceDir, req.params.runId),
+        );
+        requireGaiaSubmissionToken(current, body.submissionToken || body.submission_token);
+        current = await ensureGaiaTraceMappingUnlocked(context.workspaceDir, req.params.runId);
+        let coreRun = requireMappedCoreGaiaRun(
+          current,
+          await loadCoreRun(current.maze_run_id),
+        );
+        let actualTerminal = gaiaTerminalForCoreStatus(coreRun.status);
+        let cancellationRequested = false;
+
+        if (TERMINAL_STATIC_RUN_STATUSES.has(current.status)) {
+          if (!actualTerminal || !gaiaLocalStatusMatchesCoreTerminal(current, actualTerminal)) {
+            const error = new Error('Playground and Maze terminal statuses conflict');
+            error.status = 409;
+            throw error;
+          }
+          return { snapshot: current, pending: false };
+        }
+
+        if (!actualTerminal) {
+          cancellationRequested = true;
+          let cancellationError = null;
+          try {
+            await callMazeCore(`/runs/${encodeURIComponent(current.maze_run_id)}/cancel`, {
+              method: 'POST',
+              body: {
+                reason: requestedOutcome === 'timed_out'
+                  ? 'GAIA validation timeout'
+                  : 'GAIA validation canceled',
+              },
+            });
+          } catch (error) {
+            cancellationError = error;
+            console.error(`Maze cancellation failed for Playground run ${current.run_id}`);
+          }
+          try {
+            coreRun = requireMappedCoreGaiaRun(
+              current,
+              await loadCoreRun(current.maze_run_id),
+            );
+          } catch (error) {
+            if (!cancellationError) throw error;
+            const cancelError = new Error('Maze run cancellation could not be verified');
+            cancelError.status = 502;
+            throw cancelError;
+          }
+          actualTerminal = gaiaTerminalForCoreStatus(coreRun.status);
+          if (!actualTerminal) {
+            if (cancellationError) {
+              const cancelError = new Error('Maze run cancellation failed');
+              cancelError.status = 502;
+              throw cancelError;
+            }
+            return { snapshot: current, pending: true };
+          }
+        }
+
+        const terminal = (
+          cancellationRequested
+          && requestedOutcome === 'timed_out'
+          && actualTerminal.status === 'canceled'
+        ) ? GAIA_TERMINAL_EVENTS.timed_out : actualTerminal;
+        ({ snapshot: current } = await appendAndApplyStaticRunEventUnlocked(
+          context.workspaceDir,
+          current.run_id,
+          {
+            type: terminal.type,
+            data: {},
+            timestamp: new Date().toISOString(),
+          },
+        ));
+        return { snapshot: current, pending: false };
+      },
+    );
+    res.status(outcome.pending ? 202 : 200).json({
+      success: true,
+      ...gaiaTraceResponse(outcome.snapshot),
+    });
+  } catch (error) {
+    res.status(error.status || statusForFileError(error)).json({ error: error.message });
+  }
+});
+
+// 1.9 Static workflow run history
 app.get('/api/workflow-runs/static', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
     const workspaceDir = context.workspaceDir;
     const status = req.query.status ? String(req.query.status) : null;
     const limit = req.query.limit ? Number(req.query.limit) : null;
+    const fullRuns = await listStaticRunFilesForWorkspace(workspaceDir);
+    await reconcileActiveGaiaRunsOnRead(workspaceDir, fullRuns);
     let runs = await listStaticRunFilesForWorkspace(workspaceDir, { summary: true });
     if (status) {
       runs = runs.filter((run) => run.status === status);
@@ -8232,7 +9871,13 @@ app.get('/api/workflow-runs/static', async (req, res) => {
     if (Number.isFinite(limit)) {
       runs = runs.slice(0, Math.max(0, limit));
     }
-    res.json({ success: true, ...workspaceResponseFields(context), runs });
+    const responseWorkspaceFields = fullRuns.some(isGaiaTrace)
+      ? {
+          workspaceId: context.workspaceId,
+          workspaceManifestVersion: context.workspaceManifestVersion,
+        }
+      : workspaceResponseFields(context);
+    res.json({ success: true, ...responseWorkspaceFields, runs });
   } catch (error) {
     console.error('❌ 获取 static workflow runs 失败:', error);
     res.status(500).json({ error: error.message });
@@ -8243,8 +9888,15 @@ app.get('/api/workflow-runs/static/:runId', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
     const workspaceDir = context.workspaceDir;
-    const run = await loadStaticRun(workspaceDir, req.params.runId);
-    res.json({ success: true, ...workspaceResponseFields(context), run });
+    let run = await loadStaticRun(workspaceDir, req.params.runId);
+    if (await reconcileActiveGaiaRunsOnRead(workspaceDir, [run])) {
+      run = await loadStaticRun(workspaceDir, req.params.runId);
+    }
+    res.json({
+      success: true,
+      ...publicStaticRunWorkspaceFields(context, run),
+      run: publicStaticRunSnapshot(run),
+    });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -8261,9 +9913,17 @@ app.get('/api/workflow-runs/static/:runId/events', async (req, res) => {
     const context = await resolveWorkspaceContext(req.query);
     const workspaceDir = context.workspaceDir;
     const after = req.query.after !== undefined ? Number(req.query.after) : null;
-    await loadStaticRun(workspaceDir, req.params.runId);
+    let run = await loadStaticRun(workspaceDir, req.params.runId);
+    if (await reconcileActiveGaiaRunsOnRead(workspaceDir, [run])) {
+      run = await loadStaticRun(workspaceDir, req.params.runId);
+    }
     const events = await loadStaticRunEvents(workspaceDir, req.params.runId, after);
-    res.json({ success: true, ...workspaceResponseFields(context), runId: req.params.runId, events });
+    res.json({
+      success: true,
+      ...publicStaticRunWorkspaceFields(context, run),
+      runId: req.params.runId,
+      events: events.map((event) => publicStaticRunEvent(run, event)),
+    });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -8276,6 +9936,7 @@ app.get('/api/workflow-runs/static/:runId/events', async (req, res) => {
 });
 
 app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) => {
+  const clientRequest = createClientDisconnectAbort(req, res);
   try {
     const context = await resolveWorkspaceContext(req.query);
     const workspaceDir = context.workspaceDir;
@@ -8312,18 +9973,23 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
       return res.status(404).json({ error: 'Artifact storage path not found' });
     }
 
-    const response = await fetch(`${MAZE_CORE_URL}/artifacts/sha256/${encodeURIComponent(artifact.sha256)}`);
+    const { response, body } = await fetchMazeCoreBody(
+      `/artifacts/sha256/${encodeURIComponent(artifact.sha256)}`,
+      { signal: clientRequest.signal },
+    );
     if (!response.ok) {
       return res.status(response.status).json({ error: `Failed to download artifact: HTTP ${response.status}` });
     }
-    const data = Buffer.from(await response.arrayBuffer());
     const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
     res.setHeader('Content-Type', artifact.mime || 'application/octet-stream');
     res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(artifact.name || path.basename(artifact.path || 'artifact'))}"`);
-    res.send(data);
+    res.send(body);
   } catch (error) {
     console.error('❌ 下载 static workflow artifact 失败:', error);
+    if (res.destroyed) return;
     res.status(statusForFileError(error)).json({ error: error.message });
+  } finally {
+    clientRequest.dispose();
   }
 });
 
@@ -8339,7 +10005,12 @@ app.delete('/api/workflow-runs/static/:runId', async (req, res) => {
       return res.status(400).json({ error: 'Only terminal workflow runs can be deleted' });
     }
     await fs.rm(staticRunDir(workspaceDir, req.params.runId), { recursive: true, force: true });
-    res.json({ success: true, ...workspaceResponseFields(context), runId: req.params.runId, deleted: true });
+    res.json({
+      success: true,
+      ...publicStaticRunWorkspaceFields(context, run),
+      runId: req.params.runId,
+      deleted: true,
+    });
   } catch (error) {
     const status = statusForFileError(error);
     if (status === 404) {
@@ -8356,7 +10027,7 @@ app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
     const {
       workspaceId,
       workspaceDir: requestedWorkspaceDir,
-      statuses = ['completed', 'failed', 'canceled', 'interrupted'],
+      statuses = ['completed', 'failed', 'canceled', 'timed_out', 'interrupted'],
       older_than_days: olderThanDays = 7,
       keep_latest: keepLatestRaw,
       keepLatest,
@@ -8388,16 +10059,22 @@ app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
       }
     }
 
+    const responseWorkspaceFields = runs.some(isGaiaTrace)
+      ? {
+          workspaceId: context.workspaceId,
+          workspaceManifestVersion: context.workspaceManifestVersion,
+        }
+      : workspaceResponseFields(context);
     res.json({
       success: true,
-      ...workspaceResponseFields(context),
+      ...responseWorkspaceFields,
       cleanup: {
         dry_run: dryRun,
         keep_latest: Number.isFinite(keepLatestCount) && keepLatestCount > 0 ? keepLatestCount : null,
         older_than_days: olderThanDays,
         matched_count: runs.length,
         deleted_count: deletedRunIds.length,
-        runs,
+        runs: runs.map((run) => publicStaticRunSnapshot(run)),
         deleted_run_ids: deletedRunIds,
       },
     });
@@ -8824,7 +10501,7 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-(async () => {
+if (process.env.MAZE_PLAYGROUND_NO_LISTEN !== '1') (async () => {
   try {
     const interrupted = await markInterruptedAgentRunsOnStartup();
     if (interrupted > 0) {
@@ -8846,6 +10523,14 @@ const PORT = process.env.PORT || 3001;
     console.log('\n📡 等待前端连接...\n');
   });
 })();
+
+export const __artifactSecurityTestHooks = Object.freeze({
+  cleanupRecoveredGaiaStaging,
+  cleanupWorkspaceArtifacts,
+  ensureManagedGaiaWorkspaceContext,
+  requirePrivateGaiaStagingRoot,
+  stageGaiaExecutionFile,
+});
 
 // 优雅关闭
 process.on('SIGINT', () => {

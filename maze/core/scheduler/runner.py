@@ -106,7 +106,20 @@ def _wrap_with_envelope(raw_output, started_at, finished_at, reported_metrics):
     nesting envelopes.
     """
     if is_task_error_result(raw_output):
-        return raw_output
+        envelope = dict(raw_output)
+        envelope.setdefault("started_at", started_at)
+        envelope.setdefault("finished_at", finished_at)
+        envelope.setdefault(
+            "duration_ms",
+            int((finished_at - started_at) * 1000),
+        )
+        merged_metrics = _merge_metrics(
+            envelope.get("metrics"),
+            reported_metrics,
+        )
+        if merged_metrics:
+            envelope["metrics"] = merged_metrics
+        return envelope
 
     user_metrics = {}
     file_manifest = None

@@ -15,6 +15,23 @@ from maze.client.maze.workflow_authoring import WorkflowDefinition
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
 
 
+_SUPPORTED_LLM_BACKENDS = ("vllm", "transformers")
+
+
+def _normalize_llm_backend(backend: str | None) -> str:
+    if backend is None:
+        return "vllm"
+    if not isinstance(backend, str):
+        raise ValueError("backend must be a string")
+    normalized = backend.strip().lower()
+    if normalized not in _SUPPORTED_LLM_BACKENDS:
+        supported = ", ".join(_SUPPORTED_LLM_BACKENDS)
+        raise ValueError(
+            f"Unsupported model backend {normalized!r}; expected one of: {supported}"
+        )
+    return normalized
+
+
 class MaClient:
     """
     Maze client for connecting to Maze server and managing workflows
@@ -24,15 +41,31 @@ class MaClient:
         workflow = client.create_workflow()
     """
     
-    def __init__(self, server_url: str = "http://localhost:8000"):
+    def __init__(
+        self,
+        server_url: str = "http://localhost:8000",
+        request_timeout: Optional[float] = None,
+    ):
         """
         Initialize Maze client
         
         Args:
             server_url: Maze server address, defaults to http://localhost:8000
+            request_timeout: Optional timeout in seconds for HTTP requests
         """
         self.llm_instance = {}
         self.server_url = server_url.rstrip('/')
+
+        self.request_timeout = request_timeout
+
+    def _request_kwargs(self, request_timeout: Optional[float] = None) -> dict:
+        timeout = self.request_timeout if request_timeout is None else request_timeout
+        return {} if timeout is None else {"timeout": timeout}
+
+    def _bounded_request_timeout(self, remaining: float) -> float:
+        if self.request_timeout is None:
+            return remaining
+        return min(self.request_timeout, remaining)
         
     def create_workflow(self) -> MaWorkflow:
         """
@@ -45,13 +78,17 @@ class MaClient:
             Exception: If creation fails
         """
         url = f"{self.server_url}/create_workflow"
-        response = requests.post(url)
+        response = requests.post(url, **self._request_kwargs())
         
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "success":
                 workflow_id = data["workflow_id"]
-                return MaWorkflow(workflow_id, self.server_url)
+                return MaWorkflow(
+                    workflow_id,
+                    self.server_url,
+                    request_timeout=self.request_timeout,
+                )
             else:
                 raise Exception(f"Failed to create workflow: {data.get('message', 'Unknown error')}")
         else:
@@ -72,7 +109,7 @@ class MaClient:
             raise TypeError("create_workflow_from expects a @workflow definition")
 
         workflow = self.create_workflow()
-        workflow_def.build(workflow, inputs=inputs or {})
+        workflow_def.build(workflow, inputs=inputs)
         return workflow
 
     def create_dynamic_run(
@@ -103,7 +140,7 @@ class MaClient:
             payload["file_context"] = prepared_file_context
         if metadata:
             payload["metadata"] = metadata
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, **self._request_kwargs())
 
         if response.status_code == 200:
             data = response.json()
@@ -331,7 +368,11 @@ class MaClient:
             "tags": tags,
             "metadata": metadata,
         }
-        response = requests.post(f"{self.server_url}/apps/run", json=payload)
+        response = requests.post(
+            f"{self.server_url}/apps/run",
+            json=payload,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to run app: {response.status_code}, {response.text}")
         data = response.json()
@@ -343,7 +384,11 @@ class MaClient:
         """
         Validate an external DAG workflow submit spec without running it.
         """
-        response = requests.post(f"{self.server_url}/workflows/validate", json={"spec": spec})
+        response = requests.post(
+            f"{self.server_url}/workflows/validate",
+            json={"spec": spec},
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to validate workflow spec: {response.status_code}, {response.text}")
         data = response.json()
@@ -370,7 +415,11 @@ class MaClient:
             "tags": tags,
             "metadata": metadata,
         }
-        response = requests.post(f"{self.server_url}/workflows/submit", json=payload)
+        response = requests.post(
+            f"{self.server_url}/workflows/submit",
+            json=payload,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to submit workflow spec: {response.status_code}, {response.text}")
         data = response.json()
@@ -535,7 +584,11 @@ class MaClient:
         if detail:
             params["detail"] = "true"
 
-        response = requests.get(f"{self.server_url}/dynamic_runs", params=params or None)
+        response = requests.get(
+            f"{self.server_url}/dynamic_runs",
+            params=params or None,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to list dynamic runs: {response.status_code}, {response.text}")
 
@@ -545,7 +598,10 @@ class MaClient:
         return data.get("runs", [])
 
     def delete_dynamic_run(self, run_id: str) -> dict:
-        response = requests.delete(f"{self.server_url}/dynamic_runs/{run_id}")
+        response = requests.delete(
+            f"{self.server_url}/dynamic_runs/{run_id}",
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to delete dynamic run: {response.status_code}, {response.text}")
 
@@ -567,6 +623,7 @@ class MaClient:
                 "older_than_days": older_than_days,
                 "dry_run": dry_run,
             },
+            **self._request_kwargs(),
         )
         if response.status_code != 200:
             raise Exception(f"Failed to cleanup dynamic runs: {response.status_code}, {response.text}")
@@ -593,7 +650,11 @@ class MaClient:
         if detail:
             params["detail"] = "true"
 
-        response = requests.get(f"{self.server_url}/runs", params=params or None)
+        response = requests.get(
+            f"{self.server_url}/runs",
+            params=params or None,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to list runs: {response.status_code}, {response.text}")
 
@@ -602,8 +663,16 @@ class MaClient:
             raise Exception(f"Failed to list runs: {data.get('message', 'Unknown error')}")
         return data.get("runs", [])
 
-    def get_run(self, run_id: str) -> dict:
-        response = requests.get(f"{self.server_url}/runs/{run_id}")
+    def get_run(
+        self,
+        run_id: str,
+        *,
+        request_timeout: Optional[float] = None,
+    ) -> dict:
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}",
+            **self._request_kwargs(request_timeout),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run: {response.status_code}, {response.text}")
 
@@ -613,7 +682,10 @@ class MaClient:
         return data.get("run", {})
 
     def get_run_tasks(self, run_id: str) -> list[dict]:
-        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks")
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/tasks",
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run tasks: {response.status_code}, {response.text}")
 
@@ -623,7 +695,10 @@ class MaClient:
         return data.get("tasks", [])
 
     def get_run_task(self, run_id: str, task_id: str) -> dict:
-        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks/{task_id}")
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/tasks/{task_id}",
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run task: {response.status_code}, {response.text}")
 
@@ -633,7 +708,10 @@ class MaClient:
         return data.get("task", {})
 
     def get_run_artifacts(self, run_id: str) -> list[dict]:
-        response = requests.get(f"{self.server_url}/runs/{run_id}/artifacts")
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/artifacts",
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run artifacts: {response.status_code}, {response.text}")
 
@@ -643,7 +721,10 @@ class MaClient:
         return data.get("artifacts", [])
 
     def get_run_task_artifacts(self, run_id: str, task_id: str) -> list[dict]:
-        response = requests.get(f"{self.server_url}/runs/{run_id}/tasks/{task_id}/artifacts")
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/tasks/{task_id}/artifacts",
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get task artifacts: {response.status_code}, {response.text}")
 
@@ -654,7 +735,11 @@ class MaClient:
 
     def get_run_events(self, run_id: str, after: Optional[int] = None) -> list[dict]:
         params = {"after": after} if after is not None else None
-        response = requests.get(f"{self.server_url}/runs/{run_id}/events", params=params)
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/events",
+            params=params,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run events: {response.status_code}, {response.text}")
 
@@ -674,7 +759,11 @@ class MaClient:
             params["tail"] = tail
         if task_id:
             params["task_id"] = task_id
-        response = requests.get(f"{self.server_url}/runs/{run_id}/logs", params=params or None)
+        response = requests.get(
+            f"{self.server_url}/runs/{run_id}/logs",
+            params=params or None,
+            **self._request_kwargs(),
+        )
         if response.status_code != 200:
             raise Exception(f"Failed to get run logs: {response.status_code}, {response.text}")
 
@@ -692,6 +781,7 @@ class MaClient:
         response = requests.post(
             f"{self.server_url}/runs/{run_id}/cancel",
             json={"reason": reason},
+            **self._request_kwargs(),
         )
         if response.status_code != 200:
             raise Exception(f"Failed to cancel run: {response.status_code}, {response.text}")
@@ -720,6 +810,7 @@ class MaClient:
                 "tags": tags,
                 "metadata": metadata,
             },
+            **self._request_kwargs(),
         )
         if response.status_code != 200:
             raise Exception(f"Failed to retry run: {response.status_code}, {response.text}")
@@ -736,14 +827,40 @@ class MaClient:
         poll_interval: float = 0.5,
     ) -> dict:
         terminal_statuses = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
-        deadline = None if timeout is None else time.time() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            run = self.get_run(run_id)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for run: {run_id}")
+
+            request_timeout = (
+                None
+                if remaining is None
+                else self._bounded_request_timeout(remaining)
+            )
+            try:
+                run = self.get_run(run_id, request_timeout=request_timeout)
+            except requests.exceptions.Timeout as exc:
+                if deadline is None:
+                    raise
+                if request_timeout is not None and request_timeout >= remaining:
+                    raise TimeoutError(f"Timed out waiting for run: {run_id}") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for run: {run_id}") from exc
+                time.sleep(min(poll_interval, remaining))
+                continue
+
             if run.get("status") in terminal_statuses:
                 return run
-            if deadline is not None and time.time() >= deadline:
+            if deadline is None:
+                time.sleep(poll_interval)
+                continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for run: {run_id}")
-            time.sleep(poll_interval)
+            time.sleep(min(poll_interval, remaining))
 
     def stream_run(self, run_id: str, poll_interval: float = 0.2):
         after = None
@@ -777,7 +894,11 @@ class MaClient:
         Returns:
             MaWorkflow: Workflow object
         """
-        return MaWorkflow(workflow_id, self.server_url)
+        return MaWorkflow(
+            workflow_id,
+            self.server_url,
+            request_timeout=self.request_timeout,
+        )
     
     def get_ray_head_port(self) -> dict:
         """
@@ -787,7 +908,7 @@ class MaClient:
             dict: Dictionary containing port information
         """
         url = f"{self.server_url}/get_head_ray_port"
-        response = requests.post(url)
+        response = requests.post(url, **self._request_kwargs())
         
         if response.status_code == 200:
             return response.json()
@@ -799,7 +920,7 @@ class MaClient:
         Get Maze scheduler's registered cluster resources.
         """
         url = f"{self.server_url}/cluster/resources"
-        response = requests.get(url)
+        response = requests.get(url, **self._request_kwargs())
 
         if response.status_code != 200:
             raise Exception(f"Failed to get cluster resources, status code: {response.status_code}")
@@ -814,7 +935,7 @@ class MaClient:
         Get scheduler queue and running task diagnostics.
         """
         url = f"{self.server_url}/cluster/queues"
-        response = requests.get(url)
+        response = requests.get(url, **self._request_kwargs())
 
         if response.status_code != 200:
             raise Exception(f"Failed to get cluster queues, status code: {response.status_code}")
@@ -824,39 +945,71 @@ class MaClient:
             raise Exception(f"Failed to get cluster queues: {data.get('message', 'Unknown error')}")
         return data.get("queues", {})
 
-    def start_llm_instance(self, model: str):
+    def start_llm_instance(
+        self,
+        model: str,
+        *,
+        backend: str = "vllm",
+        cpu_nums: int = 5,
+        memory: int = 1024,
+        gpu_nums: int = 1,
+        gpu_mem: int = 0,
+        gpu_memory_utilization: float | None = None,
+        max_model_len: int | None = None,
+    ):
         """
         Start LLM instance
         """
+        backend = _normalize_llm_backend(backend)
         url = f"{self.server_url}/start_llm_instance"
         payload = {
             "model": model,
-            "cpu_nums": 5,
-            "memory": 1024,
-            "gpu_nums": 1,
+            "backend": backend,
+            "cpu_nums": cpu_nums,
+            "memory_mib": memory,
+            "gpu_nums": gpu_nums,
+            "gpu_mem": gpu_mem,
         }
+        if gpu_memory_utilization is not None:
+            payload["gpu_memory_utilization"] = gpu_memory_utilization
+        if max_model_len is not None:
+            payload["max_model_len"] = max_model_len
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, **self._request_kwargs())
 
         if response.status_code == 200:
             data = response.json()
             host = data['host']
             port = data['port']
             instance_id = data['instance_id']
-            self.llm_instance[instance_id] = {"model": model, "host": host, "port": port}
+            response_backend = _normalize_llm_backend(data.get("backend"))
+            if response_backend != backend:
+                self.llm_instance[instance_id] = dict(data)
+                raise Exception(
+                    f"Maze core started backend {response_backend!r} for instance "
+                    f"{instance_id}, expected {backend!r}"
+                )
+            data["backend"] = response_backend
+            self.llm_instance[instance_id] = dict(data)
             return instance_id
         else:
-            raise Exception(f"Failed to start LLM instance, status code: {response.status_code}")
+            raise Exception(
+                f"Failed to start LLM instance: {response.status_code}, {response.text}"
+            )
 
     def stop_llm_instance(self, instance_id: str):
         """
         Stop LLM instance
         """
         url = f"{self.server_url}/stop_llm_instance"
-        response = requests.post(url, json={"instance_id": instance_id})
+        response = requests.post(
+            url,
+            json={"instance_id": instance_id},
+            **self._request_kwargs(),
+        )
 
         if response.status_code == 200:
-            del self.llm_instance[instance_id]
+            self.llm_instance.pop(instance_id, None)
             return response.json()
         else:
             raise Exception(f"Failed to stop LLM instance, status code: {response.status_code}")
@@ -868,7 +1021,10 @@ class MaClient:
         from openai import OpenAI
 
         openai_api_key = "EMPTY"
-        openai_api_base = "http://"+self.llm_instance[instance_id]["host"] + ":" + str(self.llm_instance[instance_id]["port"]) +"/v1"
+        instance = self.llm_instance[instance_id]
+        openai_api_base = instance.get("endpoint") or (
+            "http://" + instance["host"] + ":" + str(instance["port"]) + "/v1"
+        )
         client = OpenAI(
             api_key=openai_api_key,
             base_url=openai_api_base,

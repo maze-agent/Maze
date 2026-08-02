@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -78,6 +79,13 @@ def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]
         parent_task_ids = file_context.get("parent_task_ids") or []
         parent_manifests = []
 
+        if _artifact_mode(file_context):
+            if parent_task_ids:
+                raise ArtifactError(
+                    "Artifact task context requires explicit parent_file_manifests"
+                )
+            return files_by_path
+
         for parent_task_id in parent_task_ids:
             for manifests_dir in _task_manifest_dirs(file_context, run_id):
                 manifest_path = manifests_dir / f"{parent_task_id}.json"
@@ -90,6 +98,10 @@ def _load_parent_files(file_context: Dict[str, Any]) -> Dict[str, Dict[str, Any]
                 break
 
     for manifest in parent_manifests:
+        if manifest.get("published") is not True:
+            raise ArtifactError(
+                f"Parent task manifest is not published: {manifest.get('task_id')}"
+            )
         for file_info in manifest.get("files", []):
             relative_path = file_info.get("path")
             if not relative_path:
@@ -118,9 +130,69 @@ def _artifact_base_url(file_context: Dict[str, Any]) -> str:
     return str(base_url).rstrip("/")
 
 
+def _artifact_capability(file_context: Dict[str, Any]) -> str | None:
+    capability = (file_context.get("artifact_store") or {}).get("capability")
+    return str(capability) if capability else None
+
+
+def _artifact_headers(file_context: Dict[str, Any]) -> Dict[str, str]:
+    capability = _artifact_capability(file_context)
+    if not capability:
+        return {}
+    return {"Authorization": f"Bearer {capability}"}
+
+
+def _private_artifacts(file_context: Dict[str, Any]) -> bool:
+    artifact_store = file_context.get("artifact_store") or {}
+    return bool(file_context.get("private") or artifact_store.get("private"))
+
+
+def _worker_artifact_temp_root(file_context: Dict[str, Any]) -> Path:
+    artifact_store = file_context.get("artifact_store") or {}
+    configured = (
+        artifact_store.get("worker_temp_root")
+        or os.environ.get("MAZE_WORKER_ARTIFACT_TMP_DIR")
+    )
+    root = (
+        Path(configured).expanduser()
+        if configured
+        else Path(tempfile.gettempdir()) / "maze-worker-artifacts"
+    )
+    if root.is_symlink():
+        raise ArtifactError("Worker artifact temporary root cannot be a symbolic link")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.is_symlink() or not root.is_dir():
+        raise ArtifactError("Worker artifact temporary root must be a real directory")
+    os.chmod(root, 0o700)
+    return root.resolve()
+
+
+def _artifact_work_dir(file_context: Dict[str, Any]) -> tuple[Path, Path]:
+    root = _worker_artifact_temp_root(file_context)
+    task_root = Path(tempfile.mkdtemp(prefix="task-", dir=root))
+    os.chmod(task_root, 0o700)
+    work_dir = task_root / "work"
+    work_dir.mkdir(mode=0o700)
+    return task_root, work_dir
+
+
 def _run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
-    workspace_dir = Path(file_context["workspace_dir"]).expanduser().resolve()
+    root = file_context.get("manifest_root") or file_context.get("workspace_dir")
+    if not root:
+        raise ArtifactError("Local file context requires workspace_dir or manifest_root")
+    workspace_dir = Path(root).expanduser().resolve()
     return workspace_dir / "runs" / (run_id or file_context["run_id"])
+
+
+def _attempt_path(file_context: Dict[str, Any]) -> Path:
+    attempt = file_context.get("attempt")
+    dispatch_id = file_context.get("dispatch_id")
+    if attempt is None or not dispatch_id:
+        raise ArtifactError("Task file context requires attempt and dispatch_id")
+    dispatch_path = _safe_relative_path(str(dispatch_id))
+    if len(dispatch_path.parts) != 1:
+        raise ValueError(f"Unsafe dispatch id: {dispatch_id}")
+    return Path(f"attempt-{int(attempt)}") / dispatch_path
 
 
 def _legacy_static_run_dir(file_context: Dict[str, Any], run_id: str | None = None) -> Path:
@@ -145,6 +217,8 @@ def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], 
         raise ValueError(f"Artifact missing sha256 for {file_info.get('path')}")
 
     cache_dir = file_context.get("artifact_store", {}).get("cache_dir")
+    if _private_artifacts(file_context):
+        cache_dir = None
     if cache_dir:
         cache_store = LocalCASArtifactStore(cache_dir)
         if cache_store.exists(sha256):
@@ -154,7 +228,11 @@ def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], 
     import requests
 
     try:
-        response = requests.get(f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}", timeout=60)
+        response = requests.get(
+            f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}",
+            headers=_artifact_headers(file_context),
+            timeout=60,
+        )
         response.raise_for_status()
     except Exception as exc:
         raise ArtifactError(f"Failed to download artifact {sha256} for {file_info.get('path')}: {exc}") from exc
@@ -201,7 +279,7 @@ def _stage_parent_files(file_context: Dict[str, Any], work_dir: Path):
 def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
     import json
 
-    if _artifact_mode(file_context) and not file_context.get("write_local_manifest", False):
+    if _artifact_mode(file_context) and not file_context.get("manifest_root"):
         return
 
     run_id = file_context["run_id"]
@@ -214,11 +292,40 @@ def _write_manifest(file_context: Dict[str, Any], manifest: Dict[str, Any]):
     os.replace(tmp_path, manifest_path)
 
 
+def publish_task_file_manifest(
+    file_context: Dict[str, Any],
+    manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(file_context, dict) or not file_context.get("enabled"):
+        raise ArtifactError("Published task manifest requires an enabled file context")
+    if not isinstance(manifest, dict) or manifest.get("published") is not True:
+        raise ArtifactError("Only an accepted task manifest can be published")
+
+    for field in ("run_id", "task_id", "attempt", "dispatch_id", "lease_id"):
+        expected = file_context.get(field)
+        if expected is None or manifest.get(field) != expected:
+            raise ArtifactError(
+                f"Published task manifest {field} does not match its accepted attempt"
+            )
+
+    published = dict(manifest)
+    _write_manifest(file_context, published)
+    return published
+
+
 def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, before: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
     after = _snapshot_files(work_dir)
-    artifacts_dir = _run_dir(file_context, run_id) / "artifacts" / "tasks" / task_id
+    artifacts_dir = None
+    if not _artifact_mode(file_context):
+        artifacts_dir = (
+            _run_dir(file_context, run_id)
+            / "artifacts"
+            / "tasks"
+            / task_id
+            / _attempt_path(file_context)
+        )
     files = []
 
     for relative_path, file_info in sorted(after.items()):
@@ -234,6 +341,7 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
         if _artifact_mode(file_context):
             artifact_info = _upload_artifact(file_context, source, file_info["sha256"])
         else:
+            assert artifacts_dir is not None
             target = artifacts_dir / _safe_relative_path(relative_path)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
@@ -252,6 +360,7 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
             "producer_task_id": task_id,
             "artifact_id": artifact_info.get("artifact_id"),
             "storage_uri": artifact_info.get("storage_uri"),
+            "private": bool(artifact_info.get("private") or _private_artifacts(file_context)),
             "uri": f"maze://runs/{run_id}/artifacts/tasks/{task_id}/{relative_path}",
         }
         if storage_path:
@@ -264,12 +373,15 @@ def _collect_output_manifest(file_context: Dict[str, Any], work_dir: Path, befor
         "schema_version": 1,
         "run_id": run_id,
         "task_id": task_id,
+        "attempt": file_context.get("attempt"),
+        "dispatch_id": file_context.get("dispatch_id"),
+        "lease_id": file_context.get("lease_id"),
+        "published": False,
         "node_id": file_context.get("node_id"),
         "created_time": time.time(),
         "files": files,
         "deleted_files": deleted_files,
     }
-    _write_manifest(file_context, manifest)
     return manifest
 
 
@@ -285,7 +397,10 @@ def _upload_artifact(file_context: Dict[str, Any], source: Path, expected_sha256
             response = requests.put(
                 f"{_artifact_base_url(file_context)}/artifacts/sha256/{expected_sha256}",
                 data=handle,
-                headers={"Content-Type": "application/octet-stream"},
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    **_artifact_headers(file_context),
+                },
                 timeout=120,
             )
         response.raise_for_status()
@@ -302,77 +417,109 @@ def run_task_with_file_context(
     if not file_context or not file_context.get("enabled"):
         return task_callable(task_input_data)
 
-    workspace_dir = Path(file_context["workspace_dir"]).resolve()
+    artifact_mode = _artifact_mode(file_context)
+    workspace_dir = None if artifact_mode else Path(file_context["workspace_dir"]).resolve()
     run_id = file_context["run_id"]
     task_id = file_context["task_id"]
-    work_dir = _run_dir(file_context, run_id) / "work" / "tasks" / task_id
-
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        if _artifact_mode(file_context):
-            _stage_initial_artifacts(file_context, work_dir)
-        else:
-            _copy_tree_contents(workspace_dir / "files", work_dir)
-        _stage_parent_files(file_context, work_dir)
-    except ArtifactError:
-        raise
-    except Exception as exc:
-        raise ArtifactError(f"Failed to stage task files: {exc}") from exc
-    before = _snapshot_files(work_dir)
-
-    previous_cwd = Path.cwd()
-    previous_env = {
-        key: os.environ.get(key)
-        for key in ("MAZE_WORK_DIR", "MAZE_INPUT_DIR", "MAZE_OUTPUT_DIR", "MAZE_RUN_ID", "MAZE_TASK_ID")
-    }
-
-    os.environ["MAZE_WORK_DIR"] = str(work_dir)
-    os.environ["MAZE_INPUT_DIR"] = str(work_dir)
-    os.environ["MAZE_OUTPUT_DIR"] = str(work_dir)
-    os.environ["MAZE_RUN_ID"] = run_id
-    os.environ["MAZE_TASK_ID"] = task_id
-
-    task_exception: BaseException | None = None
-    result: Dict[str, Any] | None = None
-    try:
-        os.chdir(work_dir)
-        try:
-            result = task_callable(task_input_data)
-        except Exception as exc:
-            task_exception = exc
-    finally:
-        os.chdir(previous_cwd)
-        for key, value in previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-    try:
-        manifest = _collect_output_manifest(file_context, work_dir, before)
-    except ArtifactError:
-        raise
-    except Exception as exc:
-        raise ArtifactError(f"Failed to collect task output artifacts: {exc}") from exc
-
-    if task_exception is not None:
-        from maze.core.scheduler.error import exception_to_error_envelope, task_error_result
-
-        error_result = task_error_result(
-            exception_to_error_envelope(
-                "user_code",
-                task_exception,
-                origin="runner",
-            )
+    task_root = None
+    if artifact_mode:
+        task_root, work_dir = _artifact_work_dir(file_context)
+    else:
+        work_dir = (
+            _run_dir(file_context, run_id)
+            / "work"
+            / "tasks"
+            / task_id
+            / _attempt_path(file_context)
         )
-        error_result["file_manifest"] = manifest
-        return error_result
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
 
-    return {
-        TASK_RESULT_ENVELOPE: True,
-        "result": result,
-        "file_manifest": manifest,
-    }
+    try:
+        try:
+            if artifact_mode:
+                _stage_initial_artifacts(file_context, work_dir)
+            else:
+                assert workspace_dir is not None
+                _copy_tree_contents(workspace_dir / "files", work_dir)
+            _stage_parent_files(file_context, work_dir)
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError(f"Failed to stage task files: {exc}") from exc
+        before = _snapshot_files(work_dir)
+
+        previous_cwd = Path.cwd()
+        previous_env = {
+            key: os.environ.get(key)
+            for key in (
+                "MAZE_WORK_DIR",
+                "MAZE_INPUT_DIR",
+                "MAZE_OUTPUT_DIR",
+                "MAZE_RUN_ID",
+                "MAZE_TASK_ID",
+            )
+        }
+
+        os.environ["MAZE_WORK_DIR"] = str(work_dir)
+        os.environ["MAZE_INPUT_DIR"] = str(work_dir)
+        os.environ["MAZE_OUTPUT_DIR"] = str(work_dir)
+        os.environ["MAZE_RUN_ID"] = run_id
+        os.environ["MAZE_TASK_ID"] = task_id
+
+        task_exception: BaseException | None = None
+        result: Dict[str, Any] | None = None
+        try:
+            os.chdir(work_dir)
+            try:
+                result = task_callable(task_input_data)
+            except Exception as exc:
+                task_exception = exc
+        finally:
+            os.chdir(previous_cwd)
+            for key, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        try:
+            manifest = _collect_output_manifest(file_context, work_dir, before)
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError(
+                f"Failed to collect task output artifacts: {exc}"
+            ) from exc
+
+        if task_exception is not None:
+            from maze.core.scheduler.error import exception_to_error_envelope, task_error_result
+
+            error_result = task_error_result(
+                exception_to_error_envelope(
+                    "user_code",
+                    task_exception,
+                    origin="runner",
+                )
+            )
+            error_result["file_manifest"] = manifest
+            return error_result
+
+        return {
+            TASK_RESULT_ENVELOPE: True,
+            "result": result,
+            "file_manifest": manifest,
+        }
+    finally:
+        if task_root is not None:
+            try:
+                shutil.rmtree(task_root)
+            except Exception as exc:
+                raise ArtifactError(
+                    "Failed to clean Worker artifact temporary directory"
+                ) from exc
+            if task_root.exists():
+                raise ArtifactError(
+                    "Worker artifact temporary directory still exists after cleanup"
+                )

@@ -4,7 +4,22 @@ import time
 from typing import Optional, Iterator, Dict, Any, List, Callable, Union
 from maze.client.maze.models import MaTask, TaskOutput
 from maze.client.maze.decorator import get_task_metadata
+from maze.client.maze.workflow_authoring import encode_run_inputs
 import warnings
+
+
+def _encode_output_refs(value: Any) -> Any:
+    if isinstance(value, TaskOutput):
+        return {
+            "__maze_output_ref__": True,
+            "task_id": value.task_id,
+            "output_key": value.output_key,
+        }
+    if isinstance(value, dict):
+        return {key: _encode_output_refs(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_output_refs(item) for item in value]
+    return value
 
 
 class MaWorkflow:
@@ -21,16 +36,23 @@ class MaWorkflow:
             print(msg)
     """
     
-    def __init__(self, workflow_id: str, server_url: str):
+    def __init__(
+        self,
+        workflow_id: str,
+        server_url: str,
+        request_timeout: Optional[float] = None,
+    ):
         """
         Initialize workflow object
         
         Args:
             workflow_id: Workflow ID
             server_url: Server address
+            request_timeout: Optional timeout in seconds for HTTP requests
         """
         self.workflow_id = workflow_id
         self.server_url = server_url.rstrip('/')
+        self.request_timeout = request_timeout
         self._tasks: Dict[str, MaTask] = {}
         
         # Graph structure for visualization
@@ -39,6 +61,15 @@ class MaWorkflow:
         
         # Results cache to support multiple queries (workaround for server's consume-once logic)
         self._results_cache: Dict[str, List[Dict[str, Any]]] = {}  # {run_id: [messages]}
+
+    def _request_kwargs(self, request_timeout: Optional[float] = None) -> dict:
+        timeout = self.request_timeout if request_timeout is None else request_timeout
+        return {} if timeout is None else {"timeout": timeout}
+
+    def _bounded_request_timeout(self, remaining: float) -> float:
+        if self.request_timeout is None:
+            return remaining
+        return min(self.request_timeout, remaining)
         
     def add_task(self, 
                  task_func: Callable = None,
@@ -110,7 +141,7 @@ class MaWorkflow:
             'task_name': task_name
         }
         
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, **self._request_kwargs())
         
         if response.status_code != 200:
             raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
@@ -143,8 +174,17 @@ class MaWorkflow:
             'retry_on': metadata.retry_on,
             'timeout_seconds': metadata.timeout_seconds,
         }
+        if hasattr(self, "_workflow_input_contract"):
+            save_data["workflow_input_contract"] = {
+                "constants": sorted(self._workflow_input_contract["constants"]),
+                "runtime": self._workflow_input_contract["runtime"],
+            }
         
-        save_response = requests.post(save_url, json=save_data)
+        save_response = requests.post(
+            save_url,
+            json=save_data,
+            **self._request_kwargs(),
+        )
         
         if save_response.status_code != 200:
             raise Exception(f"Failed to save task, status code: {save_response.status_code}")
@@ -154,7 +194,14 @@ class MaWorkflow:
             raise Exception(f"Failed to save task: {save_result.get('message', 'Unknown error')}")
         
         # 5. Create task object
-        task = MaTask(task_id, self.workflow_id, self.server_url, task_name, metadata.outputs)
+        task = MaTask(
+            task_id,
+            self.workflow_id,
+            self.server_url,
+            task_name,
+            metadata.outputs,
+            request_timeout=self.request_timeout,
+        )
         self._tasks[task_id] = task
         
         # 6. Record node for visualization
@@ -194,9 +241,13 @@ class MaWorkflow:
                 value = input_value.to_reference_string()
                 has_value = True
             else:
-                input_schema = "from_user"
-                value = input_value
-                has_value = has_input_value
+                value, has_run_input = encode_run_inputs(input_value)
+                if has_run_input:
+                    input_schema = "from_run"
+                    has_value = False
+                else:
+                    input_schema = "from_user"
+                    has_value = has_input_value
             
             task_input["input_params"][str(idx)] = {
                 "key": input_key,
@@ -231,13 +282,19 @@ class MaWorkflow:
             'task_name': task_name
         }
         
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, **self._request_kwargs())
         
         if response.status_code == 200:
             result = response.json()
             if result.get("status") == "success":
                 task_id = result["task_id"]
-                task = MaTask(task_id, self.workflow_id, self.server_url, task_name)
+                task = MaTask(
+                    task_id,
+                    self.workflow_id,
+                    self.server_url,
+                    task_name,
+                    request_timeout=self.request_timeout,
+                )
                 self._tasks[task_id] = task
                 return task
             else:
@@ -253,7 +310,7 @@ class MaWorkflow:
             List[Dict]: Task list, each task contains id and name
         """
         url = f"{self.server_url}/get_workflow_tasks/{self.workflow_id}"
-        response = requests.get(url)
+        response = requests.get(url, **self._request_kwargs())
         
         if response.status_code == 200:
             result = response.json()
@@ -282,7 +339,7 @@ class MaWorkflow:
             'target_task_id': target_task.task_id,
         }
         
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, **self._request_kwargs())
         
         if response.status_code == 200:
             result = response.json()
@@ -309,7 +366,7 @@ class MaWorkflow:
             'target_task_id': target_task.task_id,
         }
         
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, **self._request_kwargs())
         
         if response.status_code == 200:
             result = response.json()
@@ -352,6 +409,7 @@ class MaWorkflow:
         timeout_seconds: Optional[float] = None,
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        inputs: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Run workflow
@@ -368,6 +426,10 @@ class MaWorkflow:
         data = {
             'workflow_id': self.workflow_id,
         }
+        if inputs is not None:
+            data["inputs"] = inputs
+        if hasattr(self, "final_output_refs"):
+            data["final_output_refs"] = _encode_output_refs(self.final_output_refs)
         if timeout_seconds is not None:
             data['timeout_seconds'] = timeout_seconds
         if tags is not None:
@@ -382,7 +444,7 @@ class MaWorkflow:
         if prepared_file_context:
             data['file_context'] = prepared_file_context
         
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, **self._request_kwargs())
         
         if response.status_code == 200:
             result = response.json()
@@ -403,9 +465,33 @@ class MaWorkflow:
         Wait for a workflow run to reach a terminal status using the unified run API.
         """
         terminal_statuses = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
-        deadline = None if timeout is None else time.time() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            response = requests.get(f"{self.server_url}/runs/{run_id}")
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for run: {run_id}")
+
+            request_timeout = (
+                None
+                if remaining is None
+                else self._bounded_request_timeout(remaining)
+            )
+            try:
+                response = requests.get(
+                    f"{self.server_url}/runs/{run_id}",
+                    **self._request_kwargs(request_timeout),
+                )
+            except requests.exceptions.Timeout as exc:
+                if deadline is None:
+                    raise
+                if request_timeout is not None and request_timeout >= remaining:
+                    raise TimeoutError(f"Timed out waiting for run: {run_id}") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for run: {run_id}") from exc
+                time.sleep(min(poll_interval, remaining))
+                continue
+
             if response.status_code != 200:
                 raise Exception(f"Failed to get run: {response.status_code}, {response.text}")
             payload = response.json()
@@ -414,9 +500,14 @@ class MaWorkflow:
             run = payload.get("run", {})
             if run.get("status") in terminal_statuses:
                 return run
-            if deadline is not None and time.time() >= deadline:
+            if deadline is None:
+                time.sleep(poll_interval)
+                continue
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for run: {run_id}")
-            time.sleep(poll_interval)
+            time.sleep(min(poll_interval, remaining))
 
     def stream(
         self,
@@ -438,7 +529,11 @@ class MaWorkflow:
         after = None
         while True:
             params = {"after": after} if after is not None else None
-            response = requests.get(f"{self.server_url}/runs/{run_id}/events", params=params)
+            response = requests.get(
+                f"{self.server_url}/runs/{run_id}/events",
+                params=params,
+                **self._request_kwargs(),
+            )
             if response.status_code != 200:
                 raise Exception(f"Failed to get run events: {response.status_code}, {response.text}")
             payload = response.json()
@@ -451,7 +546,10 @@ class MaWorkflow:
                 if event.get("type") in terminal_event_types:
                     return
 
-            run_response = requests.get(f"{self.server_url}/runs/{run_id}")
+            run_response = requests.get(
+                f"{self.server_url}/runs/{run_id}",
+                **self._request_kwargs(),
+            )
             if run_response.status_code != 200:
                 raise Exception(f"Failed to get run: {run_response.status_code}, {run_response.text}")
             run_payload = run_response.json()

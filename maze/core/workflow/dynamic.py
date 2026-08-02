@@ -113,6 +113,7 @@ class DynamicRun:
         self.request_ids: Dict[str, str] = {}
         self.event_log: List[Dict[str, Any]] = []
         self.event_seq = 0
+        self.finish_continuations: Dict[str, Dict[str, Any]] = {}
         self.status = "created"
         self.finished_time = None
         self.finalized = False
@@ -212,6 +213,7 @@ class DynamicRun:
         parents: List[str] | None = None,
         request_id: str | None = None,
         resources: Dict[str, Any] | None = None,
+        model_anchor: Dict[str, Any] | None = None,
     ) -> tuple[CodeTask, bool]:
         self.check_can_mutate("append tasks")
         existing_task = self.get_task_for_request_id(request_id)
@@ -227,10 +229,17 @@ class DynamicRun:
         task_input, input_parents = build_dynamic_task_input(spec, inputs or {})
         task_output = build_dynamic_task_output(spec)
         task_resources = merge_dynamic_resources(spec.resources, resources)
+        effective_model_anchor = (
+            dict(model_anchor) if model_anchor is not None else spec.model_anchor
+        )
         task_kind, task_resources = normalize_task_semantics(
-            task_kind=spec.task_kind,
+            task_kind=(
+                None
+                if model_anchor is not None and effective_model_anchor.get("local_model")
+                else spec.task_kind
+            ),
             resources=task_resources,
-            model_anchor=spec.model_anchor,
+            model_anchor=effective_model_anchor,
         )
         task.save_task(
             task_input=task_input,
@@ -243,7 +252,7 @@ class DynamicRun:
             retry_backoff_seconds=spec.retry_backoff_seconds,
             retry_on=spec.retry_on,
             timeout_seconds=spec.timeout_seconds,
-            model_anchor=spec.model_anchor,
+            model_anchor=effective_model_anchor,
         )
 
         explicit_parents = set(parents or [])
@@ -434,15 +443,18 @@ class DynamicRun:
     def append_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         event = dict(event)
         event_data = event.get("data") or {}
-        if isinstance(event_data, dict):
-            event_data = dict(event_data)
-            event_data.setdefault("run_status", self.status)
-            event["data"] = event_data
+        if not isinstance(event_data, dict):
+            raise ValueError("Dynamic run event data must be a JSON object")
+        event_data = dict(event_data)
+        event_data["run_id"] = self.run_id
+        event_data["run_status"] = self.status
+        event["data"] = event_data
 
         self.event_seq += 1
-        event.setdefault("seq", self.event_seq)
-        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-        event.setdefault("schema_version", 1)
+        event["seq"] = self.event_seq
+        event["timestamp"] = datetime.now(timezone.utc).isoformat()
+        event["schema_version"] = 1
+        event.pop("ts", None)
         self.event_log.append(event)
         self._touch()
         return event
@@ -517,6 +529,7 @@ class DynamicRun:
             "task_fault_tolerance": to_json_safe(self.task_fault_tolerance),
             "event_count": len(self.event_log),
             "last_event_seq": self.event_seq,
+            "finish_continuations": to_json_safe(self.finish_continuations),
             "final_result": final_result,
             "cancel_reason": self.cancel_reason,
             "failure_reason": self.failure_reason,
@@ -553,6 +566,7 @@ class DynamicRun:
             "inputs": _task_io_snapshot(task.task_input),
             "outputs": _task_io_snapshot(task.task_output),
             "resources": to_json_safe(task.resources),
+            "model_anchor": to_json_safe(task.model_anchor),
             "error": to_json_safe(self.task_errors.get(task_id)),
             "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
             "fault_tolerance": to_json_safe(

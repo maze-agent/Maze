@@ -8,7 +8,6 @@ import logging
 import signal
 import json
 import requests
-import contextlib
 import socket
 from pathlib import Path
 from maze.core.worker.worker import Worker
@@ -19,6 +18,43 @@ import asyncio
 from maze.config.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+HEAD_CLEANUP_MAX_ATTEMPTS = 3
+PLAYGROUND_STOP_TIMEOUT_SECONDS = 10.0
+
+
+async def _cleanup_mapath_with_retries(
+    mapath,
+    max_attempts: int = HEAD_CLEANUP_MAX_ATTEMPTS,
+) -> bool:
+    max_attempts = max(1, int(max_attempts))
+    request_shutdown = getattr(mapath, "request_scheduler_shutdown", None)
+    if request_shutdown is not None:
+        request_shutdown()
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            cleanup_complete = await asyncio.to_thread(mapath.cleanup)
+        except Exception:
+            logger.exception(
+                "Maze head cleanup attempt %s/%s failed",
+                attempt,
+                max_attempts,
+            )
+            continue
+        if cleanup_complete:
+            return True
+        logger.warning(
+            "Maze head cleanup attempt %s/%s remained incomplete",
+            attempt,
+            max_attempts,
+        )
+
+    logger.error(
+        "Maze head cleanup did not complete after %s attempts; "
+        "Scheduler-owned resources may require manual cleanup",
+        max_attempts,
+    )
+    return False
 
 def _default_playground_backend_port(frontend_port: int) -> int:
     return 3001 if frontend_port == 5173 else frontend_port + 1
@@ -64,30 +100,39 @@ async def _async_start_head(
     for service_name, service_port in service_ports:
         _ensure_port_available(service_port, service_name)
 
-    mapath.init(
-        ray_head_port=ray_head_port,
-        strategy=scheduling_algorithm,
-        node_scheduling_policy=strategy,
-    )
-    monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
-    maintenance_coroutine = asyncio.create_task(mapath.maintenance_coroutine())
-
-    server_config = uvicorn.Config(server_app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(server_config)
-    server_task = asyncio.create_task(server.serve())
-    
+    monitor_coroutine = None
+    maintenance_coroutine = None
+    server = None
+    server_task = None
     predictor_server = None
     predictor_task = None
-
     playground_processes = []
-    if playground:
-        playground_processes = start_playground(
-            core_port=port,
-            frontend_port=playground_port,
-            backend_port=playground_backend_port,
-        )
 
     try:
+        mapath.init(
+            ray_head_port=ray_head_port,
+            strategy=scheduling_algorithm,
+            node_scheduling_policy=strategy,
+        )
+        monitor_coroutine = asyncio.create_task(mapath.monitor_coroutine())
+        maintenance_coroutine = asyncio.create_task(mapath.maintenance_coroutine())
+
+        server_config = uvicorn.Config(
+            server_app,
+            host="0.0.0.0",
+            port=port,
+            log_level="info",
+        )
+        server = uvicorn.Server(server_config)
+        server_task = asyncio.create_task(server.serve())
+
+        if playground:
+            playground_processes = start_playground(
+                core_port=port,
+                frontend_port=playground_port,
+                backend_port=playground_backend_port,
+            )
+
         tasks = [server_task, monitor_coroutine, maintenance_coroutine]
         if predictor_task is not None:
             tasks.append(predictor_task)
@@ -95,7 +140,9 @@ async def _async_start_head(
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down Maze head...")
     finally:
-        server.should_exit = True
+        pending_error = sys.exc_info()[1]
+        if server is not None:
+            server.should_exit = True
         if predictor_server is not None:
             predictor_server.should_exit = True
 
@@ -111,11 +158,20 @@ async def _async_start_head(
             return_exceptions=True,
         )
 
-        with contextlib.suppress(Exception):
-            mapath.cleanup()
+        cleanup_complete = await _cleanup_mapath_with_retries(mapath)
 
         if playground_processes:
             stop_playground(playground_processes)
+
+        if not cleanup_complete:
+            cleanup_error = RuntimeError(
+                "Maze head cleanup failed after "
+                f"{HEAD_CLEANUP_MAX_ATTEMPTS} attempts; Scheduler-owned resources "
+                "may still be running"
+            )
+            if pending_error is not None:
+                raise cleanup_error from pending_error
+            raise cleanup_error
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -129,6 +185,25 @@ def _ensure_port_available(port: int, service_name: str):
             f"{service_name} port {port} is already in use. "
             "Stop the existing process or choose another port."
         )
+
+
+def _start_playground_process(command, *, cwd: Path, env: dict[str, str]):
+    process_options = {
+        "cwd": str(cwd),
+        "env": env,
+    }
+    if sys.platform == "win32":
+        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
+    return subprocess.Popen(command, **process_options)
+
+
+def _wait_for_playground_start(name: str, process, delay_seconds: float):
+    time.sleep(delay_seconds)
+    return_code = process.poll()
+    if return_code is not None:
+        raise RuntimeError(f"Playground {name} exited during startup with status {return_code}")
 
 
 def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_port: int | None = None):
@@ -148,51 +223,41 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
     print("🎮 Starting Maze Playground...")
     print("="*60)
     
-    if backend_dir.exists():
-        print(f"🔧 starting playground backend ({backend_url})...")
-        try:
+    try:
+        if backend_dir.exists():
+            print(f"🔧 starting playground backend ({backend_url})...")
             backend_env = {
                 **os.environ,
                 "PORT": str(backend_port),
                 "MAZE_CORE_URL": core_url,
             }
-            backend_process = subprocess.Popen(
+            backend_process = _start_playground_process(
                 ["node", "src/server.js"],
-                cwd=str(backend_dir),
+                cwd=backend_dir,
                 env=backend_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
             processes.append(('backend', backend_process))
-            time.sleep(2) 
+            _wait_for_playground_start("backend", backend_process, 2)
             print("✅ Playground backend started")
-        except Exception as e:
-            print(f"❌ Failed to start backend: {e}")
-    
 
-    if frontend_dir.exists():
-        print(f"🎨 starting playground frontend (http://localhost:{frontend_port})...")
-        try:
-      
+        if frontend_dir.exists():
+            print(f"🎨 starting playground frontend (http://localhost:{frontend_port})...")
             npm_cmd = "npm.cmd" if sys.platform == 'win32' else "npm"
             frontend_env = {
                 **os.environ,
                 "VITE_MAZE_BACKEND_URL": backend_url,
             }
-            frontend_process = subprocess.Popen(
+            frontend_process = _start_playground_process(
                 [npm_cmd, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(frontend_port)],
-                cwd=str(frontend_dir),
+                cwd=frontend_dir,
                 env=frontend_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
             processes.append(('frontend', frontend_process))
-            time.sleep(3) 
+            _wait_for_playground_start("frontend", frontend_process, 3)
             print("✅ Playground frontend started")
-        except Exception as e:
-            print(f"❌ Failed to start frontend: {e}")
+    except Exception:
+        stop_playground(processes)
+        raise
     
     if processes:
         print("\n" + "="*60)
@@ -210,13 +275,28 @@ def stop_playground(processes):
     print("\n🛑 shutting down Playground...")
     for name, process in processes:
         try:
+            if process.poll() is not None:
+                print(f"✅ {name} already stopped")
+                continue
             if sys.platform == 'win32':
-               
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], 
                              capture_output=True)
             else:
-                
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                process_group_id = os.getpgid(process.pid)
+                if process_group_id == process.pid:
+                    os.killpg(process_group_id, signal.SIGTERM)
+                else:
+                    process.terminate()
+            try:
+                process.wait(timeout=PLAYGROUND_STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                if sys.platform == 'win32':
+                    process.kill()
+                elif os.getpgid(process.pid) == process.pid:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=PLAYGROUND_STOP_TIMEOUT_SECONDS)
             print(f"✅ {name} stopped")
         except Exception as e:
             print(f"⚠️  Failed to stop {name}: {e}")
@@ -244,7 +324,24 @@ def start_head(
     )
 
 def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10):
-    Worker.start_worker(addr, agent=agent, heartbeat_interval=heartbeat_interval)
+    try:
+        return Worker.start_worker(
+            addr,
+            agent=agent,
+            heartbeat_interval=heartbeat_interval,
+        )
+    finally:
+        if agent:
+            pending_error = sys.exc_info()[1]
+            try:
+                Worker.stop_worker()
+            except Exception:
+                if pending_error is None:
+                    raise
+                logger.exception(
+                    "Failed to stop the local Ray worker while handling %s",
+                    type(pending_error).__name__,
+                )
 
 def stop_worker():
     Worker.stop_worker()
@@ -254,14 +351,15 @@ def _server_url(args) -> str:
 
 def _request_core(method: str, server_url: str, path: str, **kwargs):
     url = server_url.rstrip("/") + path
+    request_timeout = kwargs.pop("timeout", 10)
     try:
-        response = requests.request(method, url, timeout=10, **kwargs)
+        response = requests.request(method, url, timeout=request_timeout, **kwargs)
     except requests.RequestException as exc:
         raise SystemExit(f"Failed to connect to Maze core at {server_url}: {exc}") from exc
     if response.status_code >= 400:
         raise SystemExit(f"Maze core request failed: {response.status_code} {response.text}")
     payload = response.json()
-    if payload.get("status") not in (None, "success"):
+    if payload.get("status") not in (None, "success", "ready"):
         raise SystemExit(f"Maze core returned error: {payload}")
     return payload
 
@@ -620,6 +718,53 @@ def _validate_app(args):
     _print_payload({"status": "success", "spec": spec}, args.json)
 
 
+def _model_serve(args):
+    payload = {
+        "model": args.model,
+        "backend": args.backend,
+        "cpu_nums": args.cpu,
+        "memory_mib": args.memory,
+        "gpu_nums": 1,
+        "gpu_mem": args.gpu_memory,
+    }
+    if args.gpu_memory_utilization is not None:
+        payload["gpu_memory_utilization"] = args.gpu_memory_utilization
+    if args.max_model_len is not None:
+        payload["max_model_len"] = args.max_model_len
+    response = _request_core(
+        "POST",
+        _server_url(args),
+        "/start_llm_instance",
+        json=payload,
+        timeout=args.timeout,
+    )
+    if response.get("backend") != args.backend:
+        raise SystemExit(
+            f"Maze core started backend {response.get('backend')!r}, expected {args.backend!r}"
+        )
+    if args.json:
+        _print_payload(response, True)
+        return
+    print(f"Instance: {response['instance_id']}")
+    print(f"Model: {response['model']}")
+    print(f"Backend: {response['backend']}")
+    print(f"Endpoint: {response['endpoint']}")
+
+
+def _model_stop(args):
+    response = _request_core(
+        "POST",
+        _server_url(args),
+        "/stop_llm_instance",
+        json={"instance_id": args.instance_id},
+        timeout=args.timeout,
+    )
+    if args.json:
+        _print_payload(response, True)
+        return
+    print(f"Stopped instance: {args.instance_id}")
+
+
 def _format_status(metrics: dict, runs: list) -> str:
     lines = []
     uptime = metrics.get("uptime_sec", 0)
@@ -817,6 +962,26 @@ def main():
     app_validate.add_argument("--workspace-dir", default=None)
     app_validate.add_argument("--json", action="store_true")
 
+    model_parser = subparsers.add_parser("model", help="Serve local models through Maze")
+    model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
+    model_serve = model_subparsers.add_parser("serve")
+    model_serve.add_argument("model", help="Local chat model path or model identifier")
+    model_serve.add_argument("--backend", choices=("vllm", "transformers"), default="vllm")
+    model_serve.add_argument("--server-url", default=os.environ.get("MAZE_CORE_URL", "http://localhost:8000"))
+    model_serve.add_argument("--cpu", type=int, default=5)
+    model_serve.add_argument("--memory", type=int, default=1024, help="CPU memory reservation in MiB")
+    model_serve.add_argument("--gpu-memory", type=int, default=0, help="GPU memory reservation in MiB")
+    model_serve.add_argument("--gpu-memory-utilization", type=float, default=None)
+    model_serve.add_argument("--max-model-len", type=int, default=None)
+    model_serve.add_argument("--timeout", type=float, default=600)
+    model_serve.add_argument("--json", action="store_true")
+
+    model_stop = model_subparsers.add_parser("stop")
+    model_stop.add_argument("instance_id")
+    model_stop.add_argument("--server-url", default=os.environ.get("MAZE_CORE_URL", "http://localhost:8000"))
+    model_stop.add_argument("--timeout", type=float, default=60)
+    model_stop.add_argument("--json", action="store_true")
+
     status_parser = subparsers.add_parser("status", help="Show cluster status (/v1/metrics)")
     status_parser.add_argument(
         "--addr",
@@ -918,6 +1083,11 @@ def main():
     elif args.command == "app":
         if args.app_command == "validate":
             _validate_app(args)
+    elif args.command == "model":
+        if args.model_command == "serve":
+            _model_serve(args)
+        elif args.model_command == "stop":
+            _model_stop(args)
     elif args.command == "status":
         cmd_status(args.addr, args.watch, args.status_filter, args.run_id)
     else:

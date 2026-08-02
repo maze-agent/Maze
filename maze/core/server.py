@@ -13,7 +13,15 @@ from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any,List
 from urllib.parse import urlsplit, urlunsplit
-from maze.core.path.path import MaPath, SchedulerUnavailableError
+from maze.core.path.path import (
+    MaPath,
+    SchedulerUnavailableError,
+    WorkflowIdempotencyConflictError,
+    WorkflowIdempotencyStateError,
+    WorkflowInitializationError,
+    WorkflowNotFoundError,
+    validate_run_workflow_file_context,
+)
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -23,6 +31,10 @@ from maze.core.application.spec import AppSpecError, app_file_context, app_spec_
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
 from maze.core.workflow.resources import apply_model_anchor_estimate, model_anchor_gpu_mem_mb, normalize_resources
 from maze.core.local_models import DEFAULT_MODEL_DIR, RUNTIME_CONFIG_PATH, model_dir
+from maze.core.scheduler.llm_instance import (
+    validate_model_backend,
+    validate_transformers_model,
+)
 
 
 app = FastAPI()
@@ -65,6 +77,39 @@ DTYPE_BYTES = {
     "U8": 1,
     "BOOL": 1,
 }
+
+
+def _store_workflow_input_contract(workflow, input_contract: Any):
+    if input_contract is None:
+        return
+    if not isinstance(input_contract, dict):
+        raise ValueError("workflow_input_contract must be an object")
+    constants = input_contract.get("constants")
+    runtime = input_contract.get("runtime")
+    if not isinstance(constants, list) or not all(
+        isinstance(key, str) for key in constants
+    ):
+        raise ValueError("workflow input constants must be a list of names")
+    if len(constants) != len(set(constants)) or not isinstance(runtime, dict):
+        raise ValueError("Malformed workflow input contract")
+    if not all(isinstance(key, str) for key in runtime):
+        raise ValueError("Workflow runtime input names must be strings")
+    if set(constants) & set(runtime):
+        raise ValueError("Workflow input cannot be both constant and runtime-bound")
+    for key, spec in runtime.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("required"), bool):
+            raise ValueError(f"Malformed workflow runtime input: {key}")
+        expected_keys = {"required"} if spec["required"] else {"required", "default"}
+        if set(spec) != expected_keys:
+            raise ValueError(f"Malformed workflow runtime input: {key}")
+    normalized_contract = {
+        "constants": sorted(constants),
+        "runtime": copy.deepcopy(runtime),
+    }
+    existing_contract = workflow.graph.graph.get("workflow_input_contract")
+    if existing_contract is not None and existing_contract != normalized_contract:
+        raise ValueError("Workflow input contract changed while building the DAG")
+    workflow.graph.graph["workflow_input_contract"] = normalized_contract
 
 
 LOCAL_MODEL_TEST_TASK_CODE = r'''
@@ -384,9 +429,75 @@ def _replace_url_host(base_url: str, host: str, fallback_port: int | None = None
     return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
 
 
+def _configured_artifact_advertised_url() -> str | None:
+    configured = (
+        os.environ.get("MAZE_ARTIFACT_ADVERTISED_URL")
+        or os.environ.get("MAZE_ARTIFACT_PUBLIC_URL")
+    )
+    if not configured:
+        return None
+    parsed = urlsplit(configured.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "MAZE_ARTIFACT_ADVERTISED_URL must be an absolute http(s) URL"
+        )
+    return configured.strip().rstrip("/")
+
+
 def _request_base_url(req: Request) -> str:
+    advertised_url = _configured_artifact_advertised_url()
+    if advertised_url:
+        return advertised_url
     parsed = urlsplit(str(req.base_url))
     return urlunsplit((parsed.scheme or "http", parsed.netloc, "", "", "")).rstrip("/")
+
+
+def _cluster_has_remote_worker(cluster: Dict[str, Any] | None) -> bool:
+    if not isinstance(cluster, dict):
+        return False
+    head_ip = str(cluster.get("head_node_ip") or "").strip()
+    candidates = [
+        *(cluster.get("nodes") or []),
+        *(cluster.get("unregistered_ray_nodes") or []),
+    ]
+    return any(
+        str(node.get("role") or "worker") != "head"
+        and bool(node.get("alive", True))
+        and (
+            not head_ip
+            or str(node.get("node_ip") or "").strip() != head_ip
+        )
+        for node in candidates
+        if isinstance(node, dict)
+    )
+
+
+def _request_artifact_capability(req: Request) -> str | None:
+    authorization = str(req.headers.get("authorization") or "")
+    if authorization.lower().startswith("bearer "):
+        capability = authorization[7:].strip()
+        return capability or None
+    capability = str(req.headers.get("x-maze-artifact-capability") or "").strip()
+    return capability or None
+
+
+def _redact_artifact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_artifact_secrets(item)
+            for key, item in value.items()
+            if str(key).lower() not in {
+                "capability",
+                "artifact_capability",
+                "authorization",
+                "x-maze-artifact-capability",
+            }
+        }
+    if isinstance(value, list):
+        return [_redact_artifact_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_artifact_secrets(item) for item in value]
+    return value
 
 
 def _local_models() -> List[Dict[str, Any]]:
@@ -643,30 +754,47 @@ async def _test_local_model(model_id: str) -> Dict[str, Any]:
 
 
 async def _worker_reachable_file_context(req: Request, file_context: Dict[str, Any] | None):
+    validate_run_workflow_file_context(file_context)
     if not file_context or not file_context.get("enabled"):
         return file_context
 
     artifact_store_context = file_context.get("artifact_store") or {}
-    base_url = artifact_store_context.get("base_url")
+    advertised_url = _configured_artifact_advertised_url()
+    base_url = advertised_url or artifact_store_context.get("base_url")
     if not base_url:
         return file_context
 
     parsed = urlsplit(base_url)
-    if not _is_local_host(parsed.hostname):
-        return file_context
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Artifact store base_url must be an absolute http(s) URL")
 
-    cluster_host = None
-    with contextlib.suppress(Exception):
+    cluster = None
+    try:
         cluster = await mapath.get_cluster_resources(timeout=2.0)
-        cluster_host = cluster.get("head_node_ip")
-
-    head_host = _worker_reachable_head_host(req, cluster_host)
-    if not head_host or _is_local_host(head_host):
-        return file_context
+    except Exception:
+        pass
+    cluster_host = cluster.get("head_node_ip") if isinstance(cluster, dict) else None
+    multi_node = _cluster_has_remote_worker(cluster)
 
     prepared_context = copy.deepcopy(file_context)
     prepared_store = dict(prepared_context.get("artifact_store") or {})
-    prepared_store["base_url"] = _replace_url_host(base_url, head_host, req.url.port)
+    prepared_store["base_url"] = str(base_url).rstrip("/")
+
+    if not _is_local_host(parsed.hostname):
+        prepared_context["artifact_store"] = prepared_store
+        return prepared_context
+
+    head_host = _worker_reachable_head_host(req, cluster_host)
+    if head_host and not _is_local_host(head_host):
+        prepared_store["base_url"] = _replace_url_host(base_url, head_host, req.url.port)
+
+    final_host = urlsplit(prepared_store["base_url"]).hostname
+    if multi_node and _is_local_host(final_host):
+        raise ValueError(
+            "Multi-node artifact transport requires MAZE_ARTIFACT_ADVERTISED_URL "
+            "or a reachable non-loopback Head address"
+        )
+
     prepared_context["artifact_store"] = prepared_store
     return prepared_context
 
@@ -773,6 +901,10 @@ async def save_task_and_add_edge(req:Request):
         workflow = mapath.get_workflow(workflow_id)
         task = workflow.get_task(task_id)
         if(task.task_type == TaskType.CODE.value):    
+            _store_workflow_input_contract(
+                workflow,
+                data.get("workflow_input_contract"),
+            )
             task_input = data["task_input"]
             task_output = data["task_output"]
             code_str = data.get("code_str")
@@ -838,20 +970,48 @@ async def del_edge(req:Request):
 async def run_workflow(req:Request):
     try: 
         data = await req.json()
+        if not isinstance(data, dict):
+            raise TypeError("request body must be a JSON object")
+        if "workflow_id" not in data:
+            raise ValueError("workflow_id is required")
         workflow_id = data["workflow_id"]
         
-        run_id = mapath.run_workflow(
-            workflow_id,
-            file_context=await _worker_reachable_file_context(req, data.get("file_context")),
-            timeout_seconds=data.get("timeout_seconds"),
-            tags=data.get("tags"),
-            metadata=data.get("metadata"),
-        )
-        return {"status":"success","run_id": run_id}
+        run_kwargs = {
+            "file_context": await _worker_reachable_file_context(req, data.get("file_context")),
+            "timeout_seconds": data.get("timeout_seconds"),
+            "tags": data.get("tags"),
+            "metadata": data.get("metadata"),
+        }
+        if "inputs" in data:
+            run_kwargs["inputs"] = data["inputs"]
+        if "final_output_refs" in data:
+            run_kwargs["final_output_refs"] = data["final_output_refs"]
+        if "idempotency_key" in data or "idempotency_fingerprint" in data:
+            run_kwargs["idempotency_key"] = data.get("idempotency_key")
+            run_kwargs["idempotency_fingerprint"] = data.get(
+                "idempotency_fingerprint"
+            )
+        run_id = mapath.run_workflow(workflow_id, **run_kwargs)
+        response = {"status":"success","run_id": run_id}
+        if run_kwargs.get("idempotency_key") is not None:
+            response["idempotency_key"] = run_kwargs["idempotency_key"]
+            response["idempotency_fingerprint"] = run_kwargs["idempotency_fingerprint"]
+        return response
+    except WorkflowIdempotencyConflictError as e:
+        raise HTTPException(status_code=409, detail=e.detail())
+    except WorkflowNotFoundError as e:
+        raise HTTPException(status_code=404, detail=e.detail())
+    except WorkflowInitializationError as e:
+        raise HTTPException(status_code=500, detail=e.detail())
+    except WorkflowIdempotencyStateError as e:
+        raise HTTPException(status_code=500, detail=e.detail())
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/apps/validate")
@@ -886,7 +1046,6 @@ async def run_app(req: Request):
                 "timeout_seconds": data.get("timeout_seconds"),
             },
         )
-        workflow_id = mapath.create_app_workflow(spec)
         artifact_mode = data.get("artifact_mode", True)
         file_context = data.get("file_context")
         if file_context is None:
@@ -896,6 +1055,7 @@ async def run_app(req: Request):
                 artifact_mode=artifact_mode,
             )
         file_context = await _worker_reachable_file_context(req, file_context)
+        workflow_id = mapath.create_app_workflow(spec)
         metadata = {
             **dict(spec.get("metadata") or {}),
             **dict(data.get("metadata") or {}),
@@ -922,6 +1082,8 @@ async def run_app(req: Request):
         raise HTTPException(status_code=400, detail=str(e))
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -943,12 +1105,6 @@ async def submit_dag_workflow(req: Request):
         data = await req.json()
         payload = data.get("spec", data)
         spec = dag_spec_from_payload(payload)
-        workflow_id = mapath.create_dag_workflow(spec)
-        workflow = mapath.get_workflow(workflow_id)
-        for task in workflow.tasks.values():
-            if getattr(task, "model_anchor", None):
-                task.resources = await _resources_for_model_anchor(task.resources, task.model_anchor)
-
         run_config = spec.get("run") or {}
         artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
         file_context = data.get("file_context")
@@ -959,6 +1115,11 @@ async def submit_dag_workflow(req: Request):
                 artifact_mode=artifact_mode,
             )
         file_context = await _worker_reachable_file_context(req, file_context)
+        workflow_id = mapath.create_dag_workflow(spec)
+        workflow = mapath.get_workflow(workflow_id)
+        for task in workflow.tasks.values():
+            if getattr(task, "model_anchor", None):
+                task.resources = await _resources_for_model_anchor(task.resources, task.model_anchor)
 
         metadata = {
             **dict(spec.get("metadata") or {}),
@@ -991,6 +1152,8 @@ async def submit_dag_workflow(req: Request):
         raise HTTPException(status_code=400, detail=str(e))
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1017,6 +1180,8 @@ async def create_dynamic_run(req: Request):
         return {"status": "success", "run_id": run_id}
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1030,7 +1195,9 @@ async def list_runs(
     try:
         return {
             "status": "success",
-            "runs": await mapath.list_runs(status=status, kind=kind, limit=limit, detail=detail),
+            "runs": _redact_artifact_secrets(
+                await mapath.list_runs(status=status, kind=kind, limit=limit, detail=detail)
+            ),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1040,7 +1207,7 @@ async def get_run(run_id: str):
     try:
         return {
             "status": "success",
-            "run": await mapath.get_run_snapshot(run_id),
+            "run": _redact_artifact_secrets(await mapath.get_run_snapshot(run_id)),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1051,7 +1218,7 @@ async def get_run_tasks(run_id: str):
         return {
             "status": "success",
             "run_id": run_id,
-            "tasks": await mapath.get_run_tasks(run_id),
+            "tasks": _redact_artifact_secrets(await mapath.get_run_tasks(run_id)),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1062,7 +1229,7 @@ async def get_run_task(run_id: str, task_id: str):
         return {
             "status": "success",
             "run_id": run_id,
-            "task": await mapath.get_run_task(run_id, task_id),
+            "task": _redact_artifact_secrets(await mapath.get_run_task(run_id, task_id)),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1073,7 +1240,7 @@ async def get_run_artifacts(run_id: str):
         return {
             "status": "success",
             "run_id": run_id,
-            "artifacts": await mapath.get_run_artifacts(run_id),
+            "artifacts": _redact_artifact_secrets(await mapath.get_run_artifacts(run_id)),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1085,7 +1252,9 @@ async def get_run_task_artifacts(run_id: str, task_id: str):
             "status": "success",
             "run_id": run_id,
             "task_id": task_id,
-            "artifacts": await mapath.get_run_task_artifacts(run_id, task_id),
+            "artifacts": _redact_artifact_secrets(
+                await mapath.get_run_task_artifacts(run_id, task_id)
+            ),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1096,7 +1265,7 @@ async def get_run_events(run_id: str, after: Optional[int] = None):
         return {
             "status": "success",
             "run_id": run_id,
-            "events": await mapath.get_run_events(run_id, after),
+            "events": _redact_artifact_secrets(await mapath.get_run_events(run_id, after)),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1128,11 +1297,19 @@ async def cancel_run(run_id: str, req: Request):
             }
 
         await mapath.stop_workflow(run_id)
-        return {
+        snapshot = await mapath.get_run_snapshot(run_id)
+        response = {
             "status": "success",
             "run_id": run_id,
-            "run_status": "cancelled",
+            "run_status": snapshot.get("status"),
         }
+        initialization = snapshot.get("idempotency_initialization")
+        if (
+            isinstance(initialization, dict)
+            and initialization.get("status") == "cleanup_pending"
+        ):
+            response["initialization_status"] = "cleanup_pending"
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1157,7 +1334,6 @@ async def retry_run(run_id: str, req: Request):
                 "timeout_seconds": data.get("timeout_seconds"),
             },
         )
-        workflow_id = mapath.create_app_workflow(spec)
         file_context = data.get("file_context")
         if file_context is None:
             file_context = app_file_context(
@@ -1166,6 +1342,7 @@ async def retry_run(run_id: str, req: Request):
                 artifact_mode=data.get("artifact_mode", True),
             )
         file_context = await _worker_reachable_file_context(req, file_context)
+        workflow_id = mapath.create_app_workflow(spec)
         retry_metadata = {
             **metadata,
             **dict(data.get("metadata") or {}),
@@ -1197,6 +1374,8 @@ async def retry_run(run_id: str, req: Request):
         raise HTTPException(status_code=400, detail=str(e))
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1283,6 +1462,7 @@ async def append_dynamic_task(run_id: str, req: Request):
             parents=data.get("parents", []),
             request_id=data.get("request_id"),
             resources=data.get("resources") or data.get("resource_override"),
+            model_anchor=data.get("model_anchor"),
         )
         outputs = []
         if task.task_output:
@@ -1352,6 +1532,8 @@ async def emit_dynamic_run_event(run_id: str, req: Request):
             "run_id": run_id,
             "event": event,
         }
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1626,44 +1808,69 @@ async def reconcile_workers(req: Request):
 @app.put("/artifacts/sha256/{sha256}")
 async def put_artifact(sha256: str, req: Request):
     try:
+        capability = _request_artifact_capability(req)
+        if capability:
+            artifact_store.require_upload_capability(capability)
+        elif artifact_store.is_private(sha256):
+            raise HTTPException(status_code=404, detail="Artifact not found")
         data = await req.body()
         if sha256_bytes(data) != sha256:
             raise HTTPException(status_code=400, detail="Artifact checksum mismatch")
-        return artifact_store.put_bytes(sha256, data)
+        return artifact_store.put_bytes(
+            sha256,
+            data,
+            private=bool(capability),
+            capability=capability,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.head("/artifacts/sha256/{sha256}")
-async def head_artifact(sha256: str):
+async def head_artifact(sha256: str, req: Request):
     try:
         if not artifact_store.exists(sha256):
             raise HTTPException(status_code=404, detail="Artifact not found")
-        return artifact_store.metadata(sha256)
+        return artifact_store.metadata(sha256, _request_artifact_capability(req))
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/artifacts/sha256/{sha256}/metadata")
-async def get_artifact_metadata(sha256: str):
+async def get_artifact_metadata(sha256: str, req: Request):
     try:
         if not artifact_store.exists(sha256):
             raise HTTPException(status_code=404, detail="Artifact not found")
-        return {"status": "success", "artifact": artifact_store.metadata(sha256)}
+        return {
+            "status": "success",
+            "artifact": artifact_store.metadata(
+                sha256,
+                _request_artifact_capability(req),
+            ),
+        }
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/artifacts/sha256/{sha256}")
-async def get_artifact(sha256: str):
+async def get_artifact(sha256: str, req: Request):
     try:
         path = artifact_store.blob_path(sha256)
         if not path.exists():
             raise HTTPException(status_code=404, detail="Artifact not found")
+        artifact_store.require_read(sha256, _request_artifact_capability(req))
         return FileResponse(path, media_type="application/octet-stream", filename=sha256)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -1692,9 +1899,53 @@ async def start_worker(req:Request):
 async def start_llm_instance(req:Request):
     try:
         data = await req.json()
+        model = str(data.get("model") or "").strip()
+        backend = data.get("backend", "vllm")
+        cpu_nums = int(data.get("cpu_nums", 5))
+        gpu_nums = int(data.get("gpu_nums", 1))
+        gpu_mem = int(data.get("gpu_mem", 0))
+        if "memory_mib" in data:
+            memory = int(data["memory_mib"]) * 1024 * 1024
+        elif "memory" in data:
+            memory = int(data["memory"])
+        else:
+            memory = 1024 * 1024 * 1024
+        if not model:
+            raise ValueError("model is required")
+        if cpu_nums < 0 or memory < 0 or gpu_mem < 0:
+            raise ValueError("resource reservations must not be negative")
+        if gpu_nums != 1:
+            raise ValueError("Model instances currently require exactly one GPU")
+
+        backend_args = {}
+        if data.get("gpu_memory_utilization") is not None:
+            utilization = float(data["gpu_memory_utilization"])
+            if not 0 < utilization <= 1:
+                raise ValueError("gpu_memory_utilization must be between 0 and 1")
+            backend_args["gpu_memory_utilization"] = utilization
+        if data.get("max_model_len") is not None:
+            max_model_len = int(data["max_model_len"])
+            if max_model_len <= 0:
+                raise ValueError("max_model_len must be positive")
+            backend_args["max_model_len"] = max_model_len
+        backend, backend_args = validate_model_backend(backend, backend_args)
+        if backend == "transformers":
+            validate_transformers_model(model)
         instance_id = str(uuid.uuid4())
-        host,port = await mapath.start_llm_instance(instance_id, data["model"], data["cpu_nums"], data["gpu_nums"], data["memory"], data.get("gpu_mem",0))
-        return {"status": "success","host": host,"port": port,"instance_id": instance_id}
+        return await mapath.start_llm_instance(
+            instance_id,
+            model,
+            cpu_nums,
+            gpu_nums,
+            memory,
+            gpu_mem,
+            backend=backend,
+            backend_args=backend_args,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1702,8 +1953,10 @@ async def start_llm_instance(req:Request):
 async def stop_llm_instance(req:Request):
     try:
         data = await req.json()
-        await mapath.stop_llm_instance(data["instance_id"])
-        return {"status": "success"}
+        stopped = await mapath.stop_llm_instance(data["instance_id"])
+        return {"status": "success", "instance": stopped}
+    except SchedulerUnavailableError as e:
+        raise HTTPException(status_code=503, detail=e.detail())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

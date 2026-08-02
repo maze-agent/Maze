@@ -1,7 +1,9 @@
 
+import copy
 import ray
 import cloudpickle
 import time
+import uuid
 from typing import Any, List,Dict,Callable
 from maze.core.scheduler.runner import remote_task_runner,remote_lgraph_task_runner
 from maze.core.workflow.resources import (
@@ -74,6 +76,8 @@ class LanggraphTaskRuntime():
         self.retry_on = _normalize_retry_on(retry_on)
         self.timeout_seconds = None if timeout_seconds is None else float(timeout_seconds)
         self.attempt = 0
+        self.dispatch_id = None
+        self.lease_id = None
         self.last_error: Dict[str, Any] | None = None
         self.last_metrics: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
@@ -98,8 +102,10 @@ class LanggraphTaskRuntime():
     def set_task_status(self, status):
         self.status = status
 
-    def begin_attempt(self):
+    def begin_attempt(self, dispatch_id: str | None = None, lease_id: str | None = None):
         self.attempt += 1
+        self.dispatch_id = dispatch_id or str(uuid.uuid4())
+        self.lease_id = lease_id
         self.started_time = time.time()
         self.pending_reason = None
 
@@ -126,6 +132,14 @@ class LanggraphTaskRuntime():
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
+
+    def clear_attempt_identity(self):
+        self.dispatch_id = None
+        self.lease_id = None
+        self.started_time = None
+        self.object_ref = None
+        self.selected_node = None
+        self.last_schedule_decision = None
 
 class TaskRuntime():
     def __init__(
@@ -176,6 +190,8 @@ class TaskRuntime():
         self.file_manifest: Dict[str, Any] | None = None
         self.selected_node = None
         self.attempt = 0
+        self.dispatch_id = None
+        self.lease_id = None
         self.last_error: Dict[str, Any] | None = None
         self.last_metrics: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
@@ -200,8 +216,11 @@ class TaskRuntime():
     def set_task_status(self, status):
         self.status = status
 
-    def begin_attempt(self):
+    def begin_attempt(self, dispatch_id: str | None = None, lease_id: str | None = None):
         self.attempt += 1
+        self.dispatch_id = dispatch_id or str(uuid.uuid4())
+        self.lease_id = lease_id
+        self.file_manifest = None
         self.started_time = time.time()
         self.pending_reason = None
 
@@ -228,6 +247,14 @@ class TaskRuntime():
         self.status = "retrying"
         self.pending_reason = None
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
+
+    def clear_attempt_identity(self):
+        self.dispatch_id = None
+        self.lease_id = None
+        self.started_time = None
+        self.object_ref = None
+        self.selected_node = None
+        self.last_schedule_decision = None
         
 class WorkflowRuntime():
     def __init__(self,workflow_id):
@@ -239,8 +266,11 @@ class WorkflowRuntime():
         '''
         Add task to workflow.
         '''
-        if task.task_id not in self.tasks:
+        existing_task = self.tasks.get(task.task_id)
+        if existing_task is None:
             self.tasks[task.task_id] = task
+            return True
+        return existing_task is task
      
          
     def get_task_result(self,key):
@@ -329,6 +359,7 @@ class WorkflowRuntimeManager():
         task:TaskRuntime|LanggraphTaskRuntime,
         node:SelectedNode,
         task_input_data:Dict|None=None,
+        file_context:Dict|None=None,
     ):
         pool = getattr(self, "standby_worker_pool", None)
         if pool is None:
@@ -354,7 +385,7 @@ class WorkflowRuntimeManager():
                     code_ser=task.code_ser,
                     task_input_data=task_input_data,
                     cuda_visible_devices=cuda_visible_devices,
-                    file_context=task.file_context,
+                    file_context=file_context,
                     model_route=task.model_route,
                 )
         except Exception:
@@ -406,15 +437,21 @@ class WorkflowRuntimeManager():
         if task.workflow_id not in self.workflows:
             self.workflows[task.workflow_id] = WorkflowRuntime(task.workflow_id)
 
-        self.workflows[task.workflow_id].add_task(task)
+        return self.workflows[task.workflow_id].add_task(task)
     
-    def run_task(self,task:TaskRuntime|LanggraphTaskRuntime,node:SelectedNode):
+    def run_task(
+        self,
+        task:TaskRuntime|LanggraphTaskRuntime,
+        node:SelectedNode,
+        dispatch_id: str | None = None,
+        lease_id: str | None = None,
+    ):
         '''
         Run task in node.
         '''
         if task.workflow_id not in self.workflows:
             return 
-        task.begin_attempt()
+        task.begin_attempt(dispatch_id, lease_id)
         task.standby_worker_lease = None
         task.execution_backend = None
         cuda_visible_devices = self._cuda_visible_devices(node)
@@ -443,7 +480,20 @@ class WorkflowRuntimeManager():
 
         elif isinstance(task, TaskRuntime):
             task_input_data = self._resolve_task_input_data(task)
-            result_ref = self._try_standby_worker(task, node, task_input_data)
+            attempt_file_context = copy.deepcopy(task.file_context)
+            if attempt_file_context and attempt_file_context.get("enabled"):
+                attempt_file_context.update({
+                    "attempt": task.attempt,
+                    "dispatch_id": task.dispatch_id,
+                    "lease_id": task.lease_id,
+                    "node_id": node.node_id,
+                })
+            result_ref = self._try_standby_worker(
+                task,
+                node,
+                task_input_data,
+                file_context=attempt_file_context,
+            )
             if result_ref is None:
                 options = {
                     "num_cpus": task.scheduler_resources["cpu"],
@@ -457,7 +507,7 @@ class WorkflowRuntimeManager():
                     code_ser=task.code_ser,
                     task_input_data=task_input_data,
                     cuda_visible_devices=cuda_visible_devices,
-                    file_context=task.file_context,
+                    file_context=attempt_file_context,
                     model_route=task.model_route,
                 )
                 task.execution_backend = "ray_task"

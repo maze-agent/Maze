@@ -78,6 +78,9 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
 ]
+inference-vllm = [
+    "vllm==0.26.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/QinbinLi/Maze"
@@ -89,12 +92,15 @@ Repository = "https://github.com/QinbinLi/Maze"
 maze = "maze.cli.cli:main"
 maze-sandbox = "maze.cli.sandbox_cli:main"
 
+[tool.setuptools]
+license-files = ["LICENSE", "LICENSES/Apache-2.0.txt"]
+
 [tool.setuptools.package-dir]
 "" = "."
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["maze*"]
+include = ["maze*", "workflows*"]
 exclude = ["test*", "examples*", "web*", "docs*", "build*"]
 
 [tool.setuptools.package-data]

@@ -66,7 +66,8 @@ class MaTask:
                  workflow_id: str, 
                  server_url: str, 
                  task_name: Optional[str] = None,
-                 output_keys: Optional[list] = None):
+                 output_keys: Optional[list] = None,
+                 request_timeout: Optional[float] = None):
         """
         Initialize task object
         
@@ -76,11 +77,13 @@ class MaTask:
             server_url: Server address
             task_name: Task name (optional)
             output_keys: List of output parameter names (optional)
+            request_timeout: Optional timeout in seconds for HTTP requests
         """
         self.task_id = task_id
         self.workflow_id = workflow_id
         self.server_url = server_url.rstrip('/')
         self.task_name = task_name
+        self.request_timeout = request_timeout
         
         # Create output reference object
         if output_keys:
@@ -123,7 +126,10 @@ class MaTask:
             'timeout_seconds': timeout_seconds,
         }
         
-        response = requests.post(url, json=data)
+        request_kwargs = (
+            {} if self.request_timeout is None else {"timeout": self.request_timeout}
+        )
+        response = requests.post(url, json=data, **request_kwargs)
         
         if response.status_code == 200:
             result = response.json()
@@ -145,7 +151,10 @@ class MaTask:
             'task_id': self.task_id,
         }
         
-        response = requests.post(url, json=data)
+        request_kwargs = (
+            {} if self.request_timeout is None else {"timeout": self.request_timeout}
+        )
+        response = requests.post(url, json=data, **request_kwargs)
         
         if response.status_code == 200:
             result = response.json()

@@ -1,5 +1,8 @@
+from contextlib import contextmanager
 from typing import Any,Dict
+import os
 import subprocess
+import sys
 import time
 import ray
 import logging
@@ -10,6 +13,14 @@ from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 from maze.core.local_models import scan_local_model_refs
 
 logger = logging.getLogger(__name__)
+
+WORKER_RECOVERY_TIMEOUT_SECONDS = 60.0
+WORKER_STOP_TIMEOUT_SECONDS = 15.0
+
+
+def build_ray_command(*args: str):
+    executable_name = "ray.exe" if os.name == "nt" else "ray"
+    return [os.path.join(os.path.dirname(sys.executable), executable_name), *args]
 
 
 class RayClusterMismatchError(RuntimeError):
@@ -22,6 +33,53 @@ class RayClusterMismatchError(RuntimeError):
 
 class Worker():
     _last_registration_payload: Dict[str, Any] | None = None
+    _recovery_deadline: float | None = None
+
+    @staticmethod
+    @contextmanager
+    def _recovery_budget():
+        previous_deadline = Worker._recovery_deadline
+        if previous_deadline is None:
+            Worker._recovery_deadline = (
+                time.monotonic() + WORKER_RECOVERY_TIMEOUT_SECONDS
+            )
+        try:
+            yield
+        finally:
+            Worker._recovery_deadline = previous_deadline
+
+    @staticmethod
+    def _remaining_recovery_seconds(operation: str) -> float | None:
+        if Worker._recovery_deadline is None:
+            return None
+        remaining = Worker._recovery_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "Worker recovery exceeded its "
+                f"{WORKER_RECOVERY_TIMEOUT_SECONDS:g}-second budget while {operation}"
+            )
+        return remaining
+
+    @staticmethod
+    def _operation_timeout(timeout: float, operation: str) -> float:
+        configured_timeout = max(0.0, float(timeout))
+        remaining = Worker._remaining_recovery_seconds(operation)
+        if remaining is None:
+            return configured_timeout
+        return min(configured_timeout, remaining)
+
+    @staticmethod
+    def _sleep(delay: float, operation: str) -> None:
+        delay = max(0.0, float(delay))
+        remaining = Worker._remaining_recovery_seconds(operation)
+        if remaining is None or delay < remaining:
+            time.sleep(delay)
+            return
+        time.sleep(remaining)
+        raise TimeoutError(
+            "Worker recovery exceeded its "
+            f"{WORKER_RECOVERY_TIMEOUT_SECONDS:g}-second budget while {operation}"
+        )
 
     @staticmethod
     def _registration_summary(response: Dict[str, Any] | None) -> str:
@@ -64,7 +122,11 @@ class Worker():
         payload = data or {}
         for attempt in range(1, max(1, int(retries)) + 1):
             try:
-                response = requests.post(url, json=payload, timeout=timeout)
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=Worker._operation_timeout(timeout, f"posting to {url}"),
+                )
                 if response.status_code == 200:
                     return Worker._parse_core_response(response, url)
                 last_error = RuntimeError(f"Failed to send request: {response.status_code}, {response.text}")
@@ -74,8 +136,12 @@ class Worker():
                 last_error = exc
 
             if attempt < retries:
-                time.sleep(max(0.0, float(retry_delay)) * attempt)
+                Worker._sleep(
+                    max(0.0, float(retry_delay)) * attempt,
+                    f"retrying POST {url}",
+                )
 
+        Worker._remaining_recovery_seconds(f"posting to {url}")
         raise RuntimeError(f"Failed to send request after {retries} attempt(s): {last_error}")
 
     @staticmethod
@@ -89,7 +155,10 @@ class Worker():
         last_error = None
         for attempt in range(1, max(1, int(retries)) + 1):
             try:
-                response = requests.get(url, timeout=timeout)
+                response = requests.get(
+                    url,
+                    timeout=Worker._operation_timeout(timeout, f"getting {url}"),
+                )
                 if response.status_code == 200:
                     return Worker._parse_core_response(response, url)
                 last_error = RuntimeError(f"Failed to send request: {response.status_code}, {response.text}")
@@ -99,8 +168,12 @@ class Worker():
                 last_error = exc
 
             if attempt < retries:
-                time.sleep(max(0.0, float(retry_delay)) * attempt)
+                Worker._sleep(
+                    max(0.0, float(retry_delay)) * attempt,
+                    f"retrying GET {url}",
+                )
 
+        Worker._remaining_recovery_seconds(f"getting {url}")
         raise RuntimeError(f"Failed to send request after {retries} attempt(s): {last_error}")
 
     @staticmethod
@@ -125,11 +198,11 @@ class Worker():
         if ray.is_initialized():
             return True
         result = subprocess.run(
-            ["pgrep", "-f", "raylet.*--node_ip_address"],
+            ["pgrep", "-f", "[r]aylet.*--node_ip_address"],
             check=False,
             text=True,
             capture_output=True,
-            timeout=5,
+            timeout=Worker._operation_timeout(5, "checking the local Ray runtime"),
         )
         return result.returncode == 0
 
@@ -142,9 +215,7 @@ class Worker():
         if local_ray_active:
             print("Local Ray runtime already active; reusing it instead of starting another raylet.")
         else:
-            command = [
-                "ray", "start", "--address", ray_addr,
-            ]
+            command = build_ray_command("start", "--address", ray_addr)
             if local_ip:
                 command.extend(["--node-ip-address", local_ip])
             result = subprocess.run(
@@ -152,6 +223,7 @@ class Worker():
                 check=False,
                 text=True,
                 capture_output=True,
+                timeout=Worker._operation_timeout(30, "joining the Ray cluster"),
             )
             output = result.stderr + result.stdout
             if result.returncode != 0 and "already" not in output.lower():
@@ -164,17 +236,28 @@ class Worker():
         if local_ip is None:
             raise RuntimeError(f"Could not determine the worker IP used to reach {ray_addr}")
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        timeout = max(0.0, float(timeout))
+        membership_deadline = time.monotonic() + timeout
+        confirmation_state = None
+        while time.monotonic() < membership_deadline:
+            remaining = membership_deadline - time.monotonic()
             cluster_response = Worker._send_get_request(
                 f"http://{addr}/cluster/resources",
                 retries=1,
-                timeout=5,
+                timeout=min(5.0, max(0.001, remaining)),
             )
             cluster = cluster_response.get("cluster") or {}
+            ray_query = cluster.get("ray_query") or {}
+            if ray_query.get("status") != "available":
+                confirmation_state = "non_authoritative"
+                Worker._sleep(
+                    min(0.5, max(0.0, membership_deadline - time.monotonic())),
+                    "waiting for Ray cluster membership",
+                )
+                continue
             candidates = [
-                *(cluster.get("nodes") or []),
                 *(cluster.get("unregistered_ray_nodes") or []),
+                *(cluster.get("nodes") or []),
             ]
             node = next(
                 (
@@ -185,7 +268,11 @@ class Worker():
                 None,
             )
             if node is None:
-                time.sleep(0.5)
+                confirmation_state = "authoritative_missing"
+                Worker._sleep(
+                    min(0.5, max(0.0, membership_deadline - time.monotonic())),
+                    "waiting for this worker in Ray cluster membership",
+                )
                 continue
 
             ray_resources = node.get("ray_resources") or {}
@@ -214,8 +301,24 @@ class Worker():
             Worker._last_registration_payload = payload
             return payload
 
+        message = (
+            f"Worker IP {local_ip} did not appear in the current Ray cluster "
+            f"within {timeout} seconds"
+        )
+        Worker._remaining_recovery_seconds("waiting for Ray cluster membership")
+        if confirmation_state == "authoritative_missing":
+            raise RayClusterMismatchError({
+                "registration_status": "cluster_mismatch",
+                "error_code": "ray_cluster_mismatch",
+                "error": {
+                    "code": "ray_cluster_mismatch",
+                    "message": message,
+                },
+                "node_id": None,
+                "node_ip": local_ip,
+            })
         raise RuntimeError(
-            f"Worker IP {local_ip} did not appear in the current Ray cluster within {timeout} seconds"
+            f"Current Ray node membership remained unavailable while waiting for {local_ip}"
         )
 
     @staticmethod
@@ -224,11 +327,11 @@ class Worker():
         if ray.is_initialized():
             ray.shutdown()
         result = subprocess.run(
-            ["ray", "stop", "--force"],
+            build_ray_command("stop", "--force"),
             check=False,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=Worker._operation_timeout(30, "resetting the local Ray runtime"),
         )
         output = f"{result.stdout}\n{result.stderr}".lower()
         if result.returncode != 0 and "no active ray processes" not in output:
@@ -259,22 +362,35 @@ class Worker():
         if not isinstance(worker, dict):
             raise RuntimeError(f"Maze core /start_worker response missing worker payload: {response}")
 
+        registration_status = worker.get("registration_status", "unknown")
+        if registration_status == "cluster_mismatch" or worker.get("error_code") == "ray_cluster_mismatch":
+            raise RayClusterMismatchError(worker)
+        if registration_status == "ray_cluster_unavailable" or worker.get("error_code") == "ray_cluster_unavailable":
+            error = worker.get("error") or {}
+            raise RuntimeError(error.get("message") or "Current Ray node membership is unavailable")
         if worker.get("node_id") != current_node_id:
             raise RuntimeError(
                 "Maze worker registration node_id mismatch: "
                 f"expected {current_node_id}, got {worker.get('node_id')}"
             )
-        if worker.get("node_ip") != current_node_ip:
+        canonical_node_ip = worker.get("node_ip")
+        if not isinstance(canonical_node_ip, str) or not canonical_node_ip:
             raise RuntimeError(
-                "Maze worker registration node_ip mismatch: "
-                f"expected {current_node_ip}, got {worker.get('node_ip')}"
+                "Maze worker registration response missing canonical node_ip: "
+                f"{canonical_node_ip!r}"
             )
 
-        registration_status = worker.get("registration_status", "unknown")
-        if registration_status == "cluster_mismatch" or worker.get("error_code") == "ray_cluster_mismatch":
-            raise RayClusterMismatchError(worker)
         if registration_status not in {"created", "updated", "already_registered"}:
             raise RuntimeError(f"Unexpected Maze worker registration status: {registration_status}")
+        if canonical_node_ip != current_node_ip:
+            logger.info(
+                "Using Maze scheduler's canonical worker address: "
+                "node_id=%s requested_ip=%s canonical_ip=%s",
+                current_node_id,
+                current_node_ip,
+                canonical_node_ip,
+            )
+            cached["node_ip"] = canonical_node_ip
         if announce:
             print(
                 "===Success to register worker=== "
@@ -301,9 +417,10 @@ class Worker():
 
     @staticmethod
     def _recover_cluster_mismatch(addr: str):
-        Worker._reset_local_ray_runtime()
-        Worker._last_registration_payload = None
-        return Worker._connect_and_register(addr)
+        with Worker._recovery_budget():
+            Worker._reset_local_ray_runtime()
+            Worker._last_registration_payload = None
+            return Worker._connect_and_register(addr)
 
     @staticmethod
     def _agent_loop(
@@ -318,30 +435,42 @@ class Worker():
             if stop_after_iterations is not None and iteration >= stop_after_iterations:
                 return
             iteration += 1
-            time.sleep(max(1.0, float(heartbeat_interval)))
-            try:
-                Worker._register_worker(addr, announce=False)
-            except RayClusterMismatchError as exc:
-                print(f"Worker Ray cluster mismatch confirmed: {exc}")
+            Worker._sleep(
+                max(1.0, float(heartbeat_interval)),
+                "waiting for the next worker heartbeat",
+            )
+            with Worker._recovery_budget():
                 try:
-                    reconnect_result = Worker._recover_cluster_mismatch(addr)
-                    registration = reconnect_result.get("registration") if isinstance(reconnect_result, dict) else None
-                    print(f"Worker joined current Ray cluster: {Worker._registration_summary(registration)}")
-                except Exception as reconnect_exc:
-                    print(f"Worker cluster recovery failed: {reconnect_exc}")
-            except Exception as exc:
-                print(f"Worker heartbeat failed: {exc}")
-                try:
-                    reconnect_result = Worker._connect_and_register(addr)
-                    registration = reconnect_result.get("registration") if isinstance(reconnect_result, dict) else None
-                    print(f"Worker reconnect succeeded: {Worker._registration_summary(registration)}")
-                except Exception as reconnect_exc:
-                    print(f"Worker reconnect failed: {reconnect_exc}")
-                    print(
-                        "Recovery hint: run "
-                        f"`maze cluster reconcile-workers --server-url http://{addr}` "
-                        "to inspect Ray nodes that are not registered with Maze."
-                    )
+                    Worker._register_worker(addr, announce=False)
+                except RayClusterMismatchError as exc:
+                    print(f"Worker Ray cluster mismatch confirmed: {exc}")
+                    try:
+                        reconnect_result = Worker._recover_cluster_mismatch(addr)
+                        registration = reconnect_result.get("registration") if isinstance(reconnect_result, dict) else None
+                        print(f"Worker joined current Ray cluster: {Worker._registration_summary(registration)}")
+                    except Exception as reconnect_exc:
+                        print(f"Worker cluster recovery failed: {reconnect_exc}")
+                except Exception as exc:
+                    print(f"Worker heartbeat failed: {exc}")
+                    try:
+                        reconnect_result = Worker._connect_and_register(addr)
+                        registration = reconnect_result.get("registration") if isinstance(reconnect_result, dict) else None
+                        print(f"Worker reconnect succeeded: {Worker._registration_summary(registration)}")
+                    except RayClusterMismatchError as mismatch_exc:
+                        print(f"Worker Ray cluster mismatch confirmed during reconnect: {mismatch_exc}")
+                        try:
+                            reconnect_result = Worker._recover_cluster_mismatch(addr)
+                            registration = reconnect_result.get("registration") if isinstance(reconnect_result, dict) else None
+                            print(f"Worker joined current Ray cluster: {Worker._registration_summary(registration)}")
+                        except Exception as reconnect_exc:
+                            print(f"Worker cluster recovery failed: {reconnect_exc}")
+                    except Exception as reconnect_exc:
+                        print(f"Worker reconnect failed: {reconnect_exc}")
+                        print(
+                            "Recovery hint: run "
+                            f"`maze cluster reconcile-workers --server-url http://{addr}` "
+                            "to inspect Ray nodes that are not registered with Maze."
+                        )
 
     @staticmethod
     def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10):
@@ -364,19 +493,19 @@ class Worker():
     
     @staticmethod
     def stop_worker():
-        try:
-            command = [
-                "ray", "stop",
-            ]
-            result = subprocess.run(
-                command,
-                check=True,                  
-                text=True,                 
-                capture_output=True,      
+        command = build_ray_command("stop", "--force")
+        result = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=WORKER_STOP_TIMEOUT_SECONDS,
+        )
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        if result.returncode != 0 and "no active ray processes" not in output:
+            raise RuntimeError(
+                result.stderr or result.stdout or "Failed to stop the local Ray worker"
             )
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to start Ray: {result.stderr}")
-            print("===Success to stop worker===")
-        except Exception as e:
-            print(e.stdout)
-            print(e.stderr)
+        Worker._last_registration_payload = None
+        print("===Success to stop worker===")
+        return result

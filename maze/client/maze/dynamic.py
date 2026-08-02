@@ -133,6 +133,7 @@ class DynamicRun:
         request_id: str | None = None,
         task_name: str | None = None,
         resources: Dict[str, Any] | None = None,
+        model_anchor: Dict[str, Any] | None = None,
     ) -> DynamicTaskInvocation:
         payload: Dict[str, Any] = {
             "inputs": _encode_dynamic_inputs(inputs),
@@ -144,6 +145,8 @@ class DynamicRun:
         }
         if resources is not None:
             payload["resources"] = resources
+        if model_anchor is not None:
+            payload["model_anchor"] = model_anchor
 
         if isinstance(task, DynamicTaskSpec):
             payload["task_spec_id"] = task.task_spec_id

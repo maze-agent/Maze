@@ -2,6 +2,7 @@ import ray
 import time
 import logging
 import copy
+import uuid
 from typing import Any,List,Dict
 from maze.core.scheduler.dag_context import DAGContextManager
 from maze.core.scheduler.runtime import SelectedNode
@@ -33,10 +34,20 @@ SUPPORTED_SCHEDULING_POLICIES = {
 }
 
 
+class RayNodeQueryError(RuntimeError):
+    """Raised when Ray cannot provide an authoritative node snapshot."""
+
+
 class ResourceSelection:
-    def __init__(self, selected_node: SelectedNode | None, decision: Dict[str, Any]):
+    def __init__(
+        self,
+        selected_node: SelectedNode | None,
+        decision: Dict[str, Any],
+        lease_id: str | None = None,
+    ):
         self.selected_node = selected_node
         self.decision = decision
+        self.lease_id = lease_id
 
     def __bool__(self):
         return self.selected_node is not None
@@ -116,12 +127,27 @@ class Node():
         gpu = resources["gpu"]
         gpu_mem = resources["gpu_mem"]
 
-        self.available_resources['cpu'] += cpu
-        self.available_resources['cpu_mem'] += cpu_mem
+        self.available_resources['cpu'] = min(
+            self.total_resources.get('cpu', 0),
+            self.available_resources.get('cpu', 0) + cpu,
+        )
+        self.available_resources['cpu_mem'] = min(
+            self.total_resources.get('cpu_mem', 0),
+            self.available_resources.get('cpu_mem', 0) + cpu_mem,
+        )
         
         if gpu_id is not None:
-            self.available_resources['gpu_resource'][gpu_id]['gpu_mem'] += gpu_mem
-            self.available_resources['gpu_resource'][gpu_id]['gpu_num'] += gpu
+            total_gpu = self.total_resources.get('gpu_resource', {}).get(gpu_id)
+            available_gpu = self.available_resources.get('gpu_resource', {}).get(gpu_id)
+            if total_gpu is not None and available_gpu is not None:
+                available_gpu['gpu_mem'] = min(
+                    total_gpu.get('gpu_mem', 0),
+                    available_gpu.get('gpu_mem', 0) + gpu_mem,
+                )
+                available_gpu['gpu_num'] = min(
+                    total_gpu.get('gpu_num', 0),
+                    available_gpu.get('gpu_num', 0) + gpu,
+                )
         self.last_resource_update_time = time.time()
             
 class ResourceManager():
@@ -129,6 +155,7 @@ class ResourceManager():
         self.head_node_id = None
         self.head_node_ip = None
         self.nodes:Dict[str,Node] = {}
+        self.active_leases: Dict[str, Dict[str, Any]] = {}
         self.running_task_counts: Dict[str, int] = {}
         self.disabled_node_ids: set[str] = set()
         self.dag_context_manager = DAGContextManager()
@@ -204,14 +231,20 @@ class ResourceManager():
                     self.running_task_counts.setdefault(self.head_node_id, 0)
                     return
                     
-    def check_dead_node(self): 
-        nodes = ray.nodes()
-        for node in nodes:
-            if node["NodeID"] in self.nodes and not node["Alive"]:
-                node_id = node["NodeID"]
-                del self.nodes[node_id]
-                self.running_task_counts.pop(node_id, None)
-                self.dag_context_manager.release_node_contexts(node_id)
+    def check_dead_node(self):
+        try:
+            nodes = self._ray_node_index()
+        except RayNodeQueryError:
+            return False
+        for node_id in list(self.nodes):
+            ray_node = nodes.get(node_id)
+            if ray_node is not None and ray_node.get("Alive", False):
+                continue
+            self.nodes.pop(node_id, None)
+            self.running_task_counts.pop(node_id, None)
+            self.disabled_node_ids.discard(node_id)
+            self.dag_context_manager.release_node_contexts(node_id)
+        return True
                 
     def show_all_node_resource(self):
         '''
@@ -229,12 +262,11 @@ class ResourceManager():
     def _ray_node_index(self):
         try:
             return {node["NodeID"]: node for node in ray.nodes()}
-        except Exception:
-            return {}
+        except Exception as exc:
+            logger.warning("Unable to query the current Ray node membership: %s", exc)
+            raise RayNodeQueryError("Current Ray node membership is unavailable") from exc
 
     def _is_node_alive(self, node_id: str, ray_nodes: Dict[str, Dict[str, Any]]):
-        if not ray_nodes:
-            return True
         ray_node = ray_nodes.get(node_id)
         return bool(ray_node and ray_node.get("Alive", False))
 
@@ -274,12 +306,24 @@ class ResourceManager():
 
     def get_cluster_resources(self):
         self._refresh_head_local_models()
-        ray_nodes = self._ray_node_index()
+        try:
+            ray_nodes = self._ray_node_index()
+            ray_query = {"status": "available"}
+        except RayNodeQueryError:
+            ray_nodes = {}
+            ray_query = {
+                "status": "unavailable",
+                "error_code": "ray_cluster_unavailable",
+            }
         registered_nodes = []
 
         for node_id, node in self.nodes.items():
             ray_node = ray_nodes.get(node_id)
-            alive = bool(ray_node.get("Alive", False)) if ray_node else False
+            alive = (
+                bool(ray_node.get("Alive", False))
+                if ray_query["status"] == "available"
+                else None
+            )
             if alive:
                 node.last_ray_seen_time = time.time()
             stale = bool(
@@ -336,6 +380,7 @@ class ResourceManager():
         return {
             "head_node_id": self.head_node_id,
             "head_node_ip": self.head_node_ip,
+            "ray_query": ray_query,
             "scheduling_policy": self.scheduling_policy,
             "supported_scheduling_policies": copy.deepcopy(SUPPORTED_SCHEDULING_POLICIES),
             "disabled_node_ids": sorted(self.disabled_node_ids),
@@ -446,6 +491,10 @@ class ResourceManager():
         reservation_kind: str = "task",
         model_anchor: Dict[str, Any] | None = None,
         workflow_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        attempt: int | None = None,
+        dispatch_id: str | None = None,
     ) -> ResourceSelection:
         '''
         Select sufficient resources node
@@ -468,7 +517,22 @@ class ResourceManager():
         dag_context = self.dag_context_manager.get_context(workflow_id)
         affinity_node_id = dag_context.preferred_node_id if dag_context else None
         self._refresh_head_local_models()
-        ray_nodes = self._ray_node_index()
+        try:
+            ray_nodes = self._ray_node_index()
+        except RayNodeQueryError:
+            return ResourceSelection(None, {
+                "selected": False,
+                "reason": "ray_cluster_unavailable",
+                "requested_resources": copy.deepcopy(task_need_resources),
+                "scheduling_policy": self.scheduling_policy,
+                "dag_context": {
+                    "workflow_id": workflow_id,
+                    "preferred_node_id": affinity_node_id,
+                    "preferred_node_ip": dag_context.preferred_node_ip if dag_context else None,
+                    "affinity_active": affinity_node_id is not None,
+                } if workflow_id else None,
+                "candidate_nodes": [],
+            })
         candidates = []
 
         for order, (node_id,node) in enumerate(self.nodes.items()):
@@ -589,8 +653,21 @@ class ResourceManager():
 
         context, context_created = self.dag_context_manager.record_selection(workflow_id, node_id, node.node_ip)
         selected_node = SelectedNode(node_id=node_id,node_ip=node.node_ip,gpu_id=gpu_id)
+        lease_id = str(uuid.uuid4())
+        self.active_leases[lease_id] = {
+            "lease_id": lease_id,
+            "reservation_kind": reservation_kind,
+            "run_id": run_id or workflow_id,
+            "task_id": task_id,
+            "attempt": attempt,
+            "dispatch_id": dispatch_id,
+            "node_id": node_id,
+            "gpu_id": gpu_id,
+            "resources": copy.deepcopy(task_need_resources),
+        }
         decision["selected"] = True
         decision["reason"] = "selected"
+        decision["lease_id"] = lease_id
         decision["selected_node"] = {
             "node_id": selected_node.node_id,
             "node_ip": selected_node.node_ip,
@@ -604,10 +681,68 @@ class ResourceManager():
                 "selected_node_id": node_id,
                 "affinity_hit": bool(affinity_node_id and node_id == affinity_node_id),
             }
-        return ResourceSelection(selected_node, decision)
+        return ResourceSelection(selected_node, decision, lease_id)
 
     def release_dag_context(self, workflow_id: str | None) -> bool:
         return self.dag_context_manager.release_context(workflow_id)
+
+    def _recompute_node_available_resources(self, node_id: str) -> None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+
+        reserved_cpu = 0
+        reserved_cpu_mem = 0
+        reserved_gpu_resources: Dict[int, Dict[str, Any]] = {}
+        for lease in self.active_leases.values():
+            if lease.get("node_id") != node_id:
+                continue
+            resources = lease.get("resources") or {}
+            reserved_cpu += resources.get("cpu", 0)
+            reserved_cpu_mem += resources.get("cpu_mem", 0)
+            gpu_id = lease.get("gpu_id")
+            if gpu_id is None:
+                continue
+            reserved_gpu = reserved_gpu_resources.setdefault(
+                gpu_id,
+                {"gpu_num": 0, "gpu_mem": 0},
+            )
+            reserved_gpu["gpu_num"] += resources.get("gpu", 0)
+            reserved_gpu["gpu_mem"] += resources.get("gpu_mem", 0)
+
+        available = copy.deepcopy(node.total_resources)
+        available["cpu"] = max(0, available.get("cpu", 0) - reserved_cpu)
+        available["cpu_mem"] = max(
+            0,
+            available.get("cpu_mem", 0) - reserved_cpu_mem,
+        )
+        for gpu_id, gpu_resource in available.get("gpu_resource", {}).items():
+            reserved_gpu = reserved_gpu_resources.get(gpu_id, {})
+            gpu_resource["gpu_num"] = max(
+                0,
+                gpu_resource.get("gpu_num", 0) - reserved_gpu.get("gpu_num", 0),
+            )
+            gpu_resource["gpu_mem"] = max(
+                0,
+                gpu_resource.get("gpu_mem", 0) - reserved_gpu.get("gpu_mem", 0),
+            )
+        node.available_resources = available
+        node.last_resource_update_time = time.time()
+
+    def release_lease(self, lease_id: str | None) -> bool:
+        lease = self.active_leases.pop(lease_id, None)
+        if lease is None:
+            return False
+
+        node_id = lease["node_id"]
+        if node_id in self.nodes:
+            if lease["reservation_kind"] == "task":
+                self.running_task_counts[node_id] = max(
+                    0,
+                    self.running_task_counts.get(node_id, 0) - 1,
+                )
+            self._recompute_node_available_resources(node_id)
+        return True
 
     def release_task_resource(self,tasks:List[TaskRuntime]):
         '''
@@ -615,29 +750,32 @@ class ResourceManager():
         '''
         assert isinstance(tasks,list)
         for task in tasks:
-            if getattr(task, "selected_node", None) is None:
-                continue
-            node_id = task.selected_node.node_id
-            if node_id not in self.nodes:
-                continue
-            self.nodes[node_id].release_resource(task.scheduler_resources,task.selected_node.gpu_id)
-            self.running_task_counts[node_id] = max(0, self.running_task_counts.get(node_id, 0) - 1)
+            self.release_lease(getattr(task, "lease_id", None))
 
     def release_instance_resource(self,resource_detail:dict):
         '''
-        Release resource
+        Release an instance reservation.
         '''
-        node_id = resource_detail["node_id"]
-        gpu_id = resource_detail["gpu_id"]
-        resources = resource_detail["resources"]
-        self.nodes[node_id].release_resource(resources,gpu_id)
+        self.release_lease(resource_detail.get("lease_id"))
         
 
     def start_worker(self,node_id:str,node_ip:str,resources:dict,capabilities:dict | None = None):
         '''
         Start worker node
         '''
-        ray_nodes = self._ray_node_index()
+        try:
+            ray_nodes = self._ray_node_index()
+        except RayNodeQueryError:
+            return {
+                "registration_status": "ray_cluster_unavailable",
+                "error_code": "ray_cluster_unavailable",
+                "error": {
+                    "code": "ray_cluster_unavailable",
+                    "message": "Current Ray node membership is temporarily unavailable",
+                },
+                "node_id": node_id,
+                "node_ip": node_ip,
+            }
         ray_node = ray_nodes.get(node_id)
         if ray_node is None or not ray_node.get("Alive", False):
             live_node_ids = sorted(
@@ -663,6 +801,16 @@ class ResourceManager():
                 "node_ip": node_ip,
             }
 
+        ray_node_ip = ray_node.get("NodeManagerAddress")
+        if ray_node_ip and ray_node_ip != node_ip:
+            logger.warning(
+                "Using Ray's canonical worker address: node_id=%s requested_ip=%s ray_ip=%s",
+                node_id,
+                node_ip,
+                ray_node_ip,
+            )
+            node_ip = str(ray_node_ip)
+
         resources = copy.deepcopy(resources)
         gpu_resource = {int(k): v for k, v in resources['gpu_resource'].items()}
         resources["gpu_resource"] = gpu_resource
@@ -686,7 +834,12 @@ class ResourceManager():
         else:
             self.nodes[node_id] = Node(node_id,node_ip,resources,resources,capabilities)
             registration_status = "created"
-        self.running_task_counts.setdefault(node_id, 0)
+        self.running_task_counts[node_id] = sum(
+            lease.get("reservation_kind") == "task"
+            and lease.get("node_id") == node_id
+            for lease in self.active_leases.values()
+        )
+        self._recompute_node_available_resources(node_id)
         log_registration = logger.debug if registration_status == "already_registered" else logger.info
         log_registration(
             "Worker registration %s: node_id=%s node_ip=%s",
