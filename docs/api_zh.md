@@ -8,7 +8,7 @@
 
 1. [Python SDK](#一python-sdk-api)：开发者最常用，定义任务 / 构建工作流 / 启动 Agent。
 2. [Head HTTP & WebSocket API](#二head-服务-http--websocket-api)：FastAPI 提供的底层接口。
-3. [CLI 命令](#三cli-命令)：`maze start`、`maze stop`、`maze-sandbox`。
+3. [CLI 命令](#三cli-命令)：`maze start`、`maze stop`，以及已退役的 `maze-sandbox` 兼容命令。
 4. [Playground 后端 REST API](#四maze-playground-后端-rest-api)：可视化界面专用接口。
 
 文末附 [事件协议](#五事件协议event-protocol)、[资源配置说明](#六资源配置resources)、[错误码与异常](#七错误处理) 与 [完整示例](#八完整示例)。
@@ -1113,9 +1113,11 @@ maze stop [--log-level INFO] [--log-file ...]
 
 停止本机的 Worker。
 
-### 3.3 `maze-sandbox`
+### 3.3 `maze-sandbox`（已退役）
 
-代码沙箱辅助命令，详见 `maze/cli/sandbox_cli.py`。
+旧的远程 Sandbox 服务已经删除。该命令仅作为兼容提示保留，执行后会给出迁移说明并退出。
+请改用 `maze start --head --playground` 和 Workspace Agent 的
+`workspace_sandbox` 后端。
 
 ---
 

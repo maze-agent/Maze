@@ -8,7 +8,7 @@ This document summarizes the public Maze APIs across four layers:
 
 1. [Python SDK](#1-python-sdk-api): define tasks, build workflows, and run agents.
 2. [Head HTTP and WebSocket API](#2-head-http-and-websocket-api): FastAPI endpoints exposed by the Maze Head service.
-3. [CLI Commands](#3-cli-commands): `maze start`, `maze stop`, and `maze-sandbox`.
+3. [CLI Commands](#3-cli-commands): `maze start`, `maze stop`, and the retired `maze-sandbox` compatibility command.
 4. [Maze Workbench Backend REST API](#4-maze-workbench-backend-rest-api): APIs used by the visual Workbench.
 
 Additional sections cover the [event protocol](#5-event-protocol), [resource configuration](#6-resource-configuration), [error handling](#7-error-handling), [examples](#8-complete-examples), and [observability APIs](#9-run-status-metrics-and-observability).
@@ -1083,9 +1083,12 @@ maze stop [--log-level INFO] [--log-file ...]
 
 Stops the local worker process.
 
-### 3.3 `maze-sandbox`
+### 3.3 `maze-sandbox` (retired)
 
-Sandbox helper command. See `maze/cli/sandbox_cli.py`.
+The legacy remote sandbox service has been removed. The command remains as a
+compatibility tombstone and exits with migration guidance. Use
+`maze start --head --playground` and the Workspace Agent `workspace_sandbox`
+backend instead.
 
 ---
 
