@@ -2020,10 +2020,11 @@ async def list_run_tasks(run_id: str):
     """All tasks of a static run with their states and metrics."""
     try:
         snapshot = mapath.get_static_run_snapshot(run_id)
+        tasks = snapshot.get("task_nodes") or {}
         return {
             "run_id": run_id,
-            "task_total": snapshot.get("task_total"),
-            "tasks": snapshot.get("tasks") or {},
+            "task_total": (snapshot.get("task_counts") or {}).get("total", len(tasks)),
+            "tasks": _redact_artifact_secrets(tasks),
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

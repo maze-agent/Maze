@@ -1498,16 +1498,14 @@ Use the unified `/runs/*` API first. It covers static workflows, AppSpec runs, a
 Run states:
 
 ```text
-created -> submitted -> running -> succeeded
-                                -> failed
-                                -> canceled
-                                -> interrupted
+Active: created / running
+Terminal: succeeded / failed / cancelled / timed_out / interrupted
 ```
 
 Task states:
 
 ```text
-pending -> running -> succeeded / failed / canceled
+pending / queued / running / succeeded / failed / cancelled / timed_out
 ```
 
 ### 9.2 Persistence
@@ -1515,10 +1513,9 @@ pending -> running -> succeeded / failed / canceled
 Static run state is persisted under the workspace:
 
 ```text
-workspace/workflow_runs/static/{run_id}/
+workspace/workflow_runs/static_runs/{run_id}/
   run.json
   events.jsonl
-workspace/workflow_runs/_index.jsonl
 ```
 
 `MAZE_WORKSPACE_DIR` can override the default workspace path for compatible flows.
@@ -1584,7 +1581,9 @@ Quickly answer "what is this DAG running now?"
 
 #### `GET /v1/runs/{run_id}/tasks`
 
-List task states and metrics. Unified equivalent:
+List task states and metrics. The compatibility response keeps the legacy
+`task_total` and `tasks` keys, mapped from `task_counts.total` and `task_nodes`.
+Unified equivalent:
 
 ```bash
 curl http://localhost:8000/runs/<run_id>/tasks
@@ -1766,7 +1765,7 @@ Expected result:
   - LangGraph bridge: `maze/client/langgraph/client.py`
   - Head service: `maze/core/server.py`
   - Scheduler: `maze/core/scheduler/`
-  - Static run persistence and events: `maze/core/runs/`
+  - Static run persistence and events: `maze/core/workflow/static_run.py`
   - Dynamic run model and events: `maze/core/workflow/dynamic.py`, `maze/core/workflow/dynamic_store.py`
   - Metrics reporting: `maze/metrics/`
   - CLI: `maze/cli/cli.py`, `maze/cli/sandbox_cli.py`

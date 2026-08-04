@@ -65,3 +65,37 @@ def test_cancel_run_reports_durable_static_status(
 
     assert asyncio.run(server.cancel_run("run", _Request())) == expected
     assert path.stop_calls == ["run"]
+
+
+def test_v1_list_run_tasks_maps_canonical_static_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAZE_WORKSPACE_DIR", str(tmp_path))
+    from maze.core import server
+
+    class Path:
+        def get_static_run_snapshot(self, run_id):
+            assert run_id == "run"
+            return {
+                "task_counts": {"total": 1},
+                "task_nodes": {
+                    "task": {
+                        "status": "running",
+                        "artifact_store": {
+                            "capability": "secret",
+                            "uri": "maze://runs/run/artifacts/file.txt",
+                        },
+                    },
+                },
+            }
+
+    monkeypatch.setattr(server, "mapath", Path())
+
+    assert asyncio.run(server.list_run_tasks("run")) == {
+        "run_id": "run",
+        "task_total": 1,
+        "tasks": {
+            "task": {
+                "status": "running",
+                "artifact_store": {"uri": "maze://runs/run/artifacts/file.txt"},
+            },
+        },
+    }

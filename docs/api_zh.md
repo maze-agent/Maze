@@ -1565,28 +1565,24 @@ curl -s -X POST http://localhost:8000/dynamic_runs/<run_id>/finalize \
 **Run 状态**（一次 `wf.run()` 提交后产生一个 run，run_id = submit_id）：
 
 ```
-created (workflow 模板)  →  submitted  →  running  →  succeeded
-                                              ↘  failed
-                                              ↘  canceled
-                                              ↘  interrupted (Head 重启时)
+运行中：created / running
+终态：succeeded / failed / cancelled / timed_out / interrupted
 ```
 
-- `created`：调过 `client.create_workflow()` 但还没调 `wf.run()`。**不持久化**，只在 Head 内存里。
-- `submitted`：调了 `wf.run()`，所有 task 已进入调度队列但还没有任何一个开始执行。
+- `created`：已提交但尚未收到 task 开始事件。
 - `running`：至少一个 task 收到了 `start_task` 事件。
-- 终态：`succeeded` / `failed` / `canceled` / `interrupted`。
+- 终态：`succeeded` / `failed` / `cancelled` / `timed_out` / `interrupted`。
 
-**Task 状态**：`pending` → `running` → `succeeded` / `failed` / `canceled`。
+**Task 状态**：`pending` / `queued` / `running` / `succeeded` / `failed` / `cancelled` / `timed_out`。
 
 ### 9.2 持久化
 
 每个 run 在 workspace 下有自己的目录：
 
 ```
-workspace/workflow_runs/static/{run_id}/
+workspace/workflow_runs/static_runs/{run_id}/
   ├── run.json          # 最新快照
   └── events.jsonl      # 事件流（append-only）
-workspace/workflow_runs/_index.jsonl   # 全集群事件索引
 ```
 
 环境变量 `MAZE_WORKSPACE_DIR` 可覆盖默认 workspace 路径。
@@ -1652,8 +1648,8 @@ curl http://localhost:8000/runs/<run_id>
   "run_id": "abc-123",
   "status": "running",
   "running": [
-    {"task_id": "t1", "task_name": "summarize", "started_at": 1716543210.0,
-     "node_id": "node-01", "duration_so_far_ms": 1234}
+    {"task_id": "t1", "task_name": "summarize", "started_time": 1716543210.0,
+     "node_id": "node-01"}
   ],
   "pending_count": 3,
   "done_count": 5,
@@ -1663,7 +1659,9 @@ curl http://localhost:8000/runs/<run_id>
 
 #### `GET /v1/runs/{run_id}/tasks`
 
-所有 task 的状态 + metrics 字典。统一 run API 也支持：
+所有 task 的状态 + metrics 字典。兼容响应继续使用旧字段名 `task_total` 和
+`tasks`，其内容分别来自当前快照的 `task_counts.total` 和 `task_nodes`。统一 run
+API 也支持：
 
 ```bash
 curl http://localhost:8000/runs/<run_id>/tasks
@@ -1893,7 +1891,7 @@ conda run -n maze python -m maze.cli.cli status --addr http://localhost:8000
   - LangGraph 桥：`maze/client/langgraph/client.py`
   - Head 服务：`maze/core/server.py`
   - 调度器：`maze/core/scheduler/`
-  - 静态 run 持久化与事件：`maze/core/runs/`
+  - 静态 run 持久化与事件：`maze/core/workflow/static_run.py`
   - 动态运行模型与事件：`maze/core/workflow/dynamic.py`、`maze/core/workflow/dynamic_store.py`
   - 指标上报：`maze/metrics/`
   - CLI：`maze/cli/cli.py`、`maze/cli/sandbox_cli.py`
