@@ -414,6 +414,17 @@ class DynamicRun:
         if self.status == "canceled":
             return False
         self.check_can_mutate("cancel")
+        active_task_ids = set(self.pending_tasks) | self.submitted_tasks | self.running_tasks
+        error = {
+            "error_type": "canceled",
+            "message": reason or "Dynamic run canceled",
+        }
+        for task_id in active_task_ids:
+            self.task_errors[task_id] = error
+        self.failed_tasks.update(active_task_ids)
+        self.pending_tasks.clear()
+        self.submitted_tasks.clear()
+        self.running_tasks.clear()
         self.status = "canceled"
         self.cancel_reason = reason
         self.finished_time = time.time()

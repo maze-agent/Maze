@@ -3613,6 +3613,7 @@ class MaPath:
 
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
+        dynamic_run.check_can_mutate("emit events")
         if event_type == "agent_repair_observation":
             result = event_data.get("result") or {}
             decision_task_id = event_data.get("decision_task_id")

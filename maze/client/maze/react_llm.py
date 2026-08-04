@@ -113,6 +113,7 @@ def create_openai_react_llm_task(
                 "required_inputs": spec.get("required_inputs", []),
                 "outputs": spec.get("outputs", []),
                 "data_types": spec.get("data_types", {}),
+                "input_schema": spec.get("input_schema", {}),
             }
             for name, spec in (tools or {}).items()
         }
@@ -301,6 +302,7 @@ def _build_react_messages(
             "required_inputs": spec.get("required_inputs", []),
             "outputs": spec.get("outputs", []),
             "data_types": spec.get("data_types", {}),
+            "input_schema": spec.get("input_schema", {}),
         }
         for name, spec in (tools or {}).items()
     }

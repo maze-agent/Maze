@@ -104,14 +104,20 @@ class AgentMCPClientManager:
         used_agent_tool_names = set()
         for client in self.clients:
             server_name = getattr(client, "name", None) or getattr(client, "server_name", None) or "mcp"
-            tool_prefix = getattr(client, "_maze_agent_tool_prefix", None) or server_name
+            configured_tool_prefix = getattr(client, "_maze_agent_tool_prefix", None)
+            tool_prefix = server_name if configured_tool_prefix is None else configured_tool_prefix
             tools = await client.list_tools()
             for tool in tools:
                 tool_name = str(getattr(tool, "name", ""))
                 if not tool_name:
                     continue
+                agent_tool_name = (
+                    _safe_tool_part(tool_name)
+                    if tool_prefix == ""
+                    else _agent_tool_name(tool_prefix, tool_name)
+                )
                 agent_tool_name = _unique_agent_tool_name(
-                    _agent_tool_name(tool_prefix, tool_name),
+                    agent_tool_name,
                     used_agent_tool_names,
                 )
                 discovered.append(

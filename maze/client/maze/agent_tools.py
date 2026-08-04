@@ -82,9 +82,12 @@ class AgentToolSpec:
     timeout_seconds: float | None = None
     source: str = "task"
     handler: Any = None
+    raw_input_schema: Dict[str, Any] | None = None
 
     @property
     def input_schema(self) -> Dict[str, Any]:
+        if self.raw_input_schema is not None:
+            return dict(self.raw_input_schema)
         properties = {}
         for name in self.inputs:
             properties[name] = {
@@ -228,6 +231,7 @@ class AgentToolRegistry:
             task_spec=None,
             source="mcp",
             handler=tool,
+            raw_input_schema=dict(tool.input_schema or {}),
         )
         self._specs[tool_name] = spec
         return spec

@@ -1,5 +1,6 @@
 import pytest
 
+from maze import get_task_metadata, task
 from maze.core.resource_history import ResourceHistoryStore
 from maze.core.scheduler.runtime import TaskRuntime
 from maze.core.scheduler.scheduler import Scheduler
@@ -33,6 +34,20 @@ def test_dag_normalizes_public_resources_and_default_kind():
     assert node["task_kind"] == "cpu"
     assert node["resources"] == {"cpu_num": 2, "gpu_mem": 0, "io_num": 0}
     assert "gpu" not in node["resources"]
+
+
+def test_task_decorator_preserves_scheduler_resource_hints():
+    @task(resources={"target_node_id": "head-node", "required_capability": "workspace_sandbox"})
+    def pinned_task():
+        return {"ok": True}
+
+    assert get_task_metadata(pinned_task).resources == {
+        "cpu_num": 1,
+        "gpu_mem": 0,
+        "io_num": 0,
+        "target_node_id": "head-node",
+        "required_capability": "workspace_sandbox",
+    }
 
 
 def test_dag_infers_gpu_from_model_anchor():

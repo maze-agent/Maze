@@ -104,6 +104,34 @@ def test_dynamic_event_envelope_is_server_owned_and_replay_remains_deduplicated(
     assert snapshot["last_event_seq"] == 3
 
 
+def test_cancel_seals_active_tasks_and_rejects_late_public_events(tmp_path):
+    path, run = _dynamic_path(tmp_path)
+    asyncio.run(_seed_dynamic_run(path, run.run_id))
+    run.pending_tasks["pending-task"] = object()
+    run.submitted_tasks.add("submitted-task")
+    run.running_tasks.add("running-task")
+
+    assert run.cancel("stop now") is True
+    terminal = asyncio.run(path._emit_dynamic_event(run.run_id, {
+        "type": "cancel_dynamic_run",
+        "data": {"reason": "stop now"},
+    }))
+
+    with pytest.raises(ValueError, match="canceled"):
+        asyncio.run(path.emit_dynamic_run_event(
+            run.run_id,
+            {"type": "agent_error", "data": {"error": "late"}},
+        ))
+
+    assert run.pending_tasks == {}
+    assert run.submitted_tasks == set()
+    assert run.running_tasks == set()
+    assert run.failed_tasks == {"pending-task", "submitted-task", "running-task"}
+    assert all(error["error_type"] == "canceled" for error in run.task_errors.values())
+    assert terminal["type"] == "cancel_dynamic_run"
+    assert run.event_seq == 2
+
+
 def test_dynamic_event_http_validation_error_is_400_without_append(
     tmp_path,
     monkeypatch,

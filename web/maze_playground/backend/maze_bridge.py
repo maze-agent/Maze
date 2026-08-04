@@ -3,6 +3,8 @@ Maze Client 桥接模块 - 完整版
 用于Node.js后端调用Python Maze Client
 """
 
+import asyncio
+import ipaddress
 import sys
 import json
 import os
@@ -12,6 +14,7 @@ import re
 import ast
 import operator
 import tempfile
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
@@ -119,6 +122,222 @@ def playground_react_decide(prompt: str, history: list, tools: dict, step: int):
 def calculator(expression: str):
     result = evaluate_arithmetic(expression)
     return {"result": result}
+
+
+_BLOCKED_WORKSPACE_AGENT_TOOLS = {
+    "save_workflow_draft",
+    "run_workflow_draft",
+}
+
+
+def _maze_core_url():
+    return str(os.environ.get("MAZE_CORE_URL") or "http://localhost:8000").rstrip("/")
+
+
+def _maze_head_node_id(core_url):
+    import requests
+
+    response = requests.get(f"{core_url}/cluster/resources", timeout=10)
+    response.raise_for_status()
+    head_node_id = str(response.json().get("cluster", {}).get("head_node_id") or "").strip()
+    if not head_node_id:
+        raise RuntimeError("Maze Core did not report a head node id")
+    return head_node_id
+
+
+def _normalize_workspace_agent_tools(value):
+    if not isinstance(value, list):
+        raise TypeError("workspaceAgentTools must be an OpenAI function-tool list")
+
+    normalized = []
+    names = set()
+    for entry in value:
+        if not isinstance(entry, dict) or entry.get("type") != "function":
+            raise TypeError("Each workspaceAgentTools entry must be a function tool")
+        function = entry.get("function")
+        if not isinstance(function, dict):
+            raise TypeError("Each workspaceAgentTools function must be an object")
+        name = str(function.get("name") or "").strip()
+        if not name:
+            raise ValueError("Each workspaceAgentTools entry needs a name")
+        if name.lower() in _BLOCKED_WORKSPACE_AGENT_TOOLS:
+            continue
+        if name in names:
+            raise ValueError(f"Duplicate workspaceAgentTools name: {name}")
+
+        input_schema = function.get("parameters") or {"type": "object", "properties": {}}
+        if not isinstance(input_schema, dict):
+            raise TypeError(f"workspaceAgentTools {name} input schema must be an object")
+        properties = input_schema.get("properties") or {}
+        required = input_schema.get("required") or []
+        if not isinstance(properties, dict):
+            raise TypeError(f"workspaceAgentTools {name} properties must be an object")
+        if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
+            raise TypeError(f"workspaceAgentTools {name} required must be a list of strings")
+
+        names.add(name)
+        normalized.append({
+            "name": name,
+            "description": str(function.get("description") or ""),
+            "input_schema": {
+                "type": "object",
+                **input_schema,
+                "properties": dict(properties),
+                "required": list(required),
+            },
+            "output_schema": None,
+        })
+
+    return normalized
+
+
+def _redact_capability(value, capability):
+    if isinstance(value, str):
+        return value.replace(capability, "<redacted>") if capability else value
+    if isinstance(value, list):
+        return [_redact_capability(item, capability) for item in value]
+    if isinstance(value, dict):
+        return {
+            _redact_capability(key, capability): _redact_capability(item, capability)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _is_loopback_http_url(value):
+    parsed = urlsplit(str(value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+class _WorkspaceAgentMCPClient:
+    name = "workspace-agent"
+    server_name = "workspace-agent"
+    _maze_agent_tool_prefix = ""
+
+    def __init__(self, *, url, token, tools, timeout):
+        if not _is_loopback_http_url(url):
+            raise ValueError("workspaceAgentToolUrl must be an HTTP(S) loopback URL")
+        if not str(token or ""):
+            raise ValueError("MAZE_WORKSPACE_AGENT_TOOL_TOKEN is required")
+        normalized_tools = _normalize_workspace_agent_tools(tools)
+        if not normalized_tools:
+            raise ValueError("workspaceAgentTools must include at least one allowed tool")
+
+        self.is_connected = False
+        self._url = str(url).strip()
+        self._token = str(token)
+        self._timeout = min(max(float(timeout or 120), 1.0), 3600.0)
+        self._tools = {tool["name"]: tool for tool in normalized_tools}
+
+    async def connect(self):
+        self.is_connected = True
+
+    async def close(self):
+        self.is_connected = False
+        self._token = ""
+
+    async def list_tools(self):
+        return [
+            SimpleNamespace(
+                name=tool["name"],
+                description=tool["description"],
+                inputSchema=tool["input_schema"],
+                outputSchema=tool["output_schema"],
+            )
+            for tool in self._tools.values()
+        ]
+
+    async def call_tool(self, tool_name, **kwargs):
+        if tool_name not in self._tools:
+            return self._result({
+                "ok": False,
+                "error": f"Unknown Workspace Agent tool: {tool_name}",
+                "error_type": "tool_not_allowed",
+                "repairable": True,
+            }, is_error=True)
+        return await asyncio.to_thread(self._call_tool_blocking, tool_name, kwargs)
+
+    def _call_tool_blocking(self, tool_name, tool_input):
+        import requests
+
+        try:
+            response = requests.post(
+                self._url,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+                json={"name": tool_name, "input": tool_input},
+                timeout=self._timeout,
+            )
+        except requests.Timeout:
+            return self._result({
+                "ok": False,
+                "error": "Workspace Agent tool request timed out",
+                "error_type": "timeout",
+                "repairable": True,
+            }, is_error=True)
+        except requests.RequestException as exc:
+            message = _redact_capability(str(exc), self._token)
+            return self._result({
+                "ok": False,
+                "error": message,
+                "error_type": type(exc).__name__,
+                "repairable": True,
+            }, is_error=True)
+
+        if response.status_code in {401, 403}:
+            return self._result({
+                "ok": False,
+                "error": "Workspace Agent tool authorization failed",
+                "error_type": "authorization_error",
+                "status": response.status_code,
+                "repairable": True,
+            }, is_error=True)
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {
+                "ok": False,
+                "error": str(response.text or "")[:1000] or f"HTTP {response.status_code}",
+                "error_type": "invalid_response",
+                "repairable": True,
+            }
+        payload = _redact_capability(payload, self._token)
+        if (
+            isinstance(payload, dict)
+            and payload.get("success") is True
+            and "result" in payload
+        ):
+            payload = payload["result"]
+
+        is_error = not response.ok
+        if isinstance(payload, dict):
+            is_error = is_error or payload.get("success") is False or payload.get("ok") is False
+            if is_error:
+                payload.setdefault("repairable", True)
+                payload.setdefault("status", response.status_code)
+        return self._result(payload, is_error=is_error)
+
+    @staticmethod
+    def _result(payload, *, is_error):
+        return SimpleNamespace(
+            structuredContent=payload,
+            content=[],
+            isError=bool(is_error),
+        )
 
 
 def build_react_workspace_tools(
@@ -863,6 +1082,10 @@ def rename_workspace_task(workspace_dir, relative_path, old_function_name, new_n
 def run_react_workflow(params):
     mode = str(params.get("mode") or "local").strip().lower()
     prompt = str(params.get("prompt") or "").strip()
+    workspace_agent_message = str(
+        params.get("workspaceAgentMessage")
+        or prompt
+    )
     max_steps = int(params.get("maxSteps") or params.get("max_steps") or 4)
     task_timeout = int(params.get("taskTimeout") or params.get("task_timeout") or 120)
     task_timeout = min(max(task_timeout, 10), 3600)
@@ -898,6 +1121,16 @@ def run_react_workflow(params):
         or os.environ.get("MAZE_AGENT_EXEC_BACKEND")
         or "workspace_sandbox"
     ).strip() or "workspace_sandbox"
+    core_url = _maze_core_url()
+    requested_system_prompt = str(
+        params.get("systemPrompt") or params.get("system_prompt") or ""
+    ).strip()
+    workspace_agent_tools = params.get("workspaceAgentTools") or []
+    workspace_agent_tool_url = str(
+        params.get("workspaceAgentToolUrl")
+        or ""
+    ).strip()
+    workspace_agent_tool_token = str(os.environ.get("MAZE_WORKSPACE_AGENT_TOOL_TOKEN") or "")
     config_path = None
 
     if not prompt:
@@ -923,37 +1156,61 @@ def run_react_workflow(params):
         if not has_explicit_skill_dirs:
             os.makedirs(skill_dirs[0], exist_ok=True)
 
-        client = DynamicMaClient(server_url="http://localhost:8000")
-        workspace_tools = build_react_workspace_tools(
-            workspace_dir,
-            default_exec_backend=exec_backend,
-            default_exec_timeout=task_timeout,
-        )
-        base_tools = [calculator, *workspace_tools]
+        client = DynamicMaClient(server_url=core_url)
+        workspace_agent_mcp_clients = []
+        workspace_agent_tool_names = []
+        if mode == "workspace-agent":
+            workspace_agent_client = _WorkspaceAgentMCPClient(
+                url=workspace_agent_tool_url,
+                token=workspace_agent_tool_token,
+                tools=workspace_agent_tools,
+                timeout=task_timeout,
+            )
+            workspace_agent_mcp_clients.append(workspace_agent_client)
+            workspace_agent_tool_names = list(workspace_agent_client._tools)
+            base_tools = []
+        else:
+            workspace_tools = build_react_workspace_tools(
+                workspace_dir,
+                default_exec_backend=exec_backend,
+                default_exec_timeout=task_timeout,
+            )
+            base_tools = [calculator, *workspace_tools]
 
         if mode == "local":
             llm_task = playground_react_decide
             tools = base_tools
+            system_prompt = requested_system_prompt or None
             max_steps = max(max_steps, 3)
-        elif mode == "online":
+        elif mode in {"online", "workspace-agent"}:
             base_url = str(params.get("baseUrl") or "").strip()
             model = str(params.get("model") or "").strip()
             api_key = os.environ.get("MAZE_REACT_API_KEY", "")
-            system_prompt = str(params.get("systemPrompt") or "").strip() or (
-                "You are a ReAct controller for Maze. Return strict JSON only. "
-                "Use available tools to make progress. When no direct domain tool exists, "
-                "write a Python helper under workspace/files with write_file, inspect it "
-                "with read_file when needed, and run it with exec_code. Do not answer that "
-                "a tool is unavailable before considering whether you can create and execute "
-                "a small helper script."
-            )
+            if requested_system_prompt:
+                system_prompt = requested_system_prompt
+            elif mode == "workspace-agent":
+                system_prompt = (
+                    "You are the Maze Workspace Agent controller. Return strict JSON only. "
+                    "Use only the available Workspace Agent tools. Draft and validation tools "
+                    "may be used proactively; saving and running require a separate confirmed "
+                    "Node action and are intentionally unavailable here."
+                )
+            else:
+                system_prompt = (
+                    "You are a ReAct controller for Maze. Return strict JSON only. "
+                    "Use available tools to make progress. When no direct domain tool exists, "
+                    "write a Python helper under workspace/files with write_file, inspect it "
+                    "with read_file when needed, and run it with exec_code. Do not answer that "
+                    "a tool is unavailable before considering whether you can create and execute "
+                    "a small helper script."
+                )
 
             if not base_url:
-                return {"success": False, "error": "Base URL is required for online ReAct runs"}
+                return {"success": False, "error": f"Base URL is required for {mode} ReAct runs"}
             if not model:
-                return {"success": False, "error": "Model is required for online ReAct runs"}
+                return {"success": False, "error": f"Model is required for {mode} ReAct runs"}
             if not api_key:
-                return {"success": False, "error": "API key is required for online ReAct runs"}
+                return {"success": False, "error": f"API key is required for {mode} ReAct runs"}
 
             config_file = tempfile.NamedTemporaryFile(
                 mode="w",
@@ -973,10 +1230,20 @@ def run_react_workflow(params):
 
             llm_task = create_openai_react_llm_task(
                 config_path=config_path,
-                task_name="playground_openai_react_decide",
+                task_name=(
+                    "playground_workspace_agent_react_decide"
+                    if mode == "workspace-agent"
+                    else "playground_openai_react_decide"
+                ),
                 system_prompt=system_prompt,
                 max_tokens=int(params.get("maxTokens") or params.get("max_tokens") or 2048),
                 timeout=task_timeout,
+                resources={
+                    "cpu_num": 1,
+                    "gpu_mem": 0,
+                    "io_num": 1,
+                    "target_node_id": _maze_head_node_id(core_url),
+                },
             )
             tools = base_tools
         else:
@@ -986,6 +1253,7 @@ def run_react_workflow(params):
             llm_task=llm_task,
             tools=tools,
             max_steps=max_steps,
+            system_prompt=system_prompt,
             timeout_seconds=timeout_seconds,
             task_timeout=task_timeout,
             file_context={
@@ -999,6 +1267,7 @@ def run_react_workflow(params):
             skill_dirs=skill_dirs,
             max_skill_chars=max_skill_chars,
             permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
+            mcp_clients=workspace_agent_mcp_clients or None,
             mcp_servers=mcp_servers,
             mcp_profile_name=mcp_profile_name or None,
             mcp_profile=mcp_profile_summary,
@@ -1014,6 +1283,11 @@ def run_react_workflow(params):
                 )
             except Exception:
                 pass
+        if mode == "workspace-agent":
+            react.dynamic_run.emit_event(
+                "workspace_agent_turn_started",
+                {"message": workspace_agent_message},
+            )
         emit_progress({
             "type": "react_run_created",
             "data": {
@@ -1031,6 +1305,8 @@ def run_react_workflow(params):
                 "mcp_server_count": len(mcp_server_summary),
                 "mcp_profile_name": mcp_profile_name or None,
                 "mcp_profile": mcp_profile_summary,
+                "workspace_agent_tools": workspace_agent_tool_names,
+                "workspace_agent_tool_count": len(workspace_agent_tool_names),
             },
         })
         answer = react.run(prompt)
@@ -1076,7 +1352,7 @@ def run_react_workflow(params):
         if failed_run_id:
             response["runId"] = failed_run_id
             try:
-                failed_run = DynamicMaClient(server_url="http://localhost:8000").get_dynamic_run(failed_run_id)
+                failed_run = DynamicMaClient(server_url=core_url).get_dynamic_run(failed_run_id)
                 response["status"] = failed_run.get_status().get("status")
             except Exception:
                 pass
