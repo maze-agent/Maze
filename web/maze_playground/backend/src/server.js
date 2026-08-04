@@ -20,9 +20,8 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const activeReactRunProcesses = new Map();
-const activeAgentRuns = new Map();
-const agentRunSseClients = new Map();
+const workspaceAgentCapabilities = new Map();
+const agentSessionWriteQueues = new Map();
 const localWorkspaceManifests = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
 const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_ROOT_DIR || process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspaces'));
@@ -2516,24 +2515,12 @@ function agentDraftsDir(workspaceDir) {
   return path.join(workspaceDir, 'agent_drafts');
 }
 
-function agentRunsDir(workspaceDir) {
-  return path.join(workspaceDir, 'agent_runs');
-}
-
 function agentSessionPath(workspaceDir, sessionId) {
   return path.join(agentSessionsDir(workspaceDir), `${safeAgentId(sessionId, 'session')}.json`);
 }
 
 function agentDraftPath(workspaceDir, draftId) {
   return path.join(agentDraftsDir(workspaceDir), `${safeAgentId(draftId, 'draft')}.json`);
-}
-
-function agentRunPath(workspaceDir, runId) {
-  return path.join(agentRunsDir(workspaceDir), `${safeAgentId(runId, 'agent-run')}.json`);
-}
-
-function agentRunEventsPath(workspaceDir, runId) {
-  return path.join(agentRunsDir(workspaceDir), `${safeAgentId(runId, 'agent-run')}.events.jsonl`);
 }
 
 const SECRET_KEY_PATTERN = /(^|[_-])(api[_-]?key|authorization|secret|credential|password|passwd|bearer|access[_-]?token|refresh[_-]?token)([_-]|$)/i;
@@ -2560,69 +2547,22 @@ function redactSecrets(value) {
   return value;
 }
 
-function approximateAgentTokens(text) {
-  return Math.ceil(String(text || '').length / 4);
-}
-
-function agentMessageApproxTokens(message) {
-  return approximateAgentTokens(JSON.stringify(message?.parts || []));
-}
-
-function summarizeAgentMessageForCompaction(message) {
-  const parts = (message.parts || []).map((part) => {
-    if (part.type === 'text') return part.text;
-    if (part.type === 'error') return `[error] ${part.message}`;
-    if (part.type === 'tool_call') return `[tool_call ${part.name}] ${JSON.stringify(redactSecrets(part.input || {}))}`;
-    if (part.type === 'tool_result') {
-      const result = redactSecrets(part.result || {});
-      return `[tool_result ${part.name}] ${JSON.stringify(result).slice(0, 1200)}`;
-    }
-    return JSON.stringify(redactSecrets(part));
-  });
-  return `${message.role} ${message.createdAt}:\n${parts.join('\n')}`;
-}
-
-function compactAgentMessages(messages, existingSummary = '', options = {}) {
-  const maxApproxTokens = Number(options.maxApproxTokens || 12000);
-  const keepRecentMessages = Number(options.keepRecentMessages || 16);
-  const total = messages.reduce((sum, message) => sum + agentMessageApproxTokens(message), 0);
-  if (total <= maxApproxTokens) {
-    return { messages, summary: existingSummary || '', compactedCount: 0, recentApproxTokens: total };
-  }
-
-  const recent = messages.slice(-keepRecentMessages);
-  const older = messages.slice(0, -keepRecentMessages);
-  const recentApproxTokens = recent.reduce((sum, message) => sum + agentMessageApproxTokens(message), 0);
-  const body = older
-    .map((message) => summarizeAgentMessageForCompaction(message))
-    .join('\n\n')
-    .slice(0, maxApproxTokens * 2);
-  const previous = String(existingSummary || '').trim();
-  const nextSummary = [
-    previous ? `Previous summary:\n${previous}` : '',
-    `Compacted ${older.length} older messages. Recent approx tokens: ${recentApproxTokens}.`,
-    body,
-  ].filter(Boolean).join('\n\n');
-
-  return {
-    messages: recent,
-    summary: nextSummary,
-    compactedCount: older.length,
-    recentApproxTokens,
-  };
-}
-
-function createAgentMessage(sessionId, role, parts) {
-  return {
-    id: safeAgentId(`msg-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`, 'msg'),
-    sessionId,
-    role,
-    createdAt: new Date().toISOString(),
-    parts: redactSecrets(parts || []),
-  };
+function normalizeAgentTurns(turns = []) {
+  return (Array.isArray(turns) ? turns : [])
+    .map((turn) => {
+      const runId = String(turn?.dynamic_run_id || turn?.dynamicRunId || '').trim();
+      return {
+        id: safeAgentId(turn?.id || `turn-${runId}`, 'turn'),
+        dynamic_run_id: runId,
+        created_at: String(turn?.created_at || turn?.createdAt || new Date().toISOString()),
+      };
+    })
+    .filter((turn) => turn.dynamic_run_id);
 }
 
 function agentSessionSummary(session) {
+  const turns = normalizeAgentTurns(session.turns);
+  const legacyMessages = Array.isArray(session.messages) ? session.messages : [];
   return {
     id: session.id,
     title: session.title,
@@ -2630,7 +2570,9 @@ function agentSessionSummary(session) {
     updatedAt: session.updatedAt,
     workspaceId: session.workspaceId,
     workspaceDir: session.workspaceDir,
-    messageCount: Array.isArray(session.messages) ? session.messages.length : 0,
+    messageCount: legacyMessages.length + turns.length * 2,
+    turnCount: turns.length,
+    dynamicRunId: turns.at(-1)?.dynamic_run_id || null,
     summary: session.summary || '',
     compaction: session.compaction || null,
     metadata: redactSecrets(session.metadata || {}),
@@ -2651,38 +2593,19 @@ function collectAgentDraftIdsFromMessages(messages = []) {
   return Array.from(draftIds);
 }
 
-async function loadAgentDraftsForMessages(workspaceDir, messages = []) {
-  const drafts = [];
-  for (const draftId of collectAgentDraftIdsFromMessages(messages)) {
-    try {
-      drafts.push(agentDraftPublic(await loadAgentDraft(workspaceDir, draftId)));
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        console.error(`Failed to hydrate Workspace Agent draft ${draftId}:`, error);
-      }
-    }
-  }
-  return drafts;
-}
-
 async function createAgentSessionRecord(context, input = {}) {
   const now = new Date().toISOString();
   const session = {
     schema: 'maze_workspace_agent_session',
-    schema_version: 1,
+    schema_version: 2,
     id: safeAgentId(input.id, 'session'),
     title: String(input.title || input.message || 'Workspace Agent').slice(0, 80),
     workspaceId: context.workspaceId,
     workspaceDir: context.workspaceDir,
     createdAt: now,
     updatedAt: now,
-    summary: '',
-    compaction: {
-      compactedCount: 0,
-      recentApproxTokens: 0,
-    },
     metadata: redactSecrets(input.metadata || {}),
-    messages: [],
+    turns: [],
   };
   await writeJsonAtomic(agentSessionPath(context.workspaceDir, session.id), session);
   return session;
@@ -2691,55 +2614,308 @@ async function createAgentSessionRecord(context, input = {}) {
 async function loadAgentSession(workspaceDir, sessionId) {
   const raw = await fs.readFile(agentSessionPath(workspaceDir, sessionId), 'utf-8');
   const session = JSON.parse(raw);
-  session.messages = Array.isArray(session.messages) ? session.messages : [];
+  session.turns = normalizeAgentTurns(session.turns);
+  if (session.schema_version === 1) {
+    session.messages = Array.isArray(session.messages) ? session.messages : [];
+  }
   return session;
 }
 
 async function saveAgentSession(workspaceDir, session) {
   session.updatedAt = new Date().toISOString();
-  session.messages = Array.isArray(session.messages) ? session.messages.map(redactSecrets) : [];
+  session.turns = normalizeAgentTurns(session.turns);
+  if (session.turns.length > 0 || session.schema_version !== 1) {
+    session.schema_version = 2;
+  }
   await writeJsonAtomic(agentSessionPath(workspaceDir, session.id), redactSecrets(session));
   return session;
 }
 
-async function updateAgentSessionRecord(workspaceDir, sessionId, updates = {}) {
-  const session = await loadAgentSession(workspaceDir, sessionId);
-  if (Object.prototype.hasOwnProperty.call(updates, 'title')) {
-    const title = String(updates.title || '').trim();
-    if (!title) {
-      const error = new Error('Session title is required');
-      error.status = 400;
-      throw error;
+async function withAgentSessionWriteQueue(workspaceDir, sessionId, operation) {
+  const key = agentSessionPath(workspaceDir, sessionId);
+  const previous = agentSessionWriteQueues.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  agentSessionWriteQueues.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (agentSessionWriteQueues.get(key) === current) {
+      agentSessionWriteQueues.delete(key);
     }
-    session.title = title.slice(0, 80);
   }
-  if (updates.metadata && typeof updates.metadata === 'object' && !Array.isArray(updates.metadata)) {
-    session.metadata = {
-      ...(session.metadata || {}),
-      ...redactSecrets(updates.metadata),
-    };
-  }
-  await saveAgentSession(workspaceDir, session);
-  return session;
+}
+
+async function appendAgentSessionTurn(workspaceDir, session, dynamicRunId) {
+  const runId = String(dynamicRunId || '').trim();
+  if (!runId) throw new Error('dynamic_run_id is required');
+  return withAgentSessionWriteQueue(workspaceDir, session.id, async () => {
+    const storedSession = await loadAgentSession(workspaceDir, session.id);
+    let turn = storedSession.turns.find((item) => item.dynamic_run_id === runId);
+    if (!turn) {
+      turn = {
+        id: safeAgentId('', 'turn'),
+        dynamic_run_id: runId,
+        created_at: new Date().toISOString(),
+      };
+      storedSession.turns.push(turn);
+    }
+    await saveAgentSession(workspaceDir, storedSession);
+    Object.assign(session, storedSession);
+    return turn;
+  });
+}
+
+async function updateAgentSessionRecord(workspaceDir, sessionId, updates = {}) {
+  return withAgentSessionWriteQueue(workspaceDir, sessionId, async () => {
+    const session = await loadAgentSession(workspaceDir, sessionId);
+    if (Object.prototype.hasOwnProperty.call(updates, 'title')) {
+      const title = String(updates.title || '').trim();
+      if (!title) {
+        const error = new Error('Session title is required');
+        error.status = 400;
+        throw error;
+      }
+      session.title = title.slice(0, 80);
+    }
+    if (updates.metadata && typeof updates.metadata === 'object' && !Array.isArray(updates.metadata)) {
+      session.metadata = {
+        ...(session.metadata || {}),
+        ...redactSecrets(updates.metadata),
+      };
+    }
+    await saveAgentSession(workspaceDir, session);
+    return session;
+  });
 }
 
 async function deleteAgentSessionRecord(workspaceDir, sessionId) {
-  await fs.unlink(agentSessionPath(workspaceDir, sessionId));
-  return { id: sessionId };
+  return withAgentSessionWriteQueue(workspaceDir, sessionId, async () => {
+    await fs.unlink(agentSessionPath(workspaceDir, sessionId));
+    return { id: sessionId };
+  });
+}
+
+function agentDynamicEventData(event) {
+  return event?.data && typeof event.data === 'object' ? event.data : {};
+}
+
+function agentViewMessage(sessionId, id, role, createdAt, parts) {
+  return {
+    id,
+    sessionId,
+    role,
+    createdAt: createdAt || new Date().toISOString(),
+    parts: redactSecrets(parts || []),
+  };
+}
+
+function agentMessagesFromDynamicTurn(sessionId, turn, run, events) {
+  const runId = turn.dynamic_run_id;
+  const messages = [];
+  const started = events.find((event) => event.type === 'workspace_agent_turn_started')
+    || events.find((event) => event.type === 'agent_run_started');
+  const startedData = agentDynamicEventData(started);
+  const userText = String(startedData.message || startedData.prompt || '').trim();
+  if (userText) {
+    messages.push(agentViewMessage(
+      sessionId,
+      `${runId}:user`,
+      'user',
+      started?.timestamp || turn.created_at,
+      [{ type: 'text', text: userText }],
+    ));
+  }
+
+  for (const event of events) {
+    const data = agentDynamicEventData(event);
+    if (event.type === 'agent_action' && data.tool) {
+      const toolCallId = `${runId}:tool:${data.step || event.seq || messages.length}`;
+      messages.push(agentViewMessage(
+        sessionId,
+        `${toolCallId}:call`,
+        'assistant',
+        event.timestamp,
+        [{
+          type: 'tool_call',
+          id: toolCallId,
+          name: data.tool,
+          input: data.args || {},
+        }],
+      ));
+    }
+    if (event.type === 'agent_observation' && data.tool) {
+      const toolCallId = `${runId}:tool:${data.step || event.seq || messages.length}`;
+      messages.push(agentViewMessage(
+        sessionId,
+        `${toolCallId}:result`,
+        'tool',
+        event.timestamp,
+        [{
+          type: 'tool_result',
+          toolCallId,
+          name: data.tool,
+          result: data.result,
+        }],
+      ));
+    }
+  }
+
+  const finalEvent = [...events].reverse().find((event) => event.type === 'agent_final');
+  const errorEvent = [...events].reverse().find((event) => event.type === 'agent_error');
+  if (finalEvent) {
+    messages.push(agentViewMessage(
+      sessionId,
+      `${runId}:assistant`,
+      'assistant',
+      finalEvent.timestamp,
+      [{ type: 'text', text: String(agentDynamicEventData(finalEvent).answer || 'Done.') }],
+    ));
+  } else if (errorEvent) {
+    messages.push(agentViewMessage(
+      sessionId,
+      `${runId}:error`,
+      'assistant',
+      errorEvent.timestamp,
+      [{ type: 'error', message: String(agentDynamicEventData(errorEvent).error || 'Workspace Agent failed') }],
+    ));
+  } else if (['canceled', 'timed_out', 'interrupted', 'failed'].includes(String(run?.status || ''))) {
+    const reason = run?.cancel_reason || run?.failure_reason?.message || run?.failure_reason || `Run ${run.status}`;
+    messages.push(agentViewMessage(
+      sessionId,
+      `${runId}:terminal`,
+      'assistant',
+      new Date(Number(run?.finished_time || run?.updated_time || 0) * 1000).toISOString(),
+      [{ type: 'error', message: String(reason) }],
+    ));
+  }
+  return messages;
+}
+
+function collectAgentDraftIdsFromEvents(events = []) {
+  const draftIds = new Set();
+  for (const event of events) {
+    const data = agentDynamicEventData(event);
+    const candidates = [
+      data.draft,
+      data.result?.draft,
+      data.result?.structured_content?.draft,
+      data.result?.structuredContent?.draft,
+      data.tool_result?.content?.draft,
+      data.tool_result?.content?.structured_content?.draft,
+      data.observation?.draft,
+      data.observation?.result?.draft,
+    ];
+    for (const draft of candidates) {
+      if (draft?.id) draftIds.add(String(draft.id));
+    }
+  }
+  return Array.from(draftIds);
+}
+
+async function loadAgentDynamicTurn(sessionId, turn) {
+  try {
+    const runId = encodeURIComponent(turn.dynamic_run_id);
+    const [runPayload, eventPayload] = await Promise.all([
+      callMazeCore(`/dynamic_runs/${runId}`),
+      callMazeCore(`/dynamic_runs/${runId}/events`),
+    ]);
+    const run = runPayload.run || runPayload;
+    const events = eventPayload.events || [];
+    return {
+      turn,
+      run,
+      events,
+      messages: agentMessagesFromDynamicTurn(sessionId, turn, run, events),
+      draftIds: collectAgentDraftIdsFromEvents(events),
+    };
+  } catch (error) {
+    return { turn, run: null, events: [], messages: [], draftIds: [], error: error.message };
+  }
+}
+
+async function loadAgentSessionView(context, session, options = {}) {
+  const legacyMessages = Array.isArray(session.messages) ? session.messages.map(redactSecrets) : [];
+  const turns = normalizeAgentTurns(options.turns ?? session.turns);
+  const dynamicTurns = await Promise.all(turns.map((turn) => loadAgentDynamicTurn(session.id, turn)));
+  const messages = [
+    ...legacyMessages,
+    ...dynamicTurns.flatMap((turn) => turn.messages),
+  ].sort((left, right) => String(left.createdAt || '').localeCompare(String(right.createdAt || '')));
+  const draftIds = new Set([
+    ...collectAgentDraftIdsFromMessages(legacyMessages),
+    ...dynamicTurns.flatMap((turn) => turn.draftIds),
+  ]);
+  const drafts = [];
+  if (options.includeDrafts !== false) {
+    for (const draftId of draftIds) {
+      try {
+        drafts.push(agentDraftPublic(await loadAgentDraft(context.workspaceDir, draftId)));
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
+  return {
+    messages,
+    drafts,
+    unavailableTurns: dynamicTurns.filter((turn) => turn.error).map((turn) => turn.turn.dynamic_run_id),
+  };
+}
+
+function agentMessagePromptText(message) {
+  const parts = (message.parts || []).map((part) => {
+    if (part.type === 'text') return String(part.text || '');
+    if (part.type === 'error') return `[error] ${String(part.message || '')}`;
+    if (part.type === 'tool_call') return `[tool ${part.name}] ${JSON.stringify(part.input || {})}`;
+    if (part.type === 'tool_result') return `[result ${part.name}] ${JSON.stringify(part.result || {})}`;
+    return '';
+  }).filter(Boolean);
+  return parts.length ? `${message.role}: ${parts.join('\n')}` : '';
+}
+
+function buildWorkspaceAgentPrompt(message, historyMessages, summary = '', maxChars = 12000) {
+  const limit = Math.max(1000, Number(maxChars) || 12000);
+  const currentPrefix = 'Current user request:\n';
+  const current = currentPrefix + redactSecretText(message).slice(0, limit - currentPrefix.length);
+  const summaryPrefix = 'Prior conversation summary:\n';
+  const summaryBudget = Math.max(0, Math.min(3000, limit - current.length - summaryPrefix.length - 2));
+  const summaryText = summaryBudget
+    ? redactSecretText(summary).trim().slice(-summaryBudget)
+    : '';
+  const summaryBlock = summaryText ? summaryPrefix + summaryText : '';
+  const historyPrefix = 'Conversation history:\n';
+  const budget = Math.max(
+    0,
+    limit - current.length - (summaryBlock ? summaryBlock.length + 2 : 0) - historyPrefix.length - 2,
+  );
+  const selected = [];
+  let used = 0;
+  for (const item of [...(historyMessages || [])].reverse()) {
+    const text = agentMessagePromptText(item);
+    if (!text) continue;
+    const clipped = text.slice(-Math.min(text.length, 3000));
+    if (used + clipped.length + 2 > budget) break;
+    selected.unshift(clipped);
+    used += clipped.length + 2;
+  }
+  const historyBlock = selected.length ? historyPrefix + selected.join('\n\n') : '';
+  return [summaryBlock, historyBlock, current].filter(Boolean).join('\n\n');
 }
 
 async function buildAgentSessionExport(context, sessionId) {
   const session = await loadAgentSession(context.workspaceDir, sessionId);
-  const drafts = await loadAgentDraftsForMessages(context.workspaceDir, session.messages);
+  const view = await loadAgentSessionView(context, session);
   return redactSecrets({
     schema: 'maze_workspace_agent_session_export',
-    schema_version: 1,
+    schema_version: 2,
     exportedAt: new Date().toISOString(),
     workspaceId: context.workspaceId,
     workspaceManifestVersion: context.workspaceManifestVersion,
     session: agentSessionSummary(session),
-    messages: session.messages,
-    drafts,
+    turns: normalizeAgentTurns(session.turns),
+    messages: view.messages,
+    drafts: view.drafts,
+    unavailableTurns: view.unavailableTurns,
     summary: session.summary || '',
     compaction: session.compaction || null,
   });
@@ -2759,119 +2935,6 @@ async function listAgentSessions(workspaceDir) {
   }
   sessions.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
   return sessions;
-}
-
-async function appendAgentSessionMessage(workspaceDir, session, role, parts) {
-  const message = createAgentMessage(session.id, role, parts);
-  session.messages.push(message);
-  await saveAgentSession(workspaceDir, session);
-  return message;
-}
-
-function agentMessagesToLLM(messages) {
-  return messages.map((message) => {
-    const toolResult = (message.parts || []).find((part) => part.type === 'tool_result');
-    const toolCalls = (message.parts || [])
-      .filter((part) => part.type === 'tool_call')
-      .map((part) => ({
-        id: part.id,
-        type: 'function',
-        function: {
-          name: part.name,
-          arguments: JSON.stringify(part.input || {}),
-        },
-      }));
-    const text = (message.parts || [])
-      .filter((part) => part.type === 'text' || part.type === 'error')
-      .map((part) => part.type === 'error' ? `[error] ${part.message}` : part.text)
-      .join('\n');
-    const llmMessage = {
-      role: message.role === 'tool' ? 'tool' : message.role,
-      content: toolResult ? JSON.stringify(redactSecrets(toolResult.result || {})) : text,
-    };
-    if (toolResult?.toolCallId) {
-      llmMessage.tool_call_id = toolResult.toolCallId;
-    }
-    if (toolCalls.length) {
-      llmMessage.tool_calls = toolCalls;
-    }
-    return llmMessage;
-  });
-}
-
-async function callOpenAICompatibleToolChat({
-  baseUrl,
-  apiKey,
-  model,
-  messages,
-  tools = [],
-  temperature = 0.2,
-  maxTokens = 2048,
-  timeoutMs = 90000,
-  signal,
-}) {
-  const apiKeys = getOpenAICompatibleApiKeys(apiKey);
-  if (apiKeys.length === 0) {
-    throw new Error('API key is required');
-  }
-  if (!model || !String(model).trim()) {
-    throw new Error('Model is required');
-  }
-
-  const endpoint = normalizeOpenAIBaseUrl(baseUrl);
-  const explicitApiKey = String(apiKey || '').trim();
-  let lastError = null;
-
-  for (const key of apiKeys) {
-    const response = await fetchWithTimeout(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      signal,
-      body: JSON.stringify({
-        model,
-        messages,
-        tools,
-        tool_choice: tools.length ? 'auto' : undefined,
-        temperature,
-        max_tokens: maxTokens,
-        stream: false,
-      }),
-    }, timeoutMs);
-
-    const text = await response.text();
-    let payload = {};
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = { error: text };
-      }
-    }
-
-    if (!response.ok) {
-      const message =
-        payload?.error?.message ||
-        payload?.message ||
-        payload?.detail ||
-        (typeof payload?.error === 'string' ? payload.error : '') ||
-        `LLM request failed: ${response.status}`;
-      const error = new Error(message);
-      error.status = response.status;
-      error.payload = payload;
-      lastError = error;
-      if (!explicitApiKey && [401, 403, 429, 500, 502, 503, 504].includes(response.status)) {
-        continue;
-      }
-      throw error;
-    }
-
-    return payload?.choices?.[0]?.message || {};
-  }
-
-  throw lastError || new Error('LLM request failed');
 }
 
 function normalizeAgentTaskDefinitions(taskDefinitions = []) {
@@ -3524,170 +3587,6 @@ async function runAgentWorkflowDraft(context, draftId, options = {}) {
   };
 }
 
-async function appendAgentRunEvent(context, run, event) {
-  const nextSeq = Number(run.lastSeq || 0) + 1;
-  const clean = redactSecrets({
-    ...event,
-    seq: nextSeq,
-    timestamp: event.timestamp || new Date().toISOString(),
-  });
-  run.lastSeq = nextSeq;
-  run.updatedAt = clean.timestamp;
-  run.events = Number(run.events || 0) + 1;
-  await fs.mkdir(agentRunsDir(context.workspaceDir), { recursive: true });
-  await fs.appendFile(agentRunEventsPath(context.workspaceDir, run.id), `${JSON.stringify(clean)}\n`, 'utf-8');
-  await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
-  broadcastAgentRunEvent(context.workspaceDir, run.id, clean);
-  return clean;
-}
-
-function agentRunSseKey(workspaceDir, runId) {
-  return `${workspaceDir}::${safeAgentId(runId, 'agent-run')}`;
-}
-
-function sendAgentSse(res, event) {
-  res.write(`id: ${event.seq || Date.now()}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
-
-function broadcastAgentRunEvent(workspaceDir, runId, event) {
-  const clients = agentRunSseClients.get(agentRunSseKey(workspaceDir, runId));
-  if (!clients) return;
-  for (const [res, client] of clients.entries()) {
-    try {
-      if (Number(event.seq || 0) <= Number(client.lastSeq || 0)) {
-        continue;
-      }
-      sendAgentSse(res, event);
-      client.lastSeq = Number(event.seq || client.lastSeq || 0);
-    } catch {
-      clients.delete(res);
-    }
-  }
-  if (clients.size === 0) {
-    agentRunSseClients.delete(agentRunSseKey(workspaceDir, runId));
-  }
-}
-
-function isAgentRunTerminal(status) {
-  return ['succeeded', 'failed', 'canceled', 'interrupted'].includes(String(status || ''));
-}
-
-function agentRunKey(workspaceDir, runId) {
-  return `${workspaceDir}::${safeAgentId(runId, 'agent-run')}`;
-}
-
-function createAgentCanceledError(reason = 'Workspace Agent run was canceled') {
-  const error = new Error(reason);
-  error.code = 'AGENT_RUN_CANCELED';
-  error.status = 499;
-  return error;
-}
-
-async function latestAgentRun(workspaceDir, runId) {
-  return readJsonFile(agentRunPath(workspaceDir, runId), null);
-}
-
-async function assertAgentRunNotCanceled(context, run, signal) {
-  if (signal?.aborted) {
-    throw createAgentCanceledError();
-  }
-  const latest = await latestAgentRun(context.workspaceDir, run.id);
-  if (latest?.status === 'canceled') {
-    throw createAgentCanceledError(latest.cancelReason || 'Workspace Agent run was canceled');
-  }
-}
-
-async function cancelAgentRun(context, runId, reason = 'Canceled by user') {
-  const run = await latestAgentRun(context.workspaceDir, runId);
-  if (!run) {
-    const error = new Error('Agent run not found');
-    error.status = 404;
-    throw error;
-  }
-
-  const key = agentRunKey(context.workspaceDir, runId);
-  activeAgentRuns.get(key)?.controller?.abort();
-
-  if (!isAgentRunTerminal(run.status)) {
-    run.status = 'canceled';
-    run.cancelReason = String(reason || 'Canceled by user').slice(0, 500);
-    run.canceledAt = new Date().toISOString();
-    run.updatedAt = run.canceledAt;
-    await writeJsonAtomic(agentRunPath(context.workspaceDir, runId), redactSecrets(run));
-    await appendAgentRunEvent(context, run, {
-      type: 'canceled',
-      reason: run.cancelReason,
-      sessionId: run.sessionId,
-      runId: run.id,
-    });
-    await appendAgentRunEvent(context, run, {
-      type: 'finish',
-      reason: 'canceled',
-      sessionId: run.sessionId,
-      runId: run.id,
-    });
-    if (run.sessionId) {
-      const session = await loadAgentSession(context.workspaceDir, run.sessionId).catch(() => null);
-      if (session) {
-        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{
-          type: 'text',
-          text: `Canceled: ${run.cancelReason}`,
-        }]);
-      }
-    }
-  }
-
-  return latestAgentRun(context.workspaceDir, runId);
-}
-
-async function markInterruptedAgentRunsOnStartup() {
-  let interrupted = 0;
-  for (const workspaceDir of await listServiceWorkspaceDirs()) {
-    const entries = await fs.readdir(agentRunsDir(workspaceDir), { withFileTypes: true }).catch((error) => {
-      if (error.code === 'ENOENT') return [];
-      throw error;
-    });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('.events.json')) continue;
-      const runId = entry.name.replace(/\.json$/, '');
-      const run = await latestAgentRun(workspaceDir, runId);
-      if (!run || isAgentRunTerminal(run.status)) continue;
-      run.status = 'interrupted';
-      run.error = run.error || 'Workspace Agent run was interrupted by a backend restart';
-      run.interruptedAt = new Date().toISOString();
-      run.updatedAt = run.interruptedAt;
-      await writeJsonAtomic(agentRunPath(workspaceDir, runId), redactSecrets(run));
-      await appendAgentRunEvent({ workspaceDir }, run, {
-        type: 'interrupted',
-        reason: run.error,
-        sessionId: run.sessionId,
-        runId: run.id,
-      });
-      await appendAgentRunEvent({ workspaceDir }, run, {
-        type: 'finish',
-        reason: 'interrupted',
-        sessionId: run.sessionId,
-        runId: run.id,
-      });
-      interrupted += 1;
-    }
-  }
-  return interrupted;
-}
-
-async function loadAgentRunEvents(workspaceDir, runId, after = null) {
-  const raw = await fs.readFile(agentRunEventsPath(workspaceDir, runId), 'utf-8').catch((error) => {
-    if (error.code === 'ENOENT') return '';
-    throw error;
-  });
-  return raw
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line))
-    .filter((event) => after === null || Number(event.seq || 0) > Number(after));
-}
-
 function agentToolDefinitions() {
   return [
     {
@@ -3853,37 +3752,6 @@ function agentToolDefinitions() {
           required: ['draftId'],
           properties: {
             draftId: { type: 'string' },
-          },
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'save_workflow_draft',
-        description: 'Save a workflow draft after explicit user confirmation.',
-        parameters: {
-          type: 'object',
-          required: ['draftId', 'confirmed'],
-          properties: {
-            draftId: { type: 'string' },
-            confirmed: { type: 'boolean' },
-            relativePath: { type: 'string' },
-          },
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'run_workflow_draft',
-        description: 'Run a workflow draft after explicit user confirmation.',
-        parameters: {
-          type: 'object',
-          required: ['draftId', 'confirmed'],
-          properties: {
-            draftId: { type: 'string' },
-            confirmed: { type: 'boolean' },
           },
         },
       },
@@ -4742,21 +4610,6 @@ async function executeAgentTool(context, name, input = {}, runtime = {}) {
     return { ok: true, draft };
   }
 
-  if (name === 'save_workflow_draft') {
-    const saved = await saveAgentWorkflowDraft(context, input.draftId, {
-      confirmed: input.confirmed === true,
-      relativePath: input.relativePath,
-    });
-    return { ok: true, ...saved };
-  }
-
-  if (name === 'run_workflow_draft') {
-    const started = await runAgentWorkflowDraft(context, input.draftId, {
-      confirmed: input.confirmed === true,
-    });
-    return { ok: true, ...started };
-  }
-
   if (name === 'inspect_recent_run_errors') {
     const limit = Math.min(Math.max(Number(input.limit || 8), 1), 30);
     const detail = input.detail !== false;
@@ -4848,8 +4701,9 @@ function workspaceAgentSystemPrompt(context) {
     'You are the Maze Workspace Agent inside Maze Playground.',
     'Your job is to turn user intent into practical Maze workflow progress.',
     'Use tools proactively whenever they can advance the user request; do not only describe an action you can perform with a tool.',
-    'If you say you will inspect, draft, validate, save, run, fix, promote, or update something, call the corresponding tool in the same assistant turn.',
-    'Only answer with text alone when you are explaining, asking for genuinely missing information, or waiting for explicit confirmation for save/run.',
+    'If you say you will inspect, draft, validate, fix, promote, or update something, call the corresponding tool in the same assistant turn.',
+    'Save and Run are explicit UI commands and are not agent tools. Never claim that you saved or ran a draft; create or update the draft and leave confirmation to the user.',
+    'Only answer with text alone when you are explaining, asking for genuinely missing information, or leaving Save/Run confirmation to the UI.',
     'Create workflow drafts instead of overwriting saved workflows.',
     'When the user references an existing saved workflow or task path, read it with read_workspace_workflow or read_workspace_task before drafting changes.',
     'When the user wants to revise a saved workflow, prefer clone_workflow_to_draft first, then update_workflow_draft for changes.',
@@ -4860,7 +4714,7 @@ function workspaceAgentSystemPrompt(context) {
     'When the user asks to reuse or save a run artifact into the workspace, inspect the run first if needed, then use promote_run_artifact with the artifact path.',
     'After promote_run_artifact, use the returned file.relativePath with read_workspace_file before creating a downstream workflow draft from that file.',
     'For downstream tasks that consume workspace files, pass the file relative path as a user input value, for example "reports/output.json"; do not use "workspace/files/..." or "files/..." in workflow input values.',
-    'Do not save or run a draft unless the user has explicitly confirmed that action.',
+    'Do not attempt to save or run a draft.',
     'When creating workspace task definitions, generate safe Python Maze tasks using `from maze import task`, one @task function per file, no secrets, no absolute paths, no subprocess, no shell, no package installation, and no network calls.',
     'Use only `@task` or `@task(resources={...})`; never use `@task(inputs=...)`, `@task(outputs=...)`, or inputs/outputs decorator arguments. Maze infers inputs from function parameters and outputs from returned dict keys.',
     'For workspace workflow nodes, use category="workspace", nodeType="task", taskPath, functionName, inputs, outputs, resources, configured=true.',
@@ -4871,20 +4725,56 @@ function workspaceAgentSystemPrompt(context) {
   ].join('\n');
 }
 
-function parseToolArguments(raw) {
-  if (!raw) return {};
-  if (typeof raw === 'object') return raw;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+function createWorkspaceAgentCapability(context, runtime = {}) {
+  const token = crypto.randomBytes(32).toString('hex');
+  workspaceAgentCapabilities.set(token, {
+    context,
+    runtime: {
+      currentWorkflow: redactSecrets(runtime.currentWorkflow || null),
+      sessionId: runtime.sessionId || null,
+    },
+    runId: null,
+    tools: new Set(agentToolDefinitions().map((tool) => tool.function.name)),
+  });
+  return token;
+}
+
+function bindWorkspaceAgentCapability(token, runId) {
+  const capability = workspaceAgentCapabilities.get(token);
+  if (capability) capability.runId = String(runId || '');
+}
+
+function revokeWorkspaceAgentCapabilities(runId) {
+  const target = String(runId || '');
+  if (!target) return;
+  for (const [token, capability] of workspaceAgentCapabilities) {
+    if (capability.runId === target) workspaceAgentCapabilities.delete(token);
   }
 }
 
+function workspaceAgentCapability(req) {
+  const address = String(req.socket?.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) return null;
+  const authorization = String(req.get('authorization') || '');
+  if (!authorization.startsWith('Bearer ')) return null;
+  return workspaceAgentCapabilities.get(authorization.slice(7).trim()) || null;
+}
+
+function workspaceAgentToolUrl() {
+  return 'http://127.0.0.1:' + PORT + '/api/internal/workspace-agent/tool';
+}
+
 async function runWorkspaceAgent(context, input = {}) {
-  const message = String(input.message || '').trim();
+  const message = redactSecretText(String(input.message || '').trim()).slice(0, 12000);
   if (!message) {
     const error = new Error('message is required');
+    error.status = 400;
+    throw error;
+  }
+
+  const llm = input.llm || {};
+  if (!String(llm.baseUrl || '').trim() || !String(llm.model || '').trim() || !String(llm.apiKey || '').trim()) {
+    const error = new Error('LLM base URL, API key, and model are required');
     error.status = 400;
     throw error;
   }
@@ -4895,224 +4785,90 @@ async function runWorkspaceAgent(context, input = {}) {
   if (!session) {
     session = await createAgentSessionRecord(context, {
       title: input.title || message.slice(0, 60),
-      message,
     });
   }
 
-  const run = {
-    schema: 'maze_workspace_agent_run',
-    schema_version: 1,
-    id: safeAgentId(input.runId, 'agent-run'),
+  const recentTurns = normalizeAgentTurns(session.turns).slice(-8);
+  const history = await loadAgentSessionView(context, session, {
+    turns: recentTurns,
+    includeDrafts: false,
+  });
+  const prompt = buildWorkspaceAgentPrompt(message, history.messages, session.summary);
+  const capabilityToken = createWorkspaceAgentCapability(context, {
+    currentWorkflow: input.currentWorkflow,
     sessionId: session.id,
-    workspaceId: context.workspaceId,
-    workspaceDir: context.workspaceDir,
-    status: 'running',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    lastSeq: 0,
-    events: 0,
-    finalMessageId: null,
-    error: null,
-  };
-  await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), run);
+  });
+  const timeoutSeconds = Math.min(
+    Math.max(Math.ceil(Number(input.timeoutMs || 180000) / 1000), 30),
+    600,
+  );
 
-  const abortController = input.abortController || new AbortController();
-  const emittedEvents = [];
-  const emit = async (event) => {
-    const saved = await appendAgentRunEvent(context, run, event);
-    emittedEvents.push(saved);
-    return saved;
-  };
-
-  await emit({ type: 'session_started', sessionId: session.id, runId: run.id });
-  await appendAgentSessionMessage(context.workspaceDir, session, 'user', [{ type: 'text', text: message }]);
-
-  const compaction = compactAgentMessages(session.messages, session.summary, input.compaction || {});
-  if (compaction.compactedCount > 0) {
-    session.summary = compaction.summary;
-    session.compaction = {
-      compactedCount: Number(session.compaction?.compactedCount || 0) + compaction.compactedCount,
-      recentApproxTokens: compaction.recentApproxTokens,
-      compactedAt: new Date().toISOString(),
-    };
-    session.messages = compaction.messages;
-    await saveAgentSession(context.workspaceDir, session);
-    await emit({
-      type: 'context_compacted',
-      compactedCount: compaction.compactedCount,
-      recentApproxTokens: compaction.recentApproxTokens,
-    });
+  let started;
+  try {
+    started = await startReactWorkflowProcess(
+      {
+        mode: 'workspace-agent',
+        prompt,
+        workspaceAgentMessage: message,
+        workspaceId: context.workspaceId,
+        workspaceDir: context.workspaceDir,
+        workspaceManifestVersion: context.workspaceManifestVersion,
+        workspaceAgentTools: agentToolDefinitions(),
+        workspaceAgentToolUrl: workspaceAgentToolUrl(),
+        permissionPolicy: {
+          mcp: Object.fromEntries(agentToolDefinitions().map((tool) => [tool.function.name, 'allow'])),
+          skill: { '*': 'allow' },
+        },
+        systemPrompt: workspaceAgentSystemPrompt(context),
+        maxSteps: Math.min(Math.max(Number(input.maxSteps || 8), 1), 16),
+        maxTokens: Math.min(Math.max(Number(input.maxTokens || 2048), 1), 32768),
+        taskTimeout: timeoutSeconds,
+        baseUrl: String(llm.baseUrl).trim(),
+        model: String(llm.model).trim(),
+      },
+      {
+        MAZE_REACT_API_KEY: String(llm.apiKey),
+        MAZE_WORKSPACE_AGENT_TOOL_TOKEN: capabilityToken,
+      },
+      () => workspaceAgentCapabilities.delete(capabilityToken),
+    );
+  } catch (error) {
+    workspaceAgentCapabilities.delete(capabilityToken);
+    throw error;
   }
 
-  const llm = input.llm || {};
-  const maxSteps = Math.min(Math.max(Number(input.maxSteps || 8), 1), 16);
-  const llmTimeoutMs = Math.min(Math.max(Number(input.timeoutMs || 180000), 30000), 600000);
-  const tools = agentToolDefinitions();
-  let finalText = '';
+  bindWorkspaceAgentCapability(capabilityToken, started.runId);
 
   try {
-    for (let step = 0; step < maxSteps; step += 1) {
-      await assertAgentRunNotCanceled(context, run, abortController.signal);
-      const llmMessages = [
-        { role: 'system', content: workspaceAgentSystemPrompt(context) },
-        ...(session.summary ? [{ role: 'system', content: `Conversation summary:\n${session.summary}` }] : []),
-        ...(input.currentWorkflow ? [{
-          role: 'system',
-          content: `Current open workflow snapshot:\n${JSON.stringify(redactSecrets(input.currentWorkflow)).slice(0, 12000)}`,
-        }] : []),
-        ...agentMessagesToLLM(session.messages),
-      ];
-      await emit({
-        type: 'context_usage',
-        source: 'estimated',
-        inputTokens: llmMessages.reduce((sum, item) => sum + approximateAgentTokens(`${item.role}\n${item.content || ''}`), 0),
-        step,
-      });
-      await assertAgentRunNotCanceled(context, run, abortController.signal);
-
-      await emit({
-        type: 'llm_waiting',
-        timeoutMs: llmTimeoutMs,
-        step,
-      });
-
-      const assistant = await callOpenAICompatibleToolChat({
-        baseUrl: llm.baseUrl,
-        apiKey: llm.apiKey,
-        model: llm.model,
-        messages: llmMessages,
-        tools,
-        maxTokens: Number(input.maxTokens || 2048),
-        temperature: Number(input.temperature ?? 0.2),
-        timeoutMs: llmTimeoutMs,
-        signal: abortController.signal,
-      });
-      await assertAgentRunNotCanceled(context, run, abortController.signal);
-
-      const assistantText = String(assistant.content || '');
-      const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
-      const assistantParts = [
-        ...(assistantText ? [{ type: 'text', text: assistantText }] : []),
-        ...toolCalls.map((call, index) => ({
-          type: 'tool_call',
-          id: call.id || `tool-${step}-${index}`,
-          name: call.function?.name || call.name,
-          input: parseToolArguments(call.function?.arguments || call.arguments),
-        })),
-      ];
-
-      if (toolCalls.length && assistantParts.length > 0) {
-        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', assistantParts);
-      }
-
-      if (!toolCalls.length) {
-        finalText = assistantText || 'Done.';
-        break;
-      }
-
-      for (const call of toolCalls) {
-        await assertAgentRunNotCanceled(context, run, abortController.signal);
-        const toolName = call.function?.name || call.name;
-        const toolInput = parseToolArguments(call.function?.arguments || call.arguments);
-        const toolCallId = call.id || `tool-${step}-${toolName}`;
-        await emit({
-          type: 'tool_call',
-          toolCallId,
-          name: toolName,
-          input: redactSecrets(toolInput),
-        });
-        let result;
-        try {
-          result = await executeAgentTool(context, toolName, toolInput, {
-            currentWorkflow: input.currentWorkflow || null,
-            sessionId: session.id,
-            runId: run.id,
-          });
-        } catch (error) {
-          result = {
-            ok: false,
-            error: error.message,
-            code: error.code || undefined,
-            status: error.status || undefined,
-          };
-        }
-        await appendAgentSessionMessage(context.workspaceDir, session, 'tool', [{
-          type: 'tool_result',
-          toolCallId,
-          name: toolName,
-          result,
-        }]);
-        await emit({
-          type: 'tool_result',
-          toolCallId,
-          name: toolName,
-          ok: result?.ok !== false,
-          result: redactSecrets(result),
-        });
-        await assertAgentRunNotCanceled(context, run, abortController.signal);
-      }
-    }
-
-    await assertAgentRunNotCanceled(context, run, abortController.signal);
-    if (!finalText) {
-      finalText = `Stopped after maxSteps=${maxSteps}.`;
-    }
-    const finalMessage = await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'text', text: finalText }]);
-    run.status = 'succeeded';
-    run.finalMessageId = finalMessage.id;
-    run.updatedAt = new Date().toISOString();
-    await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
-    await emit({ type: 'finish', reason: 'stop', sessionId: session.id, messageId: finalMessage.id });
+    await appendAgentSessionTurn(context.workspaceDir, session, started.runId);
   } catch (error) {
-    const errorMessage = error.message || String(error);
-    const canceledByUser = error.code === 'AGENT_RUN_CANCELED' || error.code === 'LLM_ABORTED' || abortController.signal.aborted;
-    if (canceledByUser) {
-      const latest = await latestAgentRun(context.workspaceDir, run.id);
-      if (latest?.status !== 'canceled') {
-        run.status = 'canceled';
-        run.cancelReason = errorMessage;
-        run.canceledAt = new Date().toISOString();
-        run.updatedAt = run.canceledAt;
-        await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
-        await emit({ type: 'canceled', reason: errorMessage, sessionId: session.id, runId: run.id });
-        await emit({ type: 'finish', reason: 'canceled', sessionId: session.id, runId: run.id });
-        await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'text', text: `Canceled: ${errorMessage}` }]);
-      } else {
-        Object.assign(run, latest);
-      }
-      finalText = errorMessage;
-      const savedSession = await loadAgentSession(context.workspaceDir, session.id);
-      const events = await loadAgentRunEvents(context.workspaceDir, run.id);
-      return {
-        success: false,
-        run: redactSecrets(latest || run),
-        session: agentSessionSummary(savedSession),
-        messages: savedSession.messages,
-        events,
-        finalText,
-      };
-    }
-    await appendAgentSessionMessage(context.workspaceDir, session, 'assistant', [{ type: 'error', message: errorMessage }]);
-    run.status = 'failed';
-    run.error = errorMessage;
-    run.updatedAt = new Date().toISOString();
-    await writeJsonAtomic(agentRunPath(context.workspaceDir, run.id), redactSecrets(run));
-    await emit({ type: 'error', message: errorMessage, code: error.code || undefined, status: error.status || undefined });
-    await emit({ type: 'finish', reason: 'error', sessionId: session.id });
+    workspaceAgentCapabilities.delete(capabilityToken);
+    await callMazeCore('/runs/' + encodeURIComponent(started.runId) + '/cancel', {
+      method: 'POST',
+      body: { reason: 'Workspace Agent session persistence failed' },
+    }).catch(() => null);
+    throw error;
   }
 
   const savedSession = await loadAgentSession(context.workspaceDir, session.id);
-  const events = await loadAgentRunEvents(context.workspaceDir, run.id);
+  const [view, dynamicTurn] = await Promise.all([
+    loadAgentSessionView(context, savedSession),
+    loadAgentDynamicTurn(savedSession.id, normalizeAgentTurns(savedSession.turns).at(-1)),
+  ]);
   return {
-    success: run.status === 'succeeded',
-    run: redactSecrets(run),
+    success: true,
+    run: {
+      ...(dynamicTurn.run || {}),
+      id: started.runId,
+      dynamic_run_id: started.runId,
+      status: dynamicTurn.run?.status || started.status || 'running',
+    },
     session: agentSessionSummary(savedSession),
-    messages: savedSession.messages,
-    events,
-    finalText,
+    messages: view.messages,
+    drafts: view.drafts,
+    events: dynamicTurn.events,
   };
 }
-
 function redactMcpServerConfig(server) {
   if (!server || typeof server !== 'object' || Array.isArray(server)) return {};
   const redacted = { ...server };
@@ -6487,7 +6243,7 @@ async function submitPlaygroundWorkflow({
   };
 }
 
-function startReactWorkflowProcess(params = {}, extraEnv = {}) {
+function startReactWorkflowProcess(params = {}, extraEnv = {}, onExit = null) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
     const python = spawn(PYTHON_BIN, [bridgePath, 'run_react_workflow', JSON.stringify(params)], {
@@ -6508,6 +6264,12 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
     let stderrLineBuffer = '';
     let settled = false;
     let runId = null;
+    let exitHandled = false;
+    const handleExit = () => {
+      if (exitHandled) return;
+      exitHandled = true;
+      onExit?.();
+    };
 
     const startupTimer = setTimeout(() => {
       if (!settled) {
@@ -6523,7 +6285,6 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
       if (!runId) return;
       settled = true;
       clearTimeout(startupTimer);
-      activeReactRunProcesses.set(runId, python);
       resolve({
         success: true,
         runId,
@@ -6563,9 +6324,7 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
 
     python.on('close', (code) => {
       clearTimeout(startupTimer);
-      if (runId) {
-        activeReactRunProcesses.delete(runId);
-      }
+      handleExit();
 
       if (!settled) {
         settled = true;
@@ -6604,9 +6363,7 @@ function startReactWorkflowProcess(params = {}, extraEnv = {}) {
 
     python.on('error', (err) => {
       clearTimeout(startupTimer);
-      if (runId) {
-        activeReactRunProcesses.delete(runId);
-      }
+      handleExit();
       if (!settled) {
         settled = true;
         reject(err);
@@ -8547,6 +8304,7 @@ app.post('/api/runs/:runId/cancel', async (req, res) => {
       method: 'POST',
       body: req.body || {},
     });
+    revokeWorkspaceAgentCapabilities(req.params.runId);
     res.json({
       success: true,
       runId: result.run_id,
@@ -8895,7 +8653,7 @@ app.post('/api/agent/sessions', async (req, res) => {
       success: true,
       ...workspaceResponseFields(context),
       session: agentSessionSummary(session),
-      messages: session.messages,
+      messages: [],
     });
   } catch (error) {
     console.error('Failed to create Workspace Agent session:', error);
@@ -8954,13 +8712,14 @@ app.get('/api/agent/sessions/:id/messages', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
     const session = await loadAgentSession(context.workspaceDir, req.params.id);
-    const drafts = await loadAgentDraftsForMessages(context.workspaceDir, session.messages);
+    const view = await loadAgentSessionView(context, session);
     res.json({
       success: true,
       ...workspaceResponseFields(context),
       session: agentSessionSummary(session),
-      messages: session.messages,
-      drafts,
+      messages: view.messages,
+      drafts: view.drafts,
+      unavailableTurns: view.unavailableTurns,
     });
   } catch (error) {
     console.error('Failed to read Workspace Agent messages:', error);
@@ -8968,162 +8727,54 @@ app.get('/api/agent/sessions/:id/messages', async (req, res) => {
   }
 });
 
+app.post('/api/internal/workspace-agent/tool', async (req, res) => {
+  const capability = workspaceAgentCapability(req);
+  if (!capability) {
+    res.status(403).json({ ok: false, error: 'Workspace Agent capability denied' });
+    return;
+  }
+
+  try {
+    const name = String(req.body?.name || '').trim();
+    const input = req.body?.input;
+    if (!name || !input || typeof input !== 'object' || Array.isArray(input)) {
+      res.status(400).json({ ok: false, error: 'Tool name and object input are required' });
+      return;
+    }
+    if (!capability.tools.has(name)) {
+      res.status(403).json({ ok: false, error: 'Workspace Agent tool is not allowed' });
+      return;
+    }
+    const result = await executeAgentTool(
+      capability.context,
+      name,
+      input,
+      capability.runtime,
+    );
+    res.json(redactSecrets(result));
+  } catch (error) {
+    res.status(error.status || 500).json({
+      ok: false,
+      error: redactSecretText(error.message),
+      code: error.code || undefined,
+    });
+  }
+});
+
 app.post('/api/agent/runs', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.body || {});
-    if (req.body?.async === true) {
-      const session = req.body.sessionId
-        ? await loadAgentSession(context.workspaceDir, req.body.sessionId).catch(() => null)
-        : await createAgentSessionRecord(context, {
-          title: req.body.title || String(req.body.message || 'Workspace Agent').slice(0, 60),
-          message: req.body.message,
-        });
-      const runId = safeAgentId(req.body.runId, 'agent-run');
-      const run = {
-        schema: 'maze_workspace_agent_run',
-        schema_version: 1,
-        id: runId,
-        sessionId: session?.id,
-        workspaceId: context.workspaceId,
-        workspaceDir: context.workspaceDir,
-        status: 'queued',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        lastSeq: 0,
-        events: 0,
-        finalMessageId: null,
-        error: null,
-      };
-      await writeJsonAtomic(agentRunPath(context.workspaceDir, runId), run);
-      const payload = {
-        ...(req.body || {}),
-        sessionId: session?.id,
-        runId,
-      };
-      const abortController = new AbortController();
-      payload.abortController = abortController;
-      const promise = runWorkspaceAgent(context, payload)
-        .catch((error) => {
-          console.error(`Workspace Agent async run failed: ${runId}`, error);
-        })
-        .finally(() => {
-          activeAgentRuns.delete(agentRunKey(context.workspaceDir, runId));
-        });
-      activeAgentRuns.set(agentRunKey(context.workspaceDir, runId), { promise, controller: abortController });
-      return res.status(202).json({
-        success: true,
-        ...workspaceResponseFields(context),
-        run,
-        session: session ? agentSessionSummary(session) : null,
-        messages: session?.messages || [],
-        events: [],
-      });
-    }
     const result = await runWorkspaceAgent(context, req.body || {});
-    res.status(result.success ? 200 : 500).json({
+    res.status(202).json({
       ...result,
       ...workspaceResponseFields(context),
     });
   } catch (error) {
     console.error('Failed to run Workspace Agent:', error);
-    res.status(error.status || 500).json({ success: false, error: error.message });
+    res.status(error.status || 500).json({ success: false, error: redactSecretText(error.message) });
   }
 });
 
-app.get('/api/agent/runs/:id/events', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const run = await readJsonFile(agentRunPath(context.workspaceDir, req.params.id), null);
-    if (!run) {
-      return res.status(404).json({ success: false, error: 'Agent run not found' });
-    }
-    const after = req.query.after === undefined ? null : Number(req.query.after);
-    const events = await loadAgentRunEvents(context.workspaceDir, req.params.id, Number.isFinite(after) ? after : null);
-    res.json({
-      success: true,
-      ...workspaceResponseFields(context),
-      run: redactSecrets(run),
-      events,
-    });
-  } catch (error) {
-    console.error('Failed to read Workspace Agent events:', error);
-    res.status(error.status || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/agent/runs/:id/cancel', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.body || {});
-    const run = await cancelAgentRun(context, req.params.id, req.body?.reason || 'Canceled by user');
-    res.json({
-      success: true,
-      ...workspaceResponseFields(context),
-      run: redactSecrets(run),
-    });
-  } catch (error) {
-    console.error('Failed to cancel Workspace Agent run:', error);
-    res.status(error.status || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/agent/runs/:id/stream', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const run = await readJsonFile(agentRunPath(context.workspaceDir, req.params.id), null);
-    if (!run) {
-      return res.status(404).json({ success: false, error: 'Agent run not found' });
-    }
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.write('\n');
-
-    const after = req.query.after === undefined ? null : Number(req.query.after);
-    const existingEvents = await loadAgentRunEvents(context.workspaceDir, req.params.id, Number.isFinite(after) ? after : null);
-    existingEvents.forEach((event) => sendAgentSse(res, event));
-    const lastSeq = existingEvents.reduce((max, event) => Math.max(max, Number(event.seq || 0)), Number.isFinite(after) ? after : 0);
-
-    if (run.status === 'succeeded' || run.status === 'failed') {
-      res.end();
-      return;
-    }
-
-    const key = agentRunSseKey(context.workspaceDir, req.params.id);
-    if (!agentRunSseClients.has(key)) {
-      agentRunSseClients.set(key, new Map());
-    }
-    agentRunSseClients.get(key).set(res, { lastSeq });
-
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(': heartbeat\n\n');
-      } catch {
-        clearInterval(heartbeat);
-      }
-    }, 15000);
-
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      const clients = agentRunSseClients.get(key);
-      if (!clients) return;
-      clients.delete(res);
-      if (clients.size === 0) {
-        agentRunSseClients.delete(key);
-      }
-    });
-  } catch (error) {
-    console.error('Failed to stream Workspace Agent events:', error);
-    if (!res.headersSent) {
-      res.status(error.status || 500).json({ success: false, error: error.message });
-    } else {
-      res.end();
-    }
-  }
-});
 
 app.get('/api/agent/drafts/:id', async (req, res) => {
   try {
@@ -9969,16 +9620,7 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-if (process.env.MAZE_PLAYGROUND_NO_LISTEN !== '1') (async () => {
-  try {
-    const interrupted = await markInterruptedAgentRunsOnStartup();
-    if (interrupted > 0) {
-      console.log(`🧹 Marked ${interrupted} stale Workspace Agent run(s) as interrupted`);
-    }
-  } catch (error) {
-    console.error('Failed to mark stale Workspace Agent runs:', error);
-  }
-
+if (process.env.MAZE_PLAYGROUND_NO_LISTEN !== '1') {
   server.listen(PORT, () => {
     console.log('\n' + '='.repeat(60));
     console.log('  🚀 Maze Playground Backend Server');
@@ -9989,7 +9631,7 @@ if (process.env.MAZE_PLAYGROUND_NO_LISTEN !== '1') (async () => {
     console.log(`✅ Python Bridge: ${PYTHON_BIN}`);
     console.log('\n📡 等待前端连接...\n');
   });
-})();
+}
 
 export const __artifactSecurityTestHooks = Object.freeze({
   cleanupRecoveredGaiaStaging,
@@ -9997,6 +9639,22 @@ export const __artifactSecurityTestHooks = Object.freeze({
   ensureManagedGaiaWorkspaceContext,
   requirePrivateGaiaStagingRoot,
   stageGaiaExecutionFile,
+});
+
+export const __workspaceAgentTestHooks = Object.freeze({
+  agentMessagesFromDynamicTurn,
+  agentSessionSummary,
+  agentToolDefinitions,
+  appendAgentSessionTurn,
+  buildAgentSessionExport,
+  buildWorkspaceAgentPrompt,
+  bindWorkspaceAgentCapability,
+  collectAgentDraftIdsFromEvents,
+  createAgentSessionRecord,
+  createWorkspaceAgentCapability,
+  loadAgentSession,
+  revokeWorkspaceAgentCapabilities,
+  workspaceAgentCapability,
 });
 
 // 优雅关闭
