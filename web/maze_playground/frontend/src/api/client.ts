@@ -105,6 +105,8 @@ export interface WorkspaceAgentSession {
   workspaceId?: string;
   workspaceDir?: string;
   messageCount?: number;
+  turnCount?: number;
+  dynamicRunId?: string | null;
   summary?: string;
   compaction?: Record<string, any> | null;
   metadata?: Record<string, any>;
@@ -139,13 +141,6 @@ export interface WorkspaceAgentDraft {
   dismissedReason?: string;
   createdAt?: string;
   updatedAt?: string;
-}
-
-export interface WorkspaceAgentEvent {
-  seq: number;
-  type: string;
-  timestamp: string;
-  [key: string]: any;
 }
 
 export const api = {
@@ -1071,6 +1066,7 @@ export const api = {
     session: WorkspaceAgentSession;
     messages: WorkspaceAgentMessage[];
     drafts?: WorkspaceAgentDraft[];
+    unavailableTurns?: string[];
   }> {
     const response = await axios.get(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { params });
     return response.data;
@@ -1095,64 +1091,13 @@ export const api = {
     session: WorkspaceAgentSession;
     messages: WorkspaceAgentMessage[];
     drafts?: WorkspaceAgentDraft[];
-    run: Record<string, any>;
-    events: WorkspaceAgentEvent[];
+    run: { id: string; status?: string; [key: string]: any };
+    events: DynamicRunEvent[];
     finalText?: string;
     error?: string;
   }> {
     const response = await axios.post(`${API_BASE}/agent/runs`, data);
     return response.data;
-  },
-
-  async getAgentRunEvents(
-    runId: string,
-    params?: {
-      workspaceId?: string;
-      workspaceDir?: string;
-      after?: number;
-    },
-  ): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    run: Record<string, any>;
-    events: WorkspaceAgentEvent[];
-  }> {
-    const response = await axios.get(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events`, { params });
-    return response.data;
-  },
-
-  async cancelAgentRun(
-    runId: string,
-    data?: {
-      workspaceId?: string;
-      workspaceDir?: string;
-      reason?: string;
-    },
-  ): Promise<{
-    success: boolean;
-    workspaceId: string;
-    workspaceDir: string;
-    run: Record<string, any>;
-  }> {
-    const response = await axios.post(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}/cancel`, data || {});
-    return response.data;
-  },
-
-  getAgentRunStreamUrl(
-    runId: string,
-    params?: {
-      workspaceId?: string;
-      workspaceDir?: string;
-      after?: number;
-    },
-  ): string {
-    const query = new URLSearchParams();
-    if (params?.workspaceId) query.set('workspaceId', params.workspaceId);
-    if (params?.workspaceDir) query.set('workspaceDir', params.workspaceDir);
-    if (params?.after !== undefined) query.set('after', String(params.after));
-    const suffix = query.toString();
-    return `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/stream${suffix ? `?${suffix}` : ''}`;
   },
 
   async getAgentDraft(

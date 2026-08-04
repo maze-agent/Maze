@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Collapse, Empty, Input, List, Modal, Select, Space, Tag, Tooltip, Typography, message } from 'antd';
 import { Bot, CheckCircle2, Download, Eye, FileText, PanelRightClose, PanelRightOpen, Pencil, Play, Plus, Save, Send, Square, Trash2, Wrench } from 'lucide-react';
-import { api, WorkspaceAgentDraft, WorkspaceAgentEvent, WorkspaceAgentMessage, WorkspaceAgentSession } from '@/api/client';
+import { api, WorkspaceAgentDraft, WorkspaceAgentMessage, WorkspaceAgentSession } from '@/api/client';
 import { createLocalWorkflowId, useWorkflowStore } from '@/stores/workflowStore';
+import type { DynamicRunEvent } from '@/types/workflow';
 import { loadLlmSettings } from '@/utils/llmSettings';
 import PendingActionCard from './PendingActionCard';
 
@@ -16,59 +17,64 @@ function messageText(messageItem: WorkspaceAgentMessage) {
     .join('\n');
 }
 
+function agentToolResult(part: WorkspaceAgentMessage['parts'][number]) {
+  const result = part.result || {};
+  return result.structured_content || result.structuredContent || result;
+}
+
 function inspectRunResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'inspect_workflow_run')
-    .map((part) => part.result?.run)
+    .map((part) => agentToolResult(part).run)
     .filter(Boolean);
 }
 
 function promotedFileResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'promote_run_artifact')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok && result?.file);
 }
 
 function readWorkspaceFileResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'read_workspace_file')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok && result?.relativePath);
 }
 
 function readWorkspaceWorkflowResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'read_workspace_workflow')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok && result?.relativePath && result?.workflow);
 }
 
 function readWorkspaceTaskResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'read_workspace_task')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok && result?.relativePath);
 }
 
 function workspaceInventoryResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'list_workspace_items')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok);
 }
 
 function workspaceFileListResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'list_workspace_files')
-    .map((part) => part.result)
+    .map(agentToolResult)
     .filter((result) => result?.ok && Array.isArray(result.files));
 }
 
 function currentWorkflowResults(messageItem: WorkspaceAgentMessage) {
   return (messageItem.parts || [])
     .filter((part) => part.type === 'tool_result' && part.name === 'read_current_workflow')
-    .map((part) => part.result?.currentWorkflow)
+    .map((part) => agentToolResult(part).currentWorkflow)
     .filter((result) => result && typeof result === 'object');
 }
 
@@ -120,11 +126,35 @@ function uniqueAgentArtifacts(artifacts: any[] = []) {
   return Array.from(byKey.values());
 }
 
-function collectDraftsFromEvents(events: WorkspaceAgentEvent[]) {
+function agentEventData(event: DynamicRunEvent) {
+  return event.data || {};
+}
+
+function agentEventIdentity(event: DynamicRunEvent) {
+  if (typeof event.seq === 'number') return `seq:${event.seq}`;
+  return `${event.timestamp || ''}:${event.type}:${JSON.stringify(agentEventData(event))}`;
+}
+
+function mergeAgentEvents(current: DynamicRunEvent[], incoming: DynamicRunEvent[]) {
+  const byKey = new Map(current.map((event) => [agentEventIdentity(event), event]));
+  incoming.forEach((event) => byKey.set(agentEventIdentity(event), event));
+  return Array.from(byKey.values()).sort((left, right) => {
+    if (typeof left.seq === 'number' && typeof right.seq === 'number') {
+      return left.seq - right.seq;
+    }
+    if (typeof left.seq === 'number') return -1;
+    if (typeof right.seq === 'number') return 1;
+    return String(left.timestamp || '').localeCompare(String(right.timestamp || ''));
+  });
+}
+
+function collectDraftsFromEvents(events: DynamicRunEvent[]) {
   const drafts = new Map<string, WorkspaceAgentDraft>();
   for (const event of events) {
-    const result = event.result || {};
-    const draft = result.draft || event.draft;
+    const data = agentEventData(event);
+    const result = data.result || data.tool_result || {};
+    const structured = result.structured_content || result.structuredContent || {};
+    const draft = result.draft || structured.draft || data.draft;
     if (draft?.id) {
       drafts.set(draft.id, draft);
     }
@@ -136,7 +166,7 @@ function collectDraftsFromMessages(messages: WorkspaceAgentMessage[]) {
   const drafts = new Map<string, WorkspaceAgentDraft>();
   for (const messageItem of messages) {
     for (const part of messageItem.parts || []) {
-      const result = (part as any).result || {};
+      const result = agentToolResult(part);
       const draft = result.draft || (part as any).draft;
       if (draft?.id) {
         drafts.set(draft.id, draft);
@@ -168,35 +198,69 @@ function draftsFromMessageResponse(result: { messages?: WorkspaceAgentMessage[];
   );
 }
 
-function eventLabel(event: WorkspaceAgentEvent) {
-  if (event.type === 'tool_call') return `Running ${event.name}`;
-  if (event.type === 'tool_result') return `${event.name} ${event.ok === false ? 'failed' : 'done'}`;
-  if (event.type === 'context_usage') return `Context ${event.inputTokens || 0} tokens`;
-  if (event.type === 'llm_waiting') return `Waiting for LLM (${Math.round(Number(event.timeoutMs || 0) / 1000)}s timeout)`;
-  if (event.type === 'context_compacted') return `Compacted ${event.compactedCount || 0} messages`;
-  if (event.type === 'interrupted') return 'Interrupted by backend restart';
-  if (event.type === 'finish') return `Finished (${event.reason || 'stop'})`;
+function eventLabel(event: DynamicRunEvent) {
+  const data = agentEventData(event);
+  const toolName = data.name || data.tool_name || data.tool || 'tool';
+  if (event.type === 'tool_call' || event.type.endsWith('_tool_call_started')) return `Running ${toolName}`;
+  if (event.type === 'tool_result' || event.type.endsWith('_tool_call_finished')) {
+    return `${toolName} ${agentToolEventFailed(event) ? 'failed' : 'done'}`;
+  }
+  if (event.type.endsWith('_tool_call_failed')) return `${toolName} failed`;
+  if (event.type === 'context_usage' || event.type === 'agent_context_usage') return `Context ${data.inputTokens || data.input_tokens || 0} tokens`;
+  if (event.type === 'llm_waiting' || event.type === 'agent_llm_waiting') return `Waiting for LLM (${Math.round(Number(data.timeoutMs || data.timeout_ms || 0) / 1000)}s timeout)`;
+  if (event.type === 'context_compacted' || event.type === 'agent_context_compacted') return `Compacted ${data.compactedCount || data.compacted_count || 0} messages`;
+  if (event.type === 'agent_final' || event.type === 'finish_workflow') return `Finished (${data.stop_reason || 'final'})`;
+  if (event.type === 'agent_error' || event.type === 'task_exception') return `Failed${data.error ? `: ${data.error}` : ''}`;
+  if (event.type === 'cancel_dynamic_run') return 'Canceled';
+  if (event.type === 'timeout_dynamic_run') return 'Timed out';
+  if (event.type === 'interrupt_dynamic_run') return 'Interrupted';
   return event.type;
 }
 
-function visibleAgentEvents(events: WorkspaceAgentEvent[]) {
+function agentToolEventFailed(event: DynamicRunEvent) {
+  const data = agentEventData(event);
+  return data.ok === false
+    || data.result?.is_error === true
+    || Boolean(data.tool_result?.error);
+}
+
+const TERMINAL_AGENT_EVENT_TYPES = new Set([
+  'agent_final',
+  'agent_error',
+  'finish_workflow',
+  'task_exception',
+  'cancel_dynamic_run',
+  'timeout_dynamic_run',
+  'interrupt_dynamic_run',
+]);
+
+function isTerminalAgentEvent(event: DynamicRunEvent) {
+  return TERMINAL_AGENT_EVENT_TYPES.has(event.type);
+}
+
+function visibleAgentEvents(events: DynamicRunEvent[]) {
   const important = events.filter((event) => (
-    event.type === 'finish'
-    || event.type === 'error'
-    || event.type === 'canceled'
-    || event.type === 'interrupted'
+    isTerminalAgentEvent(event)
     || event.type === 'llm_waiting'
+    || event.type === 'agent_llm_waiting'
     || event.type === 'context_compacted'
+    || event.type === 'agent_context_compacted'
     || event.type === 'pending_action'
-    || (event.type === 'tool_result' && event.ok === false)
+    || event.type === 'agent_pending_action'
+    || event.type.endsWith('_tool_call_failed')
+    || ((event.type === 'tool_result' || event.type.endsWith('_tool_call_finished')) && agentToolEventFailed(event))
   ));
   return important.slice(-6);
 }
 
-function currentAgentRunLabel(events: WorkspaceAgentEvent[]) {
-  const lastToolCall = [...events].reverse().find((event) => event.type === 'tool_call');
-  if (lastToolCall?.name) return `Running ${lastToolCall.name}`;
-  const lastContext = [...events].reverse().find((event) => event.type === 'context_usage');
+function currentAgentRunLabel(events: DynamicRunEvent[]) {
+  const lastToolCall = [...events].reverse().find((event) => (
+    event.type === 'tool_call' || event.type.endsWith('_tool_call_started')
+  ));
+  if (lastToolCall) return `Running ${agentEventData(lastToolCall).name || agentEventData(lastToolCall).tool_name || 'tool'}`;
+  const lastContext = [...events].reverse().find((event) => (
+    event.type === 'context_usage' || event.type === 'agent_context_usage'
+  ));
   if (lastContext) return 'Thinking';
   return 'Working';
 }
@@ -267,16 +331,17 @@ interface PendingAgentAction {
 function draftRunTagColor(status?: string) {
   if (status === 'failed') return 'red';
   if (status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'orange';
-  if (status === 'completed' || status === 'succeeded') return 'green';
+  if (status === 'completed' || status === 'finalized' || status === 'succeeded') return 'green';
   return 'blue';
 }
 
 function isAgentRunDone(status?: string) {
-  return status === 'succeeded' || status === 'failed' || status === 'canceled' || status === 'interrupted';
+  return ['finalized', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted']
+    .includes(String(status || '').toLowerCase());
 }
 
 function isDraftWorkflowRunDone(status?: string) {
-  return ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted']
+  return ['completed', 'finalized', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted']
     .includes(String(status || '').toLowerCase());
 }
 
@@ -310,9 +375,11 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
   const [sessions, setSessions] = useState<WorkspaceAgentSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [messages, setMessages] = useState<WorkspaceAgentMessage[]>([]);
-  const [events, setEvents] = useState<WorkspaceAgentEvent[]>([]);
+  const [unavailableTurnRunIds, setUnavailableTurnRunIds] = useState<string[]>([]);
+  const [events, setEvents] = useState<DynamicRunEvent[]>([]);
   const [drafts, setDrafts] = useState<WorkspaceAgentDraft[]>([]);
   const [activeRunId, setActiveRunId] = useState('');
+  const [activeRunSessionId, setActiveRunSessionId] = useState('');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
@@ -376,9 +443,11 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
     setSessions([]);
     setActiveSessionId('');
     setMessages([]);
+    setUnavailableTurnRunIds([]);
     setEvents([]);
     setDrafts([]);
     setActiveRunId('');
+    setActiveRunSessionId('');
     setBusy(false);
     setPendingActions([]);
     setProcessingActionId('');
@@ -434,14 +503,17 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
   useEffect(() => {
     if (!open || !workspaceReady || !workspaceDir || !activeSessionId) {
       setMessages([]);
+      setUnavailableTurnRunIds([]);
       return;
     }
+    setUnavailableTurnRunIds([]);
     let canceled = false;
     api.getAgentMessages(activeSessionId, { workspaceId, workspaceDir })
       .then((result) => {
         if (canceled) return;
         const loadedMessages = result.messages || [];
         setMessages(loadedMessages);
+        setUnavailableTurnRunIds(result.unavailableTurns || []);
         setDrafts((items) => mergeDraftLists(draftsFromMessageResponse(result), items));
       })
       .catch((error) => {
@@ -453,6 +525,23 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
   }, [activeSessionId, open, workspaceDir, workspaceId, workspaceReady]);
 
   useEffect(() => {
+    const runId = activeSession?.dynamicRunId;
+    if (!open || !workspaceReady || !runId || activeRunId) return;
+    let canceled = false;
+    api.getDynamicRun(runId)
+      .then((result) => {
+        if (canceled || isAgentRunDone(result.run.status)) return;
+        setActiveRunId(runId);
+        setActiveRunSessionId(activeSession.id);
+        setBusy(true);
+      })
+      .catch((error) => console.error('Failed to recover Workspace Agent run:', error));
+    return () => {
+      canceled = true;
+    };
+  }, [activeRunId, activeSession, open, workspaceReady]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, events, visibleDrafts, pendingActions]);
 
@@ -462,84 +551,67 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
   }, [visibleDrafts]);
 
   useEffect(() => {
-    if (!workspaceReady || !activeRunId || !activeSessionId || !workspaceDir) return undefined;
+    if (!workspaceReady || !activeRunId || !activeRunSessionId || !workspaceDir) return undefined;
     let canceled = false;
     let after = 0;
-    let eventSource: EventSource | null = null;
+    let timer: number | undefined;
 
-    if (typeof window !== 'undefined' && 'EventSource' in window) {
-      eventSource = new EventSource(api.getAgentRunStreamUrl(activeRunId, { workspaceId, workspaceDir }));
-      eventSource.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          after = Math.max(after, Number(parsed.seq || 0));
-          setEvents((items) => {
-            const bySeq = new Map(items.map((item) => [item.seq, item]));
-            bySeq.set(parsed.seq, parsed);
-            const merged = Array.from(bySeq.values()).sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
-            setDrafts(collectDraftsFromEvents(merged));
-            return merged;
-          });
-          if (parsed.type === 'finish' || parsed.type === 'error' || parsed.type === 'canceled') {
-            setBusy(false);
-            setActiveRunId('');
-            setCancelingRun(false);
-            api.getAgentMessages(activeSessionId, { workspaceId, workspaceDir })
-              .then((messageResult) => {
-                const loadedMessages = messageResult.messages || [];
-                setMessages(loadedMessages);
-                setDrafts((items) => mergeDraftLists(draftsFromMessageResponse(messageResult), items));
-              })
-              .catch((error) => console.error('Failed to refresh Workspace Agent messages:', error));
-            eventSource?.close();
-          }
-        } catch (error) {
-          console.error('Failed to parse Workspace Agent SSE event:', error);
-        }
-      };
-      eventSource.onerror = () => {
-        eventSource?.close();
-        eventSource = null;
-      };
-    }
+    const applyMessages = (result: Awaited<ReturnType<typeof api.getAgentMessages>>) => {
+      const loadedMessages = result.messages || [];
+      setMessages(loadedMessages);
+      setUnavailableTurnRunIds(result.unavailableTurns || []);
+      setDrafts((items) => mergeDraftLists(draftsFromMessageResponse(result), items));
+    };
 
     const poll = async () => {
+      let finished = false;
       try {
-        const [eventResult, messageResult] = await Promise.all([
-          api.getAgentRunEvents(activeRunId, { workspaceId, workspaceDir, after }),
-          api.getAgentMessages(activeSessionId, { workspaceId, workspaceDir }),
+        const [runResult, eventResult] = await Promise.all([
+          api.getDynamicRun(activeRunId),
+          api.getDynamicRunEvents(activeRunId, after),
         ]);
         if (canceled) return;
-        if (eventResult.events?.length) {
-          after = Math.max(after, ...eventResult.events.map((event) => Number(event.seq || 0)));
-          setEvents((items) => {
-            const bySeq = new Map(items.map((event) => [event.seq, event]));
-            eventResult.events.forEach((event) => bySeq.set(event.seq, event));
-            const merged = Array.from(bySeq.values()).sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
-            setDrafts(collectDraftsFromEvents(merged));
-            return merged;
-          });
+
+        const incomingEvents = eventResult.events || [];
+        const eventSeqs = incomingEvents
+          .map((event) => event.seq)
+          .filter((seq): seq is number => typeof seq === 'number');
+        if (eventSeqs.length > 0) {
+          after = Math.max(after, ...eventSeqs);
         }
-        const loadedMessages = messageResult.messages || [];
-        setMessages(loadedMessages);
-        setDrafts((items) => mergeDraftLists(draftsFromMessageResponse(messageResult), items));
-        if (isAgentRunDone(String(eventResult.run?.status || ''))) {
+        if (incomingEvents.length > 0) {
+          setEvents((items) => mergeAgentEvents(items, incomingEvents));
+          setDrafts((items) => mergeDraftLists(items, collectDraftsFromEvents(incomingEvents)));
+        }
+        if (isAgentRunDone(runResult.run.status)) {
+          try {
+            const finalMessages = await api.getAgentMessages(activeRunSessionId, { workspaceId, workspaceDir });
+            if (!canceled) applyMessages(finalMessages);
+            finished = true;
+          } catch (error) {
+            console.error('Failed to refresh Workspace Agent messages:', error);
+          }
+        }
+        if (!canceled && finished) {
           setBusy(false);
           setActiveRunId('');
+          setActiveRunSessionId('');
           setCancelingRun(false);
         }
       } catch (error) {
         console.error('Failed to poll Workspace Agent run:', error);
+      } finally {
+        if (!canceled && !finished) {
+          timer = window.setTimeout(poll, 1000);
+        }
       }
     };
-    const timer = window.setInterval(poll, 1000);
     poll();
     return () => {
       canceled = true;
-      eventSource?.close();
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [activeRunId, activeSessionId, workspaceDir, workspaceId, workspaceReady]);
+  }, [activeRunId, activeRunSessionId, workspaceDir, workspaceId, workspaceReady]);
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -575,6 +647,7 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
         result.drafts || [],
       ));
       setActiveRunId(result.run?.id || '');
+      setActiveRunSessionId(result.session.id);
       keepBusyForAsyncRun = Boolean(result.run?.id);
       await refreshSessions();
     } catch (error: any) {
@@ -590,16 +663,8 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
     if (!activeRunId || cancelingRun) return;
     setCancelingRun(true);
     try {
-      const result = await api.cancelAgentRun(activeRunId, {
-        workspaceId,
-        workspaceDir,
-        reason: 'Canceled from Workspace Agent panel',
-      });
-      if (isAgentRunDone(String(result.run?.status || ''))) {
-        setBusy(false);
-        setActiveRunId('');
-      }
-      message.success('Workspace Agent run canceled');
+      const result = await api.cancelRun(activeRunId, 'Canceled from Workspace Agent panel');
+      message.success(result.status === 'canceled' ? 'Workspace Agent run canceled' : `Workspace Agent run is ${result.status}`);
     } catch (error: any) {
       message.error(error.response?.data?.error || 'Failed to cancel Workspace Agent run');
     } finally {
@@ -736,6 +801,7 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
             const nextSessionId = result.sessions?.[0]?.id || '';
             setActiveSessionId(nextSessionId);
             setMessages([]);
+            setUnavailableTurnRunIds([]);
             setEvents([]);
             setDrafts([]);
             setPendingActions([]);
@@ -1292,12 +1358,13 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
             className="workspace-agent-session-icon"
             aria-label="New Workspace Agent session"
             icon={<Plus size={14} />}
-            disabled={!workspaceReady || !workspaceDir}
+            disabled={busy || !workspaceReady || !workspaceDir}
             onClick={async () => {
               if (!workspaceReady || !workspaceDir) return;
               const created = await api.createAgentSession({ workspaceId, workspaceDir, title: 'Workspace Agent' });
               setActiveSessionId(created.session.id);
               setMessages([]);
+              setUnavailableTurnRunIds([]);
               setEvents([]);
               setDrafts([]);
               await refreshSessions();
@@ -1330,10 +1397,11 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
               value={activeSessionId || undefined}
               placeholder={loadingSessions ? 'Loading sessions' : 'No sessions'}
               loading={loadingSessions}
-              disabled={loadingSessions || sessions.length === 0}
+              disabled={busy || loadingSessions || sessions.length === 0}
               optionLabelProp="label"
               onChange={(sessionId) => {
                 setActiveSessionId(sessionId);
+                setUnavailableTurnRunIds([]);
                 setEvents([]);
                 setDrafts([]);
               }}
@@ -1386,6 +1454,24 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
       </div>
 
       <div className="workspace-agent-body" ref={scrollRef}>
+        {unavailableTurnRunIds.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Some conversation turns are unavailable"
+            description={(
+              <>
+                <div>Referenced Core run data was deleted or could not be loaded. Those turns cannot be displayed.</div>
+                <Space size={[4, 4]} wrap style={{ marginTop: 4 }}>
+                  {unavailableTurnRunIds.map((runId, index) => (
+                    <Tag key={`${runId}:${index}`} title={runId}>run {shortAgentValue(runId)}</Tag>
+                  ))}
+                </Space>
+              </>
+            )}
+            style={{ marginBottom: 8 }}
+          />
+        )}
         {messages.length === 0 && visibleDrafts.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -1438,8 +1524,8 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
                 <Space size={8} wrap>
                   <Bot size={14} />
                   <Text strong>{currentAgentRunLabel(events)}</Text>
-                  {visibleAgentEvents(events).slice(-1).map((event) => (
-                    <Tag key={event.seq}>{eventLabel(event)}</Tag>
+                  {visibleAgentEvents(events).slice(-1).map((event, index) => (
+                    <Tag key={`${agentEventIdentity(event)}:${index}`}>{eventLabel(event)}</Tag>
                   ))}
                 </Space>
                 <Text type="secondary">The final response will appear here when this step finishes.</Text>
@@ -1448,8 +1534,8 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
 
             {visibleAgentEvents(events).length > 0 && (
               <div className="workspace-agent-events">
-                {visibleAgentEvents(events).map((event) => (
-                  <Tag key={event.seq} icon={event.type.includes('tool') ? <Wrench size={12} /> : undefined}>
+                {visibleAgentEvents(events).map((event, index) => (
+                  <Tag key={`${agentEventIdentity(event)}:${index}`} icon={event.type.includes('tool') ? <Wrench size={12} /> : undefined}>
                     {eventLabel(event)}
                   </Tag>
                 ))}
