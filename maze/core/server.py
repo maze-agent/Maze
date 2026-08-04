@@ -1103,10 +1103,54 @@ async def validate_dag_workflow(req: Request):
 async def submit_dag_workflow(req: Request):
     try:
         data = await req.json()
+        if not isinstance(data, dict):
+            raise TypeError("request body must be a JSON object")
+
+        unsupported_fields = sorted(
+            field
+            for field in (
+                "inputs",
+                "final_output_refs",
+                "idempotency_key",
+                "idempotency_fingerprint",
+            )
+            if field in data
+        )
+        if unsupported_fields:
+            raise ValueError(
+                "/workflows/submit does not support fields: "
+                + ", ".join(unsupported_fields)
+            )
+
         payload = data.get("spec", data)
         spec = dag_spec_from_payload(payload)
         run_config = spec.get("run") or {}
-        artifact_mode = bool(run_config.get("artifact_mode", data.get("artifact_mode", True)))
+        raw_run_config = payload.get("run") or {}
+        if not isinstance(raw_run_config, dict):
+            raise TypeError("spec.run must be a JSON object")
+
+        if "artifact_mode" in raw_run_config:
+            artifact_mode = raw_run_config["artifact_mode"]
+            artifact_mode_field = "spec.run.artifact_mode"
+        else:
+            artifact_mode = data.get("artifact_mode", True)
+            artifact_mode_field = "artifact_mode"
+        if not isinstance(artifact_mode, bool):
+            raise TypeError(f"{artifact_mode_field} must be a boolean")
+
+        def validated_tags(value: Any, field_name: str) -> List[str]:
+            if value is None:
+                return []
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise TypeError(f"{field_name} must be a list of strings")
+            return value
+
+        validated_tags(payload.get("tags"), "spec.tags")
+        validated_tags(raw_run_config.get("tags"), "spec.run.tags")
+        request_tags = validated_tags(data.get("tags"), "tags")
+
         file_context = data.get("file_context")
         if file_context is None:
             file_context = dag_file_context(
@@ -1132,7 +1176,7 @@ async def submit_dag_workflow(req: Request):
         tags = list(dict.fromkeys([
             *spec.get("tags", []),
             *run_config.get("tags", []),
-            *data.get("tags", []),
+            *request_tags,
             "dag",
         ]))
         run_id = mapath.run_workflow(

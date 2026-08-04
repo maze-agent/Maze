@@ -375,21 +375,7 @@ def parse_custom_function(code):
         # Find decorated function
         for name, obj in inspect.getmembers(module):
             if hasattr(obj, '_maze_task_metadata'):
-                metadata = obj._maze_task_metadata
-                
-                return {
-                    "name": name,
-                    "inputs": [
-                        {"name": inp, "dataType": metadata.data_types.get(inp, "str")}
-                        for inp in metadata.inputs
-                    ],
-                    "outputs": [
-                        {"name": out, "dataType": metadata.data_types.get(out, "str")}
-                        for out in metadata.outputs
-                    ],
-                    "resources": metadata.resources,
-                    "codeStr": code
-                }
+                return _task_metadata_payload(obj, name, code)
         
         return {"error": "No function decorated with @task found"}
     
@@ -436,8 +422,16 @@ def _task_metadata_payload(func, name, code, workspace_dir=None, relative_path=N
             for out in metadata.outputs
         ],
         "resources": metadata.resources,
+        "taskKind": metadata.task_kind,
         "functionName": name,
         "code": code,
+        "codeStr": metadata.code_str,
+        "codeSer": metadata.code_ser,
+        "modelAnchor": getattr(metadata, "model_anchor", None),
+        "maxRetries": metadata.max_retries,
+        "retryBackoffSeconds": metadata.retry_backoff_seconds,
+        "retryOn": metadata.retry_on,
+        "timeoutSeconds": metadata.timeout_seconds,
     }
 
     if workspace_dir is not None:
