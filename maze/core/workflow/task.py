@@ -1,7 +1,6 @@
 import time
 from typing import Any,Dict
 from enum import Enum
-from maze.core.predictor.predictor import FEATURES
 from maze.core.workflow.resources import DEFAULT_TASK_KIND, normalize_task_semantics
 
 class TaskType(Enum):
@@ -33,20 +32,9 @@ class CodeTask():
         self.created_time = time.time()
         self.start_time = None
         self.finish_time = None
-        self.can_predict = False
-        if self.task_name in FEATURES:
-            self.can_predict = True
-            self.predict_feature = {}
-            predict_feature_list = FEATURES[self.task_name]
-            for feature in predict_feature_list:
-                self.predict_feature[feature] = 0 #default value
 
     def mark_started(self):
         self.start_time = time.time()
-            
-    def set_predict_feature(self, feature: str, value: float):
-        if feature in self.predict_feature:
-            self.predict_feature[feature] = value
 
     def save_task(
         self,

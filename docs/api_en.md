@@ -995,20 +995,6 @@ http://<host>:<port>/v1
 
 ---
 
-### 2.8 Predictor Service
-
-When using `--strategy DAPS`, the Head also starts a predictor FastAPI service on `port + 1`.
-
-Implementation:
-
-```text
-maze/core/predictor/server.py
-```
-
-This service is mainly consumed internally by the scheduler and is not treated as a stable public REST API.
-
----
-
 ## 3. CLI Commands
 
 Registered scripts in `pyproject.toml`:
@@ -1042,7 +1028,7 @@ maze start --head \
 |---|---|---|
 | `--port` | `8000` | Maze Head FastAPI port. |
 | `--ray-head-port` | `6379` | Ray Head GCS port. |
-| `--strategy` | `least-loaded` | Scheduling strategy. Common values: `least-loaded`, `Default`, `DAPS`, `HACS`, `ATLAS`. |
+| `--strategy` | `least-loaded` | Scheduling strategy. Common values: `least-loaded`, `Default`, `HACS`, `ATLAS`. |
 | `--playground` | off | Start the Workbench UI and its Node.js backend together with the head node. |
 | `--playground-port` | `5173` | Workbench web UI port. |
 | `--playground-backend-port` | `3001` | Workbench backend API port. If omitted and `--playground-port` is changed, defaults to `--playground-port + 1`. |

@@ -104,8 +104,6 @@ async def _async_start_head(
     maintenance_coroutine = None
     server = None
     server_task = None
-    predictor_server = None
-    predictor_task = None
     playground_processes = []
 
     try:
@@ -133,26 +131,21 @@ async def _async_start_head(
                 backend_port=playground_backend_port,
             )
 
-        tasks = [server_task, monitor_coroutine, maintenance_coroutine]
-        if predictor_task is not None:
-            tasks.append(predictor_task)
-        await asyncio.gather(*tasks)
+        await asyncio.gather(server_task, monitor_coroutine, maintenance_coroutine)
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down Maze head...")
     finally:
         pending_error = sys.exc_info()[1]
         if server is not None:
             server.should_exit = True
-        if predictor_server is not None:
-            predictor_server.should_exit = True
 
-        for task in (server_task, predictor_task, monitor_coroutine, maintenance_coroutine):
+        for task in (server_task, monitor_coroutine, maintenance_coroutine):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
             *[
                 task
-                for task in (server_task, predictor_task, monitor_coroutine, maintenance_coroutine)
+                for task in (server_task, monitor_coroutine, maintenance_coroutine)
                 if task is not None
             ],
             return_exceptions=True,

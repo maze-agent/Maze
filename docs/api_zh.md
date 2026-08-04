@@ -1036,12 +1036,6 @@ Artifact store 按 sha256 存储二进制 blob：
 
 ---
 
-### 2.8 资源预测器（`--strategy DAPS` 时启用）
-
-DAPS 策略下，Head 会在 `port + 1` 上同时启动一个 FastAPI 服务（`maze/core/predictor/server.py`），用于做运行时间/资源预测；当前主要被调度器内部使用，未对外暴露稳定的 RESTful 接口。
-
----
-
 ## 三、CLI 命令
 
 `pyproject.toml` 注册：
@@ -1074,7 +1068,7 @@ maze start --head \
 |---|---|---|
 | `--port` | 8000 | Maze Head FastAPI 端口 |
 | `--ray-head-port` | 6379 | Ray Head 的 GCS 端口 |
-| `--strategy` | `least-loaded` | 调度策略；常用值包括 `least-loaded`、`Default`、`DAPS`、`HACS`、`ATLAS` |
+| `--strategy` | `least-loaded` | 调度策略；常用值包括 `least-loaded`、`Default`、`HACS`、`ATLAS` |
 | `--playground` |  | 随 Head 一起拉起 Workbench 前端和 Node.js 后端 |
 | `--playground-port` | 5173 | Workbench 页面入口端口 |
 | `--playground-backend-port` | 3001 | Workbench 后端 API 端口；如果未设置且修改了 `--playground-port`，默认使用 `--playground-port + 1` |

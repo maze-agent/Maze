@@ -322,7 +322,7 @@ class Workflow:
                     max(self.graph.nodes[succ].get("n_desc", 0) for succ in successors) + 1
                 )
 
-    def finish_task(self, task_id: str,task_result:Dict,strategy:str) -> List[CodeTask]:
+    def finish_task(self, task_id: str, strategy: str) -> List[CodeTask]:
         """
         Finish a task in workflow and return next ready tasks.
         A task is ready if all its predecessors are finished.
@@ -346,12 +346,6 @@ class Workflow:
 
         ready_tasks = []
         for successor in self.graph.successors(task_id):
-            # Set features for the successor task
-            successor_task = self.tasks[successor]
-            if successor_task.can_predict:
-                for key, value in task_result.items():
-                    successor_task.set_predict_feature(key, value)
-
             # Check if all predecessors are completed
             pred_tasks = [self.tasks[p] for p in self.graph.predecessors(successor)]
             if all(pred.completed  for pred in pred_tasks): 

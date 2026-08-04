@@ -471,7 +471,6 @@ class MaPath:
         self.idempotency_cleanup_retries: Dict[str, Dict[str, Any]] = {}
         self._scheduler_failure_handled: tuple[int | None, int | None] | None = None
 
-        self.can_predict_task = ['llm_process','llm_fuse','vlm_process','speech_process']
         self.global_metrics = GlobalMetrics()
         self.resource_history = ResourceHistoryStore()
         self.runtime_estimator = RuntimeEstimator()
@@ -5186,7 +5185,6 @@ class MaPath:
                 )
             ready_tasks = workflow.finish_task(
                 task_id=task_id,
-                task_result=copy.deepcopy(continuation.get("task_result")),
                 strategy=self.strategy,
             )
             ready_task_ids = [task.task_id for task in ready_tasks]
@@ -5536,7 +5534,6 @@ class MaPath:
             ] = file_manifest
         ready_tasks = self.submit_workflows[submit_id].finish_task(
             task_id=task_id,
-            task_result=message_data["result"],
             strategy=self.strategy,
         )
         for task in ready_tasks:
