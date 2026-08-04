@@ -266,7 +266,7 @@ interface PendingAgentAction {
 
 function draftRunTagColor(status?: string) {
   if (status === 'failed') return 'red';
-  if (status === 'canceled') return 'orange';
+  if (status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'orange';
   if (status === 'completed' || status === 'succeeded') return 'green';
   return 'blue';
 }
@@ -276,7 +276,8 @@ function isAgentRunDone(status?: string) {
 }
 
 function isDraftWorkflowRunDone(status?: string) {
-  return ['completed', 'succeeded', 'failed', 'canceled', 'interrupted'].includes(String(status || '').toLowerCase());
+  return ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted']
+    .includes(String(status || '').toLowerCase());
 }
 
 interface WorkspaceAgentPanelProps {
@@ -832,8 +833,9 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
       setEdges(result.workflow.edges || []);
       setCurrentWorkspaceWorkflowPath(result.draft.saved?.relativePath || draft.relativePath || null);
       setDrafts((items) => items.map((item) => item.id === draft.id ? result.draft : item));
-      setActiveRun(result.run);
-      setIsRunning(true);
+      const runResult = await api.getRun(result.runId);
+      setActiveRun(runResult.run);
+      setIsRunning(['created', 'queued', 'running'].includes(runResult.run.status));
       onOpenRuns?.(result.runId);
       cancelPendingAction(actionId);
       message.success(`Run started: ${result.runId}`);

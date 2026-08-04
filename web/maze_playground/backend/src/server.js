@@ -11,6 +11,7 @@ import fsSync from 'fs';
 import crypto from 'crypto';
 import os from 'os';
 import { tmpdir } from 'os';
+import { BUILTIN_TASK_ALIASES, compileWorkflowToDagSpec } from './workflow_dag_spec.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3496,185 +3497,35 @@ async function runAgentWorkflowDraft(context, draftId, options = {}) {
   }
   const saved = await saveAgentWorkflowDraft(context, draftId, { ...options, confirmed: true });
   const workflow = saved.workflow;
-  const workflowRunId = uuidv4();
-  const runSnapshot = createStaticRunSnapshot({
-    runId: workflowRunId,
+  const submission = await submitPlaygroundWorkflow({
     workflow,
-    workspaceDir: context.workspaceDir,
-    workspaceContext: context,
-  });
-  await saveStaticRun(context.workspaceDir, runSnapshot);
-
-  workflow.status = 'running';
-  workflow.activeRunId = workflowRunId;
-  workflows.set(workflow.id, workflow);
-
-  await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-    type: 'workflow_started',
-    data: {
-      workflow_id: workflow.id,
-      workflow_run_id: workflowRunId,
-      workspace_id: context.workspaceId,
-      workspace_manifest_version: context.workspaceManifestVersion,
-      source: 'workspace_agent',
-      draft_id: draftId,
+    context: {
+      ...context,
+      workspaceManifestVersion: saved.workspaceManifestVersion,
     },
-    timestamp: new Date().toISOString(),
+    playgroundWorkflowId: workflow.id,
+    workflowPath: saved.relativePath,
+    draftId,
   });
-
-  (async () => {
-    try {
-      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-        type: 'building',
-        data: { message: 'Building workflow from Workspace Agent draft...' },
-        timestamp: new Date().toISOString(),
-      });
-      const result = await callPython(
-        'run_workflow',
-        {
-          workflowId: workflow.id,
-          staticRunId: workflowRunId,
-          workspaceId: context.workspaceId,
-          workspaceDir: context.workspaceDir,
-          workspaceManifestVersion: context.workspaceManifestVersion,
-          nodes: workflow.nodes,
-          edges: workflow.edges,
-        },
-        async (progress) => {
-          await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-            ...progress,
-            timestamp: new Date().toISOString(),
-          });
-        },
-      );
-
-      if (!result.success) {
-        workflow.status = 'failed';
-        workflow.error = compactAgentDiagnosticText(result.error || 'Workflow failed', 2000);
-        workflows.set(workflow.id, workflow);
-        const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
-        if (failedDraft) {
-          failedDraft.run = {
-            ...(failedDraft.run || {}),
-            runId: workflowRunId,
-            workflowId: workflow.id,
-            status: 'failed',
-            error: workflow.error,
-            finishedAt: new Date().toISOString(),
-          };
-          await writeAgentDraft(context.workspaceDir, failedDraft);
-        }
-        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-          type: 'workflow_failed',
-          data: {
-            error: workflow.error,
-            traceback: result.traceback,
-          },
-          timestamp: new Date().toISOString(),
-        });
-        return;
-      }
-
-      const latestRunAfterPython = await loadStaticRun(context.workspaceDir, workflowRunId).catch(() => null);
-      if (latestRunAfterPython?.status === 'failed') {
-        workflow.status = 'failed';
-        workflow.error = compactAgentDiagnosticText(latestRunAfterPython.error || 'Workflow task failed', 2000);
-        workflow.lastRunId = workflowRunId;
-        workflow.mazeRunId = result.mazeRunId;
-        workflows.set(workflow.id, workflow);
-        const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
-        if (failedDraft) {
-          failedDraft.run = {
-            ...(failedDraft.run || {}),
-            runId: workflowRunId,
-            workflowId: workflow.id,
-            status: 'failed',
-            error: workflow.error,
-            finishedAt: new Date().toISOString(),
-            mazeRunId: result.mazeRunId || null,
-          };
-          await writeAgentDraft(context.workspaceDir, failedDraft);
-        }
-        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-          type: 'workflow_failed',
-          data: {
-            error: workflow.error,
-            traceback: result.traceback,
-          },
-          timestamp: new Date().toISOString(),
-        });
-        return;
-      }
-
-      workflow.status = 'completed';
-      workflow.results = result.results;
-      workflow.lastRunId = workflowRunId;
-      workflow.mazeRunId = result.mazeRunId;
-      workflows.set(workflow.id, workflow);
-      const completedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
-      if (completedDraft) {
-        completedDraft.run = {
-          ...(completedDraft.run || {}),
-          runId: workflowRunId,
-          workflowId: workflow.id,
-          status: 'completed',
-          finishedAt: new Date().toISOString(),
-          mazeRunId: result.mazeRunId || null,
-        };
-        await writeAgentDraft(context.workspaceDir, completedDraft);
-      }
-
-      if (result.mazeRunId) {
-        await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-          type: 'maze_run_created',
-          data: { maze_run_id: result.mazeRunId },
-          timestamp: new Date().toISOString(),
-        });
-      }
-      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-        type: 'workflow_completed',
-        data: { results: result.results },
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      workflow.status = 'failed';
-      workflow.error = error.message;
-      workflows.set(workflow.id, workflow);
-      const failedDraft = await loadAgentDraft(context.workspaceDir, draftId).catch(() => null);
-      if (failedDraft) {
-        failedDraft.run = {
-          ...(failedDraft.run || {}),
-          runId: workflowRunId,
-          workflowId: workflow.id,
-          status: 'failed',
-          error: error.message,
-          finishedAt: new Date().toISOString(),
-        };
-        await writeAgentDraft(context.workspaceDir, failedDraft);
-      }
-      await recordAndBroadcastStaticRun(workflow, context.workspaceDir, workflowRunId, {
-        type: 'workflow_failed',
-        data: { error: error.message },
-        timestamp: new Date().toISOString(),
-      });
-    }
-  })();
 
   const draft = await loadAgentDraft(context.workspaceDir, draftId);
   draft.run = {
-    runId: workflowRunId,
+    runId: submission.runId,
     workflowId: workflow.id,
+    coreWorkflowId: submission.coreWorkflowId,
+    submissionId: submission.submissionId,
     startedAt: new Date().toISOString(),
-    status: 'running',
+    status: 'submitted',
   };
   await writeAgentDraft(context.workspaceDir, draft);
 
   return {
     draft: agentDraftPublic(draft),
     workflow,
-    run: runSnapshot,
-    runId: workflowRunId,
+    runId: submission.runId,
     workflowId: workflow.id,
+    coreWorkflowId: submission.coreWorkflowId,
+    submissionId: submission.submissionId,
     workspaceId: context.workspaceId,
     workspaceDir: context.workspaceDir,
   };
@@ -6539,6 +6390,137 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
   });
 }
 
+async function parseWorkflowTaskDefinition(code, label) {
+  const parsed = await callPython('parse_custom_function', { code });
+  if (parsed?.error) {
+    throw badRequestError(`${label}: ${parsed.error}`);
+  }
+  return parsed;
+}
+
+async function resolveWorkflowDefinitions(workflow, workspaceDir) {
+  const definitions = new Map();
+  const nodes = Array.isArray(workflow?.nodes) ? workflow.nodes : [];
+
+  if (nodes.some((node) => node?.data?.category === 'workspace')) {
+    const result = await callPython('get_workspace_tasks', { workspaceDir });
+    if (result?.error) {
+      throw badRequestError(result.error);
+    }
+    for (const task of result.tasks || []) {
+      const relativePath = normalizeTaskRelativePath(task.relativePath);
+      definitions.set(relativePath, task);
+      if (task.functionName) {
+        definitions.set(taskDefinitionKey(relativePath, task.functionName), task);
+      }
+    }
+  }
+
+  for (const node of nodes) {
+    if (node?.data?.category !== 'custom') continue;
+    const parsed = await parseWorkflowTaskDefinition(
+      String(node.data.customCode || ''),
+      `Custom task ${node.id}`,
+    );
+    definitions.set(`custom:${node.id}`, parsed);
+  }
+
+  const builtinRefs = new Set(
+    nodes
+      .filter((node) => node?.data?.category === 'builtin')
+      .map((node) => String(node.data.taskRef || '')),
+  );
+  for (const taskRef of builtinRefs) {
+    const relativePath = BUILTIN_TASK_ALIASES[taskRef];
+    if (!relativePath) continue;
+    const functionName = taskRef.split('.').at(-1);
+    const code = await fs.readFile(path.join(SYSTEM_CATALOG_DIR, relativePath), 'utf-8');
+    const parsed = await parseWorkflowTaskDefinition(code, `Builtin task ${taskRef}`);
+    if (parsed.functionName !== functionName) {
+      throw new Error(`Builtin task ${taskRef} resolved to ${parsed.functionName || 'no function'}`);
+    }
+    definitions.set(relativePath, parsed);
+    definitions.set(taskDefinitionKey(relativePath, functionName), parsed);
+  }
+
+  return definitions;
+}
+
+async function findCoreWorkflowSubmission(submissionId) {
+  const runs = await listCoreStaticRuns();
+  const matches = runs.filter((run) => (
+    run?.metadata?.submission_id === submissionId
+    && run?.metadata?.source === 'maze_playground'
+  ));
+  if (matches.length > 1) {
+    const error = new Error(`Multiple Core runs use Playground submission ${submissionId}`);
+    error.status = 409;
+    throw error;
+  }
+  return matches[0] ? requirePublicCoreRun(matches[0]) : null;
+}
+
+async function submitPlaygroundWorkflow({
+  workflow,
+  context,
+  playgroundWorkflowId,
+  workflowPath = null,
+  draftId = null,
+}) {
+  const submissionId = uuidv4();
+  const definitions = await resolveWorkflowDefinitions(workflow, context.workspaceDir);
+  let spec;
+  try {
+    spec = compileWorkflowToDagSpec(workflow, {
+      workspaceDir: context.workspaceDir,
+      workspaceId: context.workspaceId,
+      workspaceManifestVersion: context.workspaceManifestVersion,
+      artifactMode: true,
+      tags: draftId ? ['playground', 'workspace-agent'] : ['playground'],
+      metadata: {
+        source: 'maze_playground',
+        submission_id: submissionId,
+        playground_workflow_id: playgroundWorkflowId,
+        ...(workflowPath ? { workflow_path: workflowPath } : {}),
+        ...(draftId ? { draft_id: draftId } : {}),
+      },
+    }, definitions);
+  } catch (error) {
+    throw badRequestError(error);
+  }
+
+  let receipt;
+  try {
+    receipt = await callMazeCore('/workflows/submit', { method: 'POST', body: spec });
+  } catch (error) {
+    const ambiguous = error.status === 504
+      || ['MAZE_CORE_TIMEOUT', 'MAZE_CORE_ABORTED'].includes(error.code);
+    if (!ambiguous) throw error;
+    const run = await findCoreWorkflowSubmission(submissionId).catch(() => null);
+    if (!run) {
+      error.message = `${error.message}; Core submission outcome is unknown (${submissionId})`;
+      throw error;
+    }
+    receipt = { workflow_id: run.workflow_id, run_id: run.run_id };
+  }
+
+  if (!receipt?.run_id || !receipt?.workflow_id) {
+    const run = await findCoreWorkflowSubmission(submissionId);
+    if (!run) {
+      const error = new Error('Maze Core returned a malformed workflow submission receipt');
+      error.status = 502;
+      throw error;
+    }
+    receipt = { workflow_id: run.workflow_id, run_id: run.run_id };
+  }
+
+  return {
+    runId: String(receipt.run_id),
+    coreWorkflowId: String(receipt.workflow_id),
+    submissionId,
+  };
+}
+
 function startReactWorkflowProcess(params = {}, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
@@ -9235,6 +9217,19 @@ app.get('/api/agent/drafts/:id', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext(req.query);
     const draft = await loadAgentDraft(context.workspaceDir, req.params.id);
+    if (draft.run?.runId) {
+      const coreRun = await requirePublicCoreRunId(draft.run.runId).catch(() => null);
+      if (coreRun) {
+        draft.run = {
+          ...draft.run,
+          status: coreRun.status,
+          finishedAt: coreRun.finished_time
+            ? new Date(coreRun.finished_time * 1000).toISOString()
+            : undefined,
+          error: coreRun.error_summary || undefined,
+        };
+      }
+    }
     res.json({
       success: true,
       ...workspaceResponseFields(context),
@@ -10217,178 +10212,30 @@ app.put('/api/workflows/:id', async (req, res) => {
 app.post('/api/workflows/:id/run', async (req, res) => {
   try {
     const { id } = req.params;
-    const workflow = workflows.get(id);
-    
-    if (!workflow) {
-      return res.status(404).json({ error: 'Workflow not found' });
-    }
-    
-    if (!workflow.nodes || workflow.nodes.length === 0) {
+    const workflow = req.body?.workflow || workflows.get(id);
+    if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    if (!Array.isArray(workflow.nodes) || workflow.nodes.length === 0) {
       return res.status(400).json({ error: 'Workflow has no task nodes' });
     }
-    
-    console.log(`\n🚀 开始运行工作流: ${id}`);
-    console.log(`   名称: ${workflow.name}`);
-    console.log(`   节点数: ${workflow.nodes.length}`);
-    console.log(`   边数: ${workflow.edges.length}`);
     const context = await resolveWorkspaceContext(req.body || {});
-    const workspaceDir = context.workspaceDir;
-    const workflowRunId = uuidv4();
-    const runSnapshot = createStaticRunSnapshot({
-      runId: workflowRunId,
+    const submission = await submitPlaygroundWorkflow({
       workflow,
-      workspaceDir,
-      workspaceContext: context,
+      context,
+      playgroundWorkflowId: id,
+      workflowPath: req.body?.relativePath,
     });
-    await saveStaticRun(workspaceDir, runSnapshot);
-    
-    // 更新状态
-    workflow.status = 'running';
-    workflow.activeRunId = workflowRunId;
-    workflows.set(id, workflow);
-    
-    // 立即返回，异步执行工作流
-    res.json({ 
+
+    res.json({
       message: 'Workflow started running',
       workflowId: id,
-      runId: workflowRunId,
-      run: runSnapshot,
+      runId: submission.runId,
+      coreWorkflowId: submission.coreWorkflowId,
+      submissionId: submission.submissionId,
       ...workspaceResponseFields(context),
     });
-    
-    // 通知 WebSocket 客户端开始运行
-    await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-      type: 'workflow_started',
-      data: {
-        workflow_id: id,
-        workflow_run_id: workflowRunId,
-        workspace_id: context.workspaceId,
-        workspace_manifest_version: context.workspaceManifestVersion,
-      },
-      timestamp: new Date().toISOString()
-    });
-    
-    // 异步执行工作流
-    (async () => {
-      try {
-        // 通知开始构建
-        await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-          type: 'building',
-          data: {
-            message: 'Building workflow...',
-          },
-          timestamp: new Date().toISOString()
-        });
-        
-        console.log(`📦 准备执行工作流:`);
-        console.log(`   节点: ${JSON.stringify(workflow.nodes.map(n => ({id: n.id, label: n.data.label})))}`);
-        console.log(`   边: ${JSON.stringify(workflow.edges.map(e => ({from: e.source, to: e.target})))}`);
-        
-        // 调用 Python 运行工作流
-        const result = await callPython(
-          'run_workflow',
-          {
-            workflowId: id,
-            staticRunId: workflowRunId,
-            workspaceId: context.workspaceId,
-            workspaceDir,
-            workspaceManifestVersion: context.workspaceManifestVersion,
-            nodes: workflow.nodes,
-            edges: workflow.edges
-          },
-          async (progress) => {
-            await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-              ...progress,
-              timestamp: new Date().toISOString(),
-            });
-          }
-        );
-        
-        if (!result.success) {
-          console.error('❌ 工作流执行失败:', result.error);
-          workflow.status = 'failed';
-          workflow.error = compactAgentDiagnosticText(result.error || 'Workflow failed', 2000);
-          workflows.set(id, workflow);
-          
-          await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-            type: 'workflow_failed',
-            data: {
-              error: workflow.error,
-              traceback: result.traceback,
-            },
-            timestamp: new Date().toISOString()
-          });
-          return;
-        }
-
-        const latestRunAfterPython = await loadStaticRun(workspaceDir, workflowRunId).catch(() => null);
-        if (latestRunAfterPython?.status === 'failed') {
-          console.error('❌ 工作流任务失败:', latestRunAfterPython.error);
-          workflow.status = 'failed';
-          workflow.error = compactAgentDiagnosticText(latestRunAfterPython.error || 'Workflow task failed', 2000);
-          workflow.lastRunId = workflowRunId;
-          workflow.mazeRunId = result.mazeRunId;
-          workflows.set(id, workflow);
-
-          await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-            type: 'workflow_failed',
-            data: {
-              error: workflow.error,
-              traceback: result.traceback,
-            },
-            timestamp: new Date().toISOString()
-          });
-          return;
-        }
-        
-        console.log('✅ 工作流执行成功');
-        console.log('📊 结果数据:', JSON.stringify(result.results).substring(0, 200) + '...');
-        workflow.status = 'completed';
-        workflow.results = result.results;
-        workflow.lastRunId = workflowRunId;
-        workflow.mazeRunId = result.mazeRunId;
-        workflows.set(id, workflow);
-
-        if (result.mazeRunId) {
-          await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-            type: 'maze_run_created',
-            data: {
-              maze_run_id: result.mazeRunId,
-            },
-            timestamp: new Date().toISOString(),
-          });
-        }
-        
-        // 发送结果
-        console.log(`📤 向工作流 ${id} 广播完成消息`);
-        await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-          type: 'workflow_completed',
-          data: {
-            results: result.results,
-          },
-          timestamp: new Date().toISOString()
-        });
-        console.log('✅ 完成消息已发送');
-        
-      } catch (error) {
-        console.error('❌ 工作流执行异常:', error);
-        workflow.status = 'failed';
-        workflow.error = error.message;
-        workflows.set(id, workflow);
-        
-        await recordAndBroadcastStaticRun(workflow, workspaceDir, workflowRunId, {
-          type: 'workflow_failed',
-          data: {
-            error: error.message,
-          },
-          timestamp: new Date().toISOString()
-        });
-      }
-    })();
-    
   } catch (error) {
     console.error('❌ 运行工作流失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message, code: error.code });
   }
 });
 

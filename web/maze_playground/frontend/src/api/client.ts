@@ -425,6 +425,7 @@ export const api = {
     edges: WorkflowEdge[];
   }): Promise<{
     success: boolean;
+    workspaceId?: string;
     workspaceDir: string;
     relativePath: string;
     workflow: {
@@ -542,14 +543,32 @@ export const api = {
   },
 
   // Run workflow
-  async runWorkflow(workflowId: string, workspaceDir?: string, workspaceId?: string): Promise<{
-    message: string;
+  async runWorkflow(workflowId: string, data: {
+    workflow: {
+      name: string;
+      nodes: WorkflowNode[];
+      edges: WorkflowEdge[];
+    };
+    relativePath: string;
+    workspaceId?: string;
+    workspaceDir: string;
+  }): Promise<{
     workflowId: string;
     runId: string;
-    run: StaticWorkflowRunSnapshot;
+    coreWorkflowId: string;
+    submissionId: string;
+    workspaceId?: string;
+    workspaceDir?: string;
   }> {
-    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`, { workspaceDir, workspaceId });
-    return response.data;
+    const response = await axios.post(`${API_BASE}/workflows/${workflowId}/run`, data);
+    return {
+      workflowId: response.data.workflowId,
+      runId: response.data.runId,
+      coreWorkflowId: response.data.coreWorkflowId,
+      submissionId: response.data.submissionId,
+      workspaceId: response.data.workspaceId,
+      workspaceDir: response.data.workspaceDir,
+    };
   },
 
   // Get workflow results
@@ -1277,9 +1296,10 @@ export const api = {
     workspaceDir: string;
     draft: WorkspaceAgentDraft;
     workflow: Workflow;
-    run: StaticWorkflowRunSnapshot;
     runId: string;
     workflowId: string;
+    coreWorkflowId: string;
+    submissionId: string;
   }> {
     const response = await axios.post(`${API_BASE}/agent/drafts/${encodeURIComponent(draftId)}/run`, data);
     return response.data;

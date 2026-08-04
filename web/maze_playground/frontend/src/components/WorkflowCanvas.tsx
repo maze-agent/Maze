@@ -15,11 +15,11 @@ import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
   BuiltinTaskMeta,
+  UnifiedRunSnapshot,
+  UnifiedRunTaskSnapshot,
   WorkspaceTaskMeta,
   WorkflowEdge,
   WorkflowNode,
-  StaticWorkflowRunNode,
-  StaticWorkflowRunSnapshot,
 } from '@/types/workflow';
 import CustomNode from './CustomNode';
 
@@ -30,7 +30,7 @@ const nodeTypes = {
 const COPY_PASTE_OFFSET = 48;
 
 type RuntimeNodeData = WorkflowNode['data'] & {
-  runState?: StaticWorkflowRunNode | null;
+  runState?: UnifiedRunTaskSnapshot | null;
   runStatus?: string | null;
 };
 
@@ -107,7 +107,7 @@ function duplicateNode(node: WorkflowNode, existingNodes: WorkflowNode[], pasteI
   };
 }
 
-function runTaskResources(task: StaticWorkflowRunNode) {
+function runTaskResources(task: UnifiedRunTaskSnapshot) {
   const resources = task.resources || {};
   return {
     cpu_num: Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1),
@@ -118,7 +118,7 @@ function runTaskResources(task: StaticWorkflowRunNode) {
 
 function nodeFromRunTask(
   taskId: string,
-  task: StaticWorkflowRunNode,
+  task: UnifiedRunTaskSnapshot,
   index: number,
   currentNodes: WorkflowNode[],
 ): WorkflowNode {
@@ -133,8 +133,8 @@ function nodeFromRunTask(
     data: {
       category: (existing?.data.category || 'builtin') as WorkflowNode['data']['category'],
       nodeType: 'task',
-      label: task.task_name || task.label || existing?.data.label || taskId,
-      taskRef: existing?.data.taskRef || task.maze_task_id,
+      label: task.task_name || existing?.data.label || taskId,
+      taskRef: existing?.data.taskRef,
       customCode: existing?.data.customCode,
       workspaceDir: existing?.data.workspaceDir,
       taskPath: existing?.data.taskPath,
@@ -150,19 +150,19 @@ function nodeFromRunTask(
   };
 }
 
-function runViewNodes(run: StaticWorkflowRunSnapshot, currentNodes: WorkflowNode[]) {
+function runViewNodes(run: UnifiedRunSnapshot, currentNodes: WorkflowNode[]) {
   const taskNodes = run.task_nodes || {};
   const graphNodeIds = run.graph?.nodes || [];
   const ids = graphNodeIds.length > 0 ? graphNodeIds : Object.keys(taskNodes);
   return ids.map((taskId, index) => (
     nodeFromRunTask(taskId, taskNodes[taskId] || {
-      node_id: taskId,
+      task_id: taskId,
       status: 'pending',
     }, index, currentNodes)
   ));
 }
 
-function runViewEdges(run: StaticWorkflowRunSnapshot): WorkflowEdge[] {
+function runViewEdges(run: UnifiedRunSnapshot): WorkflowEdge[] {
   return (run.graph?.edges || []).map((edge, index) => ({
     id: `run-edge-${edge.source}-${edge.target}-${index}`,
     source: edge.source,

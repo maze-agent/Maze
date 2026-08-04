@@ -11,10 +11,10 @@ import {
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
-  StaticWorkflowRunEvent,
-  StaticWorkflowRunNode,
   FaultToleranceTrace,
   LocalModel,
+  RunArtifact,
+  UnifiedRunTaskSnapshot,
   WorkflowEdge,
   WorkflowNode,
 } from '@/types/workflow';
@@ -34,11 +34,6 @@ type ArtifactItem = {
   uri?: string;
   sha256?: string;
   path?: string;
-  runId?: string;
-  taskId?: string;
-  producerTaskId?: string;
-  mime?: string;
-  storagePath?: string;
   createdAt?: string;
   producedBy?: string;
 };
@@ -251,9 +246,17 @@ function durationBetween(started?: number | string | null, finished?: number | s
   return formatDuration((finishMs - startMs) / 1000);
 }
 
-function firstTaskStartedTime(taskNodes?: Record<string, StaticWorkflowRunNode>) {
+function taskStartedTime(task?: UnifiedRunTaskSnapshot | null) {
+  return task?.started_time ?? task?.start_time;
+}
+
+function taskFinishedTime(task?: UnifiedRunTaskSnapshot | null) {
+  return task?.finished_time ?? task?.finish_time;
+}
+
+function firstTaskStartedTime(taskNodes?: Record<string, UnifiedRunTaskSnapshot>) {
   const startedTimes = Object.values(taskNodes || {})
-    .map((task) => toEpochMilliseconds(task.started_time))
+    .map((task) => toEpochMilliseconds(taskStartedTime(task)))
     .filter((value): value is number => value !== undefined);
   if (startedTimes.length === 0) return undefined;
   return Math.min(...startedTimes);
@@ -422,26 +425,22 @@ function shortArtifactId(value?: string) {
 
 function buildTask(
   node: WorkflowNode,
-  runtime: StaticWorkflowRunNode | null,
-  runId: string | null | undefined,
+  runtime: UnifiedRunTaskSnapshot | null,
+  artifactRecords: RunArtifact[],
   edges: WorkflowEdge[],
   nodes: WorkflowNode[],
-  _events: StaticWorkflowRunEvent[],
 ): WorkbenchTask {
   const data = node.data as any;
-  const kind = taskKind(node);
+  const kind = runtime?.task_kind || taskKind(node);
   const state = normalizeState(runtime?.status);
-  const resources = node.data.resources || runtime?.resources || {};
+  const resources = runtime?.resources || node.data.resources || {};
   const cpuNum = Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1);
   const gpuMem = Number((resources as any).gpu_mem || 0);
   const ioNum = Number((resources as any).io_num || 0);
-  const selectedNode = runtime?.schedule_decision?.selected_node;
+  const selectedNode = runtime?.selected_node || runtime?.schedule_decision?.selected_node;
   const queueReason = runtime?.pending_reason || runtime?.schedule_decision?.reason || undefined;
-  const manifest = (runtime as any)?.file_manifest || {};
-  const artifactRecords = [
-    ...((runtime?.artifacts || []) as any[]),
-    ...((manifest.files || []) as any[]),
-  ];
+  const startedTime = taskStartedTime(runtime);
+  const finishedTime = taskFinishedTime(runtime);
   const seenArtifacts = new Set<string>();
   const realArtifacts = artifactRecords.flatMap((artifact, index) => {
     const pathValue = artifactPath(artifact);
@@ -450,12 +449,8 @@ function buildTask(
     seenArtifacts.add(key);
     const taskId = artifact?.task_id
       || artifact?.producer_task_id
-      || manifest.task_id
-      || (runtime as any)?.maze_task_id
-      || (runtime as any)?.task_id
-      || runtime?.node_id
+      || runtime?.task_id
       || node.id;
-    const artifactRunId = artifact?.run_id || manifest.run_id || runId || undefined;
 
     return [{
       id: key,
@@ -466,19 +461,14 @@ function buildTask(
       uri: artifact?.uri || artifact?.storage_uri || artifact?.storage_path || pathValue,
       sha256: artifact?.sha256,
       path: pathValue,
-      runId: artifactRunId,
-      taskId,
-      producerTaskId: artifact?.producer_task_id,
-      mime: artifact?.mime,
-      storagePath: artifact?.storage_path,
-      createdAt: formatTimestamp(artifact?.created_time || manifest.created_time || runtime?.finished_time),
+      createdAt: formatTimestamp(artifact?.created_time || finishedTime),
       producedBy: taskId || node.id,
     }];
   });
 
   return {
-    id: node.id,
-    name: node.data.label,
+    id: runtime?.task_id || node.id,
+    name: runtime?.task_name || node.data.label,
     kind,
     state,
     isDynamic: Boolean(data.dynamic || data.runtimeAppended),
@@ -516,10 +506,10 @@ function buildTask(
     },
     runtime: {
       createdAt: formatTimestamp(runtime?.created_time),
-      startedAt: formatTimestamp(runtime?.started_time),
-      finishedAt: formatTimestamp(runtime?.finished_time),
-      duration: formatDuration(runtime?.duration_seconds) || durationBetween(runtime?.started_time, runtime?.finished_time),
-      queueTime: durationBetween(runtime?.created_time, runtime?.started_time) || formatDuration((runtime as any)?.queue_time_seconds),
+      startedAt: formatTimestamp(startedTime),
+      finishedAt: formatTimestamp(finishedTime),
+      duration: formatDuration(runtime?.duration_seconds) || durationBetween(startedTime, finishedTime),
+      queueTime: durationBetween(runtime?.created_time, startedTime) || formatDuration((runtime as any)?.queue_time_seconds),
       queueTimeRecorded: Boolean(runtime?.created_time || (runtime as any)?.queue_time_seconds),
       attempt: (runtime as any)?.attempt || undefined,
       maxAttempts: data.maxAttempts || (runtime as any)?.max_attempts || undefined,
@@ -532,14 +522,14 @@ function buildTask(
     },
     faultTolerance: runtime?.fault_tolerance,
     placement: {
-      worker: runtime?.node_ip || selectedNode?.node_ip || runtime?.node_id_runtime || undefined,
-      node: runtime?.node_id_runtime || selectedNode?.node_id || undefined,
-      gpuDevice: runtime?.gpu_id ?? selectedNode?.gpu_id ?? undefined,
+      worker: selectedNode?.node_ip || selectedNode?.node_id || undefined,
+      node: selectedNode?.node_id || undefined,
+      gpuDevice: selectedNode?.gpu_id ?? undefined,
       zone: (runtime as any)?.zone,
       host: (runtime as any)?.host,
-      address: (runtime as any)?.address || runtime?.node_ip || selectedNode?.node_ip || undefined,
+      address: selectedNode?.node_ip || undefined,
       reason: runtime?.schedule_decision?.reason || undefined,
-      scheduledAt: formatTimestamp(runtime?.started_time),
+      scheduledAt: formatTimestamp(startedTime),
     },
     queueInfo: state === 'queued' || state === 'pending'
       ? {
@@ -554,7 +544,7 @@ function buildTask(
         available: runtime?.schedule_decision?.candidate_nodes?.[0]?.available_resources
           ? JSON.stringify(runtime.schedule_decision.candidate_nodes[0].available_resources)
           : undefined,
-        queuedFor: durationBetween(runtime?.created_time, runtime?.started_time),
+        queuedFor: durationBetween(runtime?.created_time, startedTime),
         blockingTasks: (runtime as any)?.blocking_tasks,
       }
       : undefined,
@@ -1098,12 +1088,9 @@ function withDisposition(href: string, disposition: 'inline' | 'attachment') {
   return `${href}${separator}disposition=${disposition}`;
 }
 
-function artifactDownloadHref(artifact: ArtifactItem, workspaceDir?: string, disposition: 'inline' | 'attachment' = 'attachment') {
+function artifactDownloadHref(artifact: ArtifactItem, disposition: 'inline' | 'attachment' = 'attachment') {
   let href: string | null = null;
-  const taskId = artifact.taskId || artifact.producerTaskId || artifact.producedBy;
-  if (artifact.runId && taskId && artifact.path) {
-    href = api.getStaticRunArtifactDownloadUrl(artifact.runId, taskId, artifact.path, workspaceDir || undefined);
-  } else if (artifact.sha256) {
+  if (artifact.sha256) {
     href = api.getArtifactDownloadUrl(artifact.sha256);
   } else if (artifact.uri && /^https?:\/\//i.test(artifact.uri)) {
     href = artifact.uri;
@@ -1111,7 +1098,7 @@ function artifactDownloadHref(artifact: ArtifactItem, workspaceDir?: string, dis
   return href ? withDisposition(href, disposition) : null;
 }
 
-function ArtifactsPanel({ task, workspaceDir }: { task: WorkbenchTask; workspaceDir?: string }) {
+function ArtifactsPanel({ task }: { task: WorkbenchTask }) {
   const artifacts = task.artifacts || [];
   if (artifacts.length === 0) {
     return (
@@ -1129,8 +1116,8 @@ function ArtifactsPanel({ task, workspaceDir }: { task: WorkbenchTask; workspace
       <div className="workbench-inspector-section-title">TASK ARTIFACTS</div>
       <div className="workbench-inspector-artifacts">
         {artifacts.map((artifact) => {
-          const openHref = artifactDownloadHref(artifact, workspaceDir, 'inline');
-          const downloadHref = artifactDownloadHref(artifact, workspaceDir, 'attachment');
+          const openHref = artifactDownloadHref(artifact, 'inline');
+          const downloadHref = artifactDownloadHref(artifact, 'attachment');
           return (
             <div className="workbench-inspector-artifact" key={artifact.id}>
               <div className="workbench-inspector-artifact-main">
@@ -1235,6 +1222,7 @@ interface TaskInspectorProps {
 export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>('overview');
   const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  const [taskArtifacts, setTaskArtifacts] = useState<RunArtifact[]>([]);
   const {
     selectedNode,
     nodes,
@@ -1242,11 +1230,9 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
     workflowName,
     workflowSaveState,
     workflowDraftError,
-    workspaceDir,
     activeRunId,
     selectedRunId,
     staticRuns,
-    staticRunEvents,
     isRunning,
     updateNode,
   } = useWorkflowStore();
@@ -1259,13 +1245,13 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
   const runtime = currentSelectedNode && visibleRun?.task_nodes?.[currentSelectedNode.id]
     ? visibleRun.task_nodes[currentSelectedNode.id]
     : null;
-  const events = visibleRunId ? (staticRunEvents[visibleRunId] || []) : [];
+  const runtimeTaskId = runtime?.task_id || currentSelectedNode?.id;
   const runTiming = {
     createdAt: formatTimestamp(visibleRun?.created_time),
-    submittedAt: formatTimestamp(visibleRun?.submitted_time || visibleRun?.created_time),
-    startedAt: formatTimestamp(visibleRun?.started_time || firstTaskStartedTime(visibleRun?.task_nodes)),
+    submittedAt: formatTimestamp(visibleRun?.submitted_time ?? visibleRun?.created_time),
+    startedAt: formatTimestamp(visibleRun?.started_time ?? firstTaskStartedTime(visibleRun?.task_nodes)),
   };
-  const task = currentSelectedNode ? buildTask(currentSelectedNode, runtime, visibleRunId, edges, nodes, events) : null;
+  const task = currentSelectedNode ? buildTask(currentSelectedNode, runtime, taskArtifacts, edges, nodes) : null;
   const isRunMode = Boolean(visibleRunId || isRunning);
   const isSpecReadOnly = isRunMode;
 
@@ -1285,6 +1271,30 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
       .then((result) => setLocalModels(result.models || []))
       .catch(() => setLocalModels([]));
   }, []);
+
+  useEffect(() => {
+    if (!visibleRunId || !runtimeTaskId) {
+      setTaskArtifacts([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setTaskArtifacts([]);
+    api.getRunTaskArtifacts(visibleRunId, runtimeTaskId)
+      .then((result) => {
+        if (!cancelled) {
+          setTaskArtifacts(result.artifacts || []);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.debug('Failed to load task artifacts:', error);
+          setTaskArtifacts([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runtime?.status, runtimeTaskId, visibleRunId]);
 
   const headerTitle = task?.name || workflowName;
   const headerState = task?.state || (workflowSaveState === 'saved_workflow' ? 'validated' : 'draft');
@@ -1358,7 +1368,7 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
             )}
             {activeTab === 'runtime' && <RuntimePanel task={task} runTiming={runTiming} />}
             {activeTab === 'artifacts' && (
-              <ArtifactsPanel task={task} workspaceDir={visibleRun?.workspace_dir || workspaceDir || undefined} />
+              <ArtifactsPanel task={task} />
             )}
           </>
         ) : (

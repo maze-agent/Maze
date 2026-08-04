@@ -1,39 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal, Typography, Spin, Alert, Button, Tabs, List, Tag, Space } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, FileTextOutlined, CodeOutlined, DownloadOutlined } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
+import type { RunArtifact, UnifiedRunEvent } from '@/types/workflow';
 import ResultDisplay from './ResultDisplay';
 
 const { Text, Title } = Typography;
 
-interface WorkflowEvent {
-  type: string;
-  data?: Record<string, any>;
-  seq?: number;
-  timestamp?: string;
-}
+type WorkflowEvent = UnifiedRunEvent;
 
 type RunViewerStatus = 'connecting' | 'running' | 'completed' | 'failed' | 'canceled' | 'interrupted';
 
 function toRunViewerStatus(status?: string | null): RunViewerStatus {
-  if (status === 'completed' || status === 'succeeded') return 'completed';
+  if (status === 'succeeded') return 'completed';
   if (status === 'failed') return 'failed';
-  if (status === 'canceled' || status === 'cancelled' || status === 'timed_out') return 'canceled';
+  if (status === 'cancelled' || status === 'timed_out') return 'canceled';
   if (status === 'interrupted') return 'interrupted';
-  return 'running';
-}
-
-function statusFromEvent(eventType?: string | null): RunViewerStatus | null {
-  if (eventType === 'workflow_completed') return 'completed';
-  if (eventType === 'workflow_failed' || eventType === 'task_exception') return 'failed';
-  if (eventType === 'workflow_canceled' || eventType === 'timeout_dynamic_run') return 'canceled';
-  if (eventType === 'workflow_interrupted') return 'interrupted';
-  return null;
-}
-
-function isTerminalRunStatus(status?: string | null): boolean {
-  return ['completed', 'succeeded', 'failed', 'canceled', 'cancelled', 'timed_out', 'interrupted'].includes(status || '');
+  if (status === 'created' || status === 'queued' || status === 'running') return 'running';
+  return 'connecting';
 }
 
 function formatEventValue(value: any): string {
@@ -66,183 +51,110 @@ function normalizeWorkflowEvent(event: any): WorkflowEvent | null {
 
 export default function ResultsModal() {
   const {
-    workflowId,
-    isRunning,
-    activeRunId,
     selectedRunId,
     runViewerOpen,
     staticRuns,
     staticRunEvents,
-    workspaceDir,
-    upsertStaticRun,
-    addStaticRunEvent,
     setStaticRunEvents,
     closeRunViewer,
   } = useWorkflowStore();
+  const selectedRun = selectedRunId
+    ? staticRuns.find((run) => run.run_id === selectedRunId) || null
+    : null;
   const [status, setStatus] = useState<RunViewerStatus>('connecting');
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string>('');
-  const [traceback, setTraceback] = useState<string>('');
-  const [ws, setWs] = useState<WebSocket | null>(null);
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
-  const manualSocketCloseRef = useRef(false);
-  const terminalRunSeenRef = useRef(false);
-
-  useEffect(() => {
-    if (isRunning && workflowId && activeRunId) {
-      manualSocketCloseRef.current = false;
-      terminalRunSeenRef.current = false;
-      setEvents([]);
-      setResults(null);
-      setError('');
-      setTraceback('');
-
-      const websocket = api.connectWebSocket(workflowId, {
-        onConnected: () => {
-          setStatus('running');
-          setEvents((prev) => [...prev, { type: 'connected', timestamp: new Date().toISOString() }]);
-        },
-        onWorkflowStarted: () => {
-          setStatus('running');
-          setEvents((prev) => [...prev, { type: 'workflow_started', timestamp: new Date().toISOString() }]);
-        },
-        onBuilding: (message) => {
-          setStatus('running');
-          setEvents((prev) => [...prev, { type: 'building', data: { message }, timestamp: new Date().toISOString() }]);
-        },
-        onTaskUpdate: (event) => {
-          const nextEvent = normalizeWorkflowEvent(event);
-          if (!nextEvent) return;
-          const eventStatus = statusFromEvent(nextEvent.type);
-          if (eventStatus) {
-            terminalRunSeenRef.current = true;
-            setStatus(eventStatus);
-          } else {
-            setStatus((prev) => (isTerminalRunStatus(prev) ? prev : 'running'));
-          }
-          setEvents((prev) => [...prev, nextEvent]);
-          if (activeRunId) {
-            addStaticRunEvent(activeRunId, nextEvent);
-          }
-        },
-        onRunUpdate: (payload) => {
-          if (payload.run) {
-            upsertStaticRun(payload.run);
-            const nextStatus = toRunViewerStatus(payload.run.status);
-            if (isTerminalRunStatus(payload.run.status)) {
-              terminalRunSeenRef.current = true;
-            }
-            setStatus(nextStatus);
-            if (payload.run.final_result) {
-              setResults(payload.run.final_result);
-            }
-            if (payload.run.error) {
-              setError(formatEventValue(payload.run.error));
-            }
-          }
-        },
-        onWorkflowCompleted: (res) => {
-          terminalRunSeenRef.current = true;
-          setStatus('completed');
-          setResults(res);
-          setEvents((prev) => [...prev, { type: 'workflow_completed', timestamp: new Date().toISOString() }]);
-        },
-        onWorkflowFailed: (err, trace) => {
-          terminalRunSeenRef.current = true;
-          setStatus('failed');
-          setError(formatEventValue(err));
-          setTraceback(trace || '');
-          setEvents((prev) => [...prev, { type: 'workflow_failed', data: { error: err }, timestamp: new Date().toISOString() }]);
-        },
-        onError: (event, websocket) => {
-          console.warn('Workflow result stream unavailable; polling will continue.', event);
-          if (
-            manualSocketCloseRef.current ||
-            terminalRunSeenRef.current ||
-            websocket.readyState === WebSocket.CLOSING ||
-            websocket.readyState === WebSocket.CLOSED
-          ) {
-            return;
-          }
-          setStatus((prev) => (prev === 'connecting' ? 'running' : prev));
-          setEvents((prev) => [
-            ...prev,
-            {
-              type: 'stream_warning',
-              data: { message: 'Live result stream disconnected; polling will continue.' },
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-        },
-        onClose: (event) => {
-          if (event.wasClean || manualSocketCloseRef.current || terminalRunSeenRef.current) {
-            return;
-          }
-          setEvents((prev) => [
-            ...prev,
-            {
-              type: 'stream_warning',
-              data: { message: 'Live result stream closed; polling will continue.' },
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-        },
-      });
-
-      setWs(websocket);
-
-      return () => {
-        manualSocketCloseRef.current = true;
-        if (websocket.readyState === WebSocket.OPEN) {
-          websocket.close(1000, 'viewer cleanup');
-        }
-      };
-    }
-  }, [activeRunId, addStaticRunEvent, isRunning, upsertStaticRun, workflowId]);
+  const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
 
   useEffect(() => {
     if (!runViewerOpen || !selectedRunId) {
-      return;
+      setStatus('connecting');
+      setResults(null);
+      setError('');
+      setEvents([]);
+      return undefined;
     }
 
-    const selectedRun = staticRuns.find((run) => run.run_id === selectedRunId);
     if (selectedRun) {
       setStatus(toRunViewerStatus(selectedRun.status));
-      setResults(selectedRun.final_result || null);
-      setError(formatEventValue(selectedRun.error));
+      setResults(selectedRun.final_result ?? selectedRun.result_summary ?? null);
+      setError(formatEventValue(
+        selectedRun.error_summary
+          ?? selectedRun.failure_reason
+          ?? selectedRun.cancel_reason,
+      ));
+    } else {
+      setStatus('connecting');
+      setResults(null);
+      setError('');
     }
 
     const knownEvents = staticRunEvents[selectedRunId];
-    if (knownEvents) {
+    if (knownEvents !== undefined) {
       setEvents(knownEvents.map(normalizeWorkflowEvent).filter(Boolean) as WorkflowEvent[]);
-      return;
+      return undefined;
     }
 
-    api.getStaticWorkflowRunEvents(selectedRunId, workspaceDir || undefined)
+    let canceled = false;
+    api.getRunEvents(selectedRunId)
       .then((result) => {
+        if (canceled) return;
         const nextEvents = (result.events || []).map(normalizeWorkflowEvent).filter(Boolean) as WorkflowEvent[];
         setStaticRunEvents(selectedRunId, nextEvents);
         setEvents(nextEvents);
       })
-      .catch((error) => {
-        console.error('Failed to load workflow run events:', error);
+      .catch((fetchError) => {
+        if (!canceled) {
+          console.error('Failed to load workflow run events:', fetchError);
+        }
       });
-  }, [runViewerOpen, selectedRunId, setStaticRunEvents, staticRunEvents, staticRuns, workspaceDir]);
+
+    return () => {
+      canceled = true;
+    };
+  }, [runViewerOpen, selectedRun, selectedRunId, setStaticRunEvents, staticRunEvents]);
+
+  useEffect(() => {
+    if (!runViewerOpen || !selectedRunId) {
+      setArtifacts([]);
+      return undefined;
+    }
+
+    let canceled = false;
+    api.getRunArtifacts(selectedRunId)
+      .then((result) => {
+        if (!canceled) {
+          setArtifacts(result.artifacts || []);
+        }
+      })
+      .catch((fetchError) => {
+        if (!canceled) {
+          console.error('Failed to load workflow run artifacts:', fetchError);
+          setArtifacts([]);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [runViewerOpen, selectedRun?.status, selectedRunId]);
+
+  const traceback = events.reduce<string>((latest, event) => (
+    formatEventValue(event.data?.traceback) || latest
+  ), '');
 
   const handleClose = () => {
-    manualSocketCloseRef.current = true;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close(1000, 'viewer closed');
-    }
     closeRunViewer();
     setStatus('connecting');
     setResults(null);
     setError('');
-    setTraceback('');
     setEvents([]);
+    setArtifacts([]);
   };
 
   const getEventTag = (type: string) => {
+    if (type === 'start_workflow') return <Tag color="green">Workflow Started</Tag>;
     if (type === 'start_dynamic_run') return <Tag color="green">Dynamic Run</Tag>;
     if (type === 'register_task_spec') return <Tag color="cyan">Task Spec</Tag>;
     if (type === 'append_task') return <Tag color="blue">Task Appended</Tag>;
@@ -251,6 +163,9 @@ export default function ResultsModal() {
     if (type === 'finish_task') return <Tag color="success">Task Finished</Tag>;
     if (type === 'task_exception') return <Tag color="error">Task Failed</Tag>;
     if (type === 'finish_workflow') return <Tag color="success">Workflow Done</Tag>;
+    if (type === 'cancel_workflow') return <Tag color="orange">Run Canceled</Tag>;
+    if (type === 'timeout_workflow') return <Tag color="volcano">Run Timed Out</Tag>;
+    if (type === 'interrupt_workflow') return <Tag color="magenta">Interrupted</Tag>;
     if (type === 'cancel_dynamic_run') return <Tag color="orange">Run Canceled</Tag>;
     if (type === 'timeout_dynamic_run') return <Tag color="volcano">Run Timed Out</Tag>;
     if (type === 'workflow_completed') return <Tag color="success">Workflow Done</Tag>;
@@ -266,6 +181,9 @@ export default function ResultsModal() {
   const renderEventSummary = (event: WorkflowEvent) => {
     const data = event.data || {};
     const shortTaskId = data.task_id ? `${String(data.task_id).slice(0, 8)}...` : '';
+    if (event.type === 'start_workflow') {
+      return 'Workflow started';
+    }
     if (event.type === 'start_dynamic_run') {
       return `Dynamic run ${data.run_id ? String(data.run_id).slice(0, 8) : ''} started`;
     }
@@ -290,6 +208,15 @@ export default function ResultsModal() {
     }
     if (event.type === 'finish_workflow') {
       return 'All workflow tasks finished';
+    }
+    if (event.type === 'cancel_workflow') {
+      return `Workflow run canceled${data.reason ? `: ${formatEventValue(data.reason)}` : ''}`;
+    }
+    if (event.type === 'timeout_workflow') {
+      return `Workflow run timed out${data.timeout_seconds ? ` after ${data.timeout_seconds}s` : ''}`;
+    }
+    if (event.type === 'interrupt_workflow') {
+      return `Workflow run interrupted${data.reason ? `: ${formatEventValue(data.reason)}` : ''}`;
     }
     if (event.type === 'cancel_dynamic_run') {
       return `Dynamic run canceled${data.reason ? `: ${formatEventValue(data.reason)}` : ''}`;
@@ -318,7 +245,7 @@ export default function ResultsModal() {
     if (event.type === 'stream_warning') {
       return formatEventValue(data.message) || 'Live result stream disconnected; polling will continue.';
     }
-    return 'Connected to result stream';
+    return formatEventValue(data.message) || event.type.split('_').join(' ');
   };
 
   const renderEvents = () => (
@@ -358,13 +285,15 @@ export default function ResultsModal() {
   );
 
   const renderArtifacts = () => {
-    const artifactItems = Object.values(selectedRun?.task_nodes || {}).flatMap((node: any) => (
-      (node.artifacts || []).map((artifact: any) => ({
+    const artifactItems = artifacts.map((artifact) => {
+      const task = artifact.task_id
+        ? selectedRun?.task_nodes?.[artifact.task_id]
+        : undefined;
+      return {
         ...artifact,
-        taskId: node.maze_task_id || node.node_id,
-        taskLabel: node.label || node.task_name || node.node_id,
-      }))
-    ));
+        taskLabel: task?.task_name || artifact.task_id || 'Workflow',
+      };
+    });
 
     if (artifactItems.length === 0) {
       return null;
@@ -383,16 +312,11 @@ export default function ResultsModal() {
                   key="download"
                   size="small"
                   icon={<DownloadOutlined />}
+                  disabled={!artifact.sha256}
                   onClick={() => {
-                    window.open(
-                      api.getStaticRunArtifactDownloadUrl(
-                        selectedRunId || '',
-                        artifact.taskId,
-                        artifact.path,
-                        workspaceDir || undefined,
-                      ),
-                      '_blank',
-                    );
+                    if (artifact.sha256) {
+                      window.open(api.getArtifactDownloadUrl(artifact.sha256), '_blank');
+                    }
                   }}
                 >
                   Download
@@ -410,7 +334,6 @@ export default function ResultsModal() {
     );
   };
 
-  const selectedRun = selectedRunId ? staticRuns.find((run) => run.run_id === selectedRunId) : null;
   const shouldShow = runViewerOpen && !!selectedRunId;
 
   return (
@@ -442,7 +365,7 @@ export default function ResultsModal() {
         <div style={{ textAlign: 'center', padding: '40px' }}>
           <Spin size="large" />
           <div style={{ marginTop: '16px' }}>
-            <Text type="secondary">Connecting...</Text>
+            <Text type="secondary">Loading run...</Text>
           </div>
         </div>
       )}
@@ -469,7 +392,7 @@ export default function ResultsModal() {
           />
           {renderEvents()}
           {renderArtifacts()}
-          {(results || selectedRun?.final_result) && (
+          {(results ?? selectedRun?.final_result ?? selectedRun?.result_summary) != null && (
             <Tabs
               defaultActiveKey="formatted"
               style={{ marginTop: '16px' }}
@@ -487,7 +410,7 @@ export default function ResultsModal() {
                       maxHeight: '500px',
                       overflow: 'auto'
                     }}>
-                      <ResultDisplay data={results || selectedRun?.final_result} />
+                      <ResultDisplay data={results ?? selectedRun?.final_result ?? selectedRun?.result_summary} />
                     </div>
                   ),
                 },
@@ -508,7 +431,7 @@ export default function ResultsModal() {
                       overflow: 'auto'
                     }}>
                       <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word', fontSize: '12px' }}>
-                        {JSON.stringify(results || selectedRun?.final_result, null, 2)}
+                        {JSON.stringify(results ?? selectedRun?.final_result ?? selectedRun?.result_summary, null, 2)}
                       </pre>
                     </div>
                   ),

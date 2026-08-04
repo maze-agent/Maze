@@ -14,6 +14,14 @@ import { api } from './api/client';
 import { useWorkflowStore } from './stores/workflowStore';
 
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
+const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
+const TERMINAL_RUN_STATUSES = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'interrupted',
+]);
 
 function workflowDraftFingerprint(name: string, nodes: any[], edges: any[]) {
   return JSON.stringify({ name, nodes, edges });
@@ -36,7 +44,6 @@ function App() {
     edges,
     isRunning,
     activeRunId,
-    staticRuns,
     workflowSaveState,
     workflowOperation,
     setWorkflowId,
@@ -339,44 +346,62 @@ function App() {
 
   useEffect(() => {
     if (!activeRunId) {
-      return;
+      return undefined;
     }
+    const runId = activeRunId;
 
-    const activeRun = staticRuns.find((run) => run.run_id === activeRunId);
-    if (activeRun && activeRun.status !== 'running') {
+    const activeRun = useWorkflowStore.getState().staticRuns.find(
+      (run) => run.run_id === runId,
+    );
+    if (activeRun && TERMINAL_RUN_STATUSES.has(activeRun.status)) {
       setIsRunning(false);
-      return;
+      return undefined;
     }
 
     let canceled = false;
-    const poll = async () => {
+    let timer: number | undefined;
+
+    function scheduleNextPoll() {
+      if (!canceled) {
+        timer = window.setTimeout(poll, 1500);
+      }
+    }
+
+    async function poll() {
       try {
         const [runResult, eventsResult] = await Promise.all([
-          api.getStaticWorkflowRun(activeRunId, workspaceDir || undefined),
-          api.getStaticWorkflowRunEvents(activeRunId, workspaceDir || undefined),
+          api.getRun(runId),
+          api.getRunEvents(runId),
         ]);
         if (canceled) return;
         upsertStaticRun(runResult.run);
-        setStaticRunEvents(activeRunId, eventsResult.events || []);
-        if (runResult.run.status !== 'running') {
+        setStaticRunEvents(runId, eventsResult.events || []);
+        if (ACTIVE_RUN_STATUSES.has(runResult.run.status)) {
+          setIsRunning(true);
+          scheduleNextPoll();
+        } else if (TERMINAL_RUN_STATUSES.has(runResult.run.status)) {
+          setIsRunning(false);
+        } else {
           setIsRunning(false);
         }
       } catch (error) {
         if ((error as any)?.response?.status === 404) {
-          removeStaticRun(activeRunId);
+          removeStaticRun(runId);
           return;
         }
         console.error('Failed to refresh active workflow run:', error);
+        scheduleNextPoll();
       }
-    };
+    }
 
-    const timer = window.setInterval(poll, 1500);
     poll();
     return () => {
       canceled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [activeRunId, removeStaticRun, setIsRunning, setStaticRunEvents, staticRuns, upsertStaticRun, workspaceDir]);
+  }, [activeRunId, removeStaticRun, setIsRunning, setStaticRunEvents, upsertStaticRun]);
 
   return (
     <ConfigProvider locale={enUS}>

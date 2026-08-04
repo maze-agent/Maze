@@ -5,7 +5,7 @@ import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import RuntimeConsole from '@/components/workbench/RuntimeConsole';
 import TaskInspector from '@/components/workbench/TaskInspector';
-import type { StaticWorkflowRunEvent, StaticWorkflowRunNode } from '@/types/workflow';
+import type { RunArtifact, UnifiedRunEvent, UnifiedRunTaskSnapshot } from '@/types/workflow';
 import type {
   RuntimeArtifact,
   RuntimeBreakdownItem,
@@ -69,12 +69,13 @@ function shortRunId(value?: string | null) {
 
 function taskState(status?: string | null): TimelineItem['state'] {
   if (status === 'completed') return 'succeeded';
+  if (status === 'submitted') return 'queued';
   if (status === 'timed_out' || status === 'interrupted' || status === 'cancelled' || status === 'canceled') return 'failed';
   if (status === 'queued' || status === 'running' || status === 'succeeded' || status === 'failed') return status;
   return 'pending';
 }
 
-function eventLevel(event: StaticWorkflowRunEvent): RuntimeLevel {
+function eventLevel(event: UnifiedRunEvent): RuntimeLevel {
   const type = event.type.toLowerCase();
   if (type.includes('fail') || type.includes('error') || type.includes('exception') || type.includes('timeout')) return 'error';
   if (type.includes('retry') || type.includes('queue') || type.includes('pending') || type.includes('warn')) return 'warn';
@@ -93,18 +94,18 @@ function eventCategory(type: string): RuntimeEvent['category'] {
   return 'task';
 }
 
-function taskLabel(taskId: string | undefined, taskNodes: Record<string, StaticWorkflowRunNode>) {
+function taskLabel(taskId: string | undefined, taskNodes: Record<string, UnifiedRunTaskSnapshot>) {
   if (!taskId) return undefined;
   const task = taskNodes[taskId];
-  return task?.task_name || task?.label || taskId;
+  return task?.task_name || taskId;
 }
 
-function eventTaskId(event: StaticWorkflowRunEvent) {
+function eventTaskId(event: UnifiedRunEvent) {
   const data = event.data || {};
   return data.node_id || data.task_id || data.taskId || data.task_spec_id;
 }
 
-function eventDetails(event: StaticWorkflowRunEvent) {
+function eventDetails(event: UnifiedRunEvent) {
   const data = event.data || {};
   if (data.message) return String(data.message);
   if (event.type === 'start_task') {
@@ -129,7 +130,7 @@ function eventTitle(type: string) {
     .replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-function runtimeEventsFromRun(events: StaticWorkflowRunEvent[], taskNodes: Record<string, StaticWorkflowRunNode>): RuntimeEvent[] {
+function runtimeEventsFromRun(events: UnifiedRunEvent[], taskNodes: Record<string, UnifiedRunTaskSnapshot>): RuntimeEvent[] {
   return events.slice().reverse().map((event, index) => {
     const taskId = eventTaskId(event);
     const data = event.data || {};
@@ -146,20 +147,25 @@ function runtimeEventsFromRun(events: StaticWorkflowRunEvent[], taskNodes: Recor
   });
 }
 
-function timelineFromRun(taskNodes: Record<string, StaticWorkflowRunNode>): TimelineItem[] {
-  return Object.entries(taskNodes).map(([taskId, task]) => ({
-    taskId,
-    taskName: task.task_name || task.label || taskId,
-    state: taskState(task.status),
-    worker: task.node_ip || task.node_id_runtime || undefined,
-    startedAt: formatClock(task.started_time),
-    endedAt: formatClock(task.finished_time),
-    duration: formatDuration(task.duration_seconds) || durationFromTimes(task.started_time, task.finished_time),
-    queueReason: task.pending_reason || undefined,
-  }));
+function timelineFromRun(taskNodes: Record<string, UnifiedRunTaskSnapshot>): TimelineItem[] {
+  return Object.entries(taskNodes).map(([taskId, task]) => {
+    const selectedNode = task.selected_node || task.schedule_decision?.selected_node;
+    const startedTime = task.started_time ?? task.start_time;
+    const finishedTime = task.finished_time ?? task.finish_time;
+    return {
+      taskId,
+      taskName: task.task_name || taskId,
+      state: taskState(task.status),
+      worker: selectedNode?.node_ip || selectedNode?.node_id || undefined,
+      startedAt: formatClock(startedTime),
+      endedAt: formatClock(finishedTime),
+      duration: formatDuration(task.duration_seconds) || durationFromTimes(startedTime, finishedTime),
+      queueReason: task.pending_reason || undefined,
+    };
+  });
 }
 
-function logsFromEvents(events: StaticWorkflowRunEvent[], taskNodes: Record<string, StaticWorkflowRunNode>): RuntimeLogLine[] {
+function logsFromEvents(events: UnifiedRunEvent[], taskNodes: Record<string, UnifiedRunTaskSnapshot>): RuntimeLogLine[] {
   return events.slice().reverse().map((event, index) => {
     const taskId = eventTaskId(event) || 'workflow';
     return {
@@ -182,48 +188,35 @@ function artifactType(name?: string): RuntimeArtifact['type'] {
   return 'file';
 }
 
-function artifactsFromRun(taskNodes: Record<string, StaticWorkflowRunNode>): RuntimeArtifact[] {
-  const artifacts: RuntimeArtifact[] = [];
-  Object.entries(taskNodes).forEach(([taskId, task]) => {
-    const explicitArtifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
-    explicitArtifacts.forEach((artifact, index) => {
-      const name = artifact.name || artifact.path?.split('/').pop() || artifact.path || `artifact-${index}`;
-      artifacts.push({
-        id: artifact.sha256 || artifact.path || `${taskId}-artifact-${index}`,
-        name,
-        taskId,
-        taskName: task.task_name || task.label || taskId,
-        type: artifactType(name),
-        size: formatFileSize(artifact.size),
-        createdAt: formatClock(artifact.created_time || task.finished_time),
-        uri: artifact.uri || artifact.storage_uri || artifact.storage_path || artifact.path,
-      });
-    });
-
-    const files = Array.isArray(task.file_manifest?.files) ? task.file_manifest.files : [];
-    files.forEach((file: any, index: number) => {
-      const name = file.name || file.path?.split('/').pop() || file.path || `file-${index}`;
-      artifacts.push({
-        id: file.sha256 || file.path || `${taskId}-file-${index}`,
-        name,
-        taskId,
-        taskName: task.task_name || task.label || taskId,
-        type: artifactType(name),
-        size: formatFileSize(file.size),
-        createdAt: formatClock(file.created_time || task.finished_time),
-        uri: file.uri || file.storage_uri || file.storage_path || file.path,
-      });
-    });
+function artifactsFromRun(
+  artifacts: RunArtifact[],
+  taskNodes: Record<string, UnifiedRunTaskSnapshot>,
+): RuntimeArtifact[] {
+  return artifacts.map((artifact, index) => {
+    const taskId = artifact.task_id || artifact.producer_task_id || 'workflow';
+    const name = artifact.name || artifact.path?.split('/').pop() || artifact.path || `artifact-${index}`;
+    return {
+      id: artifact.sha256 || artifact.path || `${taskId}-artifact-${index}`,
+      name,
+      taskId,
+      taskName: taskLabel(taskId, taskNodes) || taskId,
+      type: artifactType(name),
+      size: formatFileSize(artifact.size),
+      createdAt: formatClock(artifact.created_time),
+      uri: artifact.sha256
+        ? api.getArtifactDownloadUrl(artifact.sha256)
+        : artifact.uri || artifact.storage_uri || artifact.storage_path || artifact.path,
+    };
   });
-  return artifacts;
 }
 
-function taskTypeForRuntimeTask(task: StaticWorkflowRunNode): 'CPU' | 'GPU' | 'I/O' {
+function taskTypeForRuntimeTask(task: UnifiedRunTaskSnapshot): 'CPU' | 'GPU' | 'I/O' {
   const resources = task.resources || {};
-  const label = `${task.task_name || ''} ${task.label || ''} ${task.node_id || ''}`.toLowerCase();
-  if (Number((resources as any).gpu || 0) > 0 || label.includes('gpu') || label.includes('cuda')) {
+  const label = `${task.task_name || ''} ${task.task_id || ''}`.toLowerCase();
+  if (task.task_kind === 'gpu' || Number((resources as any).gpu || 0) > 0 || label.includes('gpu') || label.includes('cuda')) {
     return 'GPU';
   }
+  if (task.task_kind === 'io') return 'I/O';
   if (
     label.includes('file')
     || label.includes('io')
@@ -239,7 +232,7 @@ function taskTypeForRuntimeTask(task: StaticWorkflowRunNode): 'CPU' | 'GPU' | 'I
   return 'CPU';
 }
 
-function taskTypeBreakdownFromRun(taskNodes: Record<string, StaticWorkflowRunNode>): RuntimeBreakdownItem[] {
+function taskTypeBreakdownFromRun(taskNodes: Record<string, UnifiedRunTaskSnapshot>): RuntimeBreakdownItem[] {
   const counts = new Map<string, number>();
   Object.values(taskNodes).forEach((task) => {
     const state = taskState(task.status);
@@ -282,6 +275,7 @@ export default function WorkbenchShell({
     selectNode,
   } = useWorkflowStore();
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [runtimeArtifacts, setRuntimeArtifacts] = useState<RunArtifact[]>([]);
   const runtimeRunId = selectedRunId || activeRunId;
   const runtimeRun = runtimeRunId ? staticRuns.find((run) => run.run_id === runtimeRunId) : null;
   const runtimeEvents = runtimeRunId ? (staticRunEvents[runtimeRunId] || []) : [];
@@ -289,7 +283,7 @@ export default function WorkbenchShell({
   useEffect(() => {
     if (!runtimeRun || runtimeEvents.length > 0) return;
     let cancelled = false;
-    api.getStaticWorkflowRunEvents(runtimeRun.run_id, runtimeRun.workspace_dir, runtimeRun.workspace_id)
+    api.getRunEvents(runtimeRun.run_id)
       .then((result) => {
         if (!cancelled) {
           setStaticRunEvents(runtimeRun.run_id, result.events || []);
@@ -303,14 +297,38 @@ export default function WorkbenchShell({
     };
   }, [runtimeEvents.length, runtimeRun, setStaticRunEvents]);
 
+  useEffect(() => {
+    if (!runtimeRunId) {
+      setRuntimeArtifacts([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setRuntimeArtifacts([]);
+    api.getRunArtifacts(runtimeRunId)
+      .then((result) => {
+        if (!cancelled) {
+          setRuntimeArtifacts(result.artifacts || []);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.debug('Failed to load runtime console artifacts:', error);
+          setRuntimeArtifacts([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runtimeRun?.status, runtimeRunId]);
+
   const runtimeTaskNodes = runtimeRun?.task_nodes || {};
   const consoleData = useMemo(() => ({
     events: runtimeEventsFromRun(runtimeEvents, runtimeTaskNodes),
     timeline: timelineFromRun(runtimeTaskNodes),
     logs: logsFromEvents(runtimeEvents, runtimeTaskNodes),
-    artifacts: artifactsFromRun(runtimeTaskNodes),
+    artifacts: artifactsFromRun(runtimeArtifacts, runtimeTaskNodes),
     taskTypeBreakdown: taskTypeBreakdownFromRun(runtimeTaskNodes),
-  }), [runtimeEvents, runtimeTaskNodes]);
+  }), [runtimeArtifacts, runtimeEvents, runtimeTaskNodes]);
 
   function handleSelectTask(taskId: string) {
     const targetKey = normalizeTaskKey(taskId);

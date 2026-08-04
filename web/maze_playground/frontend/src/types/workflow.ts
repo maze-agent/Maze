@@ -632,77 +632,14 @@ export type StaticWorkflowRunStatus =
   | 'timed_out'
   | 'interrupted';
 
-export interface StaticWorkflowRunNode {
-  node_id: string;
-  task_name?: string;
-  task_kind?: 'cpu' | 'gpu' | 'io';
-  label?: string;
-  category?: string;
-  status: 'pending' | 'queued' | 'running' | 'completed' | 'succeeded' | 'failed' | 'canceled' | 'cancelled' | 'timed_out';
-  created_time?: number | null;
-  started_time?: number | null;
-  finished_time?: number | null;
-  duration_seconds?: number | null;
-  result_summary?: any;
-  error?: any;
-  last_error?: any;
-  pending_reason?: string | null;
-  retry_wait_seconds?: number | null;
-  next_eligible_time?: number | null;
-  timeout_seconds?: number | null;
-  maze_task_id?: string;
-  node_ip?: string | null;
-  node_id_runtime?: string | null;
-  gpu_id?: string | number | null;
-  resources?: Resources | Record<string, any>;
-  schedule_decision?: ClusterScheduleDecision | null;
-  file_manifest?: any;
-  fault_tolerance?: FaultToleranceTrace;
-  artifacts?: RunArtifact[];
-}
+/** @deprecated Use UnifiedRunTaskSnapshot. */
+export type StaticWorkflowRunNode = UnifiedRunTaskSnapshot;
 
-export interface StaticWorkflowRunSnapshot {
-  schema: 'static_workflow_run';
-  schema_version: number;
-  kind: 'static';
-  run_id: string;
-  workflow_id: string;
-  workflow_name: string;
-  workspace_dir?: string;
-  workspace_id?: string;
-  workspace_manifest_version?: number | null;
-  status: StaticWorkflowRunStatus;
-  created_time?: number;
-  submitted_time?: number | null;
-  started_time?: number | null;
-  updated_time?: number;
-  finished_time?: number | null;
-  task_counts?: Record<string, number>;
-  task_nodes?: Record<string, StaticWorkflowRunNode>;
-  graph?: {
-    nodes: string[];
-    edges: Array<{ source: string; target: string }>;
-  };
-  events?: {
-    count: number;
-    last_seq: number;
-  };
-  final_result?: any;
-  error?: any;
-  maze_run_id?: string | null;
-  error_summary?: any;
-  result_summary?: any;
-  metadata?: Record<string, any>;
-  tags?: string[];
-}
+/** @deprecated Use UnifiedRunSnapshot. */
+export type StaticWorkflowRunSnapshot = UnifiedRunSnapshot;
 
-export interface StaticWorkflowRunEvent {
-  type: string;
-  seq?: number;
-  timestamp?: string;
-  schema_version?: number;
-  data?: Record<string, any>;
-}
+/** @deprecated Use UnifiedRunEvent. */
+export type StaticWorkflowRunEvent = UnifiedRunEvent;
 
 export type UnifiedRunStatus =
   | 'created'
@@ -712,12 +649,15 @@ export type UnifiedRunStatus =
   | 'failed'
   | 'cancelled'
   | 'timed_out'
-  | 'interrupted'
-  | string;
+  | 'interrupted';
 
 export interface UnifiedRunTaskSnapshot {
   task_id: string;
+  node_id?: string;
   task_name?: string;
+  task_kind?: 'cpu' | 'gpu' | 'io';
+  label?: string;
+  category?: string;
   task_spec_id?: string | null;
   request_id?: string | null;
   status: string;
@@ -745,8 +685,13 @@ export interface UnifiedRunTaskSnapshot {
   retry_wait_seconds?: number | null;
   next_eligible_time?: number | null;
   timeout_seconds?: number | null;
+  maze_task_id?: string;
+  node_ip?: string | null;
+  node_id_runtime?: string | null;
+  gpu_id?: string | number | null;
   file_manifest?: any;
   fault_tolerance?: FaultToleranceTrace;
+  artifacts?: RunArtifact[];
 }
 
 export interface UnifiedRunSnapshot {
@@ -757,10 +702,15 @@ export interface UnifiedRunSnapshot {
   run_type?: string;
   run_id: string;
   workflow_id?: string;
+  workflow_name?: string;
+  workspace_dir?: string;
+  workspace_id?: string;
+  workspace_manifest_version?: number | null;
   status: UnifiedRunStatus;
   native_status?: string;
   mode?: string;
   created_time?: number;
+  submitted_time?: number | null;
   updated_time?: number;
   started_time?: number | null;
   finished_time?: number | null;
@@ -779,9 +729,15 @@ export interface UnifiedRunSnapshot {
   };
   event_count?: number;
   last_event_seq?: number;
+  events?: {
+    count: number;
+    last_seq: number;
+  };
   result_summary?: any;
   error_summary?: any;
+  error?: any;
   final_result?: any;
+  maze_run_id?: string | null;
   metadata?: Record<string, any>;
   tags?: string[];
   max_tasks?: number;

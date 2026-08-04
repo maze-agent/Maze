@@ -452,10 +452,20 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       const workflowsResult = await api.getWorkspaceWorkflows(saved.workspaceDir);
       setWorkspaceWorkflows(workflowsResult.workflows || []);
 
-      setIsRunning(true);
-      const result = await api.runWorkflow(activeWorkflowId, saved.workspaceDir, workspaceId || undefined);
-      setActiveRun(result.run);
-      message.success(`Workflow run started: ${result.runId}`);
+      const receipt = await api.runWorkflow(activeWorkflowId, {
+        workflow: saved.workflow,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId || workspaceId || undefined,
+        workspaceDir: saved.workspaceDir,
+      });
+      const runResult = await api.getRun(receipt.runId);
+      setWorkspaceContext({
+        workspaceId: receipt.workspaceId || saved.workspaceId || workspaceId || undefined,
+        workspaceDir: receipt.workspaceDir || saved.workspaceDir,
+      });
+      setActiveRun(runResult.run);
+      setIsRunning(['created', 'queued', 'running'].includes(runResult.run.status));
+      message.success(`Workflow run started: ${receipt.runId}`);
     } catch (error: any) {
       console.error('Failed to run workflow:', error);
       setIsRunning(false);

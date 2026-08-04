@@ -832,11 +832,30 @@ export default function BuiltinTasksSidebar({
 
   const refreshWorkspaceRuns = async (dir: string) => {
     try {
-      const result = await api.getStaticWorkflowRuns({
-        workspaceDir: dir,
+      const result = await api.getRuns({
+        kind: 'static',
         limit: 20,
+        detail: false,
       });
-      setStaticRuns(result.runs || []);
+      const activeWorkspaceId = String(useWorkflowStore.getState().workspaceId || '').trim();
+      const normalizeWorkspaceDir = (value: unknown) => (
+        String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+      );
+      const activeWorkspaceDir = normalizeWorkspaceDir(dir);
+      const workspaceRuns = (result.runs || []).filter((run) => {
+        const metadata = run.metadata || {};
+        const runWorkspaceId = String(metadata.workspace_id || '').trim();
+        const runWorkspaceDir = normalizeWorkspaceDir(metadata.workspace_dir);
+
+        if (runWorkspaceId && activeWorkspaceId && runWorkspaceId !== activeWorkspaceId) {
+          return false;
+        }
+        if (runWorkspaceDir && activeWorkspaceDir && runWorkspaceDir !== activeWorkspaceDir) {
+          return false;
+        }
+        return true;
+      });
+      setStaticRuns(workspaceRuns);
     } catch (error) {
       console.debug('Failed to refresh workspace runs:', error);
       setStaticRuns([]);
@@ -847,8 +866,8 @@ export default function BuiltinTasksSidebar({
     openRunViewer(runId);
     try {
       const [runResult, eventsResult] = await Promise.all([
-        api.getStaticWorkflowRun(runId, workspaceDir || undefined, workspaceId || undefined),
-        api.getStaticWorkflowRunEvents(runId, workspaceDir || undefined, workspaceId || undefined),
+        api.getRun(runId),
+        api.getRunEvents(runId),
       ]);
       upsertStaticRun(runResult.run);
       setStaticRunEvents(runId, eventsResult.events || []);

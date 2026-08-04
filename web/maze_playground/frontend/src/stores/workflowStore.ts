@@ -8,9 +8,11 @@ import type {
   WorkspaceManifest,
   LocalWorkspaceFileMeta,
   RunResult,
-  StaticWorkflowRunEvent,
-  StaticWorkflowRunSnapshot,
+  UnifiedRunEvent,
+  UnifiedRunSnapshot,
 } from '@/types/workflow';
+
+const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
 
 export type WorkflowSaveState =
   | 'empty'
@@ -64,8 +66,8 @@ interface WorkflowStore {
   activeRunId: string | null;
   selectedRunId: string | null;
   runViewerOpen: boolean;
-  staticRuns: StaticWorkflowRunSnapshot[];
-  staticRunEvents: Record<string, StaticWorkflowRunEvent[]>;
+  staticRuns: UnifiedRunSnapshot[];
+  staticRunEvents: Record<string, UnifiedRunEvent[]>;
   
   // Actions
   setWorkflowId: (id: string) => void;
@@ -108,11 +110,11 @@ interface WorkflowStore {
   setIsRunning: (isRunning: boolean) => void;
   addRunResult: (result: RunResult) => void;
   clearRunResults: () => void;
-  setActiveRun: (run: StaticWorkflowRunSnapshot | null) => void;
-  upsertStaticRun: (run: StaticWorkflowRunSnapshot) => void;
-  setStaticRuns: (runs: StaticWorkflowRunSnapshot[]) => void;
-  addStaticRunEvent: (runId: string, event: StaticWorkflowRunEvent) => void;
-  setStaticRunEvents: (runId: string, events: StaticWorkflowRunEvent[]) => void;
+  setActiveRun: (run: UnifiedRunSnapshot | null) => void;
+  upsertStaticRun: (run: UnifiedRunSnapshot) => void;
+  setStaticRuns: (runs: UnifiedRunSnapshot[]) => void;
+  addStaticRunEvent: (runId: string, event: UnifiedRunEvent) => void;
+  setStaticRunEvents: (runId: string, events: UnifiedRunEvent[]) => void;
   removeStaticRun: (runId: string) => void;
   openRunViewer: (runId: string) => void;
   closeRunViewer: () => void;
@@ -300,7 +302,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
       ...state.staticRuns.filter((item) => item.run_id !== run.run_id),
     ],
     isRunning: run.run_id === state.activeRunId
-      ? run.status === 'running'
+      ? ACTIVE_RUN_STATUSES.has(run.status)
       : state.isRunning,
   })),
 

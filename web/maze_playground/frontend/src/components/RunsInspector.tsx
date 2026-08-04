@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -37,9 +37,7 @@ import type {
   DynamicRunStatus,
   RunArtifact,
   RunLogLine,
-  StaticWorkflowRunEvent,
-  StaticWorkflowRunSnapshot,
-  StaticWorkflowRunStatus,
+  UnifiedRunEvent,
   UnifiedRunSnapshot,
   UnifiedRunTaskSnapshot,
   WorkspaceSkillMeta,
@@ -55,11 +53,9 @@ import PendingActionCard from './PendingActionCard';
 
 const { Text, Title } = Typography;
 
-const staticTerminalStatuses = new Set<StaticWorkflowRunStatus>([
-  'completed',
+const staticTerminalStatuses = new Set([
   'succeeded',
   'failed',
-  'canceled',
   'cancelled',
   'timed_out',
   'interrupted',
@@ -75,14 +71,12 @@ const dynamicTerminalStatuses = new Set<DynamicRunStatus>([
   'interrupted',
 ]);
 
-const staticStatusColors: Record<StaticWorkflowRunStatus, string> = {
+const staticStatusColors: Record<string, string> = {
   created: 'default',
   queued: 'default',
   running: 'processing',
-  completed: 'success',
   succeeded: 'success',
   failed: 'error',
-  canceled: 'orange',
   cancelled: 'orange',
   timed_out: 'volcano',
   interrupted: 'magenta',
@@ -106,8 +100,8 @@ type RunItem =
       id: string;
       createdTime?: number;
       updatedTime?: number;
-      status: StaticWorkflowRunStatus;
-      run: StaticWorkflowRunSnapshot;
+      status: string;
+      run: UnifiedRunSnapshot;
     }
   | {
       kind: 'dynamic';
@@ -465,11 +459,11 @@ function runModeTag(run?: DynamicRunSnapshot | null) {
   return <Tag color={mode === 'react' ? 'purple' : 'geekblue'}>{mode}</Tag>;
 }
 
-function isAppRun(run?: StaticWorkflowRunSnapshot | DynamicRunSnapshot | null) {
+function isAppRun(run?: UnifiedRunSnapshot | DynamicRunSnapshot | null) {
   return Boolean((run as any)?.metadata?.run_kind === 'app' || (run as any)?.metadata?.app_spec);
 }
 
-function appRunName(run?: StaticWorkflowRunSnapshot | UnifiedRunSnapshot | null) {
+function appRunName(run?: UnifiedRunSnapshot | null) {
   const metadata = run?.metadata || {};
   return String(metadata.app_name || metadata.workflow_name || (run as any)?.workflow_name || run?.workflow_id || 'Workflow Run');
 }
@@ -482,28 +476,6 @@ function dynamicTaskStatus(status?: string) {
   if (status === 'succeeded') return 'completed';
   if (status === 'queued') return 'submitted';
   return status || 'pending';
-}
-
-async function loadRunArtifacts(runId: string): Promise<RunArtifact[]> {
-  try {
-    const result = await api.getRunArtifacts(runId);
-    return (result.artifacts || []) as RunArtifact[];
-  } catch (error) {
-    console.warn('Failed to load run artifacts:', error);
-    return [];
-  }
-}
-
-function collectStaticRunArtifacts(run: StaticWorkflowRunSnapshot): RunArtifact[] {
-  return Object.entries(run.task_nodes || {}).flatMap(([taskId, node]) => {
-    const artifacts = node.artifacts || node.file_manifest?.files || [];
-    return artifacts.map((artifact: RunArtifact) => ({
-      ...artifact,
-      run_id: artifact.run_id || run.run_id,
-      task_id: artifact.task_id || artifact.producer_task_id || taskId,
-      producer_task_id: artifact.producer_task_id || artifact.task_id || taskId,
-    }));
-  });
 }
 
 function adaptDynamicRun(run: UnifiedRunSnapshot): DynamicRunSnapshot {
@@ -546,7 +518,7 @@ function adaptDynamicRun(run: UnifiedRunSnapshot): DynamicRunSnapshot {
   };
 }
 
-function staticEventSummary(event: StaticWorkflowRunEvent) {
+function staticEventSummary(event: UnifiedRunEvent) {
   const data = event.data || {};
   const taskName = data.node_label || data.task_name || data.node_id || 'task';
 
@@ -701,17 +673,15 @@ export default function RunsInspector({
     workspaceDir,
     upsertStaticRun,
     setStaticRunEvents,
-    removeStaticRun,
     openRunViewer,
   } = useWorkflowStore();
-  const [inspectorStaticRuns, setInspectorStaticRuns] = useState<StaticWorkflowRunSnapshot[]>([]);
-  const [dynamicRuns, setDynamicRuns] = useState<DynamicRunSnapshot[]>([]);
+  const [runs, setRuns] = useState<UnifiedRunSnapshot[]>([]);
   const [selectedRunKey, setSelectedRunKey] = useState<string | null>(null);
-  const [selectedStaticRun, setSelectedStaticRun] = useState<StaticWorkflowRunSnapshot | null>(null);
+  const [selectedStaticRun, setSelectedStaticRun] = useState<UnifiedRunSnapshot | null>(null);
   const [selectedDynamicRun, setSelectedDynamicRun] = useState<DynamicRunSnapshot | null>(null);
   const [selectedRunArtifacts, setSelectedRunArtifacts] = useState<RunArtifact[]>([]);
   const [selectedRunLogs, setSelectedRunLogs] = useState<RunLogLine[]>([]);
-  const [staticEvents, setStaticEvents] = useState<StaticWorkflowRunEvent[]>([]);
+  const [staticEvents, setStaticEvents] = useState<UnifiedRunEvent[]>([]);
   const [dynamicEvents, setDynamicEvents] = useState<DynamicRunEvent[]>([]);
   const [lastAppliedFocusKey, setLastAppliedFocusKey] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
@@ -720,30 +690,39 @@ export default function RunsInspector({
   const [runActionLoading, setRunActionLoading] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreviewState | null>(null);
   const [promotingArtifactKey, setPromotingArtifactKey] = useState<string | null>(null);
+  const runsRequestRef = useRef<Promise<void> | null>(null);
+  const detailRequestRef = useRef<{
+    key: string;
+    version: number;
+    promise: Promise<void>;
+  } | null>(null);
+  const detailRequestVersionRef = useRef(0);
 
   const runItems = useMemo<RunItem[]>(() => {
-    const staticItems: RunItem[] = inspectorStaticRuns.map((run) => ({
-      kind: 'static',
-      id: run.run_id,
-      createdTime: run.created_time,
-      updatedTime: run.updated_time,
-      status: run.status,
-      run,
-    }));
-
-    const dynamicItems: RunItem[] = dynamicRuns.map((run) => ({
-      kind: 'dynamic',
-      id: run.run_id,
-      createdTime: run.created_time,
-      updatedTime: run.updated_time,
-      status: run.status,
-      run,
-    }));
-
-    return [...staticItems, ...dynamicItems].sort((a, b) => (
+    return runs.map((run): RunItem => {
+      if (run.kind === 'dynamic') {
+        const adapted = adaptDynamicRun(run);
+        return {
+          kind: 'dynamic',
+          id: run.run_id,
+          createdTime: run.created_time,
+          updatedTime: run.updated_time,
+          status: adapted.status,
+          run: adapted,
+        };
+      }
+      return {
+        kind: 'static',
+        id: run.run_id,
+        createdTime: run.created_time,
+        updatedTime: run.updated_time,
+        status: run.status,
+        run,
+      };
+    }).sort((a, b) => (
       (b.updatedTime || b.createdTime || 0) - (a.updatedTime || a.createdTime || 0)
     ));
-  }, [dynamicRuns, inspectorStaticRuns]);
+  }, [runs]);
 
   const filteredRunItems = useMemo(() => {
     const query = filterText.trim().toLowerCase();
@@ -784,110 +763,111 @@ export default function RunsInspector({
     [dynamicEvents, selectedDynamicRun],
   );
 
-  const loadRuns = useCallback(async (silent = false) => {
+  const loadRuns = useCallback((silent = false) => {
+    if (runsRequestRef.current) {
+      return runsRequestRef.current;
+    }
     if (!silent) {
       setLoading(true);
     }
 
-    try {
-      const result = await api.getStaticWorkflowRuns({
-        workspaceId: workspaceId || undefined,
-        workspaceDir: workspaceDir || undefined,
-        limit: 100,
-      });
-      setInspectorStaticRuns(result.runs || []);
-      setDynamicRuns([]);
-    } catch (error: any) {
-      console.error('Failed to load runs:', error);
-      if (!silent) {
-        message.error(error.response?.data?.error || 'Failed to load runs');
+    const request = (async () => {
+      try {
+        const result = await api.getRuns({ limit: 100, detail: false });
+        setRuns(result.runs || []);
+      } catch (error: any) {
+        console.error('Failed to load runs:', error);
+        if (!silent) {
+          message.error(error.response?.data?.error || 'Failed to load runs');
+        }
+      } finally {
+        runsRequestRef.current = null;
+        if (!silent) {
+          setLoading(false);
+        }
       }
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, [workspaceDir, workspaceId]);
-
-  const loadStaticRunDetails = useCallback(async (runId: string, silent = false) => {
-    if (!silent) {
-      setDetailsLoading(true);
-    }
-
-    try {
-      const [runResult, eventResult] = await Promise.all([
-        api.getStaticWorkflowRun(runId, workspaceDir || undefined, workspaceId || undefined),
-        api.getStaticWorkflowRunEvents(runId, workspaceDir || undefined, workspaceId || undefined),
-      ]);
-      const adaptedRun = runResult.run;
-      setSelectedStaticRun(adaptedRun);
-      setStaticEvents((eventResult.events || []) as StaticWorkflowRunEvent[]);
-      setSelectedRunArtifacts(collectStaticRunArtifacts(adaptedRun));
-      setSelectedRunLogs([]);
-      setSelectedDynamicRun(null);
-      setDynamicEvents([]);
-      upsertStaticRun(adaptedRun);
-      setStaticRunEvents(runId, (eventResult.events || []) as StaticWorkflowRunEvent[]);
-      openRunViewer(runId);
-    } catch (error: any) {
-      console.error('Failed to open workflow run:', error);
-      setSelectedRunArtifacts([]);
-      setSelectedRunLogs([]);
-      if (!silent) {
-        message.error(error.response?.data?.error || 'Failed to open workflow run');
-      }
-    } finally {
-      if (!silent) {
-        setDetailsLoading(false);
-      }
-    }
-  }, [openRunViewer, setStaticRunEvents, upsertStaticRun, workspaceDir, workspaceId]);
-
-  const loadDynamicRunDetails = useCallback(async (runId: string, silent = false) => {
-    if (!silent) {
-      setDetailsLoading(true);
-    }
-
-    try {
-      const [runResult, eventResult, artifacts, logResult] = await Promise.all([
-        api.getRun(runId),
-        api.getRunEvents(runId),
-        loadRunArtifacts(runId),
-        api.getRunLogs(runId, { tail: 500 }),
-      ]);
-      const adaptedRun = adaptDynamicRun(runResult.run);
-      setSelectedDynamicRun(adaptedRun);
-      setDynamicEvents((eventResult.events || []) as DynamicRunEvent[]);
-      setSelectedRunArtifacts(artifacts);
-      setSelectedRunLogs((logResult.lines || []) as RunLogLine[]);
-      setSelectedStaticRun(null);
-      setStaticEvents([]);
-      setDynamicRuns((current) => [
-        adaptedRun,
-        ...current.filter((run) => run.run_id !== adaptedRun.run_id),
-      ]);
-    } catch (error: any) {
-      console.error('Failed to open dynamic run:', error);
-      setSelectedRunArtifacts([]);
-      setSelectedRunLogs([]);
-      if (!silent) {
-        message.error(error.response?.data?.error || 'Failed to open dynamic run');
-      }
-    } finally {
-      if (!silent) {
-        setDetailsLoading(false);
-      }
-    }
+    })();
+    runsRequestRef.current = request;
+    return request;
   }, []);
+
+  const loadRunDetails = useCallback((
+    runId: string,
+    kind: RunItem['kind'],
+    silent = false,
+  ) => {
+    const key = `${kind}:${runId}`;
+    if (detailRequestRef.current?.key === key) {
+      return detailRequestRef.current.promise;
+    }
+    const version = ++detailRequestVersionRef.current;
+    if (!silent) {
+      setDetailsLoading(true);
+    }
+
+    const request = (async () => {
+      try {
+        const runResult = await api.getRun(runId);
+        const [eventResult, artifactResult, logResult] = await Promise.allSettled([
+          api.getRunEvents(runId),
+          api.getRunArtifacts(runId),
+          api.getRunLogs(runId, { tail: 500 }),
+        ]);
+        if (version !== detailRequestVersionRef.current) return;
+
+        const run = runResult.run;
+        const events = eventResult.status === 'fulfilled'
+          ? (eventResult.value.events || []) as UnifiedRunEvent[]
+          : [];
+        const artifacts = artifactResult.status === 'fulfilled'
+          ? (artifactResult.value.artifacts || []) as RunArtifact[]
+          : [];
+        const logs = logResult.status === 'fulfilled'
+          ? (logResult.value.lines || []) as RunLogLine[]
+          : [];
+        setRuns((current) => [run, ...current.filter((item) => item.run_id !== run.run_id)]);
+        setSelectedRunArtifacts(artifacts);
+        setSelectedRunLogs(logs);
+
+        if (kind === 'dynamic') {
+          setSelectedDynamicRun(adaptDynamicRun(run));
+          setDynamicEvents(events as DynamicRunEvent[]);
+          setSelectedStaticRun(null);
+          setStaticEvents([]);
+        } else {
+          setSelectedStaticRun(run);
+          setStaticEvents(events);
+          setSelectedDynamicRun(null);
+          setDynamicEvents([]);
+          upsertStaticRun(run);
+          setStaticRunEvents(runId, events);
+          openRunViewer(runId);
+        }
+      } catch (error: any) {
+        if (version !== detailRequestVersionRef.current) return;
+        console.error('Failed to open run:', error);
+        setSelectedRunArtifacts([]);
+        setSelectedRunLogs([]);
+        if (!silent) {
+          message.error(error.response?.data?.error || 'Failed to open run');
+        }
+      } finally {
+        if (detailRequestRef.current?.version === version) {
+          detailRequestRef.current = null;
+          if (!silent) {
+            setDetailsLoading(false);
+          }
+        }
+      }
+    })();
+    detailRequestRef.current = { key, version, promise: request };
+    return request;
+  }, [openRunViewer, setStaticRunEvents, upsertStaticRun]);
 
   const selectRun = useCallback((item: RunItem, silent = false) => {
     setSelectedRunKey(runKey(item));
-    if (item.kind === 'static') {
-      void loadStaticRunDetails(item.id, silent);
-    } else {
-      void loadDynamicRunDetails(item.id, silent);
-    }
-  }, [loadDynamicRunDetails, loadStaticRunDetails]);
+    void loadRunDetails(item.id, item.kind, silent);
+  }, [loadRunDetails]);
 
   const selectedIsLoaded = (item: RunItem) => (
     item.kind === 'static'
@@ -896,18 +876,12 @@ export default function RunsInspector({
   );
 
   const deleteSelectedRun = async () => {
-    if (!selectedItem) return;
+    if (!selectedItem || selectedItem.kind !== 'dynamic') return;
 
     try {
-      if (selectedItem.kind === 'static') {
-        await api.deleteStaticWorkflowRun(selectedItem.id, workspaceDir || undefined);
-        removeStaticRun(selectedItem.id);
-        message.success('Workflow run deleted');
-      } else {
-        await api.deleteDynamicRun(selectedItem.id);
-        setDynamicRuns((current) => current.filter((run) => run.run_id !== selectedItem.id));
-        message.success('Dynamic run deleted');
-      }
+      await api.deleteDynamicRun(selectedItem.id);
+      setRuns((current) => current.filter((run) => run.run_id !== selectedItem.id));
+      message.success('Dynamic run deleted');
 
       setSelectedRunKey(null);
       setSelectedStaticRun(null);
@@ -930,11 +904,7 @@ export default function RunsInspector({
       await api.cancelRun(selectedItem.id, 'Canceled from Maze Playground');
       message.success('Run canceled');
       await loadRuns(true);
-      if (selectedItem.kind === 'static') {
-        await loadStaticRunDetails(selectedItem.id, true);
-      } else {
-        await loadDynamicRunDetails(selectedItem.id, true);
-      }
+      await loadRunDetails(selectedItem.id, selectedItem.kind, true);
     } catch (error: any) {
       console.error('Failed to cancel run:', error);
       message.error(error.response?.data?.error || 'Failed to cancel run');
@@ -951,7 +921,7 @@ export default function RunsInspector({
       message.success('Run submitted');
       await loadRuns(true);
       setSelectedRunKey(`static:${result.runId}`);
-      await loadStaticRunDetails(result.runId, true);
+      await loadRunDetails(result.runId, 'static', true);
     } catch (error: any) {
       console.error('Failed to retry run:', error);
       message.error(error.response?.data?.error || 'Failed to retry run');
@@ -1018,7 +988,7 @@ export default function RunsInspector({
       message.success(`ReAct rerun started: ${result.runId.slice(0, 8)}...`);
       await loadRuns(true);
       setSelectedRunKey(`dynamic:${result.runId}`);
-      await loadDynamicRunDetails(result.runId, true);
+      await loadRunDetails(result.runId, 'dynamic', true);
     } catch (error: any) {
       console.error('Failed to rerun ReAct workflow:', error);
       message.error(error.response?.data?.error || 'Failed to rerun ReAct workflow');
@@ -1043,7 +1013,7 @@ export default function RunsInspector({
         reason: `playground ${action}`,
       });
       message.success(`Permission ${action === 'allow' ? 'allowed' : 'denied'}`);
-      await loadDynamicRunDetails(selectedDynamicRun.run_id, true);
+      await loadRunDetails(selectedDynamicRun.run_id, 'dynamic', true);
     } catch (error: any) {
       message.error(error.response?.data?.error || `Failed to ${action} permission request`);
     } finally {
@@ -1105,16 +1075,12 @@ export default function RunsInspector({
     }
 
     const timer = window.setInterval(() => {
-      if (selectedItem.kind === 'static') {
-        void loadStaticRunDetails(selectedItem.id, true);
-      } else {
-        void loadDynamicRunDetails(selectedItem.id, true);
-      }
+      void loadRunDetails(selectedItem.id, selectedItem.kind, true);
       void loadRuns(true);
     }, selectedItem.kind === 'static' ? 1200 : 1000);
 
     return () => window.clearInterval(timer);
-  }, [loadDynamicRunDetails, loadRuns, loadStaticRunDetails, open, selectedItem]);
+  }, [loadRunDetails, loadRuns, open, selectedItem]);
 
   const renderRunList = () => (
     <div style={{ minWidth: 0 }}>
@@ -1186,15 +1152,9 @@ export default function RunsInspector({
     if (artifact.sha256) {
       return api.getArtifactDownloadUrl(artifact.sha256);
     }
-
-    const taskId = artifact.task_id || artifact.producer_task_id;
-    if (selectedStaticRun && taskId && artifact.path) {
-      return api.getStaticRunArtifactDownloadUrl(
-        selectedStaticRun.run_id,
-        taskId,
-        artifact.path,
-        selectedStaticRun.workspace_dir || workspaceDir || undefined,
-      );
+    const uri = artifact.uri || artifact.storage_uri;
+    if (uri && /^https?:\/\//i.test(uri)) {
+      return uri;
     }
     return null;
   };
@@ -1431,7 +1391,7 @@ export default function RunsInspector({
     skills = [],
   }: {
     title: string;
-    run?: StaticWorkflowRunSnapshot | DynamicRunSnapshot | null;
+    run?: UnifiedRunSnapshot | DynamicRunSnapshot | null;
     nodes: any[];
     events?: DynamicRunEvent[];
     skills?: Array<WorkspaceSkillMeta & { source?: string }>;
@@ -1587,7 +1547,7 @@ export default function RunsInspector({
           <Space>
             <Button
               icon={<ReloadOutlined />}
-              onClick={() => loadStaticRunDetails(selectedStaticRun.run_id)}
+              onClick={() => loadRunDetails(selectedStaticRun.run_id, 'static')}
               loading={detailsLoading}
             >
               Refresh
@@ -1617,21 +1577,6 @@ export default function RunsInspector({
                 Retry
               </Button>
             )}
-            <Popconfirm
-              title="Delete this workflow run?"
-              disabled={!staticTerminalStatuses.has(selectedStaticRun.status)}
-              onConfirm={deleteSelectedRun}
-              okText="Delete"
-              okButtonProps={{ danger: true }}
-            >
-              <Button
-                danger
-                icon={<DeleteOutlined />}
-                disabled={!staticTerminalStatuses.has(selectedStaticRun.status)}
-              >
-                Delete
-              </Button>
-            </Popconfirm>
           </Space>
         </Space>
 
@@ -1696,7 +1641,7 @@ export default function RunsInspector({
                     <Space direction="vertical" size={2} style={{ width: '100%' }}>
                       <Space wrap>
                         <Text strong>{node.label || node.task_name || node.node_id}</Text>
-                        <Tag color={staticStatusColors[node.status as StaticWorkflowRunStatus] || 'default'}>{node.status}</Tag>
+                        <Tag color={staticStatusColors[node.status] || 'default'}>{node.status}</Tag>
                         {node.category && <Tag>{node.category}</Tag>}
                         {node.maze_task_id && <Tag>{shortId(node.maze_task_id)}</Tag>}
                         {node.node_ip && <Tag color="geekblue">{node.node_ip}</Tag>}
@@ -1823,7 +1768,7 @@ export default function RunsInspector({
           <Space>
             <Button
               icon={<ReloadOutlined />}
-              onClick={() => loadDynamicRunDetails(selectedDynamicRun.run_id)}
+              onClick={() => loadRunDetails(selectedDynamicRun.run_id, 'dynamic')}
               loading={detailsLoading}
             >
               Refresh
