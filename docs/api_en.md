@@ -1152,7 +1152,7 @@ Response includes `workflow` and `importedTaskDefinitions`. The endpoint imports
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/builtin-tasks` | List built-in tasks such as Write File, Read File, and Exec Code. |
+| GET | `/api/system-catalog?type=tasks` | List canonical built-in task sources. |
 | GET | `/api/workspace-tasks` | List Python tasks under `workspace/tasks/`. |
 | POST | `/api/workspace-tasks` | Create or overwrite one workspace task source file. |
 | DELETE | `/api/workspace-tasks` | Delete one workspace task. |
@@ -1242,9 +1242,6 @@ Example:
 | GET | `/api/workflow-runs/static/:runId` | Static run detail. |
 | GET | `/api/workflow-runs/static/:runId/events` | Static run events. |
 | GET | `/api/workflow-runs/static/:runId/artifacts/download` | Open inline or download one static run artifact. |
-| DELETE | `/api/workflow-runs/static/:runId` | Delete a static run. |
-| POST | `/api/workflow-runs/static/cleanup` | Bulk cleanup static runs. |
-| POST | `/api/workflow-runs/static/migrate` | Migrate legacy static run records. |
 
 Static run artifact download query parameters:
 
@@ -1262,11 +1259,7 @@ Static run artifact download query parameters:
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/parse-custom-function` | Parse uploaded/pasted Python source and extract `@task` metadata. |
-| POST | `/api/workflows` | Create an editor workflow draft. |
-| GET | `/api/workflows/:id` | Read a draft. |
-| PUT | `/api/workflows/:id` | Update a draft. |
-| POST | `/api/workflows/:id/run` | Compile an editor draft into a Maze workflow and execute it. |
-| GET | `/api/workflows/:id/results` | Fetch execution results. |
+| POST | `/api/workflows/:id/run` | Compile the workflow supplied in the request and submit it to Maze Core. Returns the Core `run_id`. |
 
 ### 4.8 Health
 

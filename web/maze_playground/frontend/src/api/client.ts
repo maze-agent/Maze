@@ -19,8 +19,6 @@ import type {
   WorkerProfileActionResponse,
   WorkerProfileDraftTestResponse,
   WorkerProfilesResponse,
-  StaticWorkflowRunEvent,
-  StaticWorkflowRunSnapshot,
   RunLogLine,
   UnifiedRunEvent,
   UnifiedRunSnapshot,
@@ -517,31 +515,6 @@ export const api = {
     return response.data;
   },
 
-  // Create workflow
-  async createWorkflow(name?: string): Promise<{
-    workflowId: string;
-    name: string;
-    mazeWorkflowId: string;
-  }> {
-    const response = await axios.post(`${API_BASE}/workflows`, { name });
-    return response.data;
-  },
-
-  // Get workflow details
-  async getWorkflow(workflowId: string): Promise<Workflow> {
-    const response = await axios.get(`${API_BASE}/workflows/${workflowId}`);
-    return response.data;
-  },
-
-  // Save workflow (nodes and edges)
-  async saveWorkflow(workflowId: string, data: {
-    name?: string;
-    nodes: WorkflowNode[];
-    edges: any[];
-  }): Promise<void> {
-    await axios.put(`${API_BASE}/workflows/${workflowId}`, data);
-  },
-
   // Run workflow
   async runWorkflow(workflowId: string, data: {
     workflow: {
@@ -569,16 +542,6 @@ export const api = {
       workspaceId: response.data.workspaceId,
       workspaceDir: response.data.workspaceDir,
     };
-  },
-
-  // Get workflow results
-  async getWorkflowResults(workflowId: string): Promise<{
-    status: string;
-    results: any;
-    error?: string;
-  }> {
-    const response = await axios.get(`${API_BASE}/workflows/${workflowId}/results`);
-    return response.data;
   },
 
   async getDynamicRuns(params?: {
@@ -630,18 +593,6 @@ export const api = {
     return response.data;
   },
 
-  async cleanupStaticWorkflowRuns(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    statuses?: string[];
-    older_than_days?: number | null;
-    keep_latest?: number;
-    dry_run?: boolean;
-  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; cleanup: any }> {
-    const response = await axios.post(`${API_BASE}/workflow-runs/static/cleanup`, data);
-    return response.data;
-  },
-
   async cleanupArtifacts(data: {
     workspaceId?: string;
     workspaceDir?: string;
@@ -649,15 +600,6 @@ export const api = {
     dry_run?: boolean;
   }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; cleanup: any }> {
     const response = await axios.post(`${API_BASE}/artifacts/cleanup`, data);
-    return response.data;
-  },
-
-  async migrateStaticWorkflowRuns(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    dry_run?: boolean;
-  }): Promise<{ success: boolean; workspaceId?: string; workspaceDir: string; migration: any }> {
-    const response = await axios.post(`${API_BASE}/workflow-runs/static/migrate`, data);
     return response.data;
   },
 
@@ -1305,155 +1247,4 @@ export const api = {
     return response.data;
   },
 
-  async getStaticWorkflowRuns(params?: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    status?: string;
-    limit?: number;
-  }): Promise<{ success: boolean; workspaceDir: string; runs: StaticWorkflowRunSnapshot[] }> {
-    const response = await axios.get(`${API_BASE}/workflow-runs/static`, { params });
-    return response.data;
-  },
-
-  async getStaticWorkflowRun(
-    runId: string,
-    workspaceDir?: string,
-    workspaceId?: string,
-  ): Promise<{ success: boolean; workspaceDir: string; run: StaticWorkflowRunSnapshot }> {
-    const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
-      params: {
-        ...(workspaceDir ? { workspaceDir } : {}),
-        ...(workspaceId ? { workspaceId } : {}),
-      },
-    });
-    return response.data;
-  },
-
-  async getStaticWorkflowRunEvents(
-    runId: string,
-    workspaceDir?: string,
-    workspaceId?: string,
-    after?: number,
-  ): Promise<{ success: boolean; workspaceDir: string; runId: string; events: StaticWorkflowRunEvent[] }> {
-    const response = await axios.get(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}/events`, {
-      params: {
-        ...(workspaceDir ? { workspaceDir } : {}),
-        ...(workspaceId ? { workspaceId } : {}),
-        ...(after !== undefined ? { after } : {}),
-      },
-    });
-    return response.data;
-  },
-
-  async deleteStaticWorkflowRun(
-    runId: string,
-    workspaceDir?: string,
-    workspaceId?: string,
-  ): Promise<{ success: boolean; workspaceDir: string; runId: string; deleted: boolean }> {
-    const response = await axios.delete(`${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}`, {
-      data: {
-        ...(workspaceDir ? { workspaceDir } : {}),
-        ...(workspaceId ? { workspaceId } : {}),
-      },
-    });
-    return response.data;
-  },
-
-  getStaticRunArtifactDownloadUrl(
-    runId: string,
-    taskId: string,
-    path: string,
-    workspaceDir?: string,
-  ): string {
-    const params = new URLSearchParams({
-      taskId,
-      path,
-      ...(workspaceDir ? { workspaceDir } : {}),
-    });
-    return `${API_BASE}/workflow-runs/static/${encodeURIComponent(runId)}/artifacts/download?${params.toString()}`;
-  },
-
-  // Connect WebSocket for real-time results
-  connectWebSocket(
-    workflowId: string,
-    callbacks: {
-      onConnected?: () => void;
-      onMessage?: (data: any) => void;
-      onWorkflowStarted?: () => void;
-      onBuilding?: (message: string) => void;
-      onWorkflowCompleted?: (results: any) => void;
-      onWorkflowFailed?: (error: string, traceback?: string) => void;
-      onTaskUpdate?: (event: any) => void;
-      onRunUpdate?: (payload: any) => void;
-      onError?: (error: Event, websocket: WebSocket) => void;
-      onClose?: (event: CloseEvent) => void;
-    }
-  ): WebSocket {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/workflows/${encodeURIComponent(workflowId)}/results`;
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      callbacks.onConnected?.();
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-
-        callbacks.onMessage?.(data);
-
-        switch (data.type) {
-          case 'connected':
-            break;
-
-          case 'workflow_started':
-            callbacks.onWorkflowStarted?.();
-            break;
-
-          case 'building':
-            callbacks.onBuilding?.(data.message);
-            break;
-
-          case 'workflow_completed':
-            callbacks.onWorkflowCompleted?.(data.results);
-            break;
-
-          case 'workflow_failed':
-            callbacks.onWorkflowFailed?.(data.error, data.traceback);
-            break;
-
-          case 'task_update':
-            callbacks.onTaskUpdate?.(data.event);
-            break;
-
-          case 'run_update':
-            callbacks.onRunUpdate?.(data);
-            if (data.event) {
-              callbacks.onTaskUpdate?.(data.event);
-            }
-            break;
-
-          case 'workflow_running':
-            break;
-
-          default:
-            break;
-        }
-      } catch (error) {
-        console.error('Failed to parse WebSocket message:', error);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      callbacks.onError?.(error, ws);
-    };
-
-    ws.onclose = (event) => {
-      callbacks.onClose?.(event);
-    };
-
-    return ws;
-  },
 };

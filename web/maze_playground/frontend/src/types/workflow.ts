@@ -620,27 +620,6 @@ export interface RunResult {
   timestamp: string;
 }
 
-export type StaticWorkflowRunStatus =
-  | 'created'
-  | 'queued'
-  | 'running'
-  | 'completed'
-  | 'succeeded'
-  | 'failed'
-  | 'canceled'
-  | 'cancelled'
-  | 'timed_out'
-  | 'interrupted';
-
-/** @deprecated Use UnifiedRunTaskSnapshot. */
-export type StaticWorkflowRunNode = UnifiedRunTaskSnapshot;
-
-/** @deprecated Use UnifiedRunSnapshot. */
-export type StaticWorkflowRunSnapshot = UnifiedRunSnapshot;
-
-/** @deprecated Use UnifiedRunEvent. */
-export type StaticWorkflowRunEvent = UnifiedRunEvent;
-
 export type UnifiedRunStatus =
   | 'created'
   | 'queued'

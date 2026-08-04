@@ -8,7 +8,6 @@ import cloudpickle
 import pytest
 
 from maze import get_task_metadata
-from maze.client.front.builtin import agentTools, distributedSmoke
 
 
 CATALOG_TASKS_DIR = Path(__file__).resolve().parents[1] / "system_catalog" / "tasks"
@@ -28,37 +27,42 @@ def _load_serialized_task(task_func):
 
 
 @pytest.mark.parametrize(
-    ("file_name", "function_name", "legacy_func"),
+    ("file_name", "function_name"),
     [
-        ("agent_tools_write_file.py", "write_file", agentTools.write_file),
-        ("agent_tools_read_file.py", "read_file", agentTools.read_file),
-        ("agent_tools_exec_code.py", "exec_code", agentTools.exec_code),
-        (
-            "distributed_gpu_probe.py",
-            "distributed_gpu_probe",
-            distributedSmoke.distributed_gpu_probe,
-        ),
+        ("agent_tools_write_file.py", "write_file"),
+        ("agent_tools_read_file.py", "read_file"),
+        ("agent_tools_exec_code.py", "exec_code"),
+        ("distributed_gpu_probe.py", "distributed_gpu_probe"),
     ],
 )
-def test_catalog_builtin_metadata_matches_legacy(file_name, function_name, legacy_func):
+def test_catalog_builtin_metadata_matches_parser(file_name, function_name):
+    from web.maze_playground.backend import maze_bridge
+
+    source = (CATALOG_TASKS_DIR / file_name).read_text(encoding="utf-8")
     module, task_func = _load_catalog_task(file_name, function_name)
     metadata = get_task_metadata(task_func)
-    legacy = get_task_metadata(legacy_func)
+    parsed = maze_bridge.parse_custom_function(source)
 
     decorated = [
         value for value in vars(module).values() if hasattr(value, "_maze_task_metadata")
     ]
     assert decorated == [task_func]
-    assert (CATALOG_TASKS_DIR / file_name).read_text(encoding="utf-8").startswith(
-        "from maze import task"
-    )
+    assert source.startswith("from maze import task")
     assert metadata.code_str.lstrip().startswith(f"def {function_name}")
     assert metadata.code_ser
-    assert metadata.inputs == legacy.inputs
-    assert metadata.outputs == legacy.outputs
-    assert metadata.data_types == legacy.data_types
-    assert metadata.resources == legacy.resources
-    assert metadata.task_kind == legacy.task_kind
+    assert parsed["functionName"] == function_name
+    assert parsed["inputs"] == [
+        {"name": name, "dataType": metadata.data_types.get(name, "str")}
+        for name in metadata.inputs
+    ]
+    assert parsed["outputs"] == [
+        {"name": name, "dataType": metadata.data_types.get(name, "str")}
+        for name in metadata.outputs
+    ]
+    assert parsed["resources"] == metadata.resources
+    assert parsed["taskKind"] == metadata.task_kind
+    assert parsed["codeStr"].lstrip().startswith(f"def {function_name}")
+    assert parsed["codeSer"]
 
 
 def test_custom_parser_returns_decorator_entrypoint_metadata():

@@ -2788,31 +2788,6 @@ def test_playground_backend_persists_public_gaia_trace_before_submission(
         assert [event["seq"] for event in recovered_events] == [1, 2, 3]
         assert sum(event["type"] == "maze_run_created" for event in recovered_events) == 1
 
-        status_code, cleanup_preview = request_json(
-            "/api/workflow-runs/static/cleanup",
-            method="POST",
-            payload={
-                "workspaceId": "gaia-validation",
-                "statuses": ["completed", "failed", "canceled", "timed_out"],
-                "older_than_days": None,
-                "dry_run": True,
-            },
-        )
-        assert status_code == 200
-        cleanup_text = json.dumps(cleanup_preview)
-        assert "workspaceDir" not in cleanup_preview
-        assert "gaia_private" not in cleanup_text
-        assert not any(run_id in cleanup_text for run_id in core_runs)
-
-        status_code, deleted_trace = request_json(
-            f"/api/workflow-runs/static/{terminal_race_submit['playgroundRunId']}"
-            "?workspaceId=gaia-validation",
-            method="DELETE",
-        )
-        assert status_code == 200
-        assert deleted_trace["deleted"] is True
-        assert "workspaceDir" not in deleted_trace
-        assert terminal_race_submit["mazeRunId"] not in json.dumps(deleted_trace)
     finally:
         release_hanging_artifacts.set()
         stop_playground_backend()

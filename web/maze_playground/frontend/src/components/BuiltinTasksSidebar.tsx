@@ -14,7 +14,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
-import { useWorkflowStore, type WorkflowOperationToken } from '@/stores/workflowStore';
+import { createLocalWorkflowId, useWorkflowStore, type WorkflowOperationToken } from '@/stores/workflowStore';
 import type {
   BuiltinTaskMeta,
   ModelTestResponse,
@@ -793,14 +793,8 @@ export default function BuiltinTasksSidebar({
         workspaceDir: dir,
         relativePath: WORKFLOW_DRAFT_PATH,
       });
-      const created = await api.createWorkflow(loaded.workflow.name);
-      await api.saveWorkflow(created.workflowId, {
-        name: loaded.workflow.name,
-        nodes: loaded.workflow.nodes,
-        edges: loaded.workflow.edges,
-      });
 
-      setWorkflowId(created.workflowId);
+      setWorkflowId(createLocalWorkflowId());
       setWorkflowName(loaded.workflow.name);
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);
@@ -1367,12 +1361,9 @@ export default function BuiltinTasksSidebar({
     setSavingWorkflow(true);
     try {
       const activeWorkspace = workspaceInput.trim() || workspaceDir || (await loadWorkspaceTasks()).workspaceDir;
-      let activeWorkflowId = workflowId;
-
-      if (!activeWorkflowId) {
-        const created = await api.createWorkflow(workflowName);
-        activeWorkflowId = created.workflowId;
-        setWorkflowId(created.workflowId);
+      const activeWorkflowId = workflowId || createLocalWorkflowId();
+      if (!workflowId) {
+        setWorkflowId(activeWorkflowId);
       }
 
       const saved = await api.saveWorkspaceWorkflow({
@@ -1383,12 +1374,6 @@ export default function BuiltinTasksSidebar({
         workflowId: activeWorkflowId,
         nodes,
         edges,
-      });
-
-      await api.saveWorkflow(activeWorkflowId, {
-        name: workflowName,
-        nodes: saved.workflow.nodes,
-        edges: saved.workflow.edges,
       });
 
       setWorkspaceContext(saved);
@@ -1433,15 +1418,8 @@ export default function BuiltinTasksSidebar({
         workspaceDir: activeWorkspace,
         relativePath: item.relativePath,
       });
-      const created = await api.createWorkflow(loaded.workflow.name);
 
-      await api.saveWorkflow(created.workflowId, {
-        name: loaded.workflow.name,
-        nodes: loaded.workflow.nodes,
-        edges: loaded.workflow.edges,
-      });
-
-      setWorkflowId(created.workflowId);
+      setWorkflowId(createLocalWorkflowId());
       setWorkflowName(loaded.workflow.name);
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);
@@ -1498,15 +1476,8 @@ export default function BuiltinTasksSidebar({
         workspaceDir: activeWorkspace,
         sourceId: item.id,
       });
-      const created = await api.createWorkflow(loaded.workflow.name);
 
-      await api.saveWorkflow(created.workflowId, {
-        name: loaded.workflow.name,
-        nodes: loaded.workflow.nodes,
-        edges: loaded.workflow.edges,
-      });
-
-      setWorkflowId(created.workflowId);
+      setWorkflowId(createLocalWorkflowId());
       setWorkflowName(loaded.workflow.name);
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);

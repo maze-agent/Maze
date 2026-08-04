@@ -1175,7 +1175,7 @@ maze stop [--log-level INFO] [--log-file ...]
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/builtin-tasks` | 列出内置任务（`Write File` / `Read File` / `Exec Code` 等） |
+| GET | `/api/system-catalog?type=tasks` | 列出 canonical 内置任务源码 |
 | GET | `/api/workspace-tasks` | 列出 `workspace/tasks/` 下用户任务 |
 | POST | `/api/workspace-tasks` | 保存（新增/覆盖）一个 workspace task 的 Python 源码 |
 | DELETE | `/api/workspace-tasks` | 删除一个 workspace task |
@@ -1264,9 +1264,6 @@ maze stop [--log-level INFO] [--log-file ...]
 | GET | `/api/workflow-runs/static/:runId` | 静态 run 详情 |
 | GET | `/api/workflow-runs/static/:runId/events` | 事件列表 |
 | GET | `/api/workflow-runs/static/:runId/artifacts/download` | 下载或内联打开某个静态 run artifact |
-| DELETE | `/api/workflow-runs/static/:runId` | 删除 |
-| POST | `/api/workflow-runs/static/cleanup` | 批量清理 |
-| POST | `/api/workflow-runs/static/migrate` | 迁移旧静态 run 记录 |
 
 静态 run artifact 下载参数：
 
@@ -1284,11 +1281,7 @@ maze stop [--log-level INFO] [--log-file ...]
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/parse-custom-function` | 解析用户上传/粘贴的 Python 源码，抽取 `@task` 元数据 |
-| POST | `/api/workflows` | 创建画布上的 workflow 草稿 |
-| GET | `/api/workflows/:id` | 读取草稿 |
-| PUT | `/api/workflows/:id` | 更新草稿 |
-| POST | `/api/workflows/:id/run` | 把画布草稿编译成 Maze workflow 并执行 |
-| GET | `/api/workflows/:id/results` | 拉取执行结果 |
+| POST | `/api/workflows/:id/run` | 编译请求中携带的 workflow 并提交 Maze Core，返回 Core `run_id` |
 
 ---
 

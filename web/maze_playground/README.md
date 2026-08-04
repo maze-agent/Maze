@@ -1,81 +1,57 @@
-# Maze Workflow Playground V2
+# Maze Playground
 
-基于 React + Node.js 的现代化工作流设计器
+Maze Playground 是 Maze 的 React 工作流编辑器。工作流 JSON 保存在 workspace，执行时由 Node 后端编译为 `maze.workflow/v1`，提交给 Maze Core。
 
-## 🏗️ 技术栈
+## 架构
 
-### Frontend
-- React 18 + Vite
-- ReactFlow - 工作流可视化
-- Ant Design - UI组件库
-- Zustand - 状态管理
-- Monaco Editor - 代码编辑器
-
-### Backend
-- Express.js - Node.js服务器
-- Python Maze Client - 工作流引擎
-
-## 📂 项目结构
-
-```
-v2/
-├── frontend/          # React前端
-│   ├── src/
-│   │   ├── components/
-│   │   ├── stores/
-│   │   ├── api/
-│   │   ├── types/
-│   │   └── App.tsx
-│   ├── package.json
-│   └── vite.config.ts
-├── backend/           # Node.js后端
-│   ├── src/
-│   │   ├── routes/
-│   │   ├── services/
-│   │   └── server.js
-│   ├── maze_bridge.py
-│   └── package.json
-└── README.md
+```text
+React/Vite
+    | workspace、catalog、agent API
+Express backend
+    | POST /workflows/submit；代理 /runs、events、logs、artifacts
+Maze Core
 ```
 
-## 🚀 快速开始
+普通静态工作流只使用 Core `run_id`。Node 不执行第二份 Python 工作流，也不保存运行结果镜像。`maze_bridge.py` 只承载任务解析、workspace 工具、ReAct、MCP 和 GAIA 私有流程。
 
-### 安装依赖
+## 启动
+
+从仓库根目录启动完整服务：
 
 ```bash
-# 安装前端依赖
-cd frontend
-npm install
-
-# 安装后端依赖
-cd ../backend
-npm install
+conda activate maze
+maze start --head --port 8000 --playground
 ```
 
-### 启动开发服务器
+默认地址：
+
+- Maze Core: `http://localhost:8000`
+- Playground backend: `http://localhost:3001`
+- Playground frontend: `http://localhost:5173`
+
+也可以分别运行：
 
 ```bash
-# 终端1: 启动Maze服务器
-cd E:\PythonProject\Maze
-uvicorn maze.core.server:app --port 8000
-
-# 终端2: 启动后端
-cd web/maze_playground/v2/backend
+cd web/maze_playground/backend
+npm install
 npm run dev
 
-# 终端3: 启动前端
-cd web/maze_playground/v2/frontend
+cd ../frontend
+npm install
 npm run dev
 ```
 
-访问: http://localhost:5173
+## 所有权
 
-## 🎯 核心功能
+- workspace workflow 文件是编辑事实源。
+- `system_catalog/tasks` 是内置任务事实源。
+- Maze Core 是 Run、事件、日志和 artifact 事实源。
+- GAIA 私有 trace 与旧 Playground JSON 只用于受控映射和历史只读访问。
 
-- ✅ 可视化工作流设计器
-- ✅ 内置Task/Tool节点
-- ✅ 自定义函数解析
-- ✅ 智能参数配置（支持任务输出引用）
-- ✅ 实时运行结果
-- ✅ 代码编辑器
+## 验证
 
+```bash
+conda run -n maze node --test web/maze_playground/backend/test/workflow_dag_spec.test.js
+conda run -n maze pytest -q tests/test_dag_submit_contract.py tests/test_playground_task_metadata.py
+cd web/maze_playground/frontend && conda run -n maze npm run build
+```

@@ -11,7 +11,7 @@ import RunsInspector from './components/RunsInspector';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import WorkbenchShell from './components/WorkbenchShell';
 import { api } from './api/client';
-import { useWorkflowStore } from './stores/workflowStore';
+import { createLocalWorkflowId, useWorkflowStore } from './stores/workflowStore';
 
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
 const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
@@ -101,19 +101,12 @@ function App() {
             relativePath: WORKFLOW_DRAFT_PATH,
           });
           if (canceled) return;
-          const created = await api.createWorkflow(draft.workflow.name);
-          if (canceled) return;
-          await api.saveWorkflow(created.workflowId, {
-            name: draft.workflow.name,
-            nodes: draft.workflow.nodes,
-            edges: draft.workflow.edges,
-          });
           latestWorkflowFingerprintRef.current = workflowDraftFingerprint(
             draft.workflow.name,
             draft.workflow.nodes,
             draft.workflow.edges,
           );
-          setWorkflowId(created.workflowId);
+          setWorkflowId(createLocalWorkflowId());
           setWorkflowName(draft.workflow.name);
           setNodes(draft.workflow.nodes);
           setEdges(draft.workflow.edges);
@@ -193,12 +186,16 @@ function App() {
       });
 
       try {
+        const activeWorkflowId = workflowId || createLocalWorkflowId();
+        if (!workflowId) {
+          setWorkflowId(activeWorkflowId);
+        }
         const saved = await api.saveWorkspaceWorkflow({
           workspaceId: workspaceId || undefined,
           workspaceDir,
           relativePath: WORKFLOW_DRAFT_PATH,
           name: workflowName,
-          workflowId,
+          workflowId: activeWorkflowId,
           nodes,
           edges,
         });
@@ -232,6 +229,7 @@ function App() {
     acquireWorkflowOperation,
     nodes,
     releaseWorkflowOperation,
+    setWorkflowId,
     setWorkflowSaveState,
     setWorkspaceContext,
     workflowFingerprint,
@@ -264,12 +262,9 @@ function App() {
 
     try {
       const activeWorkspace = workspaceDir || (await api.getWorkspaceWorkflows()).workspaceDir;
-      let activeWorkflowId = workflowId;
-
-      if (!activeWorkflowId) {
-        const created = await api.createWorkflow(workflowName);
-        activeWorkflowId = created.workflowId;
-        setWorkflowId(created.workflowId);
+      const activeWorkflowId = workflowId || createLocalWorkflowId();
+      if (!workflowId) {
+        setWorkflowId(activeWorkflowId);
       }
 
       const saved = await api.saveWorkspaceWorkflow({
@@ -279,12 +274,6 @@ function App() {
         workflowId: activeWorkflowId,
         nodes,
         edges,
-      });
-
-      await api.saveWorkflow(activeWorkflowId, {
-        name: workflowName,
-        nodes: saved.workflow.nodes,
-        edges: saved.workflow.edges,
       });
 
       const refreshed = await api.getWorkspaceWorkflows(saved.workspaceDir);

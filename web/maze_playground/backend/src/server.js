@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import { WebSocketServer } from 'ws';
 import { spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
@@ -17,15 +16,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// 存储工作流状态
-const workflows = new Map();
-// 存储 WebSocket 连接
-const wsConnections = new Map(); // workflowId -> Set<WebSocket>
 const activeReactRunProcesses = new Map();
 const activeAgentRuns = new Map();
 const agentRunSseClients = new Map();
@@ -3459,7 +3453,6 @@ async function saveAgentWorkflowDraft(context, draftId, options = {}) {
     workspaceId: context.workspaceId,
     relativePath,
   };
-  workflows.set(workflowId, workflow);
 
   draft.saved = {
     workflowId,
@@ -6311,16 +6304,13 @@ async function requirePublicCoreRunId(runId) {
 
 // ========== Python 桥接函数 ==========
 
-function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
+function callPython(action, params = {}) {
   return new Promise((resolve, reject) => {
     const bridgePath = path.join(__dirname, '../maze_bridge.py');
-    const progressPromises = [];
 
-    // 设置 Python 环境变量，强制使用 UTF-8 编码
     const python = spawn(PYTHON_BIN, [bridgePath, action, JSON.stringify(params)], {
       env: {
         ...process.env,
-        ...extraEnv,
         MAZE_WORKSPACE_ROOT_DIR: WORKSPACE_ROOT_DIR,
         MAZE_WORKSPACES_DIR: WORKSPACES_DIR,
         MAZE_DEFAULT_WORKSPACE_DIR: DEFAULT_WORKSPACE_DIR,
@@ -6332,45 +6322,21 @@ function callPython(action, params = {}, onProgress = null, extraEnv = {}) {
 
     let output = '';
     let error = '';
-    let stderrLineBuffer = '';
 
-    // 设置 stdout 编码为 utf8
     python.stdout.setEncoding('utf8');
     python.stdout.on('data', (data) => {
       output += data;
     });
 
-    // 设置 stderr 编码为 utf8
     python.stderr.setEncoding('utf8');
     python.stderr.on('data', (data) => {
       error += data;
-      stderrLineBuffer += data;
-      const lines = stderrLineBuffer.split(/\r?\n/);
-      stderrLineBuffer = lines.pop() || '';
-
-      lines.forEach((line) => {
-        if (line.startsWith('__MAZE_PROGRESS__')) {
-          const raw = line.slice('__MAZE_PROGRESS__'.length);
-          try {
-            const progress = JSON.parse(raw);
-            if (onProgress) {
-              progressPromises.push(Promise.resolve(onProgress(progress)));
-            }
-          } catch (e) {
-            console.error('解析进度消息失败:', raw);
-          }
-        } else if (line.trim()) {
-          console.error('Python stderr:', line);
-        }
-      });
     });
 
-    python.on('close', async (code) => {
+    python.on('close', (code) => {
       if (code === 0) {
         try {
-          if (progressPromises.length > 0) {
-            await Promise.allSettled(progressPromises);
-          }
+          if (error.trim()) console.error('Python stderr:', error.trim());
           const result = JSON.parse(output);
           resolve(result);
         } catch (e) {
@@ -6846,41 +6812,6 @@ function mcpApiErrorStatus(error) {
   return 500;
 }
 
-// ========== WebSocket 辅助函数 ==========
-
-function broadcastToWorkflow(workflowId, message) {
-  const connections = wsConnections.get(workflowId);
-  console.log(`[WebSocket] 尝试广播到工作流 ${workflowId}, 连接数: ${connections ? connections.size : 0}`);
-
-  if (connections) {
-    const data = JSON.stringify(message);
-    let sentCount = 0;
-    connections.forEach((ws) => {
-      console.log(`  WebSocket 状态: ${ws.readyState} (1=OPEN)`);
-      if (ws.readyState === 1) { // OPEN
-        ws.send(data);
-        sentCount++;
-      }
-    });
-    console.log(`  ✅ 已发送给 ${sentCount} 个客户端`);
-  } else {
-    console.log(`  ⚠️  没有找到工作流的 WebSocket 连接`);
-  }
-}
-
-async function recordAndBroadcastStaticRun(workflow, workspaceDir, runId, event) {
-  const { snapshot, event: storedEvent } = await appendAndApplyStaticRunEvent(workspaceDir, runId, event);
-  broadcastToWorkflow(workflow.id, {
-    type: 'run_update',
-    workflowId: workflow.id,
-    runId,
-    run: snapshot,
-    event: storedEvent,
-    timestamp: storedEvent.timestamp,
-  });
-  return { snapshot, event: storedEvent };
-}
-
 function catalogTypeDir(type) {
   const normalized = String(type || '').trim().toLowerCase();
   if (!['workflows', 'tasks', 'skills'].includes(normalized)) {
@@ -7231,25 +7162,6 @@ app.put('/api/workspace-policy', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 更新 workspace policy 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 1. 获取内置任务列表
-app.get('/api/builtin-tasks', async (req, res) => {
-  try {
-    console.log('📋 获取内置任务列表...');
-    const result = await callPython('get_builtin_tasks');
-
-    if (result.error) {
-      console.error('❌ 获取内置任务失败:', result.error);
-      return res.status(500).json({ error: result.error });
-    }
-
-    console.log(`✅ 成功获取 ${result.tasks.length} 个内置任务`);
-    res.json(result.tasks || []);
-  } catch (error) {
-    console.error('❌ 获取内置任务失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -9988,117 +9900,6 @@ app.get('/api/workflow-runs/static/:runId/artifacts/download', async (req, res) 
   }
 });
 
-app.delete('/api/workflow-runs/static/:runId', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext({
-      workspaceId: req.body?.workspaceId || req.query.workspaceId,
-      workspaceDir: req.body?.workspaceDir || req.query.workspaceDir,
-    });
-    const workspaceDir = context.workspaceDir;
-    const run = await loadStaticRun(workspaceDir, req.params.runId);
-    if (!TERMINAL_STATIC_RUN_STATUSES.has(run.status)) {
-      return res.status(400).json({ error: 'Only terminal workflow runs can be deleted' });
-    }
-    await fs.rm(staticRunDir(workspaceDir, req.params.runId), { recursive: true, force: true });
-    res.json({
-      success: true,
-      ...publicStaticRunWorkspaceFields(context, run),
-      runId: req.params.runId,
-      deleted: true,
-    });
-  } catch (error) {
-    const status = statusForFileError(error);
-    if (status === 404) {
-      console.warn(`⚠️ static workflow run not found for delete: ${req.params.runId}`);
-    } else {
-      console.error('❌ 删除 static workflow run 失败:', error);
-    }
-    res.status(status).json({ error: error.message });
-  }
-});
-
-app.post('/api/workflow-runs/static/cleanup', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      statuses = ['completed', 'failed', 'canceled', 'timed_out', 'interrupted'],
-      older_than_days: olderThanDays = 7,
-      keep_latest: keepLatestRaw,
-      keepLatest,
-      dry_run: dryRun = true,
-    } = req.body || {};
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const statusSet = new Set(statuses);
-    const cutoff = olderThanDays === null || olderThanDays === undefined
-      ? null
-      : nowEpochSeconds() - Number(olderThanDays) * 86400;
-    let runs = (await listStaticRunFilesForWorkspace(workspaceDir)).filter((run) => (
-      statusSet.has(run.status)
-      && TERMINAL_STATIC_RUN_STATUSES.has(run.status)
-      && (cutoff === null || Number(run.finished_time || run.updated_time || 0) <= cutoff)
-    ));
-    const keepLatestCount = Number(keepLatestRaw ?? keepLatest);
-    if (Number.isFinite(keepLatestCount) && keepLatestCount > 0) {
-      runs = runs
-        .sort((a, b) => Number(b.finished_time || b.updated_time || b.created_time || 0) - Number(a.finished_time || a.updated_time || a.created_time || 0))
-        .slice(Math.max(0, keepLatestCount));
-    }
-
-    const deletedRunIds = [];
-    if (!dryRun) {
-      for (const run of runs) {
-        await fs.rm(staticRunDir(workspaceDir, run.run_id), { recursive: true, force: true });
-        deletedRunIds.push(run.run_id);
-      }
-    }
-
-    const responseWorkspaceFields = runs.some(isGaiaTrace)
-      ? {
-          workspaceId: context.workspaceId,
-          workspaceManifestVersion: context.workspaceManifestVersion,
-        }
-      : workspaceResponseFields(context);
-    res.json({
-      success: true,
-      ...responseWorkspaceFields,
-      cleanup: {
-        dry_run: dryRun,
-        keep_latest: Number.isFinite(keepLatestCount) && keepLatestCount > 0 ? keepLatestCount : null,
-        older_than_days: olderThanDays,
-        matched_count: runs.length,
-        deleted_count: deletedRunIds.length,
-        runs: runs.map((run) => publicStaticRunSnapshot(run)),
-        deleted_run_ids: deletedRunIds,
-      },
-    });
-  } catch (error) {
-    console.error('❌ 清理 static workflow runs 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/workflow-runs/static/migrate', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      dry_run: dryRun = true,
-    } = req.body || {};
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const migration = await migrateLegacyStaticRuns(context.workspaceDir, { dryRun });
-    res.json({
-      success: true,
-      ...workspaceResponseFields(context),
-      migration,
-    });
-  } catch (error) {
-    console.error('❌ 迁移 static workflow runs 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // 2. 解析自定义函数
 app.post('/api/parse-custom-function', async (req, res) => {
   try {
@@ -10124,96 +9925,12 @@ app.post('/api/parse-custom-function', async (req, res) => {
   }
 });
 
-// 3. 创建工作流
-app.post('/api/workflows', async (req, res) => {
-  try {
-    const workflowId = uuidv4();
-    const { name = 'Untitled Workflow' } = req.body;
-    
-    console.log(`📝 创建工作流: ${workflowId}`);
-    const mazeWorkflowId = 'will-be-created-on-run';
-    
-    // 保存工作流信息
-    workflows.set(workflowId, {
-      id: workflowId,
-      name,
-      mazeWorkflowId,
-      nodes: [],
-      edges: [],
-      createdAt: new Date().toISOString(),
-      status: 'created'
-    });
-    
-    console.log(`✅ 工作流创建成功 (Maze ID: ${mazeWorkflowId})`);
-    res.json({ 
-      workflowId, 
-      name,
-      mazeWorkflowId
-    });
-  } catch (error) {
-    console.error('❌ 创建工作流失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 4. 获取工作流详情
-app.get('/api/workflows/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const workflow = workflows.get(id);
-    
-    if (!workflow) {
-      return res.status(404).json({ error: 'Workflow not found' });
-    }
-    
-    res.json(workflow);
-  } catch (error) {
-    console.error('❌ 获取工作流失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 5. 保存工作流（更新节点和边）
-app.put('/api/workflows/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, nodes, edges } = req.body;
-    
-    const workflow = workflows.get(id);
-    if (!workflow) {
-      return res.status(404).json({ error: 'Workflow not found' });
-    }
-    
-    console.log(`💾 保存工作流: ${id}`);
-    if (typeof name === 'string' && name.trim()) {
-      workflow.name = name.trim();
-    }
-    if (Array.isArray(nodes)) {
-      workflow.nodes = nodes;
-    }
-    if (Array.isArray(edges)) {
-      workflow.edges = edges;
-    }
-    console.log(`   名称: ${workflow.name}`);
-    console.log(`   节点数: ${workflow.nodes.length}, 边数: ${workflow.edges.length}`);
-    
-    workflow.updatedAt = new Date().toISOString();
-    workflows.set(id, workflow);
-    
-    console.log('✅ 工作流保存成功');
-    res.json({ message: 'Saved successfully' });
-  } catch (error) {
-    console.error('❌ 保存工作流失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 6. 运行工作流
+// Submit a Playground workflow to Maze Core.
 app.post('/api/workflows/:id/run', async (req, res) => {
   try {
     const { id } = req.params;
-    const workflow = req.body?.workflow || workflows.get(id);
-    if (!workflow) return res.status(404).json({ error: 'Workflow not found' });
+    const workflow = req.body?.workflow;
+    if (!workflow) return res.status(400).json({ error: 'workflow is required' });
     if (!Array.isArray(workflow.nodes) || workflow.nodes.length === 0) {
       return res.status(400).json({ error: 'Workflow has no task nodes' });
     }
@@ -10239,107 +9956,11 @@ app.post('/api/workflows/:id/run', async (req, res) => {
   }
 });
 
-// 7. 获取工作流结果
-app.get('/api/workflows/:id/results', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const workflow = workflows.get(id);
-    
-    if (!workflow) {
-      return res.status(404).json({ error: 'Workflow not found' });
-    }
-    
-    res.json({
-      status: workflow.status,
-      results: workflow.results || null,
-      error: workflow.error || null
-    });
-  } catch (error) {
-    console.error('❌ 获取结果失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ========== WebSocket 处理 ==========
-
-server.on('upgrade', (request, socket, head) => {
-  const pathname = new URL(request.url, 'http://localhost').pathname;
-  
-  // 匹配 /ws/workflows/:id/results
-  const match = pathname.match(/^\/ws\/workflows\/([^/]+)\/results$/);
-  
-  if (match) {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      const workflowId = match[1];
-      
-      console.log(`🔌 WebSocket 连接建立: ${workflowId}`);
-      
-      // 保存连接
-      if (!wsConnections.has(workflowId)) {
-        wsConnections.set(workflowId, new Set());
-      }
-      wsConnections.get(workflowId).add(ws);
-      
-      // 发送欢迎消息
-      ws.send(JSON.stringify({
-        type: 'connected',
-        workflowId,
-        message: 'Connected to workflow result stream',
-        timestamp: new Date().toISOString()
-      }));
-      
-      // 如果工作流已有结果，立即发送
-      const workflow = workflows.get(workflowId);
-      if (workflow) {
-        if (workflow.status === 'completed' && workflow.results) {
-          ws.send(JSON.stringify({
-            type: 'workflow_completed',
-            results: workflow.results,
-            timestamp: new Date().toISOString()
-          }));
-        } else if (workflow.status === 'failed') {
-          ws.send(JSON.stringify({
-            type: 'workflow_failed',
-            error: workflow.error,
-            timestamp: new Date().toISOString()
-          }));
-        } else if (workflow.status === 'running') {
-          ws.send(JSON.stringify({
-            type: 'workflow_running',
-            message: 'Workflow is running...',
-            timestamp: new Date().toISOString()
-          }));
-        }
-      }
-      
-      // 处理断开连接
-      ws.on('close', () => {
-        console.log(`🔌 WebSocket 连接断开: ${workflowId}`);
-        const connections = wsConnections.get(workflowId);
-        if (connections) {
-          connections.delete(ws);
-          if (connections.size === 0) {
-            wsConnections.delete(workflowId);
-          }
-        }
-      });
-      
-      ws.on('error', (error) => {
-        console.error('WebSocket 错误:', error);
-      });
-    });
-  } else {
-    socket.destroy();
-  }
-});
-
 // ========== 健康检查 ==========
 
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok',
-    workflows: workflows.size,
-    connections: wsConnections.size,
     timestamp: new Date().toISOString()
   });
 });
@@ -10364,7 +9985,6 @@ if (process.env.MAZE_PLAYGROUND_NO_LISTEN !== '1') (async () => {
     console.log('='.repeat(60));
     console.log(`\n✅ HTTP Server:   http://localhost:${PORT}`);
     console.log(`✅ API Endpoint:  http://localhost:${PORT}/api`);
-    console.log(`✅ WebSocket:     ws://localhost:${PORT}/ws`);
     console.log(`✅ Health Check:  http://localhost:${PORT}/health`);
     console.log(`✅ Python Bridge: ${PYTHON_BIN}`);
     console.log('\n📡 等待前端连接...\n');
@@ -10382,14 +10002,7 @@ export const __artifactSecurityTestHooks = Object.freeze({
 // 优雅关闭
 process.on('SIGINT', () => {
   console.log('\n\n👋 正在关闭服务器...');
-  
-  // 关闭所有 WebSocket 连接
-  wsConnections.forEach((connections) => {
-    connections.forEach((ws) => {
-      ws.close();
-    });
-  });
-  
+
   server.close(() => {
     console.log('✅ 服务器已关闭');
     process.exit(0);

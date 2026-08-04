@@ -14,6 +14,10 @@ import type {
 
 const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
 
+export function createLocalWorkflowId() {
+  return `workflow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export type WorkflowSaveState =
   | 'empty'
   | 'unsaved_draft'
@@ -123,7 +127,7 @@ interface WorkflowStore {
 
 export const useWorkflowStore = create<WorkflowStore>((set) => ({
   // Initial state
-  workflowId: null,
+  workflowId: createLocalWorkflowId(),
   workflowName: 'Untitled Workflow',
   nodes: [],
   edges: [],
@@ -343,7 +347,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   closeRunViewer: () => set({ runViewerOpen: false }),
   
   reset: () => set({
-    workflowId: null,
+    workflowId: createLocalWorkflowId(),
     workflowName: 'Untitled Workflow',
     nodes: [],
     edges: [],

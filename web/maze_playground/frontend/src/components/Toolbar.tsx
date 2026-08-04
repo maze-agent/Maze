@@ -10,7 +10,7 @@ import {
   SaveOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
-import { useWorkflowStore } from '@/stores/workflowStore';
+import { createLocalWorkflowId, useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
 
@@ -99,19 +99,6 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     setWorkflowName(nextName);
 
     try {
-      if (workflowId) {
-        try {
-          await api.saveWorkflow(workflowId, {
-            name: nextName,
-            nodes,
-            edges,
-          });
-        } catch (error) {
-          console.error('Failed to update workflow name:', error);
-          message.error('Failed to update workflow name');
-        }
-      }
-
       if (currentWorkspaceWorkflowPath && workspaceDir) {
         try {
           await api.saveWorkspaceWorkflow({
@@ -288,13 +275,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
         payload,
       });
       const { workflow } = imported;
-      const { workflowId: newId } = await api.createWorkflow(workflow.name);
-
-      await api.saveWorkflow(newId, {
-        name: workflow.name,
-        nodes: workflow.nodes,
-        edges: workflow.edges,
-      });
+      const newId = createLocalWorkflowId();
 
       setWorkflowId(newId);
       setWorkflowName(workflow.name);
@@ -339,11 +320,9 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
 
     setSavingWorkflow(true);
     try {
-      let activeWorkflowId = workflowId;
-      if (!activeWorkflowId) {
-        const created = await api.createWorkflow(workflowName);
-        activeWorkflowId = created.workflowId;
-        setWorkflowId(created.workflowId);
+      const activeWorkflowId = workflowId || createLocalWorkflowId();
+      if (!workflowId) {
+        setWorkflowId(activeWorkflowId);
       }
 
       const saved = await api.saveWorkspaceWorkflow({
@@ -354,11 +333,6 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
         workflowId: activeWorkflowId,
         nodes,
         edges,
-      });
-      await api.saveWorkflow(activeWorkflowId, {
-        name: workflowName,
-        nodes: saved.workflow.nodes,
-        edges: saved.workflow.edges,
       });
       setWorkspaceContext(saved);
       setWorkspaceDir(saved.workspaceDir);
@@ -422,11 +396,9 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
 
     setRunningWorkflow(true);
     try {
-      let activeWorkflowId = workflowId;
-      if (!activeWorkflowId) {
-        const created = await api.createWorkflow(workflowName);
-        activeWorkflowId = created.workflowId;
-        setWorkflowId(created.workflowId);
+      const activeWorkflowId = workflowId || createLocalWorkflowId();
+      if (!workflowId) {
+        setWorkflowId(activeWorkflowId);
       }
 
       const activeWorkspaceDir = workspaceDir || (await api.getWorkspaceWorkflows()).workspaceDir;
@@ -438,12 +410,6 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
         workflowId: activeWorkflowId,
         nodes,
         edges,
-      });
-
-      await api.saveWorkflow(activeWorkflowId, {
-        name: workflowName,
-        nodes: saved.workflow.nodes,
-        edges: saved.workflow.edges,
       });
 
       setWorkspaceContext(saved);

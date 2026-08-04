@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Collapse, Empty, Input, List, Modal, Select, Space, Tag, Tooltip, Typography, message } from 'antd';
 import { Bot, CheckCircle2, Download, Eye, FileText, PanelRightClose, PanelRightOpen, Pencil, Play, Plus, Save, Send, Square, Trash2, Wrench } from 'lucide-react';
 import { api, WorkspaceAgentDraft, WorkspaceAgentEvent, WorkspaceAgentMessage, WorkspaceAgentSession } from '@/api/client';
-import { useWorkflowStore } from '@/stores/workflowStore';
+import { createLocalWorkflowId, useWorkflowStore } from '@/stores/workflowStore';
 import { loadLlmSettings } from '@/utils/llmSettings';
 import PendingActionCard from './PendingActionCard';
 
@@ -609,7 +609,7 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
 
   const previewDraft = (draft: WorkspaceAgentDraft) => {
     if (!draft.workflow) return;
-    setWorkflowId(draft.saved?.workflowId || workflowId || '');
+    setWorkflowId(draft.saved?.workflowId || workflowId || createLocalWorkflowId());
     setWorkflowName(draft.workflow.name || draft.name);
     setNodes(draft.workflow.nodes || []);
     setEdges(draft.workflow.edges || []);
@@ -631,16 +631,9 @@ export default function WorkspaceAgentPanel({ open, onToggle, onOpenRuns, worksp
         workspaceDir,
         relativePath,
       });
-      const created = await api.createWorkflow(loaded.workflow.name);
-
-      await api.saveWorkflow(created.workflowId, {
-        name: loaded.workflow.name,
-        nodes: loaded.workflow.nodes,
-        edges: loaded.workflow.edges,
-      });
 
       setWorkspaceContext(loaded);
-      setWorkflowId(created.workflowId);
+      setWorkflowId(createLocalWorkflowId());
       setWorkflowName(loaded.workflow.name);
       setNodes(loaded.workflow.nodes || []);
       setEdges(loaded.workflow.edges || []);
