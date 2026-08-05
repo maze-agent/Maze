@@ -14,7 +14,6 @@ import ReactFlow, {
 import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
-  BuiltinTaskMeta,
   UnifiedRunSnapshot,
   UnifiedRunTaskSnapshot,
   WorkspaceTaskMeta,
@@ -380,32 +379,7 @@ export default function WorkflowCanvas() {
 
         const position = reactFlowInstance.screenToFlowPosition(dropPoint);
 
-        if (type === 'builtin') {
-          const builtinTask = task as BuiltinTaskMeta;
-
-          const newNode = {
-            id: `node-${Date.now()}`,
-            type: 'taskNode' as const,
-            position,
-            data: {
-              category: 'builtin' as const,
-              nodeType: 'task' as const,
-              label: builtinTask.displayName,
-              taskRef: `${builtinTask.module}.${builtinTask.functionRef}`,
-              inputs: builtinTask.inputs.map(inp => ({
-                name: inp.name,
-                dataType: inp.dataType,
-                source: 'user' as const,
-                value: ''
-              })),
-              outputs: builtinTask.outputs,
-              resources: builtinTask.resources,
-              configured: true,
-            },
-          };
-
-          addNode(newNode);
-        } else if (type === 'workspace') {
+        if (type === 'workspace') {
           const workspaceTask = task as WorkspaceTaskMeta;
 
           const newNode = {
@@ -452,45 +426,6 @@ export default function WorkflowCanvas() {
 
           addNode(newNode);
           selectNode(newNode);
-        } else if (type === 'workflow-distributed-smoke') {
-          const baseId = Date.now();
-          const smokeNodes: WorkflowNode[] = Array.from({ length: 2 }, (_, index) => ({
-            id: `node-${baseId}-${index + 1}`,
-            type: 'taskNode' as const,
-            position: {
-              x: position.x + (index % 2) * 260,
-              y: position.y + Math.floor(index / 2) * 180,
-            },
-            data: {
-              category: 'builtin' as const,
-              nodeType: 'task' as const,
-              label: `GPU Probe ${index + 1}`,
-              taskRef: 'distributedSmoke.distributed_gpu_probe',
-              inputs: [
-                {
-                  name: 'probe_id',
-                  dataType: 'int',
-                  source: 'user' as const,
-                  value: String(index + 1),
-                },
-                {
-                  name: 'sleep_seconds',
-                  dataType: 'int',
-                  source: 'user' as const,
-                  value: '1',
-                },
-              ],
-              outputs: [{ name: 'placement', dataType: 'dict' }],
-              task_kind: 'gpu' as const,
-              resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
-              configured: true,
-            },
-          }));
-
-          smokeNodes.forEach((node) => addNode(node));
-          selectNode(smokeNodes[0]);
-        } else if (type === 'workspace-example-task' || type === 'workflow-resource-soak') {
-          message.info('Use Add in the Library to import this example into the workspace.');
         }
       } catch (error) {
         console.error('Failed to drop node:', error);

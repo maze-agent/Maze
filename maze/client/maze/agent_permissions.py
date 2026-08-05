@@ -88,8 +88,6 @@ class AgentPermissionPolicy:
         rules.extend([
             AgentPermissionRule.from_value("exec_code", "*", "allow"),
             AgentPermissionRule.from_value("external_directory", "*", "deny"),
-            AgentPermissionRule.from_value("mcp", "*", "ask"),
-            AgentPermissionRule.from_value("skill", "*", "allow"),
         ])
         return cls(rules)
 

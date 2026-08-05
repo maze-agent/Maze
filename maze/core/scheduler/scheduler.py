@@ -14,8 +14,6 @@ import queue
 import json
 import os
 import sys
-import base64
-import cloudpickle
 import binascii
 import subprocess
 import multiprocessing as mp
@@ -31,7 +29,7 @@ from maze.core.scheduler.llm_instance import (
     validate_model_backend,
     validate_transformers_model,
 )
-from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime,LanggraphTaskRuntime
+from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime
 from maze.core.scheduler.queues import HeterogeneousTaskQueues
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.scheduler.standby_worker import StandbyWorkerPoolManager
@@ -51,7 +49,6 @@ from maze.core.fault_tolerance import (
     record_success,
     trace_snapshot,
 )
-from maze.core.workflow.task import TaskType
 from maze.core.files.lineage import TASK_RESULT_ENVELOPE
 
 logger = logging.getLogger(__name__)
@@ -59,6 +56,7 @@ logger = logging.getLogger(__name__)
 LLM_START_EXECUTOR_WORKERS = 2
 LLM_MAINTENANCE_EXECUTOR_WORKERS = 4
 LLM_CONTROL_POLL_SECONDS = 0.05
+LLM_SCALING_CHECK_SECONDS = 5.0
 SCHEDULER_MESSAGE_SEND_TIMEOUT_SECONDS = 5.0
 SCHEDULER_EVENT_QUEUE_MAXSIZE = 64
 SCHEDULER_PRODUCER_STOP_TIMEOUT_SECONDS = 2.0
@@ -305,6 +303,10 @@ class Scheduler():
             self._llm_runtime_probe_future = None
         if not hasattr(self, "_llm_runtime_cleanup_futures"):
             self._llm_runtime_cleanup_futures = {}
+        if not hasattr(self, "_llm_stop_future_lock"):
+            self._llm_stop_future_lock = threading.Lock()
+        if not hasattr(self, "_llm_stop_futures_by_instance"):
+            self._llm_stop_futures_by_instance = {}
         if not hasattr(self, "_llm_instance_start_request_ids"):
             self._llm_instance_start_request_ids = {}
 
@@ -328,6 +330,9 @@ class Scheduler():
                 "_llm_runtime_cleanup_futures",
                 {},
             ).values()
+        )
+        futures.update(
+            getattr(self, "_llm_stop_futures_by_instance", {}).values()
         )
         for future in futures:
             future.cancel()
@@ -650,7 +655,7 @@ class Scheduler():
             return normalized
         return "default"
 
-    def _task_queue_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float, queue_name: str | None = None):
+    def _task_queue_snapshot_item(self, task: TaskRuntime, now: float, queue_name: str | None = None):
         strategy = getattr(self, "scheduling_strategy", None) or create_scheduling_strategy(None)
         metadata = strategy.refresh_task_metadata(task, now)
         retry_wait_seconds = max(0.0, getattr(task, "next_eligible_time", 0.0) - now)
@@ -664,7 +669,7 @@ class Scheduler():
         return {
             "workflow_id": task.workflow_id,
             "task_id": task.task_id,
-            "task_type": "langgraph" if isinstance(task, LanggraphTaskRuntime) else "code",
+            "task_type": "code",
             "task_kind": getattr(task, "task_kind", "cpu"),
             "queue_name": queue_name or getattr(task, "queue_name", None) or metadata.get("queue_name"),
             "status": queue_status,
@@ -694,14 +699,14 @@ class Scheduler():
             "fault_tolerance": trace_snapshot(task),
         }
 
-    def _running_task_snapshot_item(self, task: TaskRuntime|LanggraphTaskRuntime, now: float):
+    def _running_task_snapshot_item(self, task: TaskRuntime, now: float):
         selected_node = getattr(task, "selected_node", None)
         started_time = getattr(task, "started_time", None)
         elapsed = None if started_time is None else round(max(0.0, now - started_time), 6)
         return {
             "workflow_id": task.workflow_id,
             "task_id": task.task_id,
-            "task_type": "langgraph" if isinstance(task, LanggraphTaskRuntime) else "code",
+            "task_type": "code",
             "task_kind": getattr(task, "task_kind", "cpu"),
             "status": task.status,
             "attempt": task.attempt,
@@ -719,7 +724,7 @@ class Scheduler():
             "fault_tolerance": trace_snapshot(task),
         }
 
-    def _public_schedule_decision(self, task: TaskRuntime|LanggraphTaskRuntime, decision: Dict[str, Any]):
+    def _public_schedule_decision(self, task: TaskRuntime, decision: Dict[str, Any]):
         decision = copy.deepcopy(decision)
         decision["internal_requested_resources"] = decision.get("requested_resources")
         decision["requested_resources"] = copy.deepcopy(task.resources)
@@ -728,7 +733,7 @@ class Scheduler():
             decision["scheduling"] = copy.deepcopy(task.scheduling_metadata)
         return decision
 
-    def _assign_model_route(self, task: TaskRuntime|LanggraphTaskRuntime, decision: Dict[str, Any]):
+    def _assign_model_route(self, task: TaskRuntime, decision: Dict[str, Any]):
         route = self.llm_instance_manager.route_model_request(
             getattr(task, "workflow_id", None),
             getattr(task, "model_anchor", None),
@@ -738,14 +743,14 @@ class Scheduler():
             decision["model_route"] = copy.deepcopy(route)
         return route
 
-    def _task_execution_resources(self, task: TaskRuntime|LanggraphTaskRuntime):
+    def _task_execution_resources(self, task: TaskRuntime):
         resources = copy.deepcopy(task.scheduler_resources)
         if getattr(task, "model_route", None):
             resources["gpu"] = 0
             resources["gpu_mem"] = 0
         return resources
 
-    def _release_model_route(self, task: TaskRuntime|LanggraphTaskRuntime):
+    def _release_model_route(self, task: TaskRuntime):
         route = getattr(task, "model_route", None)
         if not route:
             return
@@ -908,6 +913,7 @@ class Scheduler():
             instance_info = self.llm_instance_manager.start_llm_instance(
                 instance_id=message_data["instance_id"],
                 model=message_data["model"],
+                launch_model=record["launch_model"],
                 node_ip=selected_node.node_ip,
                 node_id=selected_node.node_id,
                 gpu_id=selected_node.gpu_id,
@@ -998,6 +1004,7 @@ class Scheduler():
             selection = self.resource_manager.select_node(
                 task_need_resources=need_resources,
                 reservation_kind="instance",
+                model_anchor=message_data.get("model_anchor"),
                 run_id=instance_id,
             )
         if not selection:
@@ -1016,11 +1023,43 @@ class Scheduler():
             return
 
         selected_node = selection.selected_node
+        launch_model = message_data["model"]
+        matched_local_model = None
+        selected_capabilities = (
+            selection.decision.get("selected_node", {}).get("capabilities", {})
+        )
+        for local_model in selected_capabilities.get("local_models") or []:
+            if not isinstance(local_model, dict):
+                continue
+            if (
+                local_model.get("id") == message_data["model"]
+                and (local_model.get("backend") or "transformers") == backend
+            ):
+                matched_local_model = local_model
+                break
+        if matched_local_model is not None and matched_local_model.get("path"):
+            launch_model = str(matched_local_model["path"])
+        elif message_data.get("model_anchor"):
+            with self.lock:
+                self.resource_manager.release_lease(selection.lease_id)
+            self._clear_auto_model_deploying(message_data, backend)
+            error = (
+                f"Selected node {selected_node.node_id} did not report a local path "
+                f"for model {message_data['model']!r} with backend {backend!r}"
+            )
+            self._send_llm_launch_failure(
+                socket_to_main,
+                message_data,
+                backend,
+                error,
+            )
+            return
         self._record_llm_owner_node(selected_node.node_id, selected_node.node_ip)
         record = {
             "message_data": dict(message_data),
             "backend": backend,
             "backend_args": backend_args,
+            "launch_model": launch_model,
             "need_resources": need_resources,
             "selection": selection,
             "cancel_event": threading.Event(),
@@ -1093,10 +1132,12 @@ class Scheduler():
                     pending,
                 )
                 pending["stop_future"] = future
-                self._llm_control_stop_futures[future] = {
-                    "requests": pending["stop_requests"],
-                    "record": pending,
-                }
+                with self._llm_stop_future_lock:
+                    self._llm_control_stop_futures[future] = {
+                        "instance_id": instance_id,
+                        "requests": pending["stop_requests"],
+                        "record": pending,
+                    }
             return
 
         if (
@@ -1111,14 +1152,34 @@ class Scheduler():
             )
             return
 
-        future = self._llm_maintenance_executor.submit(
-            self._stop_and_finalize_llm_instance,
-            instance_id,
-        )
-        self._llm_control_stop_futures[future] = {
-            "requests": [dict(message_data)],
-            "record": None,
-        }
+        with self._llm_stop_future_lock:
+            future = self._llm_stop_futures_by_instance.get(instance_id)
+            if future is None:
+                future = self._llm_maintenance_executor.submit(
+                    self._stop_and_finalize_llm_instance,
+                    instance_id,
+                )
+                self._llm_stop_futures_by_instance[instance_id] = future
+            entry = self._llm_control_stop_futures.get(future)
+            if entry is None:
+                self._llm_control_stop_futures[future] = {
+                    "instance_id": instance_id,
+                    "requests": [dict(message_data)],
+                    "record": None,
+                }
+            else:
+                entry["requests"].append(dict(message_data))
+
+    def _forget_llm_stop_future(self, instance_id: str, future) -> None:
+        with self._llm_stop_future_lock:
+            if self._llm_stop_futures_by_instance.get(instance_id) is not future:
+                return
+            if future in self._llm_control_stop_futures:
+                return
+            maintenance = self._llm_runtime_cleanup_futures.get(instance_id)
+            if maintenance is not None and maintenance[0] is future:
+                return
+            self._llm_stop_futures_by_instance.pop(instance_id, None)
 
     def _send_llm_stop_completion(
         self,
@@ -1248,10 +1309,15 @@ class Scheduler():
                     )
                 record["stop_requests"].clear()
 
-        for future, entry in list(self._llm_control_stop_futures.items()):
+        with self._llm_stop_future_lock:
+            stop_items = list(self._llm_control_stop_futures.items())
+        for future, entry in stop_items:
             if not future.done():
                 continue
-            self._llm_control_stop_futures.pop(future, None)
+            with self._llm_stop_future_lock:
+                if self._llm_control_stop_futures.get(future) is not entry:
+                    continue
+                self._llm_control_stop_futures.pop(future, None)
             record = entry.get("record")
             if record is not None:
                 record["stop_future"] = None
@@ -1271,17 +1337,25 @@ class Scheduler():
                     resource_detail=detail,
                     error=error,
                 )
+            self._forget_llm_stop_future(entry["instance_id"], future)
 
     def _submit_runtime_llm_cleanup(self, candidate: dict) -> bool:
         instance_id = candidate["instance_id"]
-        if instance_id in self._llm_runtime_cleanup_futures:
-            return False
-        future = self._llm_maintenance_executor.submit(
-            self._stop_and_finalize_llm_instance,
-            instance_id,
-        )
-        self._llm_runtime_cleanup_futures[instance_id] = (future, dict(candidate))
-        return True
+        with self._llm_stop_future_lock:
+            if instance_id in self._llm_runtime_cleanup_futures:
+                return False
+            future = self._llm_stop_futures_by_instance.get(instance_id)
+            if future is None:
+                future = self._llm_maintenance_executor.submit(
+                    self._stop_and_finalize_llm_instance,
+                    instance_id,
+                )
+                self._llm_stop_futures_by_instance[instance_id] = future
+            self._llm_runtime_cleanup_futures[instance_id] = (
+                future,
+                dict(candidate),
+            )
+            return True
 
     def _drain_llm_maintenance_futures(self) -> None:
         probe_future = self._llm_runtime_probe_future
@@ -1295,11 +1369,16 @@ class Scheduler():
                 for candidate in candidates:
                     self._submit_runtime_llm_cleanup(candidate)
 
-        for instance_id, item in list(self._llm_runtime_cleanup_futures.items()):
+        with self._llm_stop_future_lock:
+            cleanup_items = list(self._llm_runtime_cleanup_futures.items())
+        for instance_id, item in cleanup_items:
             future, candidate = item
             if not future.done():
                 continue
-            self._llm_runtime_cleanup_futures.pop(instance_id, None)
+            with self._llm_stop_future_lock:
+                if self._llm_runtime_cleanup_futures.get(instance_id) is not item:
+                    continue
+                self._llm_runtime_cleanup_futures.pop(instance_id, None)
             try:
                 future.result()
             except Exception:
@@ -1309,6 +1388,7 @@ class Scheduler():
                     candidate.get("state", "runtime failure"),
                     candidate.get("reason", "unknown error"),
                 )
+            self._forget_llm_stop_future(instance_id, future)
 
     def _manage_llm_instance_scaling(self, now: float | None = None):
         if self._shutdown_requested():
@@ -1316,7 +1396,10 @@ class Scheduler():
         self._ensure_llm_async_state()
         self._drain_llm_maintenance_futures()
         now = now or time.time()
-        if now - getattr(self, "last_llm_scaling_check", 0.0) < 5.0:
+        if (
+            now - getattr(self, "last_llm_scaling_check", 0.0)
+            < LLM_SCALING_CHECK_SECONDS
+        ):
             return
         self.last_llm_scaling_check = now
 
@@ -1332,6 +1415,40 @@ class Scheduler():
             self._llm_runtime_probe_future = self._llm_maintenance_executor.submit(
                 runtime_cleanup_candidates
             )
+
+        lru_scale_in_candidates = getattr(
+            self.llm_instance_manager,
+            "lru_scale_in_candidates",
+            None,
+        )
+        claim_lru_scale_in = getattr(
+            self.llm_instance_manager,
+            "claim_lru_scale_in",
+            None,
+        )
+        if lru_scale_in_candidates is not None and claim_lru_scale_in is not None:
+            for candidate in lru_scale_in_candidates(now=now):
+                instance_id = candidate["instance_id"]
+                if not claim_lru_scale_in(
+                    instance_id,
+                    expected_idle_since=candidate.get("idle_since"),
+                    now=now,
+                ):
+                    continue
+                try:
+                    self._submit_runtime_llm_cleanup(candidate)
+                except Exception:
+                    cancel_claim = getattr(
+                        self.llm_instance_manager,
+                        "cancel_lru_scale_in_claim",
+                        None,
+                    )
+                    if cancel_claim is not None:
+                        cancel_claim(instance_id)
+                    logger.exception(
+                        "Failed to submit idle cleanup for LLM instance %s",
+                        instance_id,
+                    )
 
         for recommendation in self.llm_instance_manager.scale_out_recommendations():
             model = recommendation["model"]
@@ -1350,6 +1467,7 @@ class Scheduler():
                 "memory": 0,
                 "gpu_nums": 1,
                 "gpu_mem": recommendation.get("gpu_mem", 0),
+                "model_anchor": recommendation.get("model_anchor"),
                 "auto_started": True,
             }))
 
@@ -1424,7 +1542,7 @@ class Scheduler():
     def _send_task_exception(
         self,
         socket_to_main,
-        task: TaskRuntime|LanggraphTaskRuntime,
+        task: TaskRuntime,
         error: Dict[str, Any],
         outbound_messages: list | None = None,
     ):
@@ -1544,7 +1662,7 @@ class Scheduler():
     def _send_task_retry(
         self,
         socket_to_main,
-        task: TaskRuntime|LanggraphTaskRuntime,
+        task: TaskRuntime,
         error: Dict[str, Any],
         outbound_messages: list | None = None,
         on_sent=None,
@@ -1586,7 +1704,7 @@ class Scheduler():
     def _send_task_pending(
         self,
         socket_to_main,
-        task: TaskRuntime|LanggraphTaskRuntime,
+        task: TaskRuntime,
         outbound_messages: list | None = None,
     ):
         message = {
@@ -1611,7 +1729,7 @@ class Scheduler():
     def _retry_or_fail_task(
         self,
         socket_to_main,
-        task: TaskRuntime|LanggraphTaskRuntime,
+        task: TaskRuntime,
         error: Dict[str, Any],
         file_manifest: Dict[str, Any] | None = None,
         metrics: Dict[str, Any] | None = None,
@@ -1708,12 +1826,12 @@ class Scheduler():
             outbound_messages,
         )
 
-    def _release_task_attempt_resource(self, task: TaskRuntime|LanggraphTaskRuntime, resources: Dict[str, Any]):
+    def _release_task_attempt_resource(self, task: TaskRuntime, resources: Dict[str, Any]):
         self.resource_manager.release_lease(getattr(task, "lease_id", None))
 
     def _run_task_with_lease(
         self,
-        task: TaskRuntime|LanggraphTaskRuntime,
+        task: TaskRuntime,
         selection,
         dispatch_id: str,
     ):
@@ -1976,48 +2094,29 @@ class Scheduler():
                                 workflow_id,
                             )
                             continue
-                        if(message_data["task_type"]==TaskType.CODE.value):
-                            task_runtime = TaskRuntime(workflow_id=message_data['workflow_id'],
-                                                                    task_id=message_data['task_id'],
-                                                                    task_input=message_data['task_input'],
-                                                                    task_output=message_data['task_output'],
-                                                                    resources=message_data['resources'],
-                                                                    task_kind=message_data.get('task_kind'),
-                                                                    model_anchor=message_data.get('model_anchor'),
-                                                                    code_str=message_data.get('code_str'),
-                                                                    code_ser=message_data.get('code_ser'),
-                                                                    file_context=message_data.get('file_context'),
-                                                                    max_retries=message_data.get('max_retries'),
-                                                                    retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
-                                                                    retry_on=message_data.get('retry_on'),
-                                                                    timeout_seconds=message_data.get('timeout_seconds'),
-                                                                    scheduling_context=message_data.get('scheduling_context'),
-                                                                    )
-                            priority =  message_data.get('priority', 0)
-                            task_runtime.set_priority(priority)
-                            self.task_queues.put(task_runtime)
-                        elif(message_data["task_type"]==TaskType.LANGGRAPH.value):
-                            task_runtime = LanggraphTaskRuntime(workflow_id=message_data['workflow_id'],
-                                                                                      task_id=message_data['task_id'],
-                                                                                      code_ser=message_data['code_ser'],
-                                                                                      args=message_data['args'],
-                                                                                      kwargs=message_data['kwargs'],
-                                                                                      resources=message_data['resources'],
-                                                                                      task_kind=message_data.get('task_kind'),
-                                                                                      model_anchor=message_data.get('model_anchor'),
-                                                                                      max_retries=message_data.get('max_retries'),
-                                                                                      retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
-                                                                                      retry_on=message_data.get('retry_on'),
-                                                                                      timeout_seconds=message_data.get('timeout_seconds'),
-                                                                                      scheduling_context=message_data.get('scheduling_context'),
-                                                                                    )
-                            priority =  message_data.get('priority', 0)
-                            task_runtime.set_priority(priority)
-                            self.task_queues.put(task_runtime)
-                        else:
+                        if message_data.get("task_type") != "code":
                             raise ValueError(
                                 f"Unsupported task_type: {message_data.get('task_type')!r}"
                             )
+                        task_runtime = TaskRuntime(
+                            workflow_id=message_data['workflow_id'],
+                            task_id=message_data['task_id'],
+                            task_input=message_data['task_input'],
+                            task_output=message_data['task_output'],
+                            resources=message_data['resources'],
+                            task_kind=message_data.get('task_kind'),
+                            model_anchor=message_data.get('model_anchor'),
+                            code_str=message_data.get('code_str'),
+                            code_ser=message_data.get('code_ser'),
+                            file_context=message_data.get('file_context'),
+                            max_retries=message_data.get('max_retries'),
+                            retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
+                            retry_on=message_data.get('retry_on'),
+                            timeout_seconds=message_data.get('timeout_seconds'),
+                            scheduling_context=message_data.get('scheduling_context'),
+                        )
+                        task_runtime.set_priority(message_data.get('priority', 0))
+                        self.task_queues.put(task_runtime)
                     except Exception as exc:
                         logger.exception(
                             "Rejecting task %s before scheduling",
@@ -2403,14 +2502,6 @@ class Scheduler():
                         self.resource_manager.release_task_resource(tasks=[finished_task])
                         self.workflow_manager.clear_task_ref(finished_task)
                         fault_tolerance = record_success(finished_task)
-
-                        if isinstance(finished_task, LanggraphTaskRuntime):
-                            self.workflow_manager.clear_workflow(
-                                finished_task.workflow_id
-                            )
-                            self.resource_manager.release_dag_context(
-                                finished_task.workflow_id
-                            )
 
                         #Send message to main
                         node_id = None

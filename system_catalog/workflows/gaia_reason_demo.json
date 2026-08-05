@@ -1,0 +1,486 @@
+{
+  "schema": "maze-playground-bundle",
+  "version": 3,
+  "description": "Interactive, unscored GAIA reasoning demo backed by an on-demand Qwen2.5-3B model route.",
+  "tags": [
+    "GAIA",
+    "reasoning",
+    "LLM",
+    "GPU",
+    "demo"
+  ],
+  "workflow": {
+    "name": "GAIA Reason Demo - Qwen2.5-3B",
+    "description": "Prepare a question, run two prompt variants through the same routed Qwen model, and fuse the answers into GAIA final-answer format. Interactive demo only; no scoring.",
+    "tags": [
+      "GAIA",
+      "reasoning",
+      "Qwen2.5-3B",
+      "demo"
+    ],
+    "recommendedSkills": [],
+    "nodes": [
+      {
+        "id": "gaia-prepare",
+        "type": "taskNode",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Prepare GAIA Question",
+          "taskPath": "tasks/gaia_reason_prepare.py",
+          "functionName": "gaia_prepare_question",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "str",
+              "source": "user",
+              "value": "gaia-ui-demo"
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "user",
+              "value": "What is the capital of France?"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "dag_id",
+              "dataType": "str"
+            },
+            {
+              "name": "question",
+              "dataType": "str"
+            },
+            {
+              "name": "question_features",
+              "dataType": "dict"
+            },
+            {
+              "name": "start_time",
+              "dataType": "float"
+            },
+            {
+              "name": "end_time",
+              "dataType": "float"
+            },
+            {
+              "name": "time_record",
+              "dataType": "dict"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 0,
+            "io_num": 0
+          },
+          "configured": true,
+          "task_kind": "cpu"
+        }
+      },
+      {
+        "id": "gaia-answer-one",
+        "type": "taskNode",
+        "position": {
+          "x": 480,
+          "y": 80
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Reasoned Answer",
+          "taskPath": "tasks/gaia_reason_answer.py",
+          "functionName": "gaia_model_answer",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "style",
+              "dataType": "str",
+              "source": "user",
+              "value": "reasoned"
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "answer",
+              "dataType": "str"
+            },
+            {
+              "name": "answer_feature",
+              "dataType": "dict"
+            },
+            {
+              "name": "style",
+              "dataType": "str"
+            },
+            {
+              "name": "dag_id",
+              "dataType": "str"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "dict"
+            },
+            {
+              "name": "start_time",
+              "dataType": "float"
+            },
+            {
+              "name": "end_time",
+              "dataType": "float"
+            },
+            {
+              "name": "time_record",
+              "dataType": "dict"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          },
+          "configured": true,
+          "task_kind": "gpu"
+        }
+      },
+      {
+        "id": "gaia-answer-two",
+        "type": "taskNode",
+        "position": {
+          "x": 480,
+          "y": 360
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Concise Answer",
+          "taskPath": "tasks/gaia_reason_answer.py",
+          "functionName": "gaia_model_answer",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "style",
+              "dataType": "str",
+              "source": "user",
+              "value": "concise"
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "answer",
+              "dataType": "str"
+            },
+            {
+              "name": "answer_feature",
+              "dataType": "dict"
+            },
+            {
+              "name": "style",
+              "dataType": "str"
+            },
+            {
+              "name": "dag_id",
+              "dataType": "str"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "dict"
+            },
+            {
+              "name": "start_time",
+              "dataType": "float"
+            },
+            {
+              "name": "end_time",
+              "dataType": "float"
+            },
+            {
+              "name": "time_record",
+              "dataType": "dict"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          },
+          "configured": true,
+          "task_kind": "gpu"
+        }
+      },
+      {
+        "id": "gaia-fuse",
+        "type": "taskNode",
+        "position": {
+          "x": 900,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Fuse Final Answer",
+          "taskPath": "tasks/gaia_reason_fuse.py",
+          "functionName": "gaia_fuse_answers",
+          "inputs": [
+            {
+              "name": "answer_one",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-answer-one",
+                "outputKey": "answer"
+              }
+            },
+            {
+              "name": "answer_two",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-answer-two",
+                "outputKey": "answer"
+              }
+            },
+            {
+              "name": "feature_one",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-answer-one",
+                "outputKey": "answer_feature"
+              }
+            },
+            {
+              "name": "feature_two",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-answer-two",
+                "outputKey": "answer_feature"
+              }
+            },
+            {
+              "name": "dag_id",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "gaia-prepare",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "dag_id",
+              "dataType": "str"
+            },
+            {
+              "name": "final_answer",
+              "dataType": "str"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "dict"
+            },
+            {
+              "name": "start_time",
+              "dataType": "float"
+            },
+            {
+              "name": "end_time",
+              "dataType": "float"
+            },
+            {
+              "name": "time_record",
+              "dataType": "dict"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          },
+          "configured": true,
+          "task_kind": "gpu"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "gaia-edge-prepare-one",
+        "source": "gaia-prepare",
+        "target": "gaia-answer-one"
+      },
+      {
+        "id": "gaia-edge-prepare-two",
+        "source": "gaia-prepare",
+        "target": "gaia-answer-two"
+      },
+      {
+        "id": "gaia-edge-prepare-fuse",
+        "source": "gaia-prepare",
+        "target": "gaia-fuse"
+      },
+      {
+        "id": "gaia-edge-one-fuse",
+        "source": "gaia-answer-one",
+        "target": "gaia-fuse"
+      },
+      {
+        "id": "gaia-edge-two-fuse",
+        "source": "gaia-answer-two",
+        "target": "gaia-fuse"
+      }
+    ]
+  },
+  "includedTasks": [
+    {
+      "relativePath": "tasks/gaia_reason_prepare.py",
+      "functionName": "gaia_prepare_question",
+      "displayName": "GAIA Prepare Question",
+      "inputs": [],
+      "outputs": [],
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 0,
+        "io_num": 0
+      },
+      "code": "\"\"\"Prepare one public question for the GAIA reasoning demo.\"\"\"\n\nfrom __future__ import annotations\n\nimport time\n\nfrom maze import task\nfrom workflows.gaia._common import empty_time_record, text_features\n\n\n@task(task_kind=\"cpu\", resources={\"cpu_num\": 1, \"gpu_mem\": 0, \"io_num\": 0})\ndef gaia_prepare_question(dag_id: str, question: str) -> dict[str, object]:\n    start_time = time.time()\n    normalized_question = str(question).strip()\n    if not normalized_question:\n        raise ValueError(f\"task {dag_id} missing Question\")\n    return {\n        \"dag_id\": str(dag_id).strip() or \"gaia-ui-demo\",\n        \"question\": normalized_question,\n        \"question_features\": text_features(normalized_question),\n        \"start_time\": start_time,\n        \"end_time\": time.time(),\n        \"time_record\": empty_time_record(),\n    }\n",
+      "type": "workspace",
+      "task_kind": "cpu"
+    },
+    {
+      "relativePath": "tasks/gaia_reason_answer.py",
+      "functionName": "gaia_model_answer",
+      "displayName": "GAIA Model Answer",
+      "inputs": [],
+      "outputs": [],
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 8192,
+        "io_num": 0
+      },
+      "code": "\"\"\"Generate one routed-model answer for the GAIA reasoning demo.\"\"\"\n\nfrom __future__ import annotations\n\nimport os\nimport time\n\nfrom maze import task\nfrom workflows.gaia._common import (\n    empty_time_record,\n    gaia_question_prompt,\n    text_feature_for_answer,\n    text_features,\n)\n\n\nGPU_RESOURCES = {\"cpu_num\": 1, \"gpu_mem\": 8192, \"io_num\": 0}\n\n\ndef _model_route() -> tuple[str, str]:\n    base_url = os.environ.get(\"MAZE_MODEL_ENDPOINT\", \"\").strip()\n    model = os.environ.get(\"MAZE_MODEL_NAME\", \"\").strip()\n    if not base_url or not model:\n        raise RuntimeError(\"GAIA model task requires a Scheduler model route\")\n    return base_url, model\n\n\n@task(task_kind=\"gpu\", resources=GPU_RESOURCES, max_retries=0)\ndef gaia_model_answer(\n    dag_id: str,\n    question: str,\n    style: str,\n    temperature: float,\n    max_tokens: int,\n) -> dict[str, object]:\n    from workflows._inference import chat\n\n    start_time = time.time()\n    base_url, model = _model_route()\n    normalized_style = str(style).strip().lower()\n    if normalized_style == \"reasoned\":\n        prompt = gaia_question_prompt(question, \"\", \"\")\n    elif normalized_style == \"concise\":\n        prompt = (\n            f\"{gaia_question_prompt(question, '', '')}\\n\"\n            \"Solve the question independently and keep the reasoning concise.\"\n        )\n    else:\n        raise ValueError(\"style must be reasoned or concise\")\n\n    answer = chat(\n        [{\"role\": \"user\", \"content\": prompt}],\n        base_url=base_url,\n        model=model,\n        api_key=\"\",\n        temperature=float(temperature),\n        max_tokens=int(max_tokens),\n    )\n    return {\n        \"answer\": answer,\n        \"answer_feature\": text_feature_for_answer(\"answer\", answer),\n        \"style\": normalized_style,\n        \"dag_id\": dag_id,\n        \"curr_task_feat\": text_features(prompt),\n        \"start_time\": start_time,\n        \"end_time\": time.time(),\n        \"time_record\": empty_time_record(),\n    }\n",
+      "type": "workspace",
+      "task_kind": "gpu"
+    },
+    {
+      "relativePath": "tasks/gaia_reason_fuse.py",
+      "functionName": "gaia_fuse_answers",
+      "displayName": "GAIA Fuse Answers",
+      "inputs": [],
+      "outputs": [],
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 8192,
+        "io_num": 0
+      },
+      "code": "\"\"\"Fuse two routed-model answers for the GAIA reasoning demo.\"\"\"\n\nfrom __future__ import annotations\n\nimport os\nimport time\n\nfrom maze import task\nfrom workflows.gaia._common import (\n    GAIA_FINAL_ANSWER_RULES,\n    empty_time_record,\n    text_features,\n)\n\n\nGPU_RESOURCES = {\"cpu_num\": 1, \"gpu_mem\": 8192, \"io_num\": 0}\n\n\ndef _model_route() -> tuple[str, str]:\n    base_url = os.environ.get(\"MAZE_MODEL_ENDPOINT\", \"\").strip()\n    model = os.environ.get(\"MAZE_MODEL_NAME\", \"\").strip()\n    if not base_url or not model:\n        raise RuntimeError(\"GAIA model task requires a Scheduler model route\")\n    return base_url, model\n\n\n@task(task_kind=\"gpu\", resources=GPU_RESOURCES, max_retries=0)\ndef gaia_fuse_answers(\n    answer_one: str,\n    answer_two: str,\n    feature_one: dict[str, object],\n    feature_two: dict[str, object],\n    dag_id: str,\n    question: str,\n    temperature: float,\n    max_tokens: int,\n) -> dict[str, object]:\n    from workflows._inference import chat\n\n    start_time = time.time()\n    base_url, model = _model_route()\n    prompt = (\n        \"Synthesize the two independent candidate answers below. Correct any \"\n        \"errors and return the most accurate answer for the original question.\\n\\n\"\n        f\"Original question:\\n{question}\\n\\n\"\n        f\"Candidate answer A:\\n{answer_one}\\n\\n\"\n        f\"Candidate answer B:\\n{answer_two}\\n\\n\"\n        f\"{GAIA_FINAL_ANSWER_RULES}\"\n    )\n    final_answer = chat(\n        [{\"role\": \"user\", \"content\": prompt}],\n        base_url=base_url,\n        model=model,\n        api_key=\"\",\n        temperature=float(temperature),\n        max_tokens=int(max_tokens),\n    )\n    prompt_features = text_features(prompt)\n    return {\n        \"dag_id\": dag_id,\n        \"final_answer\": final_answer,\n        \"curr_task_feat\": {\n            \"prompt_length\": prompt_features[\"text_length\"],\n            \"prompt_token_count\": prompt_features[\"token_count\"],\n            \"answer_one_length\": feature_one[\"answer_length\"],\n            \"answer_two_length\": feature_two[\"answer_length\"],\n        },\n        \"start_time\": start_time,\n        \"end_time\": time.time(),\n        \"time_record\": empty_time_record(),\n    }\n",
+      "type": "workspace",
+      "task_kind": "gpu"
+    }
+  ]
+}

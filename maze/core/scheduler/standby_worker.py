@@ -7,10 +7,7 @@ from typing import Any, Callable, Dict
 
 import ray
 
-from maze.core.scheduler.runner import (
-    execute_code_task_in_worker,
-    execute_langgraph_task_in_worker,
-)
+from maze.core.scheduler.runner import execute_code_task_in_worker
 
 
 STANDBY_WORKER_RESOURCE_OPTIONS = {
@@ -97,23 +94,6 @@ class StandbyWorker:
             file_context=file_context,
             model_route=model_route,
         )
-
-    def execute_langgraph_task(
-        self,
-        code_ser: str,
-        args: str,
-        kwargs: str,
-        cuda_visible_devices: str | None = None,
-        model_route: dict | None = None,
-    ):
-        return execute_langgraph_task_in_worker(
-            code_ser=code_ser,
-            args=args,
-            kwargs=kwargs,
-            cuda_visible_devices=cuda_visible_devices,
-            model_route=model_route,
-        )
-
 
 class StandbyWorkerPoolManager:
     def __init__(

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from maze.core.scheduler import scheduler as scheduler_module
+from maze.core.scheduler import runner as runner_module
 from maze.core.scheduler.llm_instance import LlmInstanceMessage
 from maze.core.scheduler.scheduler import Scheduler
 
@@ -146,6 +147,16 @@ def test_llm_start_validates_then_reserves_and_passes_lease(monkeypatch):
     scheduler, _ = _bare_scheduler(socket)
     selected_node = SimpleNamespace(node_id="node-1", node_ip="10.0.0.2", gpu_id=0)
     selection = _Selection(selected_node, "lease-1")
+    model_anchor = {"local_model": "model-1", "backend": "vllm"}
+    selection.decision["selected_node"] = {
+        "capabilities": {
+            "local_models": [{
+                "id": "model-1",
+                "backend": "vllm",
+                "path": "/models/model-1",
+            }]
+        }
+    }
 
     class ResourceManager:
         def select_node(self, **kwargs):
@@ -175,7 +186,10 @@ def test_llm_start_validates_then_reserves_and_passes_lease(monkeypatch):
         send=lambda placement: events.append(("owner_receipt", placement))
     )
 
-    _run_one_llm_message(scheduler, _llm_message(request_id="request-1"))
+    _run_one_llm_message(
+        scheduler,
+        _llm_message(request_id="request-1", model_anchor=model_anchor),
+    )
 
     assert [event[0] for event in events] == [
         "select",
@@ -187,9 +201,11 @@ def test_llm_start_validates_then_reserves_and_passes_lease(monkeypatch):
     selection_kwargs = events[0][1]
     assert selection_kwargs["reservation_kind"] == "instance"
     assert selection_kwargs["run_id"] == "instance-1"
+    assert selection_kwargs["model_anchor"] == model_anchor
     start_kwargs = events[3][1]
     assert start_kwargs["lease_id"] == "lease-1"
     assert start_kwargs["backend_args"] == {"max_model_len": 4096}
+    assert start_kwargs["launch_model"] == "/models/model-1"
     assert start_kwargs["return_info"] is True
     assert socket.messages == [{
         "type": "finish_llm_instance_launch",
@@ -347,17 +363,17 @@ def test_stop_ack_follows_stop_release_and_finalize_order():
     assert socket.messages[0]["type"] == "finish_llm_instance_stop"
 
 
-def test_scaling_keeps_ready_instances_until_explicit_stop():
+def test_scaling_stops_idle_instance_and_releases_after_confirmation():
     events = []
     scheduler, _ = _bare_scheduler()
 
     class LlmManager:
         def lru_scale_in_candidates(self, now=None):
             events.append(("lru", now))
-            return [{"instance_id": "instance-1"}]
+            return [{"instance_id": "instance-1", "idle_since": 1.0}]
 
-        def claim_lru_scale_in(self, instance_id):
-            events.append(("claim", instance_id))
+        def claim_lru_scale_in(self, instance_id, **kwargs):
+            events.append(("claim", instance_id, kwargs))
             return True
 
         def stop_llm_instance(self, **kwargs):
@@ -379,8 +395,155 @@ def test_scaling_keeps_ready_instances_until_explicit_stop():
     )
 
     scheduler._manage_llm_instance_scaling(now=10.0)
+    _wait_for_maintenance(
+        scheduler,
+        lambda: any(event[0] == "finalize" for event in events),
+        now=10.0,
+    )
 
-    assert events == []
+    assert [event[0] for event in events] == [
+        "lru",
+        "claim",
+        "stop",
+        "release",
+        "finalize",
+    ]
+    assert events[1] == (
+        "claim",
+        "instance-1",
+        {"expected_idle_since": 1.0, "now": 10.0},
+    )
+    assert events[2] == (
+        "stop",
+        True,
+        {"instance_id": "instance-1", "finalize": False},
+    )
+    scheduler._shutdown_llm_executors()
+
+
+def test_scaling_checks_idle_candidates_every_five_seconds():
+    checks = []
+    scheduler, _ = _bare_scheduler()
+
+    class LlmManager:
+        def lru_scale_in_candidates(self, now=None):
+            checks.append(now)
+            return []
+
+        def claim_lru_scale_in(self, _instance_id, **_kwargs):
+            return False
+
+        def scale_out_recommendations(self):
+            return []
+
+    scheduler.llm_instance_manager = LlmManager()
+
+    scheduler._manage_llm_instance_scaling(now=10.0)
+    scheduler._manage_llm_instance_scaling(now=14.9)
+    scheduler._manage_llm_instance_scaling(now=15.0)
+
+    assert checks == [10.0, 15.0]
+    scheduler._shutdown_llm_executors()
+
+
+def test_idle_health_and_control_stops_share_one_cleanup_future():
+    events = []
+    stop_started = threading.Event()
+    release_stop = threading.Event()
+    scheduler, socket = _bare_scheduler()
+
+    class LlmManager:
+        def runtime_cleanup_candidates(self):
+            events.append(("probe",))
+            return [{
+                "instance_id": "instance-1",
+                "state": "unhealthy",
+                "reason": "health check failed",
+            }]
+
+        def lru_scale_in_candidates(self, now=None):
+            events.append(("lru", now))
+            return [{"instance_id": "instance-1", "idle_since": 1.0}]
+
+        def claim_lru_scale_in(self, instance_id, **kwargs):
+            events.append(("claim", instance_id, kwargs))
+            return True
+
+        def stop_llm_instance(self, **kwargs):
+            events.append(("stop", kwargs))
+            stop_started.set()
+            assert release_stop.wait(2)
+            return {"backend": "vllm", "lease_id": "lease-1"}
+
+        def finalize_stopped_instance(self, instance_id):
+            events.append(("finalize", instance_id))
+
+        def scale_out_recommendations(self):
+            return []
+
+    scheduler.llm_instance_manager = LlmManager()
+    scheduler.resource_manager = SimpleNamespace(
+        release_instance_resource=lambda detail: events.append(
+            ("release", detail["lease_id"])
+        )
+    )
+
+    scheduler._manage_llm_instance_scaling(now=10.0)
+    assert stop_started.wait(1)
+    _wait_for_maintenance(
+        scheduler,
+        lambda: scheduler._llm_runtime_probe_future is None,
+        now=10.0,
+    )
+    scheduler._queue_llm_stop({
+        "instance_id": "instance-1",
+        "request_id": "stop-request",
+    })
+
+    release_stop.set()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not socket.messages:
+        scheduler._drain_llm_control_futures(socket)
+        scheduler._manage_llm_instance_scaling(now=10.0)
+        time.sleep(0.01)
+
+    assert [event[0] for event in events].count("stop") == 1
+    assert [event[0] for event in events].count("release") == 1
+    assert [event[0] for event in events].count("finalize") == 1
+    assert [message["type"] for message in socket.messages] == [
+        "finish_llm_instance_stop"
+    ]
+    assert scheduler._llm_stop_futures_by_instance == {}
+    scheduler._shutdown_llm_executors()
+
+
+def test_auto_scaling_preserves_model_anchor_for_instance_placement():
+    scheduler, _ = _bare_scheduler()
+    scheduler.llm_instance_queue = queue.Queue()
+    model_anchor = {
+        "local_model": "model-1",
+        "backend": "transformers",
+        "estimated_gpu_mem_mb": 8192,
+    }
+
+    class LlmManager:
+        def scale_out_recommendations(self):
+            return [{
+                "model": "model-1",
+                "backend": "transformers",
+                "gpu_mem": 8192,
+                "model_anchor": model_anchor,
+            }]
+
+        def mark_model_deploying(self, _model, _backend, *, instance_id):
+            return bool(instance_id)
+
+    scheduler.llm_instance_manager = LlmManager()
+    scheduler._manage_llm_instance_scaling(now=10.0)
+
+    message = scheduler.llm_instance_queue.get_nowait()
+    assert message.message_data["model_anchor"] == model_anchor
+    scheduler._shutdown_llm_executors()
 
 
 def test_model_routed_task_does_not_reserve_the_model_gpu_twice():
@@ -400,6 +563,20 @@ def test_model_routed_task_does_not_reserve_the_model_gpu_twice():
     }
     assert task.scheduler_resources["gpu"] == 1
     assert task.scheduler_resources["gpu_mem"] == 2048
+
+
+def test_model_route_env_prefers_served_model(monkeypatch):
+    for key in runner_module.MODEL_ROUTE_ENV_KEYS:
+        monkeypatch.setenv(key, "previous")
+
+    runner_module._apply_model_route_env({
+        "model": "qwen-id",
+        "served_model": "/models/qwen",
+        "endpoint": "http://model/v1",
+        "instance_id": "instance-1",
+    })
+
+    assert runner_module.os.environ["MAZE_MODEL_NAME"] == "/models/qwen"
 
 
 def test_runtime_failure_cleanup_releases_only_after_stop_confirmation():

@@ -1,15 +1,10 @@
 import time
 from typing import Any,Dict
-from enum import Enum
 from maze.core.workflow.resources import DEFAULT_TASK_KIND, normalize_task_semantics
-
-class TaskType(Enum):
-    CODE = "code"
-    LANGGRAPH = "langgraph"
 
 class CodeTask():
     def __init__(self,workflow_id:str,task_id:str,task_name:str):
-        self.task_type = TaskType.CODE.value
+        self.task_type = "code"
         self.workflow_id = workflow_id
         self.task_id = task_id
         self.task_name=task_name
@@ -87,39 +82,4 @@ class CodeTask():
             "retry_backoff_seconds":self.retry_backoff_seconds,
             "retry_on":self.retry_on,
             "timeout_seconds":self.timeout_seconds,
-        }
-
-class LangGraphTask():
-    def __init__(self,workflow_id:str,task_id:str,task_name:str,code_ser:str,resources:Dict,task_kind:str|None=None):
-        self.task_type = TaskType.LANGGRAPH.value
-        self.workflow_id = workflow_id
-        self.task_id = task_id
-        self.task_name=task_name
-        self.code_ser = code_ser
-        self.task_kind, self.resources = normalize_task_semantics(
-            task_kind=task_kind,
-            resources=resources,
-            model_anchor=None,
-        )
-
-        self.args = None
-        self.kwargs = None
-    
-    def set_args(self,args):
-        self.args = args
-    
-    def set_kwargs(self,kwargs):
-        self.kwargs = kwargs
-                
-    def to_json(self) -> Dict[str, Any]:
-        return {
-            "task_type":self.task_type,
-            "workflow_id":self.workflow_id,
-            "task_id":self.task_id,
-            "task_name":self.task_name,
-            "task_kind":self.task_kind,
-            "resources":self.resources,
-            "code_ser":self.code_ser,
-            "args":self.args,
-            "kwargs":self.kwargs
         }

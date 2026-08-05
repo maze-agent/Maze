@@ -21,17 +21,6 @@ class _Process:
         return self.alive
 
 
-class _Task:
-    def set_args(self, _args):
-        pass
-
-    def set_kwargs(self, _kwargs):
-        pass
-
-    def to_json(self):
-        return {"workflow_id": "workflow", "task_id": "task"}
-
-
 class _StaticRun:
     run_id = "run"
     workflow_id = "workflow"
@@ -102,7 +91,6 @@ def _path(process):
     path.dynamic_runs = {}
     path.lock = asyncio.Lock()
     path.async_que = {}
-    path.langgraph_task_requests = {}
     path.llm_instance_async_que = {}
     path.cluster_resource_requests = {}
     path.cluster_queue_requests = {}
@@ -110,9 +98,6 @@ def _path(process):
     path.cluster_control_requests = {}
     path.task_attempts = {}
     path._stop_local_ray_best_effort = lambda: True
-    path.workflows = {
-        "workflow": SimpleNamespace(get_task=lambda _task_id: _Task()),
-    }
     return path
 
 
@@ -219,16 +204,11 @@ async def test_scheduler_unavailable_notifies_every_request_waiter(failure_mode)
 
     def send(message):
         sent.append(message)
-        if len(sent) == 7:
+        if len(sent) == 6:
             all_sent.set()
 
     path._send_scheduler_message = send
     waiters = [
-        asyncio.create_task(
-            path.run_langgraph_task(
-                "workflow", "task", "args", "kwargs", timeout=1
-            )
-        ),
         asyncio.create_task(
             path.start_llm_instance(
                 "instance", "model", 1, 1, 1024, 0, timeout=1
@@ -275,113 +255,11 @@ async def test_scheduler_unavailable_notifies_every_request_waiter(failure_mode)
     assert all(result.pid == 4321 for result in results)
     expected_exitcode = None if failure_mode == "fatal" else 17
     assert all(result.exitcode == expected_exitcode for result in results)
-    assert path.langgraph_task_requests == {}
     assert path.llm_instance_async_que == {}
     assert path.cluster_resource_requests == {}
     assert path.cluster_queue_requests == {}
     assert path.worker_registration_requests == {}
     assert path.cluster_control_requests == {}
-
-
-@pytest.mark.asyncio
-async def test_same_langgraph_task_uses_independent_invocation_runtime_ids():
-    path = _path(_Process())
-    path.socket_from_scheduler = _SchedulerSocket()
-    sent = []
-    all_sent = asyncio.Event()
-
-    def send(message):
-        sent.append(message)
-        if len(sent) == 2:
-            all_sent.set()
-
-    path._send_scheduler_message = send
-    monitor = asyncio.create_task(path.monitor_coroutine())
-    waiters = [
-        asyncio.create_task(
-            path.run_langgraph_task(
-                "workflow", "task", f"args-{index}", "kwargs", timeout=1
-            )
-        )
-        for index in range(2)
-    ]
-
-    await asyncio.wait_for(all_sent.wait(), timeout=0.5)
-    invocation_ids = [message["data"]["workflow_id"] for message in sent]
-    assert len(set(invocation_ids)) == 2
-    assert set(path.langgraph_task_requests) == set(invocation_ids)
-    assert all(
-        message["data"]["template_workflow_id"] == "workflow"
-        for message in sent
-    )
-    assert all(
-        message["data"]["invocation_id"] == message["data"]["workflow_id"]
-        for message in sent
-    )
-    assert {message["data"]["args"] for message in sent} == {
-        "args-0",
-        "args-1",
-    }
-    assert {message["data"]["kwargs"] for message in sent} == {"kwargs"}
-
-    try:
-        for invocation_id in reversed(invocation_ids):
-            identity = {
-                "workflow_id": invocation_id,
-                "task_id": "task",
-                "attempt": 1,
-                "dispatch_id": f"dispatch-{invocation_id}",
-                "lease_id": f"lease-{invocation_id}",
-            }
-            path.socket_from_scheduler.respond({
-                "type": "task_pending",
-                "data": {
-                    "workflow_id": invocation_id,
-                    "task_id": "task",
-                    "attempt": 0,
-                },
-            })
-            path.socket_from_scheduler.respond({
-                "type": "start_task",
-                "data": dict(identity),
-            })
-            path.socket_from_scheduler.respond({
-                "type": "finish_task",
-                "data": {
-                    **identity,
-                    "result": {"invocation_id": invocation_id},
-                },
-            })
-
-        results = await asyncio.wait_for(asyncio.gather(*waiters), timeout=0.5)
-    finally:
-        monitor.cancel()
-        await asyncio.gather(monitor, return_exceptions=True)
-
-    assert {result["invocation_id"] for result in results} == set(invocation_ids)
-    assert path.langgraph_task_requests == {}
-    assert len(sent) == 2
-
-
-@pytest.mark.asyncio
-async def test_abandoned_langgraph_invocation_stops_only_its_runtime():
-    path = _path(_Process())
-    sent = []
-    path._send_scheduler_message = sent.append
-
-    with pytest.raises(SchedulerUnavailableError, match="Timed out after"):
-        await path.run_langgraph_task(
-            "workflow", "task", "args", "kwargs", timeout=0.01
-        )
-
-    assert [message["type"] for message in sent] == [
-        "run_task",
-        "stop_workflow",
-    ]
-    invocation_id = sent[0]["data"]["workflow_id"]
-    assert sent[1]["data"]["workflow_id"] == invocation_id
-    assert invocation_id != "workflow"
-    assert path.langgraph_task_requests == {}
 
 
 @pytest.mark.asyncio

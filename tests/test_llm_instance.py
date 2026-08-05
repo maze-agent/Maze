@@ -204,7 +204,7 @@ def install_fake_runtime(
 def manager_start(manager, **kwargs):
     return manager.start_llm_instance(
         instance_id=kwargs.pop("instance_id", "instance-1"),
-        model="/models/qwen",
+        model=kwargs.pop("model", "/models/qwen"),
         node_ip="127.0.0.1",
         node_id=NODE_ID,
         gpu_id=0,
@@ -644,6 +644,31 @@ def test_manager_can_return_structured_instance_info(monkeypatch):
     assert result["status"] == "ready"
 
 
+def test_manager_launches_node_path_but_routes_by_logical_model(monkeypatch):
+    events = []
+    install_fake_runtime(monkeypatch, events)
+    manager = LlmInstanceManager()
+
+    result = manager_start(
+        manager,
+        model="qwen-id",
+        launch_model="/models/qwen",
+        backend="transformers",
+        return_info=True,
+    )
+    actor_event = next(event for event in events if event[0] == "actor")
+    route = manager.route_model_request(
+        "workflow-1",
+        {"local_model": "qwen-id", "backend": "transformers"},
+    )
+
+    assert actor_event[2]["model"] == "/models/qwen"
+    assert result["model"] == "qwen-id"
+    assert result["served_model"] == "/models/qwen"
+    assert route["model"] == "qwen-id"
+    assert route["served_model"] == "/models/qwen"
+
+
 def test_full_instance_waits_for_scale_out_instead_of_overrouting(monkeypatch):
     events = []
     install_fake_runtime(monkeypatch, events)
@@ -798,7 +823,7 @@ def test_route_and_scale_in_claim_are_atomic(monkeypatch):
     assert manager.get_instance_state("instance-1") == "ready"
 
 
-def test_lru_claim_rechecks_inflight_after_advisory_selection(monkeypatch):
+def test_lru_claim_rechecks_usage_after_advisory_selection(monkeypatch):
     events = []
     install_fake_runtime(monkeypatch, events)
     manager = LlmInstanceManager(idle_scale_in_seconds=1)
@@ -814,10 +839,25 @@ def test_lru_claim_rechecks_inflight_after_advisory_selection(monkeypatch):
 
     assert [item["instance_id"] for item in candidates] == ["instance-1"]
     assert route is not None
-    assert manager.claim_lru_scale_in("instance-1") is False
+    assert manager.claim_lru_scale_in(
+        "instance-1",
+        expected_idle_since=candidates[0]["idle_since"],
+        now=10,
+    ) is False
 
     manager.release_model_route(route)
-    assert manager.claim_lru_scale_in("instance-1") is True
+    assert manager.claim_lru_scale_in(
+        "instance-1",
+        expected_idle_since=candidates[0]["idle_since"],
+        now=10,
+    ) is False
+    metadata["last_used_time"] = 1
+    candidates = manager.lru_scale_in_candidates(now=10, idle_seconds=1)
+    assert manager.claim_lru_scale_in(
+        "instance-1",
+        expected_idle_since=candidates[0]["idle_since"],
+        now=10,
+    ) is True
     assert manager.route_model_request(
         "workflow-2",
         {"local_model": "/models/qwen", "backend": "vllm"},
@@ -827,9 +867,15 @@ def test_lru_claim_rechecks_inflight_after_advisory_selection(monkeypatch):
 def test_concurrent_stop_takes_one_claim_without_double_cleanup(monkeypatch):
     events = []
     install_fake_runtime(monkeypatch, events)
-    manager = LlmInstanceManager()
+    manager = LlmInstanceManager(idle_scale_in_seconds=1)
     manager_start(manager)
-    assert manager.claim_lru_scale_in("instance-1") is True
+    manager.id_to_instance_metadata["instance-1"]["created_time"] = 1
+    candidate = manager.lru_scale_in_candidates(now=10)[0]
+    assert manager.claim_lru_scale_in(
+        "instance-1",
+        expected_idle_since=candidate["idle_since"],
+        now=10,
+    ) is True
     barrier = threading.Barrier(3)
     results = []
     errors = []

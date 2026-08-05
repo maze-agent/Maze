@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import type {
   WorkflowNode,
   WorkflowEdge,
-  BuiltinTaskMeta,
   WorkspaceTaskMeta,
   WorkspaceWorkflowMeta,
   WorkspaceManifest,
@@ -46,9 +45,6 @@ interface WorkflowStore {
   workflowDraftError: string | null;
   workflowOperation: WorkflowOperation | null;
   
-  // Builtin tasks
-  builtinTasks: BuiltinTaskMeta[];
-
   // Workspace tasks
   workspaceId: string;
   workspaceDir: string;
@@ -82,7 +78,6 @@ interface WorkflowStore {
   updateNode: (nodeId: string, updates: Partial<WorkflowNode['data']>) => void;
   deleteNode: (nodeId: string) => void;
   selectNode: (node: WorkflowNode | null) => void;
-  setBuiltinTasks: (tasks: BuiltinTaskMeta[]) => void;
   setWorkspaceContext: (workspace: {
     workspaceId?: string;
     workspaceDir?: string;
@@ -137,7 +132,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   workflowSavedAt: null,
   workflowDraftError: null,
   workflowOperation: null,
-  builtinTasks: [],
   workspaceId: '',
   workspaceDir: '',
   workspaceManifest: null,
@@ -211,8 +205,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   
   selectNode: (node) => set({ selectedNode: node }),
   
-  setBuiltinTasks: (tasks) => set({ builtinTasks: tasks }),
-
   setWorkspaceContext: (workspace) => set((state) => ({
     workspaceId: workspace.workspaceId ?? workspace.manifest?.workspace_id ?? state.workspaceId,
     workspaceDir: workspace.workspaceDir ?? state.workspaceDir,

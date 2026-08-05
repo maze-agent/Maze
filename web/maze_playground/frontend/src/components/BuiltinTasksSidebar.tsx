@@ -16,7 +16,6 @@ import {
 import { api } from '@/api/client';
 import { createLocalWorkflowId, useWorkflowStore, type WorkflowOperationToken } from '@/stores/workflowStore';
 import type {
-  BuiltinTaskMeta,
   ModelTestResponse,
   LocalModel,
   LocalWorkspaceFileMeta,
@@ -28,10 +27,10 @@ import type {
 } from '@/types/workflow';
 import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSettings } from '@/utils/llmSettings';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
 
-type BuiltinWorkflowExample = {
+type WorkflowExample = {
   key: string;
   name: string;
   description: string;
@@ -52,7 +51,7 @@ function normalizeResources(resources: any = {}) {
   };
 }
 
-const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
+const WORKFLOW_EXAMPLES: WorkflowExample[] = [
   {
     key: 'distributed-smoke',
     name: 'Distributed GPU Smoke',
@@ -60,6 +59,8 @@ const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
     tags: ['distributed', 'GPU', 'placement'],
     color: '#0958d9',
     kind: 'distributed-smoke',
+    taskSourceId: 'distributed_gpu_probe.py',
+    taskRelativePath: 'tasks/examples/distributed_gpu_probe.py',
     workflowName: 'Distributed GPU Smoke',
   },
   {
@@ -69,6 +70,8 @@ const BUILTIN_WORKFLOW_EXAMPLES: BuiltinWorkflowExample[] = [
     tags: ['resource', 'CPU', 'GPU'],
     color: '#7a5af8',
     kind: 'resource-soak',
+    taskSourceId: 'distributed_gpu_probe.py',
+    taskRelativePath: 'tasks/examples/distributed_gpu_probe.py',
     workflowName: 'CPU + GPU Resource Soak',
     sleepSeconds: 60,
   },
@@ -312,8 +315,6 @@ export default function BuiltinTasksSidebar({
   workspaceReady = false,
 }: BuiltinTasksSidebarProps = {}) {
   const {
-    builtinTasks,
-    setBuiltinTasks,
     workspaceId,
     workspaceDir,
     setWorkspaceContext,
@@ -354,7 +355,6 @@ export default function BuiltinTasksSidebar({
     acquireWorkflowOperation,
     releaseWorkflowOperation,
   } = useWorkflowStore();
-  const [builtinLoading, setBuiltinLoading] = useState(false);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [initializedWorkspaceDir, setInitializedWorkspaceDir] = useState('');
@@ -380,7 +380,7 @@ export default function BuiltinTasksSidebar({
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const [newTaskMode, setNewTaskMode] = useState<'manual' | 'ai' | 'template'>('manual');
+  const [newTaskMode, setNewTaskMode] = useState<'manual' | 'ai'>('manual');
   const [newTaskFunctionName, setNewTaskFunctionName] = useState('');
   const [newTaskRelativePath, setNewTaskRelativePath] = useState('');
   const [newTaskDescription, setNewTaskDescription] = useState('');
@@ -397,7 +397,6 @@ export default function BuiltinTasksSidebar({
   const [clusterSummary, setClusterSummary] = useState<SidebarClusterSummary | null>(null);
   const [syncingLocalWorkspace, setSyncingLocalWorkspace] = useState(false);
   const [selectedWorkflowPath, setSelectedWorkflowPath] = useState<string | null>(null);
-  const [expandedTaskKey, setExpandedTaskKey] = useState<string | null>(null);
   const initializedWorkspaceDirRef = useRef('');
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
   const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -430,9 +429,6 @@ export default function BuiltinTasksSidebar({
 
   useEffect(() => {
     loadSystemCatalog();
-    if (builtinTasks.length === 0) {
-      loadBuiltinTasks(false);
-    }
   }, []);
 
   useEffect(() => {
@@ -557,9 +553,8 @@ export default function BuiltinTasksSidebar({
         : 'Offline'
     : 'Unknown';
   const taskLibrary = useMemo(() => {
-    const tasks = [...builtinTasks, ...workspaceTasks];
-    const counts = tasks.reduce((acc, task) => {
-      const label = `${task.displayName || task.name} ${task.description || ''} ${'module' in task ? task.module : task.relativePath}`.toLowerCase();
+    const counts = workspaceTasks.reduce((acc, task) => {
+      const label = `${task.displayName || task.name} ${task.description || ''} ${task.relativePath}`.toLowerCase();
       const resources = task.resources;
       if (resources?.gpu_mem || label.includes('gpu') || label.includes('cuda') || label.includes('llm') || label.includes('model') || label.includes('inference')) {
         acc.gpu += 1;
@@ -571,14 +566,14 @@ export default function BuiltinTasksSidebar({
         acc.cpu += 1;
       }
       return acc;
-    }, { cpu: 0, gpu: 0, llm: 0, io: 0, utility: 0 });
+    }, { cpu: 0, gpu: 0, io: 0, utility: 0 });
 
     return [
       { id: 'cpu', name: 'CPU Operators', count: counts.cpu },
       { id: 'gpu', name: 'GPU Operators', count: counts.gpu },
       { id: 'io', name: 'I/O Operators', count: counts.io },
     ];
-  }, [builtinTasks, workspaceTasks]);
+  }, [workspaceTasks]);
 
   const handleNewWorkflow = () => {
     if (!requireWorkspaceInteraction()) {
@@ -604,22 +599,6 @@ export default function BuiltinTasksSidebar({
   const getDefaultPosition = () => {
     const offset = nodes.length * 30;
     return { x: 180 + offset, y: 120 + offset };
-  };
-
-  const loadBuiltinTasks = async (showSuccess = true) => {
-    setBuiltinLoading(true);
-    try {
-      const tasks = await api.getBuiltinTasks();
-      setBuiltinTasks(tasks);
-      if (showSuccess) {
-        message.success('Builtin tasks refreshed');
-      }
-    } catch (error) {
-      console.error('Failed to load builtin tasks:', error);
-      message.error('Failed to load builtin tasks');
-    } finally {
-      setBuiltinLoading(false);
-    }
   };
 
   const loadSystemCatalog = async (showSuccess = false) => {
@@ -1253,26 +1232,7 @@ export default function BuiltinTasksSidebar({
     },
   });
 
-  const createResourceSoakCpuTaskMeta = (): WorkspaceTaskMeta => {
-    const activeWorkspace = workspaceInput.trim() || workspaceDir;
-    return {
-      name: 'resource_soak_cpu',
-      displayName: 'Resource Soak Cpu',
-      description: 'Sleep for a short period and report CPU-side placement.',
-      functionName: 'resource_soak_cpu',
-      workspaceDir: activeWorkspace,
-      relativePath: RESOURCE_SOAK_CPU_TASK_PATH,
-      code: resourceSoakCpuTaskCode,
-      inputs: [
-        { name: 'probe_id', dataType: 'int' },
-        { name: 'sleep_seconds', dataType: 'int' },
-      ],
-      outputs: [{ name: 'placement', dataType: 'dict' }],
-      resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
-    };
-  };
-
-  const createResourceSoakCpuNode = (
+  const createProbeNode = (
     task: WorkspaceTaskMeta,
     id: string,
     label: string,
@@ -1297,48 +1257,6 @@ export default function BuiltinTasksSidebar({
         })),
       },
     };
-  };
-
-  const createResourceSoakGpuNode = (
-    id: string,
-    label: string,
-    probeId: number,
-    sleepSeconds: number,
-    position: { x: number; y: number },
-  ): WorkflowNode => ({
-    id,
-    type: 'taskNode',
-    position,
-    data: {
-      category: 'builtin',
-      nodeType: 'task',
-      label,
-      taskRef: 'distributedSmoke.distributed_gpu_probe',
-      inputs: [
-        {
-          name: 'probe_id',
-          dataType: 'int',
-          source: 'user',
-          value: String(probeId),
-        },
-        {
-          name: 'sleep_seconds',
-          dataType: 'int',
-          source: 'user',
-          value: String(sleepSeconds),
-        },
-      ],
-      outputs: [{ name: 'placement', dataType: 'dict' }],
-      task_kind: 'gpu',
-      resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
-      configured: true,
-    },
-  });
-
-  const getBuiltinTaskKey = (task: BuiltinTaskMeta) => `builtin:${task.module}.${task.functionRef}`;
-
-  const toggleTask = (taskKey: string) => {
-    setExpandedTaskKey((current) => (current === taskKey ? null : taskKey));
   };
 
   const handleSaveWorkspaceWorkflow = async () => {
@@ -1601,18 +1519,14 @@ export default function BuiltinTasksSidebar({
           task.relativePath === node.data.taskPath &&
           task.functionName === node.data.functionName)
       : null;
-    const builtinTask = node.data.category === 'builtin'
-      ? builtinTasks.find((task) => `${task.module}.${task.functionRef}` === node.data.taskRef)
-      : null;
-
     return {
       nodeId: node.id,
       label: node.data.label,
       category: node.data.category,
-      functionName: node.data.functionName || workspaceTask?.functionName || builtinTask?.functionRef,
+      functionName: node.data.functionName || workspaceTask?.functionName,
       taskRef: node.data.taskRef,
       relativePath: node.data.taskPath || workspaceTask?.relativePath,
-      description: workspaceTask?.description || builtinTask?.description || '',
+      description: workspaceTask?.description || '',
       inputs: node.data.inputs,
       outputs: node.data.outputs,
       codePreview: workspaceTask?.code ? workspaceTask.code.slice(0, 1200) : undefined,
@@ -1669,146 +1583,27 @@ export default function BuiltinTasksSidebar({
     await saveNewWorkspaceTask(newTaskGeneratedCode, newTaskRelativePath.trim() || `tasks/${safeTaskFunctionName(newTaskFunctionName)}.py`);
   };
 
-  const onDragStartBuiltin = (event: React.DragEvent, task: BuiltinTaskMeta) => {
-    if (workflowInteractionBlocked) {
-      event.preventDefault();
-      return;
-    }
-    event.dataTransfer.setData('application/reactflow', JSON.stringify({
-      type: 'builtin',
-      task,
-    }));
-    event.dataTransfer.effectAllowed = 'move';
-  };
-
-  const onDragStartDistributedSmoke = (event: React.DragEvent) => {
-    event.dataTransfer.setData('application/reactflow', JSON.stringify({
-      type: 'workflow-distributed-smoke',
-      task: {
-        label: 'Distributed Smoke Workflow',
-      },
-    }));
-    event.dataTransfer.effectAllowed = 'move';
-  };
-
-  const onDragStartResourceSoak = (event: React.DragEvent) => {
-    event.dataTransfer.setData('application/reactflow', JSON.stringify({
-      type: 'workflow-resource-soak',
-      task: {
-        label: 'CPU + GPU Resource Soak',
-      },
-    }));
-    event.dataTransfer.effectAllowed = 'move';
-  };
-
-  const onDragStartWorkflowExample = (event: React.DragEvent, template: BuiltinWorkflowExample) => {
-    if (workflowInteractionBlocked) {
-      event.preventDefault();
-      return;
-    }
-    if (template.kind === 'distributed-smoke') {
-      onDragStartDistributedSmoke(event);
-    } else if (template.kind === 'resource-soak') {
-      onDragStartResourceSoak(event);
-    } else {
-      event.dataTransfer.setData('application/reactflow', JSON.stringify({
-        type: 'workspace-example-task',
-        task: {
-          label: template.name,
-          taskSourceId: template.taskSourceId,
-          taskRelativePath: template.taskRelativePath,
-        },
-      }));
-      event.dataTransfer.effectAllowed = 'move';
-    }
-  };
-
-  const addBuiltinTaskToCanvas = async (task: BuiltinTaskMeta, closeAfterAdd = false) => {
-    if (!requireWorkspaceInteraction()) {
-      return;
-    }
-    if (isRunning) {
-      message.warning('Workflow is running, please update the canvas after it finishes');
-      return;
-    }
-    const operationToken = beginWorkflowOperation('Adding task to workflow');
-    if (!operationToken) {
-      return;
-    }
-    try {
-      const newNode: WorkflowNode = {
-        id: `node-${Date.now()}`,
-        type: 'taskNode',
-        position: getDefaultPosition(),
-        data: {
-          category: 'builtin',
-          nodeType: 'task',
-          label: task.displayName,
-          taskRef: `${task.module}.${task.functionRef}`,
-          inputs: task.inputs.map((input) => ({
-            name: input.name,
-            dataType: input.dataType,
-            source: 'user',
-            value: '',
-          })),
-          outputs: task.outputs,
-          resources: task.resources,
-          configured: true,
-        },
-      };
-
-      addNode(newNode);
-      selectNode(newNode);
-      if (closeAfterAdd) {
-        setNewTaskOpen(false);
-      }
-      message.success(`${task.displayName} added to canvas`);
-    } finally {
-      releaseWorkflowOperation(operationToken);
-    }
-  };
-
-  const addDistributedSmokeTemplateToCanvas = async (template?: BuiltinWorkflowExample) => {
-    setWorkflowName(template?.workflowName || 'Distributed GPU Smoke');
+  const addDistributedSmokeTemplateToCanvas = async (template: WorkflowExample) => {
+    setWorkflowName(template.workflowName || template.name);
+    const task = await importWorkspaceExampleTask(template);
     const position = getDefaultPosition();
     const baseId = Date.now();
-    const smokeNodes: WorkflowNode[] = Array.from({ length: 2 }, (_, index) => ({
-      id: `node-${baseId}-${index + 1}`,
-      type: 'taskNode',
-      position: {
+    const smokeNodes = Array.from({ length: 2 }, (_, index) => createProbeNode(
+      task,
+      `node-${baseId}-${index + 1}`,
+      `GPU Probe ${index + 1}`,
+      index + 1,
+      1,
+      {
         x: position.x + (index % 2) * 260,
         y: position.y + Math.floor(index / 2) * 180,
       },
-      data: {
-        category: 'builtin',
-        nodeType: 'task',
-        label: `GPU Probe ${index + 1}`,
-        taskRef: 'distributedSmoke.distributed_gpu_probe',
-        inputs: [
-          {
-            name: 'probe_id',
-            dataType: 'int',
-            source: 'user',
-            value: String(index + 1),
-          },
-          {
-            name: 'sleep_seconds',
-            dataType: 'int',
-            source: 'user',
-            value: '1',
-          },
-        ],
-        outputs: [{ name: 'placement', dataType: 'dict' }],
-        task_kind: 'gpu',
-        resources: { cpu_num: 1, gpu_mem: 0, io_num: 0 },
-        configured: true,
-      },
-    }));
+    ));
 
     smokeNodes.forEach((node) => addNode(node));
     selectNode(smokeNodes[0]);
     setCatalogImportType(null);
-    message.success(`${template?.name || 'Distributed smoke workflow'} added`);
+    message.success(`${template.name} added`);
   };
 
   const ensureResourceSoakCpuTask = async () => {
@@ -1830,14 +1625,15 @@ export default function BuiltinTasksSidebar({
     return task;
   };
 
-  const addResourceSoakTemplateToCanvas = async (template: BuiltinWorkflowExample) => {
+  const addResourceSoakTemplateToCanvas = async (template: WorkflowExample) => {
     setWorkflowName(template.workflowName || template.name);
     const sleepSeconds = template.sleepSeconds || 60;
-    const cpuTask = createResourceSoakCpuTaskMeta();
+    const cpuTask = await ensureResourceSoakCpuTask();
+    const gpuTask = await importWorkspaceExampleTask(template);
     const position = getDefaultPosition();
     const baseId = Date.now();
     const soakNodes: WorkflowNode[] = [
-      createResourceSoakCpuNode(
+      createProbeNode(
         cpuTask,
         `node-${baseId}-cpu-1`,
         'CPU Soak 1',
@@ -1845,7 +1641,7 @@ export default function BuiltinTasksSidebar({
         sleepSeconds,
         { x: position.x, y: position.y },
       ),
-      createResourceSoakCpuNode(
+      createProbeNode(
         cpuTask,
         `node-${baseId}-cpu-2`,
         'CPU Soak 2',
@@ -1853,14 +1649,16 @@ export default function BuiltinTasksSidebar({
         sleepSeconds,
         { x: position.x, y: position.y + 170 },
       ),
-      createResourceSoakGpuNode(
+      createProbeNode(
+        gpuTask,
         `node-${baseId}-gpu-1`,
         'GPU Soak 1',
         101,
         sleepSeconds,
         { x: position.x + 280, y: position.y },
       ),
-      createResourceSoakGpuNode(
+      createProbeNode(
+        gpuTask,
         `node-${baseId}-gpu-2`,
         'GPU Soak 2',
         102,
@@ -1873,15 +1671,9 @@ export default function BuiltinTasksSidebar({
     selectNode(soakNodes[0]);
     setCatalogImportType(null);
     message.success(`${template.name} added (${sleepSeconds}s tasks)`);
-    try {
-      await ensureResourceSoakCpuTask();
-    } catch (error: any) {
-      console.error('Failed to prepare resource soak CPU task:', error);
-      message.error(error.response?.data?.error || error.message || 'Failed to prepare CPU soak task');
-    }
   };
 
-  const importWorkspaceExampleTask = async (template: BuiltinWorkflowExample) => {
+  const importWorkspaceExampleTask = async (template: WorkflowExample) => {
     if (!template.taskSourceId) {
       throw new Error('Example task source is missing');
     }
@@ -1902,7 +1694,7 @@ export default function BuiltinTasksSidebar({
     return task;
   };
 
-  const addWorkspaceExampleTaskToCanvas = async (template: BuiltinWorkflowExample) => {
+  const addWorkspaceExampleTaskToCanvas = async (template: WorkflowExample) => {
     setWorkflowName(template.workflowName || template.name);
     const task = await importWorkspaceExampleTask(template);
     const newNode = createWorkspaceNode(task);
@@ -1912,7 +1704,7 @@ export default function BuiltinTasksSidebar({
     message.success(`${template.name} added`);
   };
 
-  const addWorkflowExampleToCanvas = async (template: BuiltinWorkflowExample) => {
+  const addWorkflowExampleToCanvas = async (template: WorkflowExample) => {
     if (!requireWorkspaceInteraction()) {
       return;
     }
@@ -2011,7 +1803,7 @@ export default function BuiltinTasksSidebar({
   const visibleSystemWorkflowItems = useMemo(() => {
     const query = workflowSearch.trim().toLowerCase();
     return (catalogItems.workflows || [])
-      .filter((item) => item.kind === 'file' && item.name.toLowerCase().endsWith('.json'))
+      .filter((item) => item.kind === 'file' && item.path.toLowerCase().endsWith('.json'))
       .filter((item) => {
         if (!query) return true;
         return [item.name, item.description, ...(item.tags || [])]
@@ -2049,68 +1841,7 @@ export default function BuiltinTasksSidebar({
     return { workflows, tasks };
   }, [catalogItems]);
 
-  const renderBuiltinTaskSummary = (task: BuiltinTaskMeta) => (
-    <>
-      <Space size={[4, 4]} wrap style={{ marginBottom: '6px' }}>
-        <Tag color="blue">builtin</Tag>
-        <Tag>{task.module}</Tag>
-      </Space>
-      <Paragraph
-        type="secondary"
-        ellipsis={{ rows: 2, tooltip: task.description }}
-        style={{ fontSize: '12px', marginBottom: '6px' }}
-      >
-        {task.description || 'No description provided.'}
-      </Paragraph>
-    </>
-  );
-
-  const renderTaskDetails = (task: BuiltinTaskMeta | WorkspaceTaskMeta) => (
-    <>
-      <Paragraph
-        type="secondary"
-        ellipsis={{ rows: 2, tooltip: task.description }}
-        style={{ fontSize: '12px', marginBottom: '8px' }}
-      >
-        {task.description || 'No description provided.'}
-      </Paragraph>
-      <Space size={[4, 4]} wrap style={{ marginBottom: '8px' }}>
-        <Tag color="geekblue">Inputs {task.inputs.length}</Tag>
-        <Tag color="cyan">Outputs {task.outputs.length}</Tag>
-      </Space>
-      <div style={{ fontSize: '12px', color: '#666' }}>
-        {'relativePath' in task && (
-          <div style={{ marginBottom: '4px' }}>
-            <Text type="secondary">File: </Text>
-            <Tag>{task.relativePath}</Tag>
-          </div>
-        )}
-        <div>
-          <Text type="secondary">In: </Text>
-          {task.inputs.map((input) => (
-            <Tag key={input.name} style={{ marginBottom: '4px' }}>
-              {input.name}:{input.dataType}
-            </Tag>
-          ))}
-        </div>
-        <div>
-          <Text type="secondary">Out: </Text>
-          {task.outputs.map((output) => (
-            <Tag key={output.name} style={{ marginBottom: '4px' }}>
-              {output.name}:{output.dataType}
-            </Tag>
-          ))}
-        </div>
-        {task.resources && (
-          <Text type="secondary" style={{ fontSize: '11px' }}>
-            CPU {task.resources.cpu_num ?? (task.resources as any).cpu}, VRAM {task.resources.gpu_mem}MB, I/O {task.resources.io_num ?? 0}
-          </Text>
-        )}
-      </div>
-    </>
-  );
-
-  const renderBuiltinWorkflowTemplates = () => {
+  const renderWorkflowExamples = () => {
     return (
       <div>
         <Space align="center" size={6} style={{ marginBottom: 8 }}>
@@ -2119,13 +1850,10 @@ export default function BuiltinTasksSidebar({
         </Space>
         <List
           size="small"
-          dataSource={BUILTIN_WORKFLOW_EXAMPLES}
+          dataSource={WORKFLOW_EXAMPLES}
           renderItem={(template) => (
             <List.Item
               className="workspace-file-row"
-              draggable={!workflowInteractionBlocked}
-              onDragStart={(event) => onDragStartWorkflowExample(event, template)}
-              style={{ cursor: 'grab' }}
               actions={[
                 <Button
                   key="add"
@@ -2163,103 +1891,16 @@ export default function BuiltinTasksSidebar({
     );
   };
 
-  const renderBuiltinTaskTemplates = (closeAfterAdd = false) => (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-        <Space align="center" size={6}>
-          <Text strong>Built-in Templates</Text>
-          <Tag color="blue" style={{ margin: 0 }}>canvas</Tag>
-        </Space>
-        <Button
-          type="text"
-          size="small"
-          icon={<ReloadOutlined />}
-          onClick={() => loadBuiltinTasks(true)}
-          loading={builtinLoading}
-        >
-          Refresh
-        </Button>
-      </div>
-      <List
-        size="small"
-        loading={builtinLoading}
-        dataSource={builtinTasks}
-        locale={{
-          emptyText: (
-            <Empty description="No built-in tasks" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button size="small" icon={<ReloadOutlined />} onClick={() => loadBuiltinTasks(true)}>
-                Load Templates
-              </Button>
-            </Empty>
-          ),
-        }}
-        renderItem={(task) => {
-          const taskKey = getBuiltinTaskKey(task);
-          const expanded = expandedTaskKey === taskKey;
-
-          return (
-            <List.Item
-              className="workspace-file-row"
-              draggable={!workflowInteractionBlocked}
-              onDragStart={(event) => onDragStartBuiltin(event, task)}
-              onClick={() => {
-                toggleTask(taskKey);
-              }}
-              style={{ cursor: 'grab' }}
-              actions={[
-                <Button
-                  key="add"
-                  size="small"
-                  type="primary"
-                  icon={<PlusOutlined />}
-                  disabled={!workspaceInteractionReady || workflowInteractionBlocked}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    addBuiltinTaskToCanvas(task, closeAfterAdd);
-                  }}
-                >
-                  Add
-                </Button>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={<ThunderboltOutlined style={{ color: '#1677ff' }} />}
-                title={
-                  <Text style={{ fontSize: 13, maxWidth: 230 }} ellipsis={{ tooltip: task.displayName }}>
-                    {task.displayName}
-                  </Text>
-                }
-                description={
-                  <div>
-                    {renderBuiltinTaskSummary(task)}
-                    {expanded && (
-                      <>
-                        <Divider style={{ margin: '8px 0' }} />
-                        {renderTaskDetails(task)}
-                      </>
-                    )}
-                  </div>
-                }
-              />
-            </List.Item>
-          );
-        }}
-      />
-    </div>
-  );
-
   const renderCatalogList = (type: 'workflows' | 'tasks') => {
     const items = importableCatalogItems[type] || [];
 
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {type === 'workflows' && renderBuiltinWorkflowTemplates()}
-        {type === 'tasks' && renderBuiltinTaskTemplates()}
-
+        {type === 'workflows' && renderWorkflowExamples()}
         <div>
           <Space align="center" size={6} style={{ marginBottom: 8 }}>
-            <Text strong>Built-in Library</Text>
-            <Tag color="geekblue" style={{ margin: 0 }}>built-in</Tag>
+            <Text strong>System Catalog</Text>
+            <Tag color="geekblue" style={{ margin: 0 }}>system</Tag>
             <Tag color="green" style={{ margin: 0 }}>import to workspace</Tag>
           </Space>
           {items.length === 0 ? (
@@ -2301,7 +1942,7 @@ export default function BuiltinTasksSidebar({
                             </Text>
                           )}
                           <Space size={4} wrap>
-                            <Tag color="geekblue" style={{ margin: 0 }}>built-in</Tag>
+                            <Tag color="geekblue" style={{ margin: 0 }}>system</Tag>
                             <Tag style={{ margin: 0 }}>{item.kind}</Tag>
                             {(item.tags || []).map((tag) => (
                               <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
@@ -3071,11 +2712,7 @@ export default function BuiltinTasksSidebar({
         open={newTaskOpen}
         onCancel={closeNewWorkspaceTaskModal}
         width={760}
-        footer={newTaskMode === 'template' ? [
-          <Button key="close" onClick={closeNewWorkspaceTaskModal}>
-            Close
-          </Button>,
-        ] : newTaskMode === 'manual' ? [
+        footer={newTaskMode === 'manual' ? [
           <Button key="cancel" onClick={closeNewWorkspaceTaskModal} disabled={creatingTask}>
             Cancel
           </Button>,
@@ -3120,7 +2757,6 @@ export default function BuiltinTasksSidebar({
             options={[
               { label: 'Manual', value: 'manual' },
               { label: 'Generate with AI', value: 'ai' },
-              { label: 'Built-in Templates', value: 'template' },
             ]}
           />
 
@@ -3135,31 +2771,25 @@ export default function BuiltinTasksSidebar({
             />
           )}
 
-          {newTaskMode !== 'template' && (
-            <>
-              <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                <Text strong>Function name</Text>
-                <Input
-                  value={newTaskFunctionName}
-                  onChange={(event) => setNewTaskFunctionName(event.target.value)}
-                  placeholder="process_file"
-                />
-              </Space>
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Text strong>Function name</Text>
+            <Input
+              value={newTaskFunctionName}
+              onChange={(event) => setNewTaskFunctionName(event.target.value)}
+              placeholder="process_file"
+            />
+          </Space>
 
-              <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                <Text strong>Task file</Text>
-                <Input
-                  value={newTaskRelativePath}
-                  onChange={(event) => setNewTaskRelativePath(event.target.value)}
-                  placeholder="tasks/ai_generated/process_file.py"
-                />
-              </Space>
-            </>
-          )}
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Text strong>Task file</Text>
+            <Input
+              value={newTaskRelativePath}
+              onChange={(event) => setNewTaskRelativePath(event.target.value)}
+              placeholder="tasks/ai_generated/process_file.py"
+            />
+          </Space>
 
-          {newTaskMode === 'template' ? (
-            renderBuiltinTaskTemplates(true)
-          ) : newTaskMode === 'manual' ? (
+          {newTaskMode === 'manual' ? (
             <Alert
               type="info"
               showIcon

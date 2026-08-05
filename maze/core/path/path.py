@@ -1,4 +1,3 @@
-from asyncio.queues import Queue
 import hashlib
 import math
 import os
@@ -24,11 +23,11 @@ from pathlib import Path
 from typing import Any,Dict,List
 from urllib.parse import urlsplit
 from asyncio.queues import Queue
-from maze.core.workflow.task import CodeTask, LangGraphTask,TaskType
-from maze.core.workflow.workflow import Workflow,LangGraphWorkflow
+from maze.core.workflow.task import CodeTask
+from maze.core.workflow.workflow import Workflow
 from maze.core.workflow.dynamic import DynamicRun, TERMINAL_DYNAMIC_RUN_STATUSES, dynamic_task_spec_from_payload
 from maze.core.workflow.dynamic_store import DynamicRunStore
-from maze.core.workflow.dag_spec import build_dag_workflow
+from maze.core.workflow.dag_spec import build_dag_workflow, dag_definition_from_spec, dag_spec_from_payload
 from maze.core.workflow.static_run import (
     FINAL_OUTPUT_REFS_UNSET,
     StaticRun,
@@ -43,6 +42,7 @@ from maze.core.scheduler.llm_instance import (
     stop_llm_owner_processes_on_cluster,
 )
 from maze.core.scheduler.result_summary import summarize_task_result
+from maze.core.scheduler.error import exception_to_error_envelope
 from maze.core.scheduler.strategy import DEFAULT_PREDICTED_DURATION_SECONDS, normalize_scheduling_algorithm
 from maze.core.scheduler.runtime_estimator import RuntimeEstimator, RuntimePrediction
 from maze.core.files.artifact_store import LocalCASArtifactStore
@@ -441,7 +441,7 @@ class MaPath:
         self.lock = lock = asyncio.Lock()
         self._run_workflow_idempotency_index: Dict[str, Dict[str, str]] = {}
 
-        self.workflows: Dict[str, Workflow|LangGraphWorkflow] = {}
+        self.workflows: Dict[str, Workflow] = {}
         self.submit_workflows: Dict[str, Workflow] = {}
         self.static_runs: Dict[str, StaticRun] = {}
         self.static_run_store = StaticRunStore()
@@ -461,7 +461,6 @@ class MaPath:
         self.task_attempts: Dict[tuple[str, str], Dict[str, Any]] = {}
         self.pre_dispatch_rejections: set[tuple[str, str]] = set()
         self.async_que: Dict[str, asyncio.Queue] = {} 
-        self.langgraph_task_requests: Dict[str, asyncio.Queue] = {}
         self.llm_instance_async_que: Dict[str, asyncio.Queue] = {}
         self.cluster_resource_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
@@ -783,6 +782,24 @@ class MaPath:
         serialized: bytes = json.dumps(message).encode('utf-8')
         self.socket_to_scheduler.send(serialized)
 
+    def _stop_workflow_after_artifact_failure(self, data: Dict[str, Any]):
+        error = data.get("error")
+        if not (
+            isinstance(error, dict)
+            and error.get("error_type") == "artifact_error"
+            and error.get("origin") == "core"
+        ):
+            return
+        try:
+            self._send_scheduler_message({
+                "type": "stop_workflow",
+                "data": {"workflow_id": data.get("workflow_id")},
+            })
+        except Exception:
+            logger.exception(
+                "Could not clean up workflow after artifact validation failure"
+            )
+
     def _require_scheduler_available(self):
         unavailable = self._scheduler_unavailable_message()
         if unavailable is None:
@@ -1091,36 +1108,26 @@ class MaPath:
         '''
         Create a static workflow from an external DAG submit spec.
         '''
-        workflow_id = str(uuid.uuid4())
+        spec = dag_spec_from_payload(spec)
+        workflow_id = spec.get("workflow_id") or str(uuid.uuid4())
+        existing = self.workflows.get(workflow_id)
+        definition = dag_definition_from_spec(spec)
+        if existing is not None:
+            if existing.graph.graph.get("dag_definition") != definition:
+                raise ValueError(
+                    f"workflow_id {workflow_id!r} is already bound to a different DAG"
+                )
+            return workflow_id
         self.workflows[workflow_id] = build_dag_workflow(workflow_id, spec)
         self.global_metrics.on_workflow_created(workflow_id)
         return workflow_id
 
-    def get_workflow(self,workflow_id:str) -> Workflow|LangGraphWorkflow:
+    def get_workflow(self,workflow_id:str) -> Workflow:
         '''
         Get a workflow.
         '''
         return self.workflows[workflow_id]
   
-    def get_workflow_tasks(self,workflow_id:str):
-        """
-        Get all tasks in a workflow.
-        """
-        if workflow_id not in self.workflows:
-            return []
-        
-        workflow = self.workflows[workflow_id]
-        tasks = []
-        
-       
-        for task_id, task in workflow.tasks.items():
-            tasks.append({
-                "id": task_id,
-                "name": task.task_name if hasattr(task, 'task_name') else f"任务_{task_id[:8]}"
-            })
-        
-        return tasks
-
     def _get_hacs_priority(self, workflow: Workflow, task_id: str):
         node_info = workflow.graph.nodes[task_id]
         n_desc = node_info.get("n_desc", 0)
@@ -1235,7 +1242,7 @@ class MaPath:
             data["file_context"] = {
                 **file_context,
                 "enabled": True,
-                "run_id": file_context.get("run_id") or submit_id,
+                "run_id": submit_id,
                 "submit_id": submit_id,
                 "task_id": task.task_id,
                 "node_id": task_node_ids.get(task.task_id),
@@ -1256,6 +1263,7 @@ class MaPath:
     ) -> Dict[str, Any]:
         validate_run_workflow_file_context(file_context)
         prepared_context = copy.deepcopy(file_context)
+        prepared_context["run_id"] = submit_id
         if (
             not prepared_context
             or not prepared_context.get("enabled")
@@ -1318,7 +1326,6 @@ class MaPath:
                     "uri": f"maze://runs/{submit_id}/workspace/files/{relative_path}",
                 })
 
-        prepared_context["run_id"] = prepared_context.get("run_id") or submit_id
         prepared_context["initial_files"] = initial_files
         # Artifact workers consume immutable HTTP references.  Do not send a
         # Head-local absolute workspace path in their scheduler payload.
@@ -1660,7 +1667,7 @@ class MaPath:
                 exc,
             ) from exc
 
-    def _workflow_for_submission(self, workflow_id: str) -> Workflow | LangGraphWorkflow:
+    def _workflow_for_submission(self, workflow_id: str) -> Workflow:
         try:
             workflow = self.workflows[workflow_id]
         except KeyError as exc:
@@ -3614,31 +3621,6 @@ class MaPath:
         await self._refresh_dynamic_timeout(run_id)
         dynamic_run = self.get_dynamic_run(run_id)
         dynamic_run.check_can_mutate("emit events")
-        if event_type == "agent_repair_observation":
-            result = event_data.get("result") or {}
-            decision_task_id = event_data.get("decision_task_id")
-            if decision_task_id and isinstance(result, dict):
-                dynamic_run.record_invocation_repair_observation(
-                    decision_task_id,
-                    error_type=str(result.get("error_type") or "invocation_error"),
-                    message=str(result.get("error") or result.get("message") or "Agent invocation repair observation"),
-                    repair_action={
-                        "type": "invocation_correction",
-                        "applied": True,
-                        "strategy": "feedback_observation",
-                        "tool": event_data.get("tool"),
-                    },
-                    retry={
-                        "scheduled": True,
-                        "kind": "next_llm_decision",
-                        "step": event_data.get("step"),
-                    },
-                    outcome={
-                        "status": "feedback_recorded",
-                        "step": event_data.get("step"),
-                    },
-                )
-
         stored_event = await self._emit_dynamic_event(run_id, {
             "type": event_type,
             "data": {
@@ -4002,7 +3984,6 @@ class MaPath:
             "data": {**unavailable, "status": "interrupted"},
         }
         for attribute in (
-            "langgraph_task_requests",
             "llm_instance_async_que",
             "cluster_resource_requests",
             "cluster_queue_requests",
@@ -4433,7 +4414,7 @@ class MaPath:
             data["file_context"] = {
                 **file_context,
                 "enabled": True,
-                "run_id": file_context.get("run_id") or dynamic_run.run_id,
+                "run_id": dynamic_run.run_id,
                 "submit_id": dynamic_run.run_id,
                 "task_id": task.task_id,
                 "parent_task_ids": parent_task_ids,
@@ -4810,7 +4791,7 @@ class MaPath:
     ):
         runs = []
         include_static = kind in (None, "static")
-        include_dynamic = kind in (None, "dynamic", "react", "agent")
+        include_dynamic = kind in (None, "dynamic")
 
         if include_static:
             static_runs = self.static_run_store.list_runs(summary=not detail)
@@ -4822,11 +4803,6 @@ class MaPath:
                 self._normalize_dynamic_run_snapshot(run) if detail else self._normalize_dynamic_run_summary(run)
                 for run in dynamic_runs
             ]
-            if kind in {"react", "agent"}:
-                normalized_dynamic = [
-                    run for run in normalized_dynamic
-                    if run.get("mode") == kind or run.get("run_type") == kind
-                ]
             runs.extend(normalized_dynamic)
 
         if status:
@@ -4931,9 +4907,6 @@ class MaPath:
 
         for event in events:
             data = event.get("data") or {}
-            if event.get("type") == "agent_tool_output_artifact":
-                add_artifact(data.get("artifact") or {}, data)
-                continue
             if event.get("type") in {"finish_task", "finish_workflow"}:
                 walk_result_summary(data.get("result"), data)
         return artifacts
@@ -5371,6 +5344,7 @@ class MaPath:
             self._persist_dynamic_scheduler_event(run_id, message)
             self._commit_task_attempt_event_transaction(attempt_transaction)
             await self._notify_dynamic_scheduler_event(run_id)
+            self._stop_workflow_after_artifact_failure(message_data)
             return
 
         self._rollback_task_attempt_event_transaction(attempt_transaction)
@@ -5793,7 +5767,6 @@ class MaPath:
                         continue
 
                     attempt_transaction = None
-                    langgraph_request_queue = None
                     if message_type in {
                         "start_task",
                         "finish_task",
@@ -5801,27 +5774,6 @@ class MaPath:
                         "task_retry",
                         "task_exception",
                     }:
-                        langgraph_request_key = message_data.get("workflow_id")
-                        langgraph_request_queue = self.langgraph_task_requests.get(
-                            langgraph_request_key
-                        )
-                        if langgraph_request_queue is None:
-                            # Compatibility with requests created before per-invocation
-                            # runtime identities were introduced.
-                            langgraph_request_queue = self.langgraph_task_requests.get(
-                                message_data.get("task_id")
-                            )
-
-                    if (
-                        langgraph_request_queue is None
-                        and message_type in {
-                            "start_task",
-                            "finish_task",
-                            "task_pending",
-                            "task_retry",
-                            "task_exception",
-                        }
-                    ):
                         static_run = self.static_runs.get(
                             message_data.get("workflow_id")
                         )
@@ -5840,7 +5792,36 @@ class MaPath:
                             message_type,
                             message_data,
                         )
-                        if not self._accept_task_attempt_event(message_type, message_data):
+                        try:
+                            accepted = self._accept_task_attempt_event(
+                                message_type,
+                                message_data,
+                            )
+                        except ArtifactError as exc:
+                            self._rollback_task_attempt_event_transaction(
+                                attempt_transaction
+                            )
+                            failed_message = copy.deepcopy(message)
+                            failed_message["type"] = "task_exception"
+                            failed_data = failed_message.setdefault("data", {})
+                            failed_data.pop("file_manifest", None)
+                            error = exception_to_error_envelope(
+                                "artifact_error",
+                                exc,
+                                retryable=False,
+                                origin="core",
+                                node_id=failed_data.get("node_id"),
+                                node_ip=failed_data.get("node_ip"),
+                                attempt=failed_data.get("attempt"),
+                            )
+                            failed_data["error"] = error
+                            failed_data["result"] = error
+                            retry_message = failed_message
+                            logger.exception(
+                                "Task artifact validation failed; recording a terminal task failure"
+                            )
+                            continue
+                        if not accepted:
                             attempt_transaction = None
                             if (
                                 message_type == "finish_task"
@@ -5854,125 +5835,118 @@ class MaPath:
                             message_data.pop("file_manifest", None)
 
                     if(message_type=="finish_task"):
-                        if langgraph_request_queue is not None:
-                            await langgraph_request_queue.put(message)
-                            self._commit_task_attempt_event_transaction(attempt_transaction)
-                        else:
-                            submit_id = message_data['workflow_id']
-                            if submit_id in self.dynamic_runs:
-                                await self._handle_dynamic_scheduler_event(
-                                    message,
-                                    attempt_transaction,
-                                )
-                                continue
-                            await self._handle_static_finish_scheduler_event(
+                        submit_id = message_data['workflow_id']
+                        if submit_id in self.dynamic_runs:
+                            await self._handle_dynamic_scheduler_event(
                                 message,
                                 attempt_transaction,
                             )
+                            continue
+                        await self._handle_static_finish_scheduler_event(
+                            message,
+                            attempt_transaction,
+                        )
 
                     elif(message_type=="start_task" or message_type=="task_pending" or message_type=="task_retry" or message_type=="task_exception"):
-                        if langgraph_request_queue is not None:
-                            await langgraph_request_queue.put(message)
-                            self._commit_task_attempt_event_transaction(attempt_transaction)
-                        else:
-                            submit_id = message_data['workflow_id']
-                            if submit_id in self.dynamic_runs:
-                                await self._handle_dynamic_scheduler_event(
-                                    message,
-                                    attempt_transaction,
-                                )
-                                continue
-                            if submit_id not in self.async_que or submit_id not in self.submit_workflows:
-                                self._rollback_task_attempt_event_transaction(
-                                    attempt_transaction
-                                )
-                                continue
-
-                            static_run = self.static_runs.get(submit_id)
-                            if static_run is not None and static_run.is_terminal():
-                                self._rollback_task_attempt_event_transaction(
-                                    attempt_transaction
-                                )
-                                continue
-                            if message_type == "start_task":
-                                self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
-                                if static_run is not None:
-                                    if static_run.status == "created":
-                                        self.global_metrics.on_run_status_change(
-                                            submit_id,
-                                            "submitted",
-                                            "running",
-                                        )
-                                    static_run.mark_task_started(message_data["task_id"], message_data)
-                                    message = self._record_static_event(submit_id, message)
-                                self.global_metrics.on_task_started(
-                                    submit_id,
-                                    message_data["task_id"],
-                                )
-                            elif message_type == "task_pending":
-                                if static_run is not None:
-                                    static_run.mark_task_pending(
-                                        message_data["task_id"],
-                                        message_data.get("pending_reason"),
-                                        message_data.get("schedule_decision"),
-                                    )
-                                    message = self._record_static_event(submit_id, message)
-                            elif message_type == "task_retry":
-                                if static_run is not None:
-                                    static_run.mark_task_retry(
-                                        message_data["task_id"],
-                                        message_data.get("error"),
-                                        message_data.get("attempt"),
-                                        message_data.get("fault_tolerance"),
-                                        node_info=message_data,
-                                    )
-                                    message = self._record_static_event(submit_id, message)
-                            elif message_type == "task_exception":
-                                if static_run is not None:
-                                    error = message_data.get("error", message_data.get("result"))
-                                    observation = self._resource_observation_from_message(
-                                        submit_id,
-                                        message_data["task_id"],
-                                        status="failed",
-                                        metrics=message_data.get("metrics") or {},
-                                        error=error if isinstance(error, dict) else None,
-                                        schedule_decision=message_data.get("schedule_decision"),
-                                        attempt_data=message_data,
-                                    )
-                                    if isinstance(error, dict):
-                                        error = {**error, "resource_observation": observation}
-                                        message_data["error"] = error
-                                        message_data["result"] = error
-                                    message_data["resource_observation"] = observation
-                                    static_run.mark_task_failed(
-                                        message_data["task_id"],
-                                        error,
-                                        None,
-                                        message_data.get("fault_tolerance"),
-                                        attempt=message_data.get("attempt"),
-                                        dispatch_id=message_data.get("dispatch_id"),
-                                        lease_id=message_data.get("lease_id"),
-                                    )
-                                    message = self._record_static_event(submit_id, message)
-                                    if static_run.status == "failed":
-                                        self.global_metrics.on_run_status_change(
-                                            submit_id,
-                                            "running",
-                                            "failed",
-                                        )
-                                self.global_metrics.on_task_finished(
-                                    submit_id,
-                                    message_data["task_id"],
-                                    "failed",
-                                    None,
-                                )
-
-                            self._commit_task_attempt_event_transaction(
+                        submit_id = message_data['workflow_id']
+                        if submit_id in self.dynamic_runs:
+                            await self._handle_dynamic_scheduler_event(
+                                message,
+                                attempt_transaction,
+                            )
+                            continue
+                        if submit_id not in self.async_que or submit_id not in self.submit_workflows:
+                            self._rollback_task_attempt_event_transaction(
                                 attempt_transaction
                             )
-    
-                            que: Queue[Any] = self.async_que[submit_id]
-                            await que.put(message)
+                            continue
+
+                        static_run = self.static_runs.get(submit_id)
+                        if static_run is not None and static_run.is_terminal():
+                            self._rollback_task_attempt_event_transaction(
+                                attempt_transaction
+                            )
+                            continue
+                        if message_type == "start_task":
+                            self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
+                            if static_run is not None:
+                                if static_run.status == "created":
+                                    self.global_metrics.on_run_status_change(
+                                        submit_id,
+                                        "submitted",
+                                        "running",
+                                    )
+                                static_run.mark_task_started(message_data["task_id"], message_data)
+                                message = self._record_static_event(submit_id, message)
+                            self.global_metrics.on_task_started(
+                                submit_id,
+                                message_data["task_id"],
+                            )
+                        elif message_type == "task_pending":
+                            if static_run is not None:
+                                static_run.mark_task_pending(
+                                    message_data["task_id"],
+                                    message_data.get("pending_reason"),
+                                    message_data.get("schedule_decision"),
+                                )
+                                message = self._record_static_event(submit_id, message)
+                        elif message_type == "task_retry":
+                            if static_run is not None:
+                                static_run.mark_task_retry(
+                                    message_data["task_id"],
+                                    message_data.get("error"),
+                                    message_data.get("attempt"),
+                                    message_data.get("fault_tolerance"),
+                                    node_info=message_data,
+                                )
+                                message = self._record_static_event(submit_id, message)
+                        elif message_type == "task_exception":
+                            if static_run is not None:
+                                error = message_data.get("error", message_data.get("result"))
+                                observation = self._resource_observation_from_message(
+                                    submit_id,
+                                    message_data["task_id"],
+                                    status="failed",
+                                    metrics=message_data.get("metrics") or {},
+                                    error=error if isinstance(error, dict) else None,
+                                    schedule_decision=message_data.get("schedule_decision"),
+                                    attempt_data=message_data,
+                                )
+                                if isinstance(error, dict):
+                                    error = {**error, "resource_observation": observation}
+                                    message_data["error"] = error
+                                    message_data["result"] = error
+                                message_data["resource_observation"] = observation
+                                static_run.mark_task_failed(
+                                    message_data["task_id"],
+                                    error,
+                                    None,
+                                    message_data.get("fault_tolerance"),
+                                    attempt=message_data.get("attempt"),
+                                    dispatch_id=message_data.get("dispatch_id"),
+                                    lease_id=message_data.get("lease_id"),
+                                )
+                                message = self._record_static_event(submit_id, message)
+                                if static_run.status == "failed":
+                                    self.global_metrics.on_run_status_change(
+                                        submit_id,
+                                        "running",
+                                        "failed",
+                                    )
+                            self.global_metrics.on_task_finished(
+                                submit_id,
+                                message_data["task_id"],
+                                "failed",
+                                None,
+                            )
+
+                        self._commit_task_attempt_event_transaction(
+                            attempt_transaction
+                        )
+
+                        que: Queue[Any] = self.async_que[submit_id]
+                        await que.put(message)
+                        self._stop_workflow_after_artifact_failure(message_data)
                     
                     elif message_type in {
                         "finish_llm_instance_launch",
@@ -6000,25 +5974,6 @@ class MaPath:
                 self._rollback_task_attempt_event_transaction(attempt_transaction)
                 logger.exception("Error in scheduler monitor")
       
-    async def get_workflow_res(self,workflow_id:str,submit_id:str,websocket:WebSocket):    
-        """
-        Get the workflow result and send to websocket.
-        """
-        que = self.async_que[submit_id]
-        assert que != None
-
-        while True:
-            data = await que.get()
-            await websocket.send_json(data)
-
-            if data["type"] in {"finish_workflow", "timeout_workflow", "interrupt_workflow", "cancel_workflow"}:
-                if data["type"] == "finish_workflow":
-                    message = {"type":"clear_workflow","data":{"workflow_id":submit_id}}
-                    self._send_scheduler_message(message)
-                break
-            elif data["type"]=="task_exception":
-                raise Exception("task_exception")
-
     async def get_dynamic_run_res(self, run_id:str, websocket:WebSocket):
         dynamic_run = self.get_dynamic_run(run_id)
         que = self.async_que[run_id]
@@ -6073,69 +6028,6 @@ class MaPath:
 
         message = {"type":"stop_workflow","data":{"workflow_id":submit_id}}
         self._send_scheduler_message(message)
-    
-    async def run_langgraph_task(
-        self,
-        workflow_id: str,
-        task_id: str,
-        args: str,
-        kwargs: str,
-        timeout: float = SCHEDULER_RESPONSE_TIMEOUT_SECONDS,
-    ):
-        """
-        Run langgraph task
-        """
-        invocation_id = str(uuid.uuid4())
-        que: Queue[Any] = asyncio.Queue()
-        self.langgraph_task_requests[invocation_id] = que
-
-        task: LangGraphTask = self.workflows[workflow_id].get_task(task_id)
-        data = task.to_json()
-        data['args'] = args
-        data['kwargs'] = kwargs
-        data['workflow_id'] = invocation_id
-        data['template_workflow_id'] = workflow_id
-        data['invocation_id'] = invocation_id
-        data['priority'] = 0
-        message: dict[str, str] = {
-            "type":"run_task",
-            "data":data,
-         }
-        result = None
-        terminal_received = False
-        try:
-            self._send_scheduler_message(message)
-            while True:
-                response = await self._wait_for_scheduler_response(
-                    que,
-                    timeout=timeout,
-                    operation="finish the LangGraph task",
-                )
-                message_type = response["type"]
-                message_data = response["data"]
-                if message_type == "finish_task":
-                    result = message_data["result"]
-                    terminal_received = True
-                    break
-                if message_type == "task_exception":
-                    result = message_data["result"]
-                    terminal_received = True
-                    break
-        finally:
-            self.langgraph_task_requests.pop(invocation_id, None)
-            if not terminal_received:
-                try:
-                    self._send_scheduler_message({
-                        "type": "stop_workflow",
-                        "data": {"workflow_id": invocation_id},
-                    })
-                except Exception:
-                    logger.warning(
-                        "Failed to stop abandoned LangGraph invocation %s",
-                        invocation_id,
-                        exc_info=True,
-                    )
-        return result
     
     async def start_llm_instance(
         self,

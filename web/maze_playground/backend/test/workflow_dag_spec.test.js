@@ -112,11 +112,8 @@ test('compiles current ReactFlow nodes to Core v1 without changing node ids or v
   });
 });
 
-test('resolves the four builtin aliases to their canonical task files', () => {
+test('resolves builtin aliases to their canonical task files', () => {
   const aliases = {
-    'agentTools.write_file': ['tasks/agent_tools_write_file.py', 'write_file'],
-    'agentTools.read_file': ['tasks/agent_tools_read_file.py', 'read_file'],
-    'agentTools.exec_code': ['tasks/agent_tools_exec_code.py', 'exec_code'],
     'distributedSmoke.distributed_gpu_probe': ['tasks/distributed_gpu_probe.py', 'distributed_gpu_probe'],
   };
   assert.deepEqual(BUILTIN_TASK_ALIASES, Object.fromEntries(

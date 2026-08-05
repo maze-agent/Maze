@@ -23,11 +23,7 @@ Main imports:
 from maze import (
     MaClient, MaWorkflow, MaTask, TaskOutput, TaskOutputs,
     DynamicRun, DynamicTaskSpec, DynamicTaskInvocation,
-    AgentRun, AgentContext, AgentStep,
-    ReActWorkflow, ReActStep,
-    SkillSpec, load_skill, load_skills_from_dir,
     LanggraphClient,
-    create_openai_react_llm_task,
     task, get_task_metadata,
 )
 ```
@@ -105,9 +101,8 @@ class MaClient:
 
 | Method | Returns | Description |
 |---|---|---|
-| `create_workflow()` | `MaWorkflow` | Create a static DAG workflow. |
+| `create_workflow()` | `MaWorkflow` | Create a local static DAG draft. |
 | `create_workflow_from(workflow_def, inputs=None)` | `MaWorkflow` | Build a static workflow from a `@workflow` definition. |
-| `get_workflow(workflow_id)` | `MaWorkflow` | Attach to an existing workflow id. Does not validate existence eagerly. |
 | `run_app(spec, workspace_dir=None, artifact_mode=True, timeout_seconds=None, tags=None, metadata=None)` | `dict` | Submit an AppSpec/RunSpec through `/apps/run`. |
 | `validate_workflow_spec(spec)` | `dict` | Validate an external DAG spec through `/workflows/validate`. |
 | `submit_workflow(spec, artifact_mode=True, tags=None, metadata=None)` | `dict` | Submit an external DAG spec and return `workflow_id` and `run_id`. |
@@ -126,8 +121,6 @@ class MaClient:
 | `retry_run(run_id, ...)` | `dict` | Retry an AppSpec run. Only AppSpec runs are supported. |
 | `wait_run(run_id, timeout=None, poll_interval=0.5)` | `dict` | Poll until the run reaches a terminal state. |
 | `stream_run(run_id, poll_interval=0.2)` | `Iterator[dict]` | Yield events until a terminal event/state appears. |
-| `create_agent_run(tools, planner, max_steps=10, timeout_seconds=None, task_timeout=None)` | `AgentRun` | Generic agent loop with a custom planner. |
-| `create_react_workflow(llm_task, tools, max_steps=10, system_prompt=None, skills=None, progressive_skills=True, timeout_seconds=None, task_timeout=None)` | `ReActWorkflow` | ReAct template. Tools must be `@task` functions. |
 | `get_ray_head_port()` | `dict` | Return Ray Head port information for worker connection. |
 | `get_cluster_resources()` | `dict` | Inspect scheduler-registered nodes, resources, GPUs, and unregistered Ray nodes. |
 | `get_cluster_queues()` | `dict` | Inspect scheduling queues and running task diagnostics. |
@@ -139,108 +132,24 @@ class MaClient:
 
 ### 1.3 `MaWorkflow`
 
-```python
-class MaWorkflow:
-    workflow_id: str
-    server_url: str
-```
-
-Instances are returned by `MaClient.create_workflow()` or `MaClient.get_workflow()`.
-
-#### Tasks and edges
+`MaWorkflow` is a local DAG draft. Adding tasks does not contact Core.
+`run()` submits the complete graph and run configuration once through
+`POST /workflows/submit`.
 
 | Method | Description |
 |---|---|
-| `add_task(task_func, inputs=None, task_name=None)` | Add a decorated task. Inputs may be literal values or `TaskOutput` references. |
-| `add_task(task_type="code", task_name=...)` | Legacy manual task creation. |
-| `get_tasks() -> list[dict]` | List tasks in the workflow. |
-| `add_edge(source_task, target_task)` | Add a dependency edge. |
-| `del_edge(source_task, target_task)` | Delete a dependency edge. |
+| `add_task(task_func, inputs=None, task_name=None)` | Add a decorated task; `TaskOutput` inputs create dependency edges automatically. |
+| `get_tasks() -> list[dict]` | List tasks in the local draft. |
+| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, idempotency_key=None, idempotency_fingerprint=None) -> str` | Atomically submit the DAG and return the Core `run_id`. |
 
-When `add_task` receives a `@task` function, it:
-
-1. Creates a task through `POST /add_task`.
-2. Saves code, I/O, resources, retry settings, and timeout through `POST /save_task_and_add_edge`.
-3. Automatically connects dependency edges for `TaskOutput` references.
-4. Returns a `MaTask`; downstream tasks can use `task.outputs["key"]`.
-
-#### Execution and results
-
-| Method | Description |
-|---|---|
-| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None) -> str` | Submit the workflow and return `run_id`. Supports workspace mounting, Head artifact store, timeout, tags, and metadata. |
-| `wait(run_id, timeout=None, poll_interval=0.5) -> dict` | Wait through the unified run API. |
-| `stream(run_id, poll_interval=0.2) -> Iterator[dict]` | Poll unified run events until a terminal event/state. |
-| `get_results(run_id, verbose=True) -> list[dict]` | Read raw WebSocket messages. Results are cached locally. |
-| `show_results(run_id) -> dict` | Format task results and return completion/error flags. |
-| `get_task_result(run_id, task_id) -> dict | None` | Return one task result from cached messages. |
-| `list_cached_runs() -> list[str]` | List locally cached run ids. |
-| `clear_cache(run_id=None)` | Clear result cache. |
-
-#### Visualization
-
-| Method | Description |
-|---|---|
-| `get_graph_mermaid() -> str` | Generate Mermaid graph source. |
-| `get_graph_ascii() -> str` / `print_graph()` | Render an ASCII view. |
-| `get_graph_info() -> dict` | Return `{nodes, edges, stats}`. |
-| `draw_graph(output_path, engine="graphviz" | "matplotlib", figsize, dpi)` | Render a graph image. |
-
-#### Example
-
-```python
-from maze import MaClient, task
-
-@task(resources={"cpu": 1, "cpu_mem": 128})
-def greet(text: str = ""):
-    return {"result": f"Hello {text}"}
-
-@task(resources={"cpu": 1, "cpu_mem": 128})
-def upper(result: str = ""):
-    return {"upper": result.upper()}
-
-client = MaClient("http://localhost:8000")
-wf = client.create_workflow()
-g = wf.add_task(greet, inputs={"text": "Maze"})
-u = wf.add_task(upper, inputs={"result": g.outputs["result"]})
-run_id = wf.run()
-wf.show_results(run_id)
-```
-
----
+Use `MaClient.get_run()`, `wait_run()`, `stream_run()`, and `cancel_run()`
+for run state, events, results, and cancellation.
 
 ### 1.4 `MaTask`, `TaskOutput`, and `TaskOutputs`
 
-```python
-class MaTask:
-    task_id: str
-    workflow_id: str
-    task_name: str | None
-    outputs: TaskOutputs
-```
-
-| Method | Description |
-|---|---|
-| `save(code_str, task_input, task_output, resources)` | Legacy API for saving code and I/O manually. |
-| `delete()` | Delete this task from the workflow. |
-
-```python
-class TaskOutput:
-    task_id: str
-    output_key: str
-
-    def to_reference_string(self) -> str:
-        return f"{task_id}.output.{output_key}"
-```
-
-`TaskOutputs` is a mapping-like wrapper:
-
-```python
-task.outputs["message"]  # -> TaskOutput
-```
-
----
-
+`MaTask` is a local node handle. `task.outputs["name"]` returns a
+`TaskOutput` that can be passed directly to a downstream task input. Tasks,
+deletions, and edges are no longer persisted through separate HTTP calls.
 ### 1.5 `DynamicRun`
 
 Dynamic runs allow the graph to grow at runtime. Create them through `MaClient.create_dynamic_run()` or attach through `MaClient.get_dynamic_run()`.
@@ -324,108 +233,21 @@ print(run.wait())
 
 ---
 
-### 1.6 `AgentRun`
+### 1.6 `LanggraphClient`
 
-`AgentRun` is a generic controller for agent-style loops. A planner decides which tool to run next; tools are Maze `@task` functions.
-
-Common concepts:
-
-| Concept | Description |
-|---|---|
-| `AgentContext` | Current prompt, steps, observations, max steps, and run metadata. |
-| `AgentStep` | One planner decision, tool call, observation, or final answer. |
-| `emit_event` | Writes structured agent events into the dynamic run event stream. |
-
-Typical flow:
-
-```text
-agent_run_started -> agent_action -> agent_observation -> ... -> agent_final
-```
-
----
-
-### 1.7 `ReActWorkflow`
-
-`ReActWorkflow` is a specialized agent template that separates the LLM decision task from registered tool tasks.
-
-```python
-client.create_react_workflow(
-    llm_task=decide_next_action,
-    tools=[search, summarize],
-    max_steps=10,
-    system_prompt=None,
-    skills=None,
-    progressive_skills=True,
-    timeout_seconds=None,
-    task_timeout=None,
-)
-```
-
-Rules:
-
-- Every tool must be decorated with `@task`.
-- Tool names must be unique.
-- The LLM decision task is also a normal `@task`.
-- The LLM task can request tool execution, final answer, or repair.
-
-LLM decision task inputs may include any subset of:
-
-| Input | Description |
-|---|---|
-| `prompt` | User prompt. |
-| `steps` | Prior ReAct steps. |
-| `tools` | Tool schemas and names. |
-| `system_prompt` | Optional system instruction. |
-| `skills` | Loaded skill instructions. |
-
-Expected result shape:
-
-```python
-return {
-    "action": "tool",       # "tool" | "final" | "repair"
-    "tool": "search",
-    "args": {"query": "..."},
-    "answer": None,
-}
-```
-
-#### OpenAI-compatible LLM factory
-
-```python
-create_openai_react_llm_task(
-    model: str,
-    base_url: str | None = None,
-    api_key: str | None = None,
-    temperature: float = 0,
-    max_tokens: int | None = None,
-)
-```
-
-It returns a `@task` function that can be passed directly as `llm_task`.
-
----
-
-### 1.8 Skills
-
-Skills are instruction packages for ReAct-style agents. They are used for progressive disclosure: the agent can load high-level descriptions first and only read detailed instructions when needed.
-
-| API | Description |
-|---|---|
-| `SkillSpec` | In-memory skill metadata and content. |
-| `load_skill(path)` | Load one skill directory/file. |
-| `load_skills_from_dir(path)` | Load multiple skills from a directory. |
-
----
-
-### 1.9 `LanggraphClient`
-
-Maze can run LangGraph-style functions through the LangGraph bridge.
+Maze can run LangGraph node functions through the standard static Run API.
+Decorating a function creates a local one-node DAG template. Calling it submits
+that DAG through `POST /workflows/submit`, waits on `GET /runs/{run_id}`, and
+returns the decoded Python value.
 
 | Method | Description |
 |---|---|
 | `LanggraphClient(...).task(...)` | Decorate a graph node as a Maze task. |
-| `POST /add_langgraph_task` | Register a LangGraph task in a workflow. |
-| `POST /run_langgraph_task` | Execute the serialized LangGraph task. |
+
+Each invocation is an ordinary Core Run tagged `langgraph`, so the existing
+Run events, cancellation, retry, and inspection APIs apply without a separate
+LangGraph control plane. Supported resource keys are `cpu_num`, `gpu_mem`,
+`io_num`, and the legacy `cpu` alias.
 
 ---
 
@@ -456,148 +278,6 @@ Errors usually return non-2xx with `detail`.
 ---
 
 ### 2.1 Static Workflow
-
-#### `POST /create_workflow`
-
-Create a workflow.
-
-Response:
-
-```json
-{"status": "success", "workflow_id": "<uuid>"}
-```
-
-#### `POST /add_task`
-
-Add a code task to a workflow.
-
-```json
-{
-  "workflow_id": "<uuid>",
-  "task_type": "code",
-  "task_name": "<string>"
-}
-```
-
-Response:
-
-```json
-{"status": "success", "task_id": "<uuid>"}
-```
-
-`task_type` can be `"code"` or `"langgraph"`. Use `/add_langgraph_task` for LangGraph tasks.
-
-#### `GET /get_workflow_tasks/{workflow_id}`
-
-List tasks in a workflow.
-
-```json
-{"status": "success", "tasks": []}
-```
-
-#### `POST /del_task`
-
-```json
-{"workflow_id": "...", "task_id": "..."}
-```
-
-#### `POST /save_task`
-
-Save task code, I/O, resources, retry settings, timeout, and optional file context.
-
-```json
-{
-  "workflow_id": "...",
-  "task_id": "...",
-  "task_input": {
-    "input_params": {
-      "1": {
-        "key": "x",
-        "input_schema": "from_user",
-        "data_type": "str",
-        "value": "...",
-        "has_value": true
-      }
-    }
-  },
-  "task_output": {
-    "output_params": {
-      "1": {"key": "y", "data_type": "any"}
-    }
-  },
-  "code_str": "<optional>",
-  "code_ser": "<optional base64-cloudpickle>",
-  "resources": {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0},
-  "max_retries": null,
-  "retry_backoff_seconds": 0,
-  "retry_on": null,
-  "timeout_seconds": null,
-  "file_context": null
-}
-```
-
-`code_str` or `code_ser` must be provided.
-
-#### `POST /save_task_and_add_edge`
-
-Same as `/save_task`, and automatically adds edges when an input uses:
-
-```text
-input_schema == "from_task"
-```
-
-The value format is:
-
-```text
-<source_task_id>.output.<key>
-```
-
-#### `POST /add_edge` / `POST /del_edge`
-
-```json
-{
-  "workflow_id": "...",
-  "source_task_id": "...",
-  "target_task_id": "..."
-}
-```
-
-#### `POST /run_workflow`
-
-Submit a workflow run.
-
-```json
-{
-  "workflow_id": "...",
-  "file_context": {},
-  "timeout_seconds": 300,
-  "tags": ["demo"],
-  "metadata": {"source": "sdk"}
-}
-```
-
-Response:
-
-```json
-{"status": "success", "run_id": "<uuid>"}
-```
-
-#### `WS /get_workflow_res/{workflow_id}/{run_id}`
-
-Subscribe to static workflow events. Common event types:
-
-| Type | Description |
-|---|---|
-| `start_task` | A task started. |
-| `finish_task` | A task finished and includes `data.result`. |
-| `task_exception` | A task failed. |
-| `finish_workflow` | The workflow completed. |
-
----
-
-### 2.2 AppSpec / RunSpec
-
-These endpoints submit a complete AppSpec/RunSpec to the Head service. The Head builds a static workflow, enables artifact mode by default, and stores `app_spec` in run metadata so AppSpec runs can be retried.
 
 #### `POST /apps/validate`
 
@@ -693,6 +373,9 @@ Response:
 Recommended stable endpoint for external visual DAG builders. Maze validates the spec, builds a static workflow, and submits a run.
 
 The body is the same as `/workflows/validate`. You may additionally pass `tags`, `metadata`, and `artifact_mode`.
+Python workflows include a stable `workflow_id`, `input_contract`, and
+`final_output_refs` in the spec. Per-run inputs, timeout, and idempotency fields
+live under `spec.run`.
 
 Response:
 
@@ -851,7 +534,7 @@ Read events where `seq > after`.
 Write a custom event.
 
 ```json
-{"type": "agent_action", "data": {}}
+{"type": "domain_progress", "data": {"completed": 3, "total": 10}}
 ```
 
 #### `PATCH /dynamic_runs/{run_id}/metadata`
@@ -864,7 +547,7 @@ Merge-update dynamic run metadata.
 
 #### `POST /dynamic_runs/{run_id}/permission_requests`
 
-Create a permission request, usually before an agent/tool performs a sensitive action.
+Create a permission request before a dynamic run performs a sensitive action.
 
 ```json
 {
@@ -901,42 +584,17 @@ Real-time dynamic run event stream. Common event types include:
 
 ```text
 register_task_spec / append_task / task_ready / start_task / finish_task /
-task_exception / agent_* / react_* / finish_workflow / cancel_dynamic_run /
+task_exception / finish_workflow / cancel_dynamic_run /
 timeout_dynamic_run / interrupt_dynamic_run
 ```
 
 ---
 
-### 2.6 LangGraph Bridge
+### 2.6 LangGraph Adapter
 
-#### `POST /add_langgraph_task`
-
-```json
-{
-  "workflow_id": "...",
-  "task_type": "langgraph",
-  "task_name": "...",
-  "code_ser": "<base64-cloudpickle>",
-  "resources": {"cpu": 1, "gpu": 0, "cpu_mem": 0, "gpu_mem": 0}
-}
-```
-
-#### `POST /run_langgraph_task`
-
-```json
-{
-  "workflow_id": "...",
-  "task_id": "...",
-  "args": "<base64-cloudpickle tuple>",
-  "kwargs": "<base64-cloudpickle dict>"
-}
-```
-
-Response:
-
-```json
-{"status": "success", "result": "..."}
-```
+LangGraph has no dedicated Head endpoint. `LanggraphClient` serializes the
+callable and invocation values into a standard one-node DAG, submits it with
+`POST /workflows/submit`, and reads the result from `GET /runs/{run_id}`.
 
 ---
 
@@ -1073,8 +731,7 @@ Stops the local worker process.
 
 The legacy remote sandbox service has been removed. The command remains as a
 compatibility tombstone and exits with migration guidance. Use
-`maze start --head --playground` and the Workspace Agent `workspace_sandbox`
-backend instead.
+`maze start --head --playground` for the maintained workflow editor.
 
 ---
 
@@ -1175,8 +832,7 @@ Task paths in requests are relative to `workspace/tasks/`.
 | PUT | `/api/local-workspaces/:workspaceId/manifest` | Write a local workspace manifest. |
 | GET | `/api/local-workspaces/:workspaceId/manifest` | Read a local workspace manifest. |
 | POST | `/api/workspace-files/missing` | Check whether paths are missing. |
-| POST | `/api/artifacts/promote` | Promote a temporary/local artifact into a workspace-visible location. |
-| POST | `/api/artifacts/cleanup` | Clean artifact cache. |
+| POST | `/api/artifacts/promote` | Copy a Core SHA-256 artifact into Workspace Files. |
 
 ---
 
@@ -1238,20 +894,6 @@ Example:
 | POST | `/api/dynamic-runs/:runId/permission-requests/:requestId/decision` | Allow or deny a dynamic run permission request. |
 | DELETE | `/api/dynamic-runs/:runId` | Delete a dynamic run. |
 | POST | `/api/dynamic-runs/cleanup` | Bulk cleanup dynamic runs. |
-| GET | `/api/workflow-runs/static` | List static runs from workspace storage. |
-| GET | `/api/workflow-runs/static/:runId` | Static run detail. |
-| GET | `/api/workflow-runs/static/:runId/events` | Static run events. |
-| GET | `/api/workflow-runs/static/:runId/artifacts/download` | Open inline or download one static run artifact. |
-
-Static run artifact download query parameters:
-
-| Query | Description |
-|---|---|
-| `taskId` | Required. Producing task id. |
-| `path` | Required. Artifact path from the manifest. |
-| `workspaceId` / `workspaceDir` | Optional workspace locator. |
-| `disposition` | `inline` opens in browser; `attachment` downloads. Default: `attachment`. |
-
 ---
 
 ### 4.7 Editor APIs
@@ -1299,22 +941,6 @@ Common static/dynamic workflow events:
 | `append_task` | dynamic run invocation metadata |
 | `finish_dynamic_run` | dynamic run result |
 
-### 5.2 Agent and ReAct events
-
-| Type | Key data fields |
-|---|---|
-| `agent_run_started` | `mode`, `prompt`, `max_steps`, `tools` |
-| `agent_action` | `step`, `tool`, `args` |
-| `agent_observation` | `step`, `tool`, `task_id`, `result` |
-| `agent_repair_observation` | `step`, `tool`, `decision_task_id`, `result.error_type` |
-| `react_llm_decision` | `step`, `task_id`, `decision`, `action` |
-| `agent_final` | `mode`, `answer`, `step_count` |
-| `agent_error` | `error` |
-
-Custom event types are allowed. Prefer `snake_case` with a domain prefix to avoid collisions.
-
----
-
 ## 6. Resource Configuration
 
 Common resource fields:
@@ -1345,6 +971,7 @@ Normalization rules:
 | `Exception("Failed to ...")` | HTTP non-200 or response `status != "success"`. |
 | `RuntimeError("Dynamic run ended before task finished: ...")` | Waiting for a task while the dynamic run entered a terminal state. |
 | `RuntimeError("Dynamic task failed: ...")` | A dynamic task emitted `task_exception`. |
+| `RuntimeError("Failed to execute remote task ...")` | A LangGraph adapter Run failed or returned an invalid result. |
 | `TimeoutError` | Wait operation timed out. |
 | `TaskOutputInferenceError` | A task does not return a dict literal with string keys. |
 | `TypeError("Task ... must return a dict")` | Task returned a non-dict value at runtime. |
@@ -1415,47 +1042,7 @@ print(run.wait_for_task(t2))
 run.finalize({"done": True})
 ```
 
-### 8.3 ReAct agent with a custom decision task
-
-```python
-from maze import MaClient, task
-
-@task
-def echo(text: str = ""):
-    return {"observation": text}
-
-@task
-def decide(prompt: str = "", steps=None, tools=None):
-    if steps:
-        return {"action": "final", "answer": steps[-1]["observation"]}
-    return {"action": "tool", "tool": "echo", "args": {"text": prompt}}
-
-client = MaClient("http://localhost:8000")
-agent = client.create_react_workflow(decide, tools=[echo], max_steps=3)
-print(agent.run("hello"))
-```
-
-### 8.4 OpenAI-compatible ReAct decision task
-
-```python
-from maze import MaClient, task, create_openai_react_llm_task
-
-@task
-def search(query: str = ""):
-    return {"result": f"Result for {query}"}
-
-llm_task = create_openai_react_llm_task(
-    model="gpt-4o-mini",
-    base_url="https://api.openai.com/v1",
-    api_key="..."
-)
-
-client = MaClient("http://localhost:8000")
-agent = client.create_react_workflow(llm_task=llm_task, tools=[search])
-print(agent.run("Find Maze docs"))
-```
-
-### 8.5 Direct HTTP DAG submission
+### 8.3 Direct HTTP DAG submission
 
 ```bash
 curl -sS -X POST http://localhost:8000/workflows/submit \
@@ -1503,7 +1090,7 @@ pending / queued / running / succeeded / failed / cancelled / timed_out
 
 ### 9.2 Persistence
 
-Static run state is persisted under the workspace:
+Maze Core exclusively owns static run persistence under its workspace:
 
 ```text
 workspace/workflow_runs/static_runs/{run_id}/
@@ -1737,9 +1324,8 @@ Expected result:
 
 ### 9.8 Compatibility and boundaries
 
-- Dynamic runs and ReAct workflows can be inspected through unified `/runs/*`.
-- Use `DynamicRun` SDK and `/dynamic_runs/*` for task appending, permission requests, and detailed Agent/ReAct events.
-- ReAct skills enhance dynamic/ReAct agent loops; they are not part of static workflow observability.
+- Dynamic runs can be inspected through unified `/runs/*`.
+- Use `DynamicRun` SDK and `/dynamic_runs/*` for task appending, permission requests, and detailed events.
 - Token metrics depend on user reporting. Maze does not intercept LLM traffic.
 - If the Head process crashes or restarts, running static runs are marked `interrupted` on the next startup and written to `events.jsonl`.
 
@@ -1754,7 +1340,6 @@ Expected result:
   - Decorator: `maze/client/maze/decorator.py`
   - Static workflow SDK: `maze/client/maze/workflow.py`
   - Dynamic run SDK: `maze/client/maze/dynamic.py`
-  - Agent / ReAct: `maze/client/maze/agent.py`, `maze/client/maze/react.py`, `maze/client/maze/react_llm.py`
   - LangGraph bridge: `maze/client/langgraph/client.py`
   - Head service: `maze/core/server.py`
   - Scheduler: `maze/core/scheduler/`

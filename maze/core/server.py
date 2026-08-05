@@ -25,7 +25,7 @@ from maze.core.path.path import (
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from maze.core.workflow.task import TaskType,CodeTask,LangGraphTask
+from maze.core.workflow.task import CodeTask
 from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
@@ -77,39 +77,6 @@ DTYPE_BYTES = {
     "U8": 1,
     "BOOL": 1,
 }
-
-
-def _store_workflow_input_contract(workflow, input_contract: Any):
-    if input_contract is None:
-        return
-    if not isinstance(input_contract, dict):
-        raise ValueError("workflow_input_contract must be an object")
-    constants = input_contract.get("constants")
-    runtime = input_contract.get("runtime")
-    if not isinstance(constants, list) or not all(
-        isinstance(key, str) for key in constants
-    ):
-        raise ValueError("workflow input constants must be a list of names")
-    if len(constants) != len(set(constants)) or not isinstance(runtime, dict):
-        raise ValueError("Malformed workflow input contract")
-    if not all(isinstance(key, str) for key in runtime):
-        raise ValueError("Workflow runtime input names must be strings")
-    if set(constants) & set(runtime):
-        raise ValueError("Workflow input cannot be both constant and runtime-bound")
-    for key, spec in runtime.items():
-        if not isinstance(spec, dict) or not isinstance(spec.get("required"), bool):
-            raise ValueError(f"Malformed workflow runtime input: {key}")
-        expected_keys = {"required"} if spec["required"] else {"required", "default"}
-        if set(spec) != expected_keys:
-            raise ValueError(f"Malformed workflow runtime input: {key}")
-    normalized_contract = {
-        "constants": sorted(constants),
-        "runtime": copy.deepcopy(runtime),
-    }
-    existing_contract = workflow.graph.graph.get("workflow_input_contract")
-    if existing_contract is not None and existing_contract != normalized_contract:
-        raise ValueError("Workflow input contract changed while building the DAG")
-    workflow.graph.graph["workflow_input_contract"] = normalized_contract
 
 
 LOCAL_MODEL_TEST_TASK_CODE = r'''
@@ -647,7 +614,6 @@ async def _wait_for_model_test_run(run_id: str, timeout_seconds: float) -> Dict[
 async def _run_model_test_task(model: Dict[str, Any], path: Path, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
     cluster = await mapath.get_cluster_resources()
     resources = _model_test_resources(cluster, model)
-    model_anchor = _model_anchor_for_model(model)
     workflow_id = f"model-test-{uuid.uuid4()}"
     task_id = str(uuid.uuid4())
     run_id = None
@@ -678,7 +644,6 @@ async def _run_model_test_task(model: Dict[str, Any], path: Path, checks: List[D
             code_ser=None,
             resources=resources,
             task_kind="gpu",
-            model_anchor=model_anchor,
             timeout_seconds=MODEL_TEST_TASK_TIMEOUT_SECONDS,
         )
 
@@ -802,217 +767,6 @@ def signal_handler(signum, frame):
     mapath.cleanup()
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
-
-@app.post("/create_workflow")
-async def create_workflow(req:Request):
-    try:
-        workflow_id: str = str(uuid.uuid4())
-        mapath.create_workflow(workflow_id)
-        return {"status": "success","workflow_id": workflow_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-     
-@app.post("/add_task")
-async def add_task(req:Request):
-    try:
-        data = await req.json()
-        workflow_id:str = data["workflow_id"]
-        task_type:str = data["task_type"]
-        task_name: str =data["task_name"]
-        task_id: str = str(uuid.uuid4())
-     
-        if(task_type == TaskType.CODE.value):
-            mapath.get_workflow(workflow_id).add_task(task_id,CodeTask(workflow_id,task_id,task_name))
-        else:
-            raise HTTPException(status_code=500, detail="Invalid task_type")
-
-        return {"status":"success","task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-@app.get("/get_workflow_tasks/{workflow_id}")
-async def get_workflow_tasks(workflow_id: str):
-    try:
-        # 调用mapath获取工作流任务
-        tasks = mapath.get_workflow_tasks(workflow_id)
-        return {"status": "success", "tasks": tasks}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/del_task")
-async def del_task(req:Request):
-    try:
-        data = await req.json()
-        workflow_id:str = data["workflow_id"]
-        task_id: str = data["task_id"]
-      
-        mapath.get_workflow(workflow_id).del_task(task_id)
-        return {"status":"success","task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/save_task")
-async def save_task(req:Request):
-    try:
-        data = await req.json()
-        workflow_id = data["workflow_id"]
-        task_id = data["task_id"]
-        model_anchor = data.get("model_anchor")
-        resources = await _resources_for_model_anchor(data.get("resources"), model_anchor)
-
-        task = mapath.get_workflow(workflow_id).get_task(task_id)
-        if(task.task_type == TaskType.CODE.value):    
-            task_input = data["task_input"]
-            task_output = data["task_output"]
-            code_str = data.get("code_str")
-            code_ser = data.get("code_ser")
-            if code_ser is None and code_str is None:
-                raise HTTPException(status_code=500, detail="code_str or code_ser is required")
-            task.save_task(
-                task_input=task_input,
-                task_output=task_output,
-                code_str=code_str,
-                code_ser=code_ser,
-                resources=resources,
-                task_kind=data.get("task_kind"),
-                file_context=data.get("file_context"),
-                model_anchor=model_anchor,
-                max_retries=data.get("max_retries"),
-                retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
-                retry_on=data.get("retry_on"),
-                timeout_seconds=data.get("timeout_seconds"),
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Invalid task_type")
-  
-        return {"status":"success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/save_task_and_add_edge")
-async def save_task_and_add_edge(req:Request):
-    try:
-        data = await req.json()
-        workflow_id = data["workflow_id"]
-        task_id = data["task_id"]
-        model_anchor = data.get("model_anchor")
-        resources = await _resources_for_model_anchor(data.get("resources"), model_anchor)
-
-        workflow = mapath.get_workflow(workflow_id)
-        task = workflow.get_task(task_id)
-        if(task.task_type == TaskType.CODE.value):    
-            _store_workflow_input_contract(
-                workflow,
-                data.get("workflow_input_contract"),
-            )
-            task_input = data["task_input"]
-            task_output = data["task_output"]
-            code_str = data.get("code_str")
-            code_ser = data.get("code_ser")
-            if code_ser is None and code_str is None:
-                raise HTTPException(status_code=500, detail="code_str or code_ser is required")
-            task.save_task(
-                task_input=task_input,
-                task_output=task_output,
-                code_str=code_str,
-                code_ser=code_ser,
-                resources=resources,
-                task_kind=data.get("task_kind"),
-                file_context=data.get("file_context"),
-                model_anchor=model_anchor,
-                max_retries=data.get("max_retries"),
-                retry_backoff_seconds=data.get("retry_backoff_seconds", 0),
-                retry_on=data.get("retry_on"),
-                timeout_seconds=data.get("timeout_seconds"),
-            )
-
-            # 修复：正确遍历 input_params
-            for _, input_param in task_input.get("input_params", {}).items():
-                if input_param.get('input_schema') == 'from_task':
-                    source_task_id = input_param['value'].split('.')[0]
-                    target_task_id = task_id
-                    workflow.add_edge(source_task_id, target_task_id)
-        else:
-            raise HTTPException(status_code=500, detail="Invalid task_type")
-  
-        return {"status":"success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/add_edge")
-async def add_edge(req:Request):
-    try:
-        data = await req.json()
-        workflow_id = data["workflow_id"]
-        source_task_id = data["source_task_id"]
-        target_task_id = data["target_task_id"]
-         
-        mapath.get_workflow(workflow_id).add_edge(source_task_id, target_task_id)
-        return {"status":"success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/del_edge")
-async def del_edge(req:Request):
-    try:
-        data = await req.json()
-    
-        workflow_id = data["workflow_id"]
-        source_task_id = data["source_task_id"]
-        target_task_id = data["target_task_id"]
-        mapath.get_workflow(workflow_id).del_edge(source_task_id, target_task_id)
-    
-        return {"status":"success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/run_workflow")
-async def run_workflow(req:Request):
-    try: 
-        data = await req.json()
-        if not isinstance(data, dict):
-            raise TypeError("request body must be a JSON object")
-        if "workflow_id" not in data:
-            raise ValueError("workflow_id is required")
-        workflow_id = data["workflow_id"]
-        
-        run_kwargs = {
-            "file_context": await _worker_reachable_file_context(req, data.get("file_context")),
-            "timeout_seconds": data.get("timeout_seconds"),
-            "tags": data.get("tags"),
-            "metadata": data.get("metadata"),
-        }
-        if "inputs" in data:
-            run_kwargs["inputs"] = data["inputs"]
-        if "final_output_refs" in data:
-            run_kwargs["final_output_refs"] = data["final_output_refs"]
-        if "idempotency_key" in data or "idempotency_fingerprint" in data:
-            run_kwargs["idempotency_key"] = data.get("idempotency_key")
-            run_kwargs["idempotency_fingerprint"] = data.get(
-                "idempotency_fingerprint"
-            )
-        run_id = mapath.run_workflow(workflow_id, **run_kwargs)
-        response = {"status":"success","run_id": run_id}
-        if run_kwargs.get("idempotency_key") is not None:
-            response["idempotency_key"] = run_kwargs["idempotency_key"]
-            response["idempotency_fingerprint"] = run_kwargs["idempotency_fingerprint"]
-        return response
-    except WorkflowIdempotencyConflictError as e:
-        raise HTTPException(status_code=409, detail=e.detail())
-    except WorkflowNotFoundError as e:
-        raise HTTPException(status_code=404, detail=e.detail())
-    except WorkflowInitializationError as e:
-        raise HTTPException(status_code=500, detail=e.detail())
-    except WorkflowIdempotencyStateError as e:
-        raise HTTPException(status_code=500, detail=e.detail())
-    except SchedulerUnavailableError as e:
-        raise HTTPException(status_code=503, detail=e.detail())
-    except (TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/apps/validate")
 async def validate_app_spec(req: Request):
@@ -1185,31 +939,48 @@ async def submit_dag_workflow(req: Request):
             timeout_seconds=run_config.get("timeout_seconds"),
             tags=tags,
             metadata=metadata,
+            **({"inputs": run_config["inputs"]} if "inputs" in run_config else {}),
+            **(
+                {"final_output_refs": spec["final_output_refs"]}
+                if "final_output_refs" in spec
+                else {}
+            ),
+            **(
+                {
+                    "idempotency_key": run_config.get("idempotency_key"),
+                    "idempotency_fingerprint": run_config.get("idempotency_fingerprint"),
+                }
+                if "idempotency_key" in run_config
+                or "idempotency_fingerprint" in run_config
+                else {}
+            ),
         )
-        return {
+        response = {
             "status": "success",
             "workflow_id": workflow_id,
             "run_id": run_id,
             "spec": spec,
         }
+        if run_config.get("idempotency_key") is not None:
+            response["idempotency_key"] = run_config["idempotency_key"]
+            response["idempotency_fingerprint"] = run_config["idempotency_fingerprint"]
+        return response
     except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except WorkflowIdempotencyConflictError as e:
+        raise HTTPException(status_code=409, detail=e.detail())
+    except WorkflowNotFoundError as e:
+        raise HTTPException(status_code=404, detail=e.detail())
+    except WorkflowInitializationError as e:
+        raise HTTPException(status_code=500, detail=e.detail())
+    except WorkflowIdempotencyStateError as e:
+        raise HTTPException(status_code=500, detail=e.detail())
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.websocket("/get_workflow_res/{workflow_id}/{run_id}")
-async def get_workflow_res(websocket: WebSocket, workflow_id: str, run_id: str):
-    try:
-        await websocket.accept()
-        await mapath.get_workflow_res(workflow_id,run_id,websocket)
-        await websocket.close()
-    except Exception as e:
-        await mapath.stop_workflow(run_id)
-        await websocket.close()
 
 @app.post("/dynamic_runs")
 async def create_dynamic_run(req: Request):
@@ -1650,41 +1421,6 @@ async def get_dynamic_run_events_ws(websocket: WebSocket, run_id: str):
     except Exception:
         await websocket.close()
 
-@app.post("/add_langgraph_task")
-async def add_langgraph_task(req:Request):
-    try:
-        data = await req.json()
-        workflow_id:str = data["workflow_id"]
-        task_type:str = data["task_type"]
-        task_name: str =data["task_name"]
-        code_ser = data["code_ser"]
-        resources = data["resources"]
-        task_kind = data.get("task_kind")
-        task_id: str = str(uuid.uuid4())
-     
-        if(task_type == TaskType.LANGGRAPH.value):
-            mapath.get_workflow(workflow_id).add_task(task_id,LangGraphTask(workflow_id,task_id,task_name,code_ser=code_ser,resources=resources,task_kind=task_kind))
-            
-        else:
-            raise HTTPException(status_code=500, detail="Invalid task_type")
-
-        return {"status":"success","task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-@app.post("/run_langgraph_task")
-async def run_langgraph_task(req:Request):
-    try:
-        data = await req.json()
-        workflow_id = data["workflow_id"]
-        task_id = data["task_id"]
-        args = data["args"]
-        kwargs = data["kwargs"]
-        result = await mapath.run_langgraph_task(workflow_id=workflow_id,task_id=task_id,args=args,kwargs=kwargs)
-        return {"status": "success","result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-         
 @app.post("/get_head_ray_port")
 async def get_head_ray_port():
     try:

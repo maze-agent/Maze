@@ -23,11 +23,7 @@
 from maze import (
     MaClient, MaWorkflow, MaTask, TaskOutput, TaskOutputs,
     DynamicRun, DynamicTaskSpec, DynamicTaskInvocation,
-    AgentRun, AgentContext, AgentStep,
-    ReActWorkflow, ReActStep,
-    SkillSpec, load_skill, load_skills_from_dir,
     LanggraphClient,
-    create_openai_react_llm_task,
     task, get_task_metadata,
 )
 ```
@@ -96,9 +92,8 @@ class MaClient:
 
 | 方法 | 返回 | 说明 |
 |---|---|---|
-| `create_workflow()` | `MaWorkflow` | 创建一个静态 DAG workflow |
+| `create_workflow()` | `MaWorkflow` | 创建一个本地静态 DAG 草稿 |
 | `create_workflow_from(workflow_def, inputs=None)` | `MaWorkflow` | 从 `@workflow` 定义构建静态 workflow |
-| `get_workflow(workflow_id)` | `MaWorkflow` | 关联已有 workflow（不校验存在性） |
 | `run_app(spec, workspace_dir=None, artifact_mode=True, timeout_seconds=None, tags=None, metadata=None)` | `dict` | 提交 AppSpec/RunSpec，走 `/apps/run` |
 | `validate_workflow_spec(spec)` | `dict` | 校验外部 DAG spec，走 `/workflows/validate` |
 | `submit_workflow(spec, artifact_mode=True, tags=None, metadata=None)` | `dict` | 提交外部 DAG spec，返回 `workflow_id/run_id` |
@@ -117,8 +112,6 @@ class MaClient:
 | `retry_run(run_id, ...)` | `dict` | 重跑 AppSpec run（仅 AppSpec run 支持） |
 | `wait_run(run_id, timeout=None, poll_interval=0.5)` | `dict` | 轮询等待 run 进入终态 |
 | `stream_run(run_id, poll_interval=0.2)` | `Iterator[dict]` | 轮询事件流直到终态事件 |
-| `create_agent_run(tools, planner, max_steps=10, timeout_seconds=None, task_timeout=None)` | `AgentRun` | 通用 Agent loop（自定义 planner） |
-| `create_react_workflow(llm_task, tools, max_steps=10, system_prompt=None, skills=None, progressive_skills=True, timeout_seconds=None, task_timeout=None)` | `ReActWorkflow` | ReAct 模板；`skills` 为 Claude/Cursor 风格 instruction package |
 | `get_ray_head_port()` | `dict` | 拿到 Ray Head 端口（外部 worker 接入用） |
 | `get_cluster_resources()` | `dict` | 查询调度器注册的节点、资源与未注册 Ray 节点 |
 | `get_cluster_queues()` | `dict` | 查询调度队列与运行中任务诊断信息 |
@@ -130,104 +123,22 @@ class MaClient:
 
 ### 1.3 `MaWorkflow`（静态 DAG）
 
-```python
-class MaWorkflow:
-    workflow_id: str
-    server_url: str
-```
-
-> 实例由 `MaClient.create_workflow()` 或 `get_workflow()` 返回，不要直接构造。
-
-#### 任务与边
+`MaWorkflow` 是本地 DAG 草稿。添加 task 时不访问 Core，`run()` 才通过
+`POST /workflows/submit` 一次提交完整节点、边和运行配置。
 
 | 方法 | 说明 |
 |---|---|
-| `add_task(task_func, inputs=None, task_name=None)` | 添加 task；`inputs` 中允许填普通值或 `TaskOutput` 引用 |
-| `add_task(task_type="code", task_name=...)` | 旧式手动添加（兼容） |
-| `get_tasks() -> list[dict]` | 列出 workflow 中所有任务（`id`, `name`） |
-| `add_edge(source_task, target_task)` | 增加依赖边 |
-| `del_edge(source_task, target_task)` | 删除依赖边 |
+| `add_task(task_func, inputs=None, task_name=None)` | 添加 `@task` 节点；`TaskOutput` 输入会自动生成依赖边 |
+| `get_tasks() -> list[dict]` | 列出草稿中的任务 |
+| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, idempotency_key=None, idempotency_fingerprint=None) -> str` | 原子提交 DAG 并返回 Core `run_id` |
 
-`add_task` 接到 `@task` 函数后会自动：
-1. 通过 `POST /add_task` 创建 task。
-2. 用 `POST /save_task_and_add_edge` 保存代码、I/O、资源，并依据 `TaskOutput` 引用自动连边。
-3. 返回 `MaTask`，其 `outputs["key"]` 是 `TaskOutput` 引用，可用于下游 `inputs`。
-
-#### 执行与结果
-
-| 方法 | 说明 |
-|---|---|
-| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None) -> run_id` | 提交执行，返回 `run_id`；支持挂载 workspace、启用 Head artifact store、设置超时/标签/元数据 |
-| `wait(run_id, timeout=None, poll_interval=0.5) -> dict` | 使用统一 run API 等待静态 run 进入终态 |
-| `stream(run_id, poll_interval=0.2) -> Iterator[dict]` | 轮询统一事件流直到终态事件 |
-| `get_results(run_id, verbose=True) -> list[dict]` | 通过 WebSocket 拉取**全部原始消息**；结果会缓存 |
-| `show_results(run_id) -> dict` | 格式化展示并返回 `{task_results, workflow_completed, has_exception, exception_tasks}` |
-| `get_task_result(run_id, task_id) -> dict \| None` | 拿到单个 task 的结果 |
-| `list_cached_runs() -> list[str]` | 列出已缓存的 run_id |
-| `clear_cache(run_id=None)` | 清掉缓存 |
-
-#### 可视化
-
-| 方法 | 说明 |
-|---|---|
-| `get_graph_mermaid() -> str` | 生成 Mermaid 源码 |
-| `get_graph_ascii() -> str` / `print_graph()` | ASCII 树状结构 |
-| `get_graph_info() -> dict` | `{nodes, edges, stats}` |
-| `draw_graph(output_path, engine="graphviz" \| "matplotlib", figsize, dpi)` | 渲染为图片 |
-
-#### 示例
-
-```python
-from maze import MaClient, task
-
-@task(resources={"cpu": 1, "cpu_mem": 128})
-def greet(text: str = ""):
-    return {"result": f"Hello {text}"}
-
-@task(resources={"cpu": 1, "cpu_mem": 128})
-def upper(result: str = ""):
-    return {"upper": result.upper()}
-
-client = MaClient("http://localhost:8000")
-wf = client.create_workflow()
-g  = wf.add_task(greet, inputs={"text": "Maze"})
-u  = wf.add_task(upper, inputs={"result": g.outputs["result"]})
-run_id = wf.run()
-wf.show_results(run_id)
-```
-
----
+执行状态、事件、结果和取消统一使用 `MaClient.get_run()`、`wait_run()`、
+`stream_run()` 和 `cancel_run()`。
 
 ### 1.4 `MaTask` / `TaskOutput` / `TaskOutputs`
 
-```python
-class MaTask:
-    task_id: str
-    workflow_id: str
-    task_name: str | None
-    outputs: TaskOutputs  # 通过 outputs["key"] 拿到 TaskOutput
-```
-
-| 方法 | 说明 |
-|---|---|
-| `save(code_str, task_input, task_output, resources)` | 旧式 API：手动保存代码与 I/O |
-| `delete()` | 从 workflow 删除该 task |
-
-```python
-class TaskOutput:
-    task_id: str
-    output_key: str
-    def to_reference_string(self) -> str  # "<task_id>.output.<key>"
-
-class TaskOutputs:
-    def __getitem__(self, key) -> TaskOutput
-    def keys() -> KeysView
-```
-
-`TaskOutput` 作为下游 task 的 `inputs[...]` 时，框架会在 server 端记录 `input_schema="from_task"` 并自动建立依赖边。
-
----
-
+`MaTask` 只是本地节点句柄；`task.outputs["name"]` 返回 `TaskOutput`，可直接作为
+下游 task 的输入。任务保存、删除和边创建不再通过独立 HTTP 接口。
 ### 1.5 `DynamicRun`（动态工作流）
 
 ```python
@@ -315,232 +226,23 @@ run.finalize({"status": "done"})
 
 ---
 
-### 1.6 `AgentRun`（通用 Agent 控制器）
-
-```python
-class AgentRun:
-    def __init__(self,
-                 dynamic_run: DynamicRun,
-                 tools: list[Callable],
-                 planner: Callable[[AgentContext], dict],
-                 max_steps: int = 10,
-                 task_timeout: float | None = None)
-
-    def run(self, prompt: str) -> Any
-    def status(self) -> dict
-    def get_events(self, after=None) -> list[dict]
-    def cancel(self, reason=None)
-```
-
-- `tools` 列表中的每个函数都必须是 `@task`。
-- `planner(ctx: AgentContext) -> {"tool": "<name>", "args": {...}}` 或 `{"final": ...}`。
-- 内部会 emit 事件：`agent_run_started` / `agent_action` / `agent_observation` / `agent_final` / `agent_error`。
-
-#### `AgentContext` / `AgentStep`
-
-```python
-@dataclass
-class AgentStep:
-    index: int
-    action: dict
-    tool_name: str | None
-    args: dict
-    task_id: str | None
-    observation: dict | None
-
-@dataclass
-class AgentContext:
-    prompt: str
-    tool_specs: dict[str, dict]
-    steps: list[AgentStep]
-    @property
-    def observations(self) -> list[dict]
-```
-
----
-
-### 1.7 `ReActWorkflow`（ReAct 模板）
-
-```python
-class ReActWorkflow:
-    def __init__(self,
-                 dynamic_run: DynamicRun,
-                 llm_task: Callable,
-                 tools: list[Callable],
-                 max_steps: int = 10,
-                 system_prompt: str | None = None,
-                 skills: list[SkillSpec | str] | None = None,
-                 progressive_skills: bool = True,
-                 skill_reader_max_chars: int = 12000,
-                 task_timeout: float | None = None)
-
-    @property
-    def run_id(self) -> str
-    def run(self, prompt: str) -> Any
-    def status(self) -> dict
-    def get_events(self, after=None) -> list[dict]
-    def cancel(self, reason=None)
-```
-
-#### LLM 决策 task 的契约
-
-`llm_task` 是一个普通的 `@task`，函数签名可包含以下任意输入（按需声明，框架按签名传入）：
-
-| 输入 | 类型 | 说明 |
-|---|---|---|
-| `prompt` | `str` | 用户原始问题 |
-| `history` | `list[dict]` | 历史步骤（含 `tool`, `args`, `observation`） |
-| `tools` | `dict[str, dict]` | 可用工具元信息（描述、入参、必填、出参等） |
-| `skills` | `dict` | 可用 skill catalog；当 `progressive_skills=True` 时只包含名称、描述和文件列表 |
-| `step` | `int` | 当前步序号（从 1 起） |
-| `system_prompt` | `str \| None` | 调用方注入的 system prompt |
-
-返回值必须是 dict，并满足以下任一形式：
-
-```json
-{"action": {"tool": "<name>", "args": {...}}}
-{"action": {"final": "<answer>"}}
-// 兼容简写
-{"tool": "...", "args": {...}}
-{"final": "..."}
-{"action": {"type": "final", "answer": "..."}}
-```
-
-#### 工具校验与修复
-
-ReAct 会自动校验每一步决策，遇到下列错误会作为 `observation` 反馈给下一轮 LLM（允许“自我修复”）：
-
-- `invalid_action`：JSON 不合法 / 缺字段
-- `tool_not_allowed`：调用了未注册工具
-- `missing_args`：必填入参缺失
-- `unknown_args`：传了多余入参
-
-#### `ReActStep`
-
-```python
-@dataclass
-class ReActStep:
-    index: int
-    decision_task_id: str
-    decision: dict
-    tool_name: str | None
-    args: dict
-    tool_task_id: str | None
-    observation: dict | None
-```
-
-#### OpenAI 兼容 LLM 决策 task 工厂
-
-```python
-from maze import create_openai_react_llm_task
-
-llm_task = create_openai_react_llm_task(
-    base_url="https://api.openai.com/v1",
-    model="gpt-4o-mini",
-    api_key_env="OPENAI_API_KEY",
-    system_prompt=None,
-    task_name="openai_react_decide",
-    temperature=0,
-    max_tokens=512,
-    timeout=60,
-    resources={"cpu": 1, "cpu_mem": 128},
-)
-```
-
-参数：
-
-| 参数 | 说明 |
-|---|---|
-| `base_url` | OpenAI 兼容端点（去掉末尾 `/`） |
-| `model` | 模型名 |
-| `api_key` / `api_key_env` / `config_path` | 三选一；`config_path` 指向 JSON，可包含 `url/base_url/model/key/api_key/key_env/api_key_env` |
-| `system_prompt` | 自定义系统提示，默认会强调“仅返回 JSON” |
-| `temperature` / `max_tokens` / `timeout` | 透传给 `/chat/completions` |
-| `resources` | 该 task 的资源声明 |
-
-返回值是一个 `@task` 函数，可直接传给 `client.create_react_workflow(llm_task=...)`。
-
----
-
-### 1.8 Skills（ReAct 渐进式披露）
-
-Maze 支持读取 Claude/Cursor 风格的 skill 目录，用于教 ReAct Agent 如何组合已经注册好的 tools。Skill 本身不提供可执行工具；工具仍通过 `tools=[...]` 显式注册。
-
-标准目录结构：
-
-```text
-data-analysis/
-├── SKILL.md
-├── reference.md
-└── examples.md
-```
-
-`SKILL.md` 保持通用格式：
-
-```markdown
----
-name: data-analysis
-description: Analyze CSV or spreadsheet-like data. Use when the user asks for statistics, summaries, trends, charts, or data cleaning.
----
-
-# Data Analysis
-
-## Quick Start
-
-Use `read_file` to inspect data, `exec_code` for pandas analysis, and `write_file` to save reports.
-
-## Additional Resources
-
-- For detailed workflow, see [reference.md](reference.md)
-- For examples, see [examples.md](examples.md)
-```
-
-Python API：
-
-```python
-from maze import load_skill, load_skills_from_dir
-
-skill = load_skill("./skills/data-analysis")
-skills = load_skills_from_dir("./skills")
-```
-
-ReAct 使用方式：
-
-```python
-react = client.create_react_workflow(
-    llm_task=decide,
-    tools=[read_file, write_file, exec_code],
-    skills=[load_skill("./skills/data-analysis")],
-    progressive_skills=True,
-)
-```
-
-当 `progressive_skills=True`（默认）时，Maze 初始只向 `llm_task` 暴露 skill catalog（`name`、`description`、文件列表）。如需详细内容，ReAct 可以调用自动注册的工具：
-
-```json
-{"tool": "read_skill_file", "args": {"skill_name": "data-analysis", "file_name": "reference.md"}}
-```
-
-`read_skill_file` 只允许读取对应 skill 目录内的相对路径，防止 `..` 或绝对路径逃逸。
-
----
-
-### 1.9 `LanggraphClient`（LangGraph 桥）
+### 1.6 `LanggraphClient`（LangGraph 桥）
 
 ```python
 from maze import LanggraphClient
 
 lc = LanggraphClient(addr="localhost:8000")
 
-@lc.task(resources={"cpu": 1, "gpu": 0})
+@lc.task(resources={"cpu_num": 1})
 def node(state):
     ...
     return state
 ```
 
-- 构造时自动 `POST /create_workflow`。
-- `lc.task(...)` 装饰过的函数被调用时，框架会 cloudpickle args/kwargs，调用 `POST /run_langgraph_task` 在 Maze 集群中远程执行，返回值与本地调用一致。
-- 资源支持 `cpu / gpu / cpu_mem / gpu_mem`，默认 `{cpu: 1, gpu: 0}`。
+- 构造和装饰阶段只在本地生成稳定的一节点 DAG，不访问 Core。
+- 调用被装饰函数时，框架通过 `POST /workflows/submit` 提交标准静态 Run，并通过 `GET /runs/{run_id}` 等待结果。
+- 每次调用都会出现在统一 Runs、events、cancel、retry 和检查界面中，并带有 `langgraph` 标签。
+- 资源支持 `cpu_num / gpu_mem / io_num` 和兼容别名 `cpu`，默认 `cpu_num=1`。
 
 ---
 
@@ -552,113 +254,6 @@ def node(state):
 > 所有响应都遵循 `{"status": "success" \| "error", ...}` 约定；错误时返回 HTTP 500 并附 `detail`。
 
 ### 2.1 静态 Workflow
-
-#### `POST /create_workflow`
-新建 workflow。
-
-**请求体**：无
-**响应**：
-```json
-{"status": "success", "workflow_id": "<uuid>"}
-```
-
----
-
-#### `POST /add_task`
-向 workflow 加入一个任务（Code 类型）。
-
-**请求体**：
-```json
-{
-  "workflow_id": "<uuid>",
-  "task_type":  "code",
-  "task_name":  "<string>"
-}
-```
-**响应**：
-```json
-{"status": "success", "task_id": "<uuid>"}
-```
-
-`task_type` 取值：`"code"` 或 `"langgraph"`（LangGraph 任务请用 `/add_langgraph_task`）。
-
----
-
-#### `GET /get_workflow_tasks/{workflow_id}`
-列出 workflow 内任务。
-
-**响应**：
-```json
-{"status": "success", "tasks": [ {...任务序列化...} ]}
-```
-
----
-
-#### `POST /del_task`
-删除任务。
-
-```json
-{"workflow_id": "...", "task_id": "..."}
-```
-
----
-
-#### `POST /save_task`
-保存任务的代码、I/O、资源、文件上下文。
-
-```json
-{
-  "workflow_id": "...",
-  "task_id": "...",
-  "task_input":  { "input_params":  { "1": { "key": "x", "input_schema": "from_user|from_task", "data_type": "str", "value": "...", "has_value": true } } },
-  "task_output": { "output_params": { "1": { "key": "y", "data_type": "any" } } },
-  "code_str":  "<可选>",
-  "code_ser":  "<base64-cloudpickle 序列化函数，可选；code_str/code_ser 至少一项>",
-  "resources": { "cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0 },
-  "file_context": null
-}
-```
-
----
-
-#### `POST /save_task_and_add_edge`
-与 `/save_task` 相同，且会按 `task_input.input_params[].input_schema == "from_task"` 自动建立依赖边（`value` 形如 `"<source_task_id>.output.<key>"`）。
-
----
-
-#### `POST /add_edge` / `POST /del_edge`
-```json
-{"workflow_id": "...", "source_task_id": "...", "target_task_id": "..."}
-```
-
----
-
-#### `POST /run_workflow`
-触发执行。
-```json
-{"workflow_id": "...", "file_context": { ...可选 }}
-```
-**响应**：`{"status": "success", "run_id": "<uuid>"}`
-
----
-
-#### `WS /get_workflow_res/{workflow_id}/{run_id}`
-订阅静态 run 的实时事件流，消息体为 JSON。常见事件类型：
-
-| `type` | 说明 |
-|---|---|
-| `start_task` | 任务开始 |
-| `finish_task` | 任务完成（携带 `data.result`） |
-| `task_exception` | 任务异常 |
-| `finish_workflow` | 工作流完成 |
-
-连接异常时服务端会自动调用 `stop_workflow`。
-
----
-
-### 2.2 AppSpec / RunSpec
-
-这组接口用于把一个完整 AppSpec/RunSpec 直接提交给 Head。它会根据 spec 构建静态 workflow，默认启用 artifact store，并把 `app_spec` 写入 run metadata，后续可通过 `/runs/{run_id}/retry` 重跑。
 
 #### `POST /apps/validate`
 校验 AppSpec/RunSpec，不执行。
@@ -754,6 +349,8 @@ def node(state):
 外部 DAG 平台推荐使用的稳定提交接口。Maze 会一次性校验、构建静态 workflow 并提交执行。
 
 请求体同 `/workflows/validate`，也可额外传 `tags`、`metadata`、`artifact_mode`。
+Python Workflow 会在 spec 中携带稳定的 `workflow_id`、`input_contract` 和
+`final_output_refs`；每次执行的 `inputs`、超时和幂等字段位于 `spec.run`。
 
 响应：
 
@@ -928,7 +525,7 @@ Artifact store 按 sha256 存储二进制 blob：
 #### `POST /dynamic_runs/{run_id}/events`
 写入自定义事件。
 ```json
-{"type": "agent_action", "data": {...}}
+{"type": "domain_progress", "data": {"completed": 3, "total": 10}}
 ```
 
 ---
@@ -943,7 +540,7 @@ Artifact store 按 sha256 存储二进制 blob：
 ---
 
 #### `POST /dynamic_runs/{run_id}/permission_requests`
-创建一个权限请求，通常由 Agent/工具执行前发起。
+创建一个动态 run 权限请求，通常由工具执行前发起。
 
 ```json
 {
@@ -979,33 +576,13 @@ Artifact store 按 sha256 存储二进制 blob：
 ---
 
 #### `WS /dynamic_runs/{run_id}/events`
-实时事件流（含 `register_task_spec`、`append_task`、`task_ready`、`start_task`、`finish_task`、`task_exception`、`agent_*`、`react_*`、`finish_workflow`、`cancel_dynamic_run`、`timeout_dynamic_run`、`interrupt_dynamic_run` 等，参见 [事件协议](#五事件协议event-protocol)）。
+实时事件流（含 `register_task_spec`、`append_task`、`task_ready`、`start_task`、`finish_task`、`task_exception`、`finish_workflow`、`cancel_dynamic_run`、`timeout_dynamic_run`、`interrupt_dynamic_run` 等，参见 [事件协议](#五事件协议event-protocol)）。
 
 ---
 
-### 2.6 LangGraph 桥
+### 2.6 LangGraph 适配器
 
-#### `POST /add_langgraph_task`
-```json
-{
-  "workflow_id": "...",
-  "task_type":   "langgraph",
-  "task_name":   "...",
-  "code_ser":    "<base64-cloudpickle>",
-  "resources":   {"cpu": 1, "gpu": 0, "cpu_mem": 0, "gpu_mem": 0}
-}
-```
-
-#### `POST /run_langgraph_task`
-```json
-{
-  "workflow_id": "...",
-  "task_id":     "...",
-  "args":   "<base64-cloudpickle of tuple>",
-  "kwargs": "<base64-cloudpickle of dict>"
-}
-```
-**响应**：`{"status":"success","result": <pickle-back 后的返回值>}`
+LangGraph 不再拥有专用 Head 接口。`LanggraphClient` 将函数和调用参数编码成标准的一节点 DAG，通过 `POST /workflows/submit` 提交，并从 `GET /runs/{run_id}` 读取结果。
 
 ---
 
@@ -1110,8 +687,7 @@ maze stop [--log-level INFO] [--log-file ...]
 ### 3.3 `maze-sandbox`（已退役）
 
 旧的远程 Sandbox 服务已经删除。该命令仅作为兼容提示保留，执行后会给出迁移说明并退出。
-请改用 `maze start --head --playground` 和 Workspace Agent 的
-`workspace_sandbox` 后端。
+请改用 `maze start --head --playground` 启动维护中的工作流编辑器。
 
 ---
 
@@ -1198,8 +774,7 @@ maze stop [--log-level INFO] [--log-file ...]
 | PUT | `/api/local-workspaces/:workspaceId/manifest` | 写入本地 workspace manifest |
 | GET | `/api/local-workspaces/:workspaceId/manifest` | 读取本地 workspace manifest |
 | POST | `/api/workspace-files/missing` | 检查一组文件路径是否缺失 |
-| POST | `/api/artifacts/promote` | 将临时/本地 artifact 提升到 workspace 可引用位置 |
-| POST | `/api/artifacts/cleanup` | 清理 artifact 缓存 |
+| POST | `/api/artifacts/promote` | 将 Core SHA-256 artifact 复制到 Workspace Files |
 
 ---
 
@@ -1260,20 +835,6 @@ maze stop [--log-level INFO] [--log-file ...]
 | POST | `/api/dynamic-runs/:runId/permission-requests/:requestId/decision` | Workbench 对动态 run 权限请求做 allow/deny 决策 |
 | DELETE | `/api/dynamic-runs/:runId` | 删除 |
 | POST | `/api/dynamic-runs/cleanup` | 批量清理 |
-| GET | `/api/workflow-runs/static` | 列出静态 run |
-| GET | `/api/workflow-runs/static/:runId` | 静态 run 详情 |
-| GET | `/api/workflow-runs/static/:runId/events` | 事件列表 |
-| GET | `/api/workflow-runs/static/:runId/artifacts/download` | 下载或内联打开某个静态 run artifact |
-
-静态 run artifact 下载参数：
-
-| Query | 说明 |
-|---|---|
-| `taskId` | 必填，artifact 所属 task |
-| `path` | 必填，artifact 在 manifest 中的路径 |
-| `workspaceId` / `workspaceDir` | 可选，用于定位 workspace |
-| `disposition` | `inline` 用于浏览器打开，`attachment` 用于下载；默认 `attachment` |
-
 ---
 
 ### 4.7 编辑器
@@ -1320,22 +881,6 @@ maze stop [--log-level INFO] [--log-file ...]
 | `timeout_dynamic_run` | 超时 | `timeout_seconds` |
 | `interrupt_dynamic_run` | 被打断 | — |
 | `start_llm_instance` / `finish_llm_instance_launch` / `stop_llm_instance` | LLM 实例生命周期 | `instance_id`, `host`, `port` |
-
-### 5.2 Agent / ReAct 事件（由 SDK 通过 `emit_event` 写入）
-
-| `type` | `data` 关键字段 |
-|---|---|
-| `agent_run_started` | `mode (react/...) , prompt, max_steps, tools` |
-| `agent_action` | `step, tool, args` |
-| `agent_observation` | `step, tool, task_id, result` |
-| `agent_repair_observation` | `step, tool, decision_task_id, result.error_type` |
-| `react_llm_decision` | `step, task_id, decision, action` |
-| `agent_final` | `mode, answer, step_count` |
-| `agent_error` | `error` |
-
-> 自定义事件类型：任何字符串都允许，建议使用 `snake_case` 并以业务前缀避免冲突。
-
----
 
 ## 六、资源配置（resources）
 
@@ -1409,7 +954,7 @@ g  = wf.add_task(greet, inputs={"text": "Maze"})
 u  = wf.add_task(upper, inputs={"result": g.outputs["result"]})
 
 run_id = wf.run()
-out = wf.show_results(run_id)
+out = client.wait_run(run_id)
 print(out["task_results"])
 ```
 
@@ -1431,59 +976,7 @@ print(finish_event["data"]["result"])
 run.finalize({"status": "done"})
 ```
 
-### 8.3 ReAct Agent（自定义决策）
-
-```python
-from maze import MaClient, task
-
-@task
-def decide(prompt: str, history: list, tools: dict, step: int):
-    if not history:
-        return {"action": {"tool": "multiply", "args": {"a": 18, "b": 7}}}
-    result = history[-1]["observation"]["result"]["result"]
-    return {"action": {"final": f"The answer is {result}."}}
-
-@task
-def multiply(a: int, b: int):
-    return {"result": a * b}
-
-client = MaClient("http://localhost:8000")
-react = client.create_react_workflow(
-    llm_task=decide,
-    tools=[multiply],
-    max_steps=3,
-)
-answer = react.run("Compute 18 * 7 with the calculator.")
-print(answer)
-```
-
-### 8.4 ReAct Agent（OpenAI 兼容 LLM）
-
-```python
-import os
-from maze import MaClient, task, create_openai_react_llm_task
-
-@task
-def multiply(a: int, b: int):
-    return {"result": a * b}
-
-llm_task = create_openai_react_llm_task(
-    base_url="https://api.openai.com/v1",
-    model="gpt-4o-mini",
-    api_key=os.environ["OPENAI_API_KEY"],
-)
-
-client = MaClient("http://localhost:8000")
-react = client.create_react_workflow(
-    llm_task=llm_task,
-    tools=[multiply],
-    max_steps=4,
-    system_prompt="You can only call the multiply tool.",
-)
-print(react.run("Compute 23 * 17."))
-```
-
-### 8.5 LangGraph 迁移
+### 8.3 LangGraph 迁移
 
 ```python
 from langgraph.graph import StateGraph, START, END
@@ -1512,7 +1005,7 @@ app = graph.compile()
 print(app.invoke({"x": 1}))
 ```
 
-### 8.6 直接调用 HTTP API（curl）
+### 8.4 直接调用 HTTP API（curl）
 
 ```bash
 # 1) 创建动态 run
@@ -1570,7 +1063,7 @@ curl -s -X POST http://localhost:8000/dynamic_runs/<run_id>/finalize \
 
 ### 9.2 持久化
 
-每个 run 在 workspace 下有自己的目录：
+静态 run 的持久化由 Maze Core 独占，每个 run 在 Core workspace 下有自己的目录：
 
 ```
 workspace/workflow_runs/static_runs/{run_id}/
@@ -1863,8 +1356,7 @@ conda run -n maze python -m maze.cli.cli status --addr http://localhost:8000
 
 ### 9.8 兼容性与边界
 
-- 动态 run / ReAct workflow 可以走统一 `/runs/*` 查询；需要动态追加任务、权限请求、Agent/ReAct 细节事件时，仍使用 `DynamicRun` SDK 和 `/dynamic_runs/*`。
-- ReAct skill 是动态/ReAct Agent loop 的能力增强，用于教 agent 如何使用已注册 tools；它不是静态 workflow 监控的一部分。
+- 动态 run 可以走统一 `/runs/*` 查询；需要动态追加任务、权限请求和详细事件时，仍使用 `DynamicRun` SDK 和 `/dynamic_runs/*`。
 - 本节接口的 schema 字段名是稳定的，未来扩展会向后兼容。
 - Token 数据可信度依赖用户上报；框架不做 LLM 流量拦截。
 - Head 进程崩溃 / 重启时，正在跑的 run 会在下次启动时被标记为 `interrupted` 并写入 `events.jsonl`。
@@ -1880,7 +1372,6 @@ conda run -n maze python -m maze.cli.cli status --addr http://localhost:8000
   - 装饰器：`maze/client/maze/decorator.py`
   - 静态 workflow SDK：`maze/client/maze/workflow.py`
   - 动态 run SDK：`maze/client/maze/dynamic.py`
-  - Agent / ReAct：`maze/client/maze/agent.py`、`maze/client/maze/react.py`、`maze/client/maze/react_llm.py`
   - LangGraph 桥：`maze/client/langgraph/client.py`
   - Head 服务：`maze/core/server.py`
   - 调度器：`maze/core/scheduler/`

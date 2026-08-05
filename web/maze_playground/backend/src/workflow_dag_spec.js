@@ -1,9 +1,6 @@
 const NODE_ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/;
 
 export const BUILTIN_TASK_ALIASES = Object.freeze({
-  'agentTools.write_file': 'tasks/agent_tools_write_file.py',
-  'agentTools.read_file': 'tasks/agent_tools_read_file.py',
-  'agentTools.exec_code': 'tasks/agent_tools_exec_code.py',
   'distributedSmoke.distributed_gpu_probe': 'tasks/distributed_gpu_probe.py',
 });
 

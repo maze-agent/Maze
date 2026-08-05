@@ -6,9 +6,7 @@ import pytest
 import requests
 
 from maze.client.maze import client as client_module
-from maze.client.maze import models as models_module
 from maze.client.maze.client import MaClient
-from maze.client.maze.workflow import MaWorkflow
 
 
 class _Response:
@@ -49,78 +47,47 @@ def blackhole_http_server():
         thread.join(timeout=2)
 
 
-def test_request_timeout_propagates_to_created_and_loaded_workflows(monkeypatch):
+def test_request_timeout_propagates_to_atomic_workflow_submit(monkeypatch):
     calls = []
 
     def post(url, json=None, **kwargs):
         calls.append((url, json, kwargs))
-        if url.endswith("/create_workflow"):
-            return _Response({"status": "success", "workflow_id": "workflow-1"})
-        return _Response({"status": "success", "run_id": "run-1"})
+        return _Response({"status": "success", "workflow_id": "workflow-1", "run_id": "run-1"})
 
     monkeypatch.setattr(client_module.requests, "post", post)
     client = MaClient("http://maze.test", request_timeout=1.25)
 
     created = client.create_workflow()
-    loaded = client.get_workflow("workflow-2")
-
     assert created.request_timeout == 1.25
-    assert loaded.request_timeout == 1.25
-    assert calls == [
-        ("http://maze.test/create_workflow", None, {"timeout": 1.25}),
-    ]
+    assert calls == []
 
-    assert created.run() == "run-1"
-    assert calls[-1] == (
-        "http://maze.test/run_workflow",
-        {"workflow_id": "workflow-1"},
+    result = client.submit_workflow({"name": "draft", "nodes": [], "edges": []})
+    assert result["run_id"] == "run-1"
+    assert calls == [(
+        "http://maze.test/workflows/submit",
+        {
+            "spec": {"name": "draft", "nodes": [], "edges": []},
+            "artifact_mode": True,
+            "tags": None,
+            "metadata": None,
+        },
         {"timeout": 1.25},
-    )
+    )]
 
 
 def test_default_request_timeout_keeps_requests_call_shape(monkeypatch):
-    def post(url):
-        assert url == "http://maze.test/create_workflow"
-        return _Response({"status": "success", "workflow_id": "workflow-1"})
+    calls = []
+
+    def post(url, json, **kwargs):
+        calls.append((url, json, kwargs))
+        return _Response({"status": "success", "workflow_id": "workflow-1", "run_id": "run-1"})
 
     monkeypatch.setattr(client_module.requests, "post", post)
 
     workflow = MaClient("http://maze.test").create_workflow()
 
     assert workflow.request_timeout is None
-
-
-def test_request_timeout_propagates_to_legacy_task_save_and_delete(monkeypatch):
-    calls = []
-
-    def post(url, json=None, **kwargs):
-        calls.append((url, json, kwargs))
-        if url.endswith("/add_task"):
-            return _Response({"status": "success", "task_id": "task-1"})
-        return _Response({"status": "success"})
-
-    monkeypatch.setattr(models_module.requests, "post", post)
-    workflow = MaWorkflow(
-        "workflow-1",
-        "http://maze.test",
-        request_timeout=1.25,
-    )
-
-    task = workflow.add_task(task_type="code", task_name="legacy")
-    task.save(
-        "def legacy():\n    return {'value': 1}\n",
-        {"input_params": {}},
-        {"output_params": {}},
-        {"cpu": 1, "cpu_mem": 1, "gpu": 0, "gpu_mem": 0},
-    )
-    task.delete()
-
-    assert task.request_timeout == 1.25
-    assert [kwargs for _, _, kwargs in calls] == [
-        {"timeout": 1.25},
-        {"timeout": 1.25},
-        {"timeout": 1.25},
-    ]
+    assert calls == []
 
 
 def test_wait_run_bounds_each_poll_by_remaining_deadline(monkeypatch):

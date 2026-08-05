@@ -120,7 +120,7 @@ def test_cancel_seals_active_tasks_and_rejects_late_public_events(tmp_path):
     with pytest.raises(ValueError, match="canceled"):
         asyncio.run(path.emit_dynamic_run_event(
             run.run_id,
-            {"type": "agent_error", "data": {"error": "late"}},
+            {"type": "domain_error", "data": {"error": "late"}},
         ))
 
     assert run.pending_tasks == {}

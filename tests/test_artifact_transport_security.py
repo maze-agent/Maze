@@ -1,10 +1,7 @@
 import hashlib
 import json
-import os
-import shutil
 import socket
 import stat
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -294,7 +291,7 @@ async def test_multinode_loopback_requires_reachable_advertised_url(monkeypatch)
             "scheme": "http",
             "server": ("127.0.0.1", 8000),
             "client": ("127.0.0.1", 50000),
-            "path": "/run_workflow",
+            "path": "/workflows/submit",
             "root_path": "",
             "query_string": b"",
             "headers": [(b"host", b"127.0.0.1:8000")],
@@ -336,97 +333,3 @@ async def test_multinode_loopback_requires_reachable_advertised_url(monkeypatch)
     monkeypatch.setattr(core_server.mapath, "get_cluster_resources", invalid_cluster)
     with pytest.raises(ValueError, match="Multi-node artifact transport"):
         await core_server._worker_reachable_file_context(request, context)
-
-
-def _run_node_script(script: str, env: dict[str, str], cwd: Path) -> dict:
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required for the Playground transport test")
-    completed = subprocess.run(
-        [node, "--input-type=module", "-e", script],
-        cwd=cwd,
-        env={**os.environ, **env, "MAZE_PLAYGROUND_NO_LISTEN": "1"},
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=True,
-    )
-    return json.loads(completed.stdout.strip().splitlines()[-1])
-
-
-def test_playground_private_staging_symlink_and_gc_boundaries(tmp_path):
-    repo_root = Path(__file__).resolve().parents[1]
-    workspaces = tmp_path / "workspaces"
-    staging_root = tmp_path / "private-staging"
-    artifact_root = tmp_path / "cas"
-    active_blob = artifact_root / "blobs" / "aa" / "bb" / ("a" * 64)
-    active_blob.parent.mkdir(parents=True)
-    active_blob.write_bytes(b"active-initial-file")
-    script = r"""
-      import fs from 'fs/promises';
-      import path from 'path';
-      const hooks = (await import('./web/maze_playground/backend/src/server.js')).__artifactSecurityTestHooks;
-      const context = await hooks.ensureManagedGaiaWorkspaceContext('private-test');
-      const staged = await hooks.stageGaiaExecutionFile(
-        context,
-        'run-1',
-        {name: 'input.txt', content: Buffer.from('private-input')},
-      );
-      const rootMode = (await fs.stat(process.env.MAZE_GAIA_STAGING_ROOT)).mode & 0o777;
-      const runMode = (await fs.stat(staged.workspaceDir)).mode & 0o777;
-      const filesMode = (await fs.stat(path.join(staged.workspaceDir, 'files'))).mode & 0o777;
-      const fileMode = (await fs.stat(path.join(staged.workspaceDir, 'files', 'input.txt'))).mode & 0o777;
-      const outside = path.join(process.env.MAZE_GAIA_STAGING_ROOT, '..', 'outside-target');
-      await fs.mkdir(outside, {recursive: true});
-      await fs.writeFile(path.join(outside, 'marker'), 'keep');
-      await fs.rm(staged.workspaceDir, {recursive: true});
-      await fs.symlink(outside, staged.workspaceDir, 'dir');
-      let exchangeRejected = false;
-      try { await staged.clearInput(); } catch (error) { exchangeRejected = error.code === 'GAIA_PATH_UNSAFE'; }
-      await fs.unlink(staged.workspaceDir);
-      let gcStatus = null;
-      try { await hooks.cleanupWorkspaceArtifacts(context.workspaceDir, {dryRun: false}); }
-      catch (error) { gcStatus = error.status; }
-      console.log(JSON.stringify({
-        rootMode, runMode, filesMode, fileMode, exchangeRejected, gcStatus,
-        outsideIntact: Boolean(await fs.stat(path.join(outside, 'marker')).catch(() => null)),
-        stagingOutsideWorkspace: !staged.workspaceDir.startsWith(context.workspaceDir + path.sep),
-      }));
-    """
-    result = _run_node_script(
-        script,
-        {
-            "MAZE_WORKSPACES_DIR": str(workspaces),
-            "MAZE_GAIA_STAGING_ROOT": str(staging_root),
-            "MAZE_ARTIFACT_STORE_DIR": str(artifact_root),
-        },
-        repo_root,
-    )
-    assert result == {
-        "rootMode": 0o700,
-        "runMode": 0o700,
-        "filesMode": 0o700,
-        "fileMode": 0o600,
-        "exchangeRejected": True,
-        "gcStatus": 403,
-        "outsideIntact": True,
-        "stagingOutsideWorkspace": True,
-    }
-    assert active_blob.read_bytes() == b"active-initial-file"
-
-    external = tmp_path / "preexisting-symlink-target"
-    external.mkdir()
-    symlink_root = tmp_path / "symlink-staging-root"
-    symlink_root.symlink_to(external, target_is_directory=True)
-    symlink_script = r"""
-      const hooks = (await import('./web/maze_playground/backend/src/server.js')).__artifactSecurityTestHooks;
-      let rejected = false;
-      try { await hooks.requirePrivateGaiaStagingRoot(); }
-      catch (error) { rejected = error.code === 'GAIA_PATH_UNSAFE'; }
-      console.log(JSON.stringify({rejected}));
-    """
-    assert _run_node_script(
-        symlink_script,
-        {"MAZE_GAIA_STAGING_ROOT": str(symlink_root)},
-        repo_root,
-    ) == {"rejected": True}

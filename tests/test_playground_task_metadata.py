@@ -29,9 +29,6 @@ def _load_serialized_task(task_func):
 @pytest.mark.parametrize(
     ("file_name", "function_name"),
     [
-        ("agent_tools_write_file.py", "write_file"),
-        ("agent_tools_read_file.py", "read_file"),
-        ("agent_tools_exec_code.py", "exec_code"),
         ("distributed_gpu_probe.py", "distributed_gpu_probe"),
     ],
 )
@@ -106,47 +103,10 @@ def _load_serialized_task_from_payload(payload):
     return cloudpickle.loads(base64.b64decode(payload["codeSer"]))
 
 
-def test_catalog_serialized_tasks_are_callable(tmp_path, monkeypatch):
-    (tmp_path / "files").mkdir()
-    _, write_file = _load_catalog_task("agent_tools_write_file.py", "write_file")
-    _, read_file = _load_catalog_task("agent_tools_read_file.py", "read_file")
-    _, exec_code = _load_catalog_task("agent_tools_exec_code.py", "exec_code")
+def test_catalog_serialized_tasks_are_callable(monkeypatch):
     _, distributed_gpu_probe = _load_catalog_task(
         "distributed_gpu_probe.py", "distributed_gpu_probe"
     )
-
-    write_result = _load_serialized_task(write_file)({
-        "path": "notes/test.txt",
-        "content": "hello",
-        "workspace_dir": str(tmp_path),
-    })
-    assert write_result["error"] is None
-
-    read_result = _load_serialized_task(read_file)({
-        "path": "notes/test.txt",
-        "workspace_dir": str(tmp_path),
-    })
-    assert read_result["content"] == "hello"
-    assert read_result["error"] is None
-
-    from maze.client.maze import agent_exec
-
-    monkeypatch.setattr(
-        agent_exec,
-        "run_agent_exec_code",
-        lambda **kwargs: {
-            "path": kwargs["path"],
-            "backend": kwargs["backend"],
-            "returncode": 0,
-            "stdout": "catalog-ok",
-            "stderr": "",
-            "error": None,
-            "metadata": {},
-        },
-    )
-    exec_result = _load_serialized_task(exec_code)({"path": "probe.py"})
-    assert exec_result["stdout"] == "catalog-ok"
-    assert exec_result["metadata"]["resource_request"]["cpu"] == 1
 
     fake_ray = SimpleNamespace(
         get_runtime_context=lambda: SimpleNamespace(get_node_id=lambda: "node-1"),

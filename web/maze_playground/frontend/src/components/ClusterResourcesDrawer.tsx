@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Collapse, Drawer, Empty, Form, Input, InputNumber, Modal, Progress, Select, Space, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { DeleteOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
@@ -208,49 +208,67 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const [consoleOutput, setConsoleOutput] = useState('');
   const [consoleHistory, setConsoleHistory] = useState<Array<{ command: string; ok: boolean; ranAt: string }>>([]);
   const [queueRefreshIntervalMs, setQueueRefreshIntervalMs] = useState(QUEUE_REFRESH_INTERVAL_MS);
+  const resourceRequestRef = useRef<Promise<void> | null>(null);
+  const queueRequestRef = useRef<Promise<void> | null>(null);
 
-  const loadResources = useCallback(async (showLoading = false) => {
+  const loadResources = useCallback((showLoading = false) => {
+    if (resourceRequestRef.current) {
+      return resourceRequestRef.current;
+    }
     if (showLoading) {
       setLoading(true);
     }
-    try {
-      const result = await api.getClusterResources();
-      setData(result);
-      setError(null);
-    } catch (reason: any) {
-      console.error('Failed to load cluster resources:', reason);
-      setError(
-        reason?.response?.data?.error
-        || reason?.message
-        || 'Failed to load cluster resources',
-      );
-    } finally {
-      if (showLoading) {
-        setLoading(false);
+    const request = (async () => {
+      try {
+        const result = await api.getClusterResources();
+        setData(result);
+        setError(null);
+      } catch (reason: any) {
+        console.error('Failed to load cluster resources:', reason);
+        setError(
+          reason?.response?.data?.error
+          || reason?.message
+          || 'Failed to load cluster resources',
+        );
+      } finally {
+        resourceRequestRef.current = null;
+        if (showLoading) {
+          setLoading(false);
+        }
       }
-    }
+    })();
+    resourceRequestRef.current = request;
+    return request;
   }, []);
 
-  const loadQueues = useCallback(async (showLoading = false) => {
+  const loadQueues = useCallback((showLoading = false) => {
+    if (queueRequestRef.current) {
+      return queueRequestRef.current;
+    }
     if (showLoading) {
       setQueueLoading(true);
     }
-    try {
-      const result = await api.getClusterQueues();
-      setQueues(result.queues);
-      setQueueError(null);
-    } catch (reason: any) {
-      console.error('Failed to load cluster queues:', reason);
-      setQueueError(
-        reason?.response?.data?.error
-        || reason?.message
-        || 'Failed to load cluster queues',
-      );
-    } finally {
-      if (showLoading) {
-        setQueueLoading(false);
+    const request = (async () => {
+      try {
+        const result = await api.getClusterQueues();
+        setQueues(result.queues);
+        setQueueError(null);
+      } catch (reason: any) {
+        console.error('Failed to load cluster queues:', reason);
+        setQueueError(
+          reason?.response?.data?.error
+          || reason?.message
+          || 'Failed to load cluster queues',
+        );
+      } finally {
+        queueRequestRef.current = null;
+        if (showLoading) {
+          setQueueLoading(false);
+        }
       }
-    }
+    })();
+    queueRequestRef.current = request;
+    return request;
   }, []);
 
   const loadWorkerProfiles = useCallback(async (showLoading = false) => {
@@ -289,17 +307,37 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       return;
     }
 
-    loadResources(true);
-    loadQueues(true);
+    let cancelled = false;
+    let resourceTimer: number | undefined;
+    let queueTimer: number | undefined;
+
+    const pollResources = async (showLoading = false) => {
+      await loadResources(showLoading);
+      if (!cancelled) {
+        resourceTimer = window.setTimeout(pollResources, RESOURCE_REFRESH_INTERVAL_MS);
+      }
+    };
+    const pollQueues = async (showLoading = false) => {
+      await loadQueues(showLoading);
+      if (!cancelled && queueRefreshIntervalMs > 0) {
+        queueTimer = window.setTimeout(pollQueues, queueRefreshIntervalMs);
+      }
+    };
+
+    void pollResources(true);
+    if (queueRefreshIntervalMs > 0) {
+      void pollQueues(true);
+    } else {
+      void loadQueues(true);
+    }
     loadWorkerProfiles(true);
-    const resourceTimer = window.setInterval(loadResources, RESOURCE_REFRESH_INTERVAL_MS);
-    const queueTimer = queueRefreshIntervalMs > 0
-      ? window.setInterval(loadQueues, queueRefreshIntervalMs)
-      : undefined;
     return () => {
-      window.clearInterval(resourceTimer);
+      cancelled = true;
+      if (resourceTimer !== undefined) {
+        window.clearTimeout(resourceTimer);
+      }
       if (queueTimer !== undefined) {
-        window.clearInterval(queueTimer);
+        window.clearTimeout(queueTimer);
       }
     };
   }, [loadQueues, loadResources, loadWorkerProfiles, open, queueRefreshIntervalMs]);
@@ -786,7 +824,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       },
     },
     {
-      title: 'GPU Memory',
+      title: 'GPU Memory Reserved',
       key: 'gpu_memory',
       width: 260,
       render: (_, node) => {
@@ -798,12 +836,12 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
 
         return (
           <Space direction="vertical" size={4} style={{ width: '100%' }}>
-            <Text>{formatGpuMemory(totals.available)} / {formatGpuMemory(totals.total)}</Text>
+            <Text>{formatGpuMemory(Math.max(totals.total - totals.available, 0))} / {formatGpuMemory(totals.total)}</Text>
             <Progress percent={percent(totals.available, totals.total)} showInfo={false} size="small" />
             <Space size={4} wrap>
               {devices.map((device) => (
                 <Tag key={String(device.gpu_id)} color={device.available_memory > 0 ? 'green' : 'volcano'}>
-                  GPU {device.gpu_id}: {formatGpuMemory(device.available_memory)} / {formatGpuMemory(device.total_memory)}
+                  GPU {device.gpu_id}: {formatGpuMemory(Math.max(device.total_memory - device.available_memory, 0))} / {formatGpuMemory(device.total_memory)}
                 </Tag>
               ))}
             </Space>
@@ -1042,7 +1080,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
           ['Registered', `${totals.registered}/${totals.nodes}`],
           ['CPU', totals.cpu],
           ['GPU', totals.gpu],
-          ['GPU Memory', `${formatGpuMemory(totals.gpuMemoryAvailable)} / ${formatGpuMemory(totals.gpuMemoryTotal)}`],
+          ['GPU Memory Reserved', `${formatGpuMemory(Math.max(totals.gpuMemoryTotal - totals.gpuMemoryAvailable, 0))} / ${formatGpuMemory(totals.gpuMemoryTotal)}`],
         ].map(([label, value]) => (
           <div
             key={label}

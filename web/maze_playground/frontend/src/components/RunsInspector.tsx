@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
-  Collapse,
   Descriptions,
   Divider,
   Drawer,
@@ -30,7 +29,6 @@ import {
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
-import { computeReactRunTimeout, normalizeReactTaskTimeout } from '@/utils/reactRuntime';
 import type {
   DynamicRunEvent,
   DynamicRunSnapshot,
@@ -40,16 +38,16 @@ import type {
   UnifiedRunEvent,
   UnifiedRunSnapshot,
   UnifiedRunTaskSnapshot,
-  WorkspaceSkillMeta,
 } from '@/types/workflow';
-import { loadLlmSettings } from '@/utils/llmSettings';
-import ReActRuntimeCanvas, {
-  buildAgentTrace,
-  formatJson,
-  hasAgentTrace,
-  type AgentTraceStep,
-} from './ReActRuntimeCanvas';
-import PendingActionCard from './PendingActionCard';
+
+function formatJson(value: any) {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
 
 const { Text, Title } = Typography;
 
@@ -139,13 +137,6 @@ function shortId(value?: string) {
 function formatTime(value?: number | null) {
   if (!value) return '-';
   return new Date(value * 1000).toLocaleString();
-}
-
-function formatIsoTime(value?: string | null) {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString();
 }
 
 function formatBytes(value?: number | null) {
@@ -287,36 +278,6 @@ function collectSandboxSummary(nodes: any[], events: DynamicRunEvent[] = [], run
   return Array.from(values);
 }
 
-function collectToolSummary(events: DynamicRunEvent[]) {
-  const byTool = new Map<string, { count: number; failed: number }>();
-  events.forEach((event) => {
-    const data = event.data || {};
-    const tool = data.tool || data.tool_name;
-    if (!tool) return;
-    if (![
-      'agent_action',
-      'agent_tool_call_started',
-      'agent_tool_call_finished',
-      'agent_observation',
-      'agent_repair_observation',
-    ].includes(event.type)) {
-      return;
-    }
-    const key = String(tool);
-    const current = byTool.get(key) || { count: 0, failed: 0 };
-    if (event.type === 'agent_action' || event.type === 'agent_tool_call_started') {
-      current.count += 1;
-    }
-    if (data.error || data.error_type || data.ok === false) {
-      current.failed += 1;
-    }
-    byTool.set(key, current);
-  });
-  return Array.from(byTool.entries())
-    .map(([tool, summary]) => ({ tool, ...summary }))
-    .sort((a, b) => a.tool.localeCompare(b.tool));
-}
-
 function collectRunErrors(run: any, nodes: any[], events: DynamicRunEvent[] = []) {
   const errors: string[] = [];
   if (run?.failure_reason) errors.push(compactText(run.failure_reason));
@@ -327,65 +288,11 @@ function collectRunErrors(run: any, nodes: any[], events: DynamicRunEvent[] = []
     }
   });
   events.forEach((event) => {
-    if (['agent_error', 'agent_skill_load_failed', 'task_exception'].includes(event.type)) {
+    if (event.type === 'task_exception') {
       errors.push(compactText(event.data?.error || event.data?.result || event.data));
     }
   });
   return Array.from(new Set(errors)).slice(0, 5);
-}
-
-function issueGuidance(issue: any) {
-  const text = compactText(issue, 300);
-  const lower = text.toLowerCase();
-  let stage = 'runtime';
-  let suggestion = 'Open the failed task or event, inspect the raw error, then retry after fixing the input, tool call, or environment.';
-
-  if (lower.includes('api key') || lower.includes('unauthorized') || lower.includes('401')) {
-    stage = 'llm';
-    suggestion = 'Check Advanced Setting -> LLM API key/base URL/model, then rerun the ReAct workflow.';
-  } else if (lower.includes('skill_not_found') || lower.includes('skill not found')) {
-    stage = 'skills';
-    suggestion = 'Import the missing skill from Library, or remove it from the ReAct run skill selection.';
-  } else if (lower.includes('docker')) {
-    stage = 'sandbox';
-    suggestion = 'Switch to workspace_sandbox, or connect a worker that reports docker_sandbox=true before rerunning.';
-  } else if (lower.includes('permission')) {
-    stage = 'sandbox';
-    suggestion = 'Review the permission target and policy. Prefer writing under workspace/files or generated artifact paths.';
-  } else if (lower.includes('timeout') || lower.includes('timed out')) {
-    stage = 'execution';
-    suggestion = 'Increase timeout, reduce max steps, or split the work into a smaller task before rerunning.';
-  } else if (lower.includes('no registered') || lower.includes('no alive') || lower.includes('insufficient')) {
-    stage = 'scheduler';
-    suggestion = 'Check Cluster resources. Reconnect worker nodes or lower requested CPU/GPU resources.';
-  } else if (lower.includes('json') || lower.includes('parse')) {
-    stage = 'llm/tool';
-    suggestion = 'Inspect the raw LLM decision and repair prompt. Rerun after making the prompt/tool schema more explicit.';
-  }
-
-  return { stage, issue: text, suggestion };
-}
-
-function collectRepairGuidance(run: any, nodes: any[], events: DynamicRunEvent[] = []) {
-  const rawIssues: any[] = [];
-  if (run?.failure_reason) rawIssues.push(run.failure_reason);
-  if (run?.cancel_reason) rawIssues.push(run.cancel_reason);
-  nodes.forEach((node) => {
-    if (node?.error || node?.last_error) rawIssues.push(node.error || node.last_error);
-    if (node?.pending_reason) rawIssues.push(node.pending_reason);
-  });
-  events.forEach((event) => {
-    if (['agent_error', 'agent_skill_load_failed', 'task_exception'].includes(event.type)) {
-      rawIssues.push(event.data?.error || event.data?.result || event.data);
-    }
-  });
-
-  const byKey = new Map<string, ReturnType<typeof issueGuidance>>();
-  rawIssues.forEach((issue) => {
-    const guidance = issueGuidance(issue);
-    byKey.set(`${guidance.stage}:${guidance.issue}`, guidance);
-  });
-  return Array.from(byKey.values()).slice(0, 5);
 }
 
 function artifactLooksImage(artifact: RunArtifact) {
@@ -422,15 +329,6 @@ function formatArtifactPreview(artifact: RunArtifact, content: string) {
   return content;
 }
 
-function inferReactRerunMode(started: Record<string, any> | null, run?: DynamicRunSnapshot | null): 'local' | 'online' {
-  const llmTask = String(started?.llm_task || '').toLowerCase();
-  const mode = String(started?.mode || run?.final_result?.mode || run?.mode || '').toLowerCase();
-  if (llmTask.includes('openai') || llmTask.includes('online')) return 'online';
-  if (mode === 'local' || mode.includes('local')) return 'local';
-  if (mode === 'online' || mode.includes('online')) return 'online';
-  return 'local';
-}
-
 function scheduleRejectSummary(decision: any): string[] {
   const candidates = decision?.candidate_nodes || [];
   return candidates
@@ -445,18 +343,13 @@ function getRunMode(run?: DynamicRunSnapshot | null) {
   if (!run) return null;
   if (run.mode) return String(run.mode);
   if (run.final_result?.mode) return String(run.final_result.mode);
-  if (run.task_specs?.react_llm_decision) return 'react';
-  const taskNodes = Object.values(run.task_nodes || {});
-  if (taskNodes.some((node: any) => node?.task_spec_id === 'react_llm_decision')) {
-    return 'react';
-  }
   return null;
 }
 
 function runModeTag(run?: DynamicRunSnapshot | null) {
   const mode = getRunMode(run);
   if (!mode) return null;
-  return <Tag color={mode === 'react' ? 'purple' : 'geekblue'}>{mode}</Tag>;
+  return <Tag color="geekblue">{mode}</Tag>;
 }
 
 function isAppRun(run?: UnifiedRunSnapshot | DynamicRunSnapshot | null) {
@@ -498,7 +391,7 @@ function adaptDynamicRun(run: UnifiedRunSnapshot): DynamicRunSnapshot {
     status: (run.native_status || run.status) as DynamicRunStatus,
     kind: 'dynamic',
     summary: run.summary,
-    mode: run.mode || (run.run_type === 'react' ? 'react' : undefined),
+    mode: run.mode,
     max_tasks: run.max_tasks,
     timeout_seconds: run.timeout_seconds,
     created_time: run.created_time,
@@ -527,8 +420,6 @@ function staticEventSummary(event: UnifiedRunEvent) {
       return 'Workflow run started';
     case 'building':
       return data.message || 'Building workflow';
-    case 'maze_run_created':
-      return `Maze run created: ${shortId(data.maze_run_id)}`;
     case 'task_ready':
       return `${taskName} is ready`;
     case 'start_task':
@@ -575,79 +466,9 @@ function dynamicEventSummary(event: DynamicRunEvent) {
       return `Run timed out${data.timeout_seconds ? ` after ${data.timeout_seconds}s` : ''}`;
     case 'interrupt_dynamic_run':
       return data.reason || 'Run interrupted';
-    case 'agent_run_started':
-      return `Agent started with ${Array.isArray(data.tools) ? data.tools.length : 0} tool(s)`;
-    case 'agent_skill_loaded':
-      return `Skill loaded: ${data.skill?.name || data.skill || 'unknown'}`;
-    case 'agent_skill_load_failed':
-      return `Skill load failed: ${data.skill || data.error?.details?.skill || data.error?.message || 'unknown'}`;
-    case 'agent_action':
-      return `Agent step ${data.step || '?'} selected ${data.tool || 'unknown tool'}`;
-    case 'agent_observation':
-      return `Agent step ${data.step || '?'} observed ${data.tool || 'tool'} result`;
-    case 'agent_repair_observation':
-      return `Agent step ${data.step || '?'} recorded a repair observation`;
-    case 'agent_final':
-      return 'Agent produced a final answer';
-    case 'agent_error':
-      return `Agent error: ${data.error || 'Unknown error'}`;
     default:
       return event.type;
   }
-}
-
-function normalizeSkillSummary(skill: any, source?: string): WorkspaceSkillMeta & { source?: string } | null {
-  if (!skill) return null;
-  const name = String(skill.name || '').trim();
-  if (!name) return null;
-  return {
-    name,
-    path: String(skill.path || ''),
-    description: skill.description ? String(skill.description) : '',
-    metadata: skill.metadata || {},
-    resources: Array.isArray(skill.resources) ? skill.resources : [],
-    truncated: Boolean(skill.truncated),
-    original_chars: skill.original_chars,
-    returned_chars: skill.returned_chars,
-    source,
-  };
-}
-
-function collectLoadedSkills(
-  run?: DynamicRunSnapshot | null,
-  events: DynamicRunEvent[] = [],
-): Array<WorkspaceSkillMeta & { source?: string }> {
-  const byName = new Map<string, WorkspaceSkillMeta & { source?: string }>();
-  const addSkill = (skill: any, source?: string) => {
-    const normalized = normalizeSkillSummary(skill, source);
-    if (!normalized) return;
-    byName.set(normalized.name, {
-      ...(byName.get(normalized.name) || {}),
-      ...normalized,
-      source: normalized.source || byName.get(normalized.name)?.source,
-    });
-  };
-
-  const finalSkills = Array.isArray(run?.final_result?.skills) ? run?.final_result?.skills : [];
-  finalSkills.forEach((skill: any) => addSkill(skill, 'final'));
-  events.forEach((event) => {
-    const data = event.data || {};
-    if (event.type === 'agent_run_started') {
-      const startedSkills = Array.isArray(data.skills) ? data.skills : [];
-      startedSkills.forEach((skill: any) => addSkill(skill, 'start'));
-    }
-    if (event.type === 'agent_skill_loaded') {
-      addSkill(data.skill, data.source || 'event');
-    }
-  });
-
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function rawDecisionText(step: AgentTraceStep) {
-  if (step.decision?.raw) return String(step.decision.raw);
-  if (step.decision && step.decision !== step.action) return formatJson(step.decision);
-  return '';
 }
 
 function itemStatusColor(item: RunItem) {
@@ -756,12 +577,6 @@ export default function RunsInspector({
   }, [selectedDynamicRun]);
 
   const selectedDynamicEdges = selectedDynamicRun?.graph?.edges || [];
-  const agentTrace = useMemo(() => buildAgentTrace(dynamicEvents), [dynamicEvents]);
-  const showAgentTrace = hasAgentTrace(agentTrace);
-  const selectedLoadedSkills = useMemo(
-    () => collectLoadedSkills(selectedDynamicRun, dynamicEvents),
-    [dynamicEvents, selectedDynamicRun],
-  );
 
   const loadRuns = useCallback((silent = false) => {
     if (runsRequestRef.current) {
@@ -925,97 +740,6 @@ export default function RunsInspector({
     } catch (error: any) {
       console.error('Failed to retry run:', error);
       message.error(error.response?.data?.error || 'Failed to retry run');
-    } finally {
-      setRunActionLoading(false);
-    }
-  };
-
-  const rerunSelectedDynamicReactRun = async () => {
-    if (!selectedDynamicRun) return;
-
-    const started = agentTrace.started || {};
-    const prompt = String(started.prompt || '').trim();
-    if (!prompt) {
-      message.warning('The selected ReAct run does not include its original prompt');
-      return;
-    }
-
-    const mode = inferReactRerunMode(agentTrace.started, selectedDynamicRun);
-    const maxSteps = Number(started.max_steps || selectedDynamicRun.final_result?.max_steps || 4);
-    const maxTokensValue = Number(started.max_tokens || selectedDynamicRun.final_result?.max_tokens || 0);
-    const taskTimeout = normalizeReactTaskTimeout(
-      started.task_timeout || selectedDynamicRun.final_result?.task_timeout,
-      mode,
-    );
-    const sandboxes = collectSandboxSummary(selectedDynamicTaskNodes, dynamicEvents, selectedDynamicRun);
-    const execBackend = (
-      sandboxes.find((value) => value === 'workspace_sandbox' || value === 'docker')
-      || selectedDynamicRun.final_result?.exec_backend
-      || 'workspace_sandbox'
-    ) as 'workspace_sandbox' | 'docker';
-
-    const llmSettings = loadLlmSettings();
-    if (mode === 'online') {
-      if (!llmSettings.baseUrl.trim() || !llmSettings.model.trim() || !llmSettings.apiKey.trim()) {
-        message.warning('Please configure online LLM settings first');
-        return;
-      }
-    }
-
-    setRunActionLoading(true);
-    try {
-      const result = await api.startReactRun({
-        mode,
-        prompt,
-        workspaceId: workspaceId || undefined,
-        workspaceDir: workspaceDir || undefined,
-        maxSteps: Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 4,
-        maxTokens: Number.isFinite(maxTokensValue) && maxTokensValue > 0 ? maxTokensValue : undefined,
-        timeoutSeconds: computeReactRunTimeout(maxSteps, taskTimeout),
-	        taskTimeout,
-	        skills: selectedLoadedSkills.map((skill) => skill.name),
-	        execBackend,
-	        permissionAskTimeoutSeconds: 120,
-	        llm: mode === 'online'
-          ? {
-              ...llmSettings,
-              baseUrl: llmSettings.baseUrl.trim(),
-              model: llmSettings.model.trim(),
-            }
-          : undefined,
-      });
-
-      message.success(`ReAct rerun started: ${result.runId.slice(0, 8)}...`);
-      await loadRuns(true);
-      setSelectedRunKey(`dynamic:${result.runId}`);
-      await loadRunDetails(result.runId, 'dynamic', true);
-    } catch (error: any) {
-      console.error('Failed to rerun ReAct workflow:', error);
-      message.error(error.response?.data?.error || 'Failed to rerun ReAct workflow');
-    } finally {
-      setRunActionLoading(false);
-    }
-  };
-
-  const decidePermissionRequest = async (event: any, action: 'allow' | 'deny') => {
-    if (!selectedDynamicRun) return;
-    const request = event.request || {};
-    const requestId = event.request_id || request.request_id;
-    if (!requestId) {
-      message.warning('Permission request id is missing');
-      return;
-    }
-
-    setRunActionLoading(true);
-    try {
-      await api.decideDynamicPermissionRequest(selectedDynamicRun.run_id, requestId, {
-        action,
-        reason: `playground ${action}`,
-      });
-      message.success(`Permission ${action === 'allow' ? 'allowed' : 'denied'}`);
-      await loadRunDetails(selectedDynamicRun.run_id, 'dynamic', true);
-    } catch (error: any) {
-      message.error(error.response?.data?.error || `Failed to ${action} permission request`);
     } finally {
       setRunActionLoading(false);
     }
@@ -1342,66 +1066,21 @@ export default function RunsInspector({
     </div>
   );
 
-  const renderLoadedSkills = () => {
-    if (selectedLoadedSkills.length === 0) {
-      return null;
-    }
-
-    return (
-      <div>
-        <Title level={5}>Skills</Title>
-        <List
-          size="small"
-          bordered
-          dataSource={selectedLoadedSkills}
-          renderItem={(skill) => (
-            <List.Item>
-              <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                <Space wrap>
-                  <Text strong>{skill.name}</Text>
-                  {skill.source && <Tag>{skill.source}</Tag>}
-                  {skill.truncated && <Tag color="orange">truncated</Tag>}
-                  {skill.resources && skill.resources.length > 0 && (
-                    <Tag color="geekblue">{skill.resources.length} resource(s)</Tag>
-                  )}
-                </Space>
-                {skill.description && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {skill.description}
-                  </Text>
-                )}
-                {skill.path && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {skill.path}
-                  </Text>
-                )}
-              </Space>
-            </List.Item>
-          )}
-        />
-      </div>
-    );
-  };
-
   const renderRuntimeEvidence = ({
     title,
     run,
     nodes,
     events = [],
-    skills = [],
   }: {
     title: string;
     run?: UnifiedRunSnapshot | DynamicRunSnapshot | null;
     nodes: any[];
     events?: DynamicRunEvent[];
-    skills?: Array<WorkspaceSkillMeta & { source?: string }>;
   }) => {
     const placements = collectPlacementSummary(nodes);
     const resources = collectResourceSummary(nodes);
     const sandboxes = collectSandboxSummary(nodes, events, run as DynamicRunSnapshot);
-    const tools = collectToolSummary(events);
     const errors = collectRunErrors(run, nodes, events);
-    const repairGuidance = collectRepairGuidance(run, nodes, events);
     const finalResult = (run as any)?.final_result || {};
     const artifactFiles = Array.isArray(finalResult?.artifacts?.files) ? finalResult.artifacts.files : [];
     const totalArtifacts = Math.max(
@@ -1449,20 +1128,6 @@ export default function RunsInspector({
           </div>
 
           <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
-            <Text strong>Skills & Tools</Text>
-            <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
-              {skills.length === 0 ? <Tag>no skills</Tag> : skills.map((skill) => (
-                <Tag key={skill.name} color="purple">{skill.name}</Tag>
-              ))}
-              {tools.length === 0 ? <Tag>no tool calls</Tag> : tools.map((tool) => (
-                <Tag key={tool.tool} color={tool.failed ? 'red' : 'blue'}>
-                  {tool.tool} x{tool.count || 1}
-                </Tag>
-              ))}
-            </Space>
-          </div>
-
-          <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, background: '#fff' }}>
             <Text strong>Artifacts & Timing</Text>
             <Space size={[4, 4]} wrap style={{ display: 'flex', marginTop: 8 }}>
               <Tag color={totalArtifacts > 0 ? 'green' : 'default'}>{totalArtifacts} artifact(s)</Tag>
@@ -1495,31 +1160,6 @@ export default function RunsInspector({
           />
         )}
 
-        {repairGuidance.length > 0 && (
-          <Alert
-            style={{ marginTop: 10 }}
-            type="warning"
-            showIcon
-            message="Repair Guidance"
-            description={(
-              <List
-                size="small"
-                dataSource={repairGuidance}
-                renderItem={(item) => (
-                  <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                      <Space wrap>
-                        <Tag color="orange">{item.stage}</Tag>
-                        <Text type="secondary" style={{ fontSize: 12 }}>{item.issue}</Text>
-                      </Space>
-                      <Text style={{ fontSize: 12 }}>{item.suggestion}</Text>
-                    </Space>
-                  </List.Item>
-                )}
-              />
-            )}
-          />
-        )}
       </div>
     );
   };
@@ -1588,7 +1228,6 @@ export default function RunsInspector({
           <Descriptions.Item label="Created">{formatTime(selectedStaticRun.created_time)}</Descriptions.Item>
           <Descriptions.Item label="Updated">{formatTime(selectedStaticRun.updated_time)}</Descriptions.Item>
           <Descriptions.Item label="Finished">{formatTime(selectedStaticRun.finished_time)}</Descriptions.Item>
-          <Descriptions.Item label="Maze Run">{selectedStaticRun.maze_run_id ? shortId(selectedStaticRun.maze_run_id) : '-'}</Descriptions.Item>
           <Descriptions.Item label="Workspace" span={2}>{selectedStaticRun.workspace_dir || '-'}</Descriptions.Item>
           <Descriptions.Item label="Error" span={2}>
             {renderJsonValue(selectedStaticRun.error || selectedStaticRun.error_summary)}
@@ -1736,23 +1375,6 @@ export default function RunsInspector({
       return <Empty description="Select a dynamic run" />;
     }
 
-    const metadata = selectedDynamicRun.metadata || {};
-    const mcpProfile = metadata.mcp_profile || {};
-    const metadataMcpServers = Array.isArray(metadata.mcp_servers) ? metadata.mcp_servers : [];
-    const metadataMcpTools = Array.isArray(metadata.mcp_tools) ? metadata.mcp_tools : [];
-    const mcpProfileName = metadata.mcp_profile_name || mcpProfile.name;
-    const mcpServersForDisplay = metadataMcpServers.length > 0 ? metadataMcpServers : (agentTrace.mcp?.servers || []);
-    const mcpToolsForDisplay = metadataMcpTools.length > 0 ? metadataMcpTools : (agentTrace.mcp?.tools || []);
-    const mcpProfileError = agentTrace.mcp?.discoveryError
-      || agentTrace.mcp?.toolErrors?.[agentTrace.mcp.toolErrors.length - 1]?.error
-      || agentTrace.mcp?.toolErrors?.[agentTrace.mcp.toolErrors.length - 1]?.tool_result?.error;
-    const showMcpProfilePanel = Boolean(
-      mcpProfileName
-      || mcpServersForDisplay.length
-      || mcpToolsForDisplay.length
-      || mcpProfileError,
-    );
-
     return (
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space style={{ justifyContent: 'space-between', width: '100%' }} align="start">
@@ -1773,16 +1395,6 @@ export default function RunsInspector({
             >
               Refresh
             </Button>
-            {(getRunMode(selectedDynamicRun) === 'react' || showAgentTrace) && (
-              <Button
-                icon={<PlayCircleOutlined />}
-                onClick={rerunSelectedDynamicReactRun}
-                loading={runActionLoading}
-                disabled={!agentTrace.started?.prompt}
-              >
-                Rerun
-              </Button>
-            )}
             {!dynamicTerminalStatuses.has(selectedDynamicRun.status) && (
               <Popconfirm
                 title="Cancel this run?"
@@ -1861,313 +1473,13 @@ export default function RunsInspector({
           run: selectedDynamicRun,
           nodes: selectedDynamicTaskNodes,
           events: dynamicEvents,
-          skills: selectedLoadedSkills,
         })}
-
-        {showMcpProfilePanel && (
-          <div>
-            <Title level={5}>MCP Profile</Title>
-            <Space wrap style={{ marginBottom: 8 }}>
-              {mcpProfileName && <Tag color="purple">profile {String(mcpProfileName)}</Tag>}
-              <Tag color="magenta">{mcpServersForDisplay.length} server(s)</Tag>
-              <Tag color="blue">{mcpToolsForDisplay.length} discovered tool(s)</Tag>
-              {mcpProfile.lastTest?.status && (
-                <Tag color={mcpProfile.lastTest.status === 'ok' ? 'green' : 'red'}>
-                  last test {String(mcpProfile.lastTest.status)}
-                </Tag>
-              )}
-              {mcpProfile.lastTest?.testedAt && (
-                <Tag>{formatIsoTime(mcpProfile.lastTest.testedAt)}</Tag>
-              )}
-              {mcpProfile.usesEnvRefs && <Tag color="gold">{mcpProfile.envRefCount || 0} env ref(s)</Tag>}
-            </Space>
-            <Descriptions bordered size="small" column={2}>
-              <Descriptions.Item label="Using Profile" span={2}>
-                {mcpProfileName ? String(mcpProfileName) : '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Description" span={2}>
-                {mcpProfile.description || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Servers" span={2}>
-                {mcpServersForDisplay.length > 0 ? (
-                  <Space wrap>
-                    {mcpServersForDisplay.map((server: any, index: number) => (
-                      <Tag key={`mcp-profile-server-${index}`} color="magenta">
-                        {server.name || 'mcp'} {server.transport || ''}
-                        {server.has_env ? ' env' : ''}
-                        {server.has_headers ? ' headers' : ''}
-                      </Tag>
-                    ))}
-                  </Space>
-                ) : '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Discovered Tools" span={2}>
-                {mcpToolsForDisplay.length > 0 ? (
-                  <Space wrap>
-                    {mcpToolsForDisplay.map((tool: any, index: number) => (
-                      <Tag key={`mcp-profile-tool-${index}`} color="blue">
-                        {tool.agent_tool || tool.tool || 'tool'}
-                      </Tag>
-                    ))}
-                  </Space>
-                ) : '-'}
-              </Descriptions.Item>
-            </Descriptions>
-            {mcpProfileError && (
-              <Alert
-                style={{ marginTop: 8 }}
-                type="error"
-                showIcon
-                message={mcpProfileName ? `MCP profile "${mcpProfileName}" error` : 'MCP error'}
-                description={compactText(mcpProfileError, 300)}
-              />
-            )}
-          </div>
-        )}
-
-        {renderLoadedSkills()}
 
         {renderRunLogs()}
 
         {renderArtifacts()}
 
-        {showAgentTrace && (
-          <div>
-            <Title level={5}>ReAct Runtime Canvas</Title>
-            <ReActRuntimeCanvas trace={agentTrace} run={selectedDynamicRun} />
-
-            <Divider style={{ margin: '16px 0 8px' }} />
-
-            <Title level={5}>Agent Trace</Title>
-            {agentTrace.started && (
-              <Space wrap style={{ marginBottom: 8 }}>
-                {agentTrace.started.mode && <Tag color="purple">{String(agentTrace.started.mode)}</Tag>}
-                {Array.isArray(agentTrace.started.tools) && (
-                  <Tag color="geekblue">{agentTrace.started.tools.length} tool(s)</Tag>
-                )}
-                {agentTrace.mcp?.servers?.length > 0 && (
-                  <Tag color="magenta">MCP servers {agentTrace.mcp.servers.length}</Tag>
-                )}
-                {agentTrace.mcp?.tools?.length > 0 && (
-                  <Tag color="blue">MCP tools {agentTrace.mcp.tools.length}</Tag>
-                )}
-                {Object.keys(agentTrace.mcp?.calls || {}).length > 0 && (
-                  <Tag color="purple">MCP calls {Object.values(agentTrace.mcp.calls).reduce((sum: number, count: any) => sum + Number(count || 0), 0)}</Tag>
-                )}
-                {agentTrace.mcp?.discoveryError && (
-                  <Tag color="red">MCP discovery failed</Tag>
-                )}
-                {agentTrace.mcp?.toolErrors?.length > 0 && (
-                  <Tag color="red">MCP errors {agentTrace.mcp.toolErrors.length}</Tag>
-                )}
-                {agentTrace.started.llm_task && (
-                  <Tag color="cyan">LLM {String(agentTrace.started.llm_task)}</Tag>
-                )}
-                {agentTrace.permissions?.agent_permission_checked !== undefined && (
-                  <Tag color="green">permissions {agentTrace.permissions.agent_permission_checked}</Tag>
-                )}
-                {agentTrace.permissions?.agent_permission_denied !== undefined && (
-                  <Tag color="red">denied {agentTrace.permissions.agent_permission_denied}</Tag>
-                )}
-                {agentTrace.permissions?.agent_permission_ask !== undefined && (
-                  <Tag color="orange">ask {agentTrace.permissions.agent_permission_ask}</Tag>
-                )}
-              </Space>
-            )}
-
-            {(agentTrace.mcp?.servers?.length > 0 || agentTrace.mcp?.tools?.length > 0 || agentTrace.mcp?.discoveryError || agentTrace.mcp?.callEvents?.length > 0 || agentTrace.mcp?.toolErrors?.length > 0) && (
-              <div style={{ marginBottom: 12 }}>
-                <Text type="secondary">MCP</Text>
-                <Space wrap style={{ marginTop: 6, display: 'flex' }}>
-                  {(agentTrace.mcp.servers || []).map((server: any, index: number) => (
-                    <Tag key={`mcp-server-${index}`} color="magenta">
-                      {server.name || 'mcp'} {server.transport || ''}
-                    </Tag>
-                  ))}
-                  {(agentTrace.mcp.tools || []).map((tool: any, index: number) => (
-                    <Tag key={`mcp-tool-${index}`} color="blue">
-                      {tool.agent_tool || tool.tool || 'tool'}
-                    </Tag>
-                  ))}
-                  {agentTrace.mcp.discoveryError && (
-                    <Text type="danger">{compactText(agentTrace.mcp.discoveryError, 180)}</Text>
-                  )}
-                </Space>
-                {agentTrace.mcp.callEvents?.length > 0 && (
-                  <List
-                    size="small"
-                    style={{ marginTop: 8 }}
-                    dataSource={agentTrace.mcp.callEvents.slice(-6)}
-                    renderItem={(event: any) => (
-                      <List.Item>
-                        <Space wrap>
-                          <Tag color={event.status === 'finished' ? 'green' : 'purple'}>{event.status}</Tag>
-                          <Tag>{event.server || 'mcp'}</Tag>
-                          <Tag color="blue">{event.tool || event.mcp_tool || 'tool'}</Tag>
-                          {event.timings?.tool_seconds !== undefined && <Tag>{event.timings.tool_seconds}s</Tag>}
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
-                )}
-                {agentTrace.mcp.toolErrors?.length > 0 && (
-                  <Alert
-                    style={{ marginTop: 8 }}
-                    type="error"
-                    showIcon
-                    message="MCP tool error"
-                    description={compactText(agentTrace.mcp.toolErrors[agentTrace.mcp.toolErrors.length - 1]?.error || agentTrace.mcp.toolErrors[agentTrace.mcp.toolErrors.length - 1]?.tool_result?.error, 240)}
-                  />
-                )}
-              </div>
-            )}
-
-            {agentTrace.permissionEvents?.length > 0 && (
-              <div style={{ marginBottom: 12 }}>
-                <Text type="secondary">Permissions</Text>
-                <List
-                  size="small"
-                  style={{ marginTop: 6 }}
-                  dataSource={agentTrace.permissionEvents.slice(-8)}
-                  renderItem={(event: any) => {
-                    const request = event.request || event;
-                    const permission = event.permission || request.policy_decision || {};
-                    const action = permission.action || '';
-                    const requestStatus = request.status || '';
-                    const pendingRequestId = requestStatus === 'pending'
-                      ? (event.request_id || request.request_id)
-                      : '';
-                    const target = permission.target || request.target || '*';
-                    const toolName = event.tool || request.tool || 'tool';
-                    const permissionName = permission.permission || request.permission || 'permission';
-                    const color = requestStatus === 'allowed' || permission.allowed
-                      ? 'green'
-                      : requestStatus === 'pending' || action === 'ask'
-                        ? 'orange'
-                        : 'red';
-
-                    if (pendingRequestId) {
-                      return (
-                        <List.Item>
-                          <PendingActionCard
-                            title="Pending Action"
-                            actionLabel="Permission"
-                            actionColor="orange"
-                            subject={`${toolName} requests ${permissionName}`}
-                            description={`Target: ${target}`}
-                            tags={[
-                              <Tag color={color}>{event.type.replace('agent_permission_', '')}</Tag>,
-                              <Tag>{toolName}</Tag>,
-                              <Tag>{permissionName}</Tag>,
-                              <Tag>{target}</Tag>,
-                              requestStatus ? <Tag>{requestStatus}</Tag> : null,
-                              permission.pattern ? <Tag>rule {permission.pattern}</Tag> : null,
-                            ].filter(Boolean)}
-                            error={permission.reason && action !== 'ask' ? permission.reason : undefined}
-                            approveLabel="Allow"
-                            denyLabel="Deny"
-                            loading={runActionLoading}
-                            onApprove={() => decidePermissionRequest(event, 'allow')}
-                            onDeny={() => decidePermissionRequest(event, 'deny')}
-                          />
-                        </List.Item>
-                      );
-                    }
-
-                    return (
-                      <List.Item>
-                        <Space wrap>
-                          <Tag color={color}>{event.type.replace('agent_permission_', '')}</Tag>
-                          <Tag>{toolName}</Tag>
-                          <Tag>{permissionName}</Tag>
-                          <Tag>{target}</Tag>
-                          {requestStatus && <Tag>{requestStatus}</Tag>}
-                          {permission.pattern && <Tag>rule {permission.pattern}</Tag>}
-                          {permission.reason && <Text type="secondary">{permission.reason}</Text>}
-                        </Space>
-                      </List.Item>
-                    );
-                  }}
-                />
-              </div>
-            )}
-
-            {agentTrace.steps.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No agent steps recorded" />
-            ) : (
-              <List
-                size="small"
-                bordered
-                dataSource={agentTrace.steps}
-                renderItem={(step) => (
-                  <List.Item>
-                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                      <Space wrap>
-                        <Text strong>Step {step.step}</Text>
-                        {step.repair && <Tag color="orange">repair</Tag>}
-                        {step.tool && <Tag color="blue">{step.tool}</Tag>}
-                        {step.decisionTaskId && <Tag>LLM {shortId(step.decisionTaskId)}</Tag>}
-                        {step.toolTaskId && <Tag>Tool {shortId(step.toolTaskId)}</Tag>}
-                        {step.timings?.llm_seconds !== undefined && <Tag color="cyan">LLM {step.timings.llm_seconds}s</Tag>}
-                        {step.timings?.tool_seconds !== undefined && <Tag color="green">Tool {step.timings.tool_seconds}s</Tag>}
-                      </Space>
-                      <Text type="secondary">Action</Text>
-                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>
-                        {formatJson(step.action || step.decision)}
-                      </pre>
-                      {rawDecisionText(step) && (
-                        <Collapse
-                          ghost
-                          size="small"
-                          items={[
-                            {
-                              key: 'raw',
-                              label: 'Raw LLM decision',
-                              children: (
-                                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>
-                                  {rawDecisionText(step)}
-                                </pre>
-                              ),
-                            },
-                          ]}
-                        />
-                      )}
-                      {step.observation !== undefined && (
-                        <>
-                          <Text type="secondary">Observation</Text>
-                          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>
-                            {formatJson(step.observation)}
-                          </pre>
-                        </>
-                      )}
-                    </Space>
-                  </List.Item>
-                )}
-              />
-            )}
-
-            {agentTrace.final && (
-              <Alert
-                style={{ marginTop: 8 }}
-                type="success"
-                showIcon
-                message="Final Answer"
-                description={formatJson(agentTrace.final.answer)}
-              />
-            )}
-            {agentTrace.error && (
-              <Alert
-                style={{ marginTop: 8 }}
-                type="error"
-                showIcon
-                message="Agent Error"
-                description={String(agentTrace.error.error || 'Unknown error')}
-              />
-            )}
-          </div>
-        )}
-
-        <div>
+       <div>
           <Title level={5}>Task Graph</Title>
           {selectedDynamicTaskNodes.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No appended tasks" />

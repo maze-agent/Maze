@@ -1,11 +1,11 @@
 import asyncio
-import importlib
+import copy
 from types import SimpleNamespace
 
 import pytest
 
 from maze.client.maze.models import TaskOutput
-from maze.client.maze.workflow import _encode_output_refs
+from maze.client.maze.workflow import MaWorkflow, _encode_output_refs
 from maze.core.path.path import MaPath
 from maze.core.workflow.static_run import StaticRun, StaticRunStore
 from maze.core.workflow.task import CodeTask
@@ -94,29 +94,30 @@ def test_encode_output_refs_recurses_through_dict_list_and_tuple():
     }
 
 
-def test_client_run_sends_declared_final_output_refs(monkeypatch):
-    requests = []
-    workflow_module = importlib.import_module("maze.client.maze.workflow")
+def test_client_run_sends_declared_final_output_refs():
+    class Client:
+        server_url = "http://maze.test"
+        request_timeout = None
 
-    class Response:
-        status_code = 200
-        text = "ok"
+        def __init__(self):
+            self.spec = None
 
-        def json(self):
-            return {"status": "success", "run_id": "run-1"}
+        def _build_file_context(self, **_kwargs):
+            return None
 
-    monkeypatch.setattr(
-        workflow_module.requests,
-        "post",
-        lambda url, json: requests.append((url, json)) or Response(),
-    )
-    workflow = workflow_module.MaWorkflow("template", "http://maze.test")
+        def submit_workflow(self, spec, **_kwargs):
+            self.spec = copy.deepcopy(spec)
+            return {"workflow_id": spec["workflow_id"], "run_id": "run-1"}
+
+    client = Client()
+    workflow = MaWorkflow("template", client)
+    workflow._nodes["fuse"] = {"id": "fuse"}
     workflow.final_output_refs = {
         "answer": TaskOutput("fuse", "final_answer"),
     }
 
     assert workflow.run() == "run-1"
-    assert requests[0][1]["final_output_refs"] == {
+    assert client.spec["final_output_refs"] == {
         "answer": _output_ref("fuse", "final_answer"),
     }
 

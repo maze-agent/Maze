@@ -6,13 +6,13 @@ Maze Playground 是 Maze 的 React 工作流编辑器。工作流 JSON 保存在
 
 ```text
 React/Vite
-    | workspace、catalog、agent API
+    | workspace、catalog API
 Express backend
     | POST /workflows/submit；代理 /runs、events、logs、artifacts
 Maze Core
 ```
 
-普通静态工作流只使用 Core `run_id`。Node 不执行第二份 Python 工作流，也不保存运行结果镜像。`maze_bridge.py` 只承载任务解析、workspace 工具、ReAct、MCP 和 GAIA 私有流程。
+普通静态工作流只使用 Core `run_id`。Node 不执行第二份 Python 工作流，也不保存运行结果镜像。`maze_bridge.py` 只承载任务解析和 workspace task 文件操作。
 
 ## 启动
 
@@ -46,7 +46,8 @@ npm run dev
 - workspace workflow 文件是编辑事实源。
 - `system_catalog/tasks` 是内置任务事实源。
 - Maze Core 是 Run、事件、日志和 artifact 事实源。
-- GAIA 私有 trace 与旧 Playground JSON 只用于受控映射和历史只读访问。
+- GAIA 直接创建私有 Core Run，并由本地 validation runner 评分。
+- 旧 Playground JSON 保留在磁盘上，但不再读取或写入。
 
 ## 验证
 

@@ -57,7 +57,6 @@ workspace/workspaces/*/files/
 workspace/workspaces/*/runs/
 workspace/workflow_runs/
 /files/
-/skills/
 /tasks/
 /workflow_runs/
 web/maze_playground/backend/D*/

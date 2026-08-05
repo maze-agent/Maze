@@ -1,25 +1,45 @@
-from requests.models import Response
-import cloudpickle
-import requests
-import functools
-from typing import Any, Dict, Callable
+from __future__ import annotations
+
 import base64
+import functools
+import uuid
+from typing import Any, Callable, Dict
 
-class LanggraphClient():
-    def __init__(self,addr:str="localhost:8000") -> None:
+import cloudpickle
+
+from maze.client.maze.client import MaClient
+
+
+RUN_INPUT_REF_MARKER = "__maze_run_input__"
+
+
+def _dumps(value: Any) -> str:
+    return base64.b64encode(cloudpickle.dumps(value)).decode("ascii")
+
+
+def _loads(value: str) -> Any:
+    return cloudpickle.loads(base64.b64decode(value))
+
+
+def _execute_langgraph_callable(task_input_data: Dict[str, Any] | None = None) -> dict:
+    payload = dict(task_input_data or {})
+    func = _loads(payload["callable"])
+    args = _loads(payload["args"])
+    kwargs = _loads(payload["kwargs"])
+    return {"result": _dumps(func(*args, **kwargs))}
+
+
+class LanggraphClient:
+    """Run LangGraph node functions as ordinary one-node Maze workflows."""
+
+    def __init__(self, addr: str = "localhost:8000") -> None:
+        server_url = addr.rstrip("/")
+        if not server_url.startswith(("http://", "https://")):
+            server_url = f"http://{server_url}"
         self.maze_server_addr = addr
+        self.workflow_id = str(uuid.uuid4())
         self.default_resources = {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
-        
-        data = self._send_post_request(f"http://{self.maze_server_addr}/create_workflow")
-        self.workflow_id = data["workflow_id"]
-
-    def _send_post_request(self, url: str, data: Dict[str, Any]={}):
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            data = response.json()
-            return data
-        else:
-            raise Exception(f"Failed to send request: {response.status_code}, {response.text}")
+        self._client = MaClient(server_url)
 
     def _normalize_resources(self, resources: Dict[str, Any] | None) -> Dict[str, int]:
         raw = dict(resources or {})
@@ -33,71 +53,152 @@ class LanggraphClient():
         normalized["io_num"] = max(0, normalized["io_num"])
         return normalized
 
-    def _normalize_task_kind(self, task_kind: str | None, resources: Dict[str, int]) -> str:
-        normalized = (task_kind or ("gpu" if resources.get("gpu_mem", 0) > 0 else "cpu")).strip().lower()
+    def _normalize_task_kind(
+        self,
+        task_kind: str | None,
+        resources: Dict[str, int],
+    ) -> str:
+        normalized = (
+            task_kind
+            or ("gpu" if resources.get("gpu_mem", 0) > 0 else "cpu")
+        ).strip().lower()
         if normalized not in {"cpu", "gpu", "io"}:
             raise ValueError("task_kind must be one of: cpu, gpu, io")
         if normalized == "gpu" and resources.get("gpu_mem", 0) <= 0:
             raise ValueError("gpu LangGraph tasks must declare resources.gpu_mem")
         return normalized
 
-    def task(self, func_or_resources=None, *, resources=None, task_kind: str | None = None):
-        
-        if callable(func_or_resources): 
-            func = func_or_resources
+    def task(
+        self,
+        func_or_resources=None,
+        *,
+        resources=None,
+        task_kind: str | None = None,
+    ):
+        if callable(func_or_resources):
             normalized_resources = self.default_resources.copy()
-            normalized_task_kind = self._normalize_task_kind(task_kind, normalized_resources)
-            return self._decorate(func, normalized_resources, normalized_task_kind)
-        else:
-            if resources is None:
-                resources = self.default_resources
-            allowed = {"cpu_num", "gpu_mem", "io_num", "cpu"}
-            for k, v in resources.items():
-                if k not in allowed:
-                    raise ValueError(f"Invalid resource type: {k}")
-                if not isinstance(v, (int, float)):
-                    raise ValueError(f"Resource values must be numbers, but got {type(v)}")
-            normalized_resources = self._normalize_resources(resources)
-            normalized_task_kind = self._normalize_task_kind(task_kind, normalized_resources)
+            normalized_task_kind = self._normalize_task_kind(
+                task_kind,
+                normalized_resources,
+            )
+            return self._decorate(
+                func_or_resources,
+                normalized_resources,
+                normalized_task_kind,
+            )
 
-            return lambda func: self._decorate(func, normalized_resources, normalized_task_kind)
-          
-    def _decorate(self,func: Callable,resources:Dict,task_kind:str):
-        
+        if resources is None:
+            resources = func_or_resources or self.default_resources
+        allowed = {"cpu_num", "gpu_mem", "io_num", "cpu"}
+        for key, value in resources.items():
+            if key not in allowed:
+                raise ValueError(f"Invalid resource type: {key}")
+            if not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"Resource values must be numbers, but got {type(value)}"
+                )
+        normalized_resources = self._normalize_resources(resources)
+        normalized_task_kind = self._normalize_task_kind(
+            task_kind,
+            normalized_resources,
+        )
+        return lambda func: self._decorate(
+            func,
+            normalized_resources,
+            normalized_task_kind,
+        )
+
+    def _decorate(
+        self,
+        func: Callable,
+        resources: Dict[str, int],
+        task_kind: str,
+    ):
+        task_id = str(uuid.uuid4())
+        workflow_id = f"{self.workflow_id}-{task_id}"
+        template = {
+            "schema": "maze.workflow/v1",
+            "workflow_id": workflow_id,
+            "name": f"langgraph-{func.__name__}",
+            "nodes": [{
+                "id": task_id,
+                "type": "code",
+                "task_name": func.__name__,
+                "inputs": {
+                    "callable": {
+                        "input_schema": "from_user",
+                        "value": _dumps(func),
+                        "data_type": "str",
+                        "has_value": True,
+                    },
+                    "args": {
+                        "input_schema": "from_run",
+                        "value": {RUN_INPUT_REF_MARKER: True, "key": "args"},
+                        "data_type": "str",
+                    },
+                    "kwargs": {
+                        "input_schema": "from_run",
+                        "value": {RUN_INPUT_REF_MARKER: True, "key": "kwargs"},
+                        "data_type": "str",
+                    },
+                },
+                "outputs": [{"name": "result", "data_type": "str"}],
+                "resources": dict(resources),
+                "task_kind": task_kind,
+                "code_ser": _dumps(_execute_langgraph_callable),
+            }],
+            "edges": [],
+            "input_contract": {
+                "constants": ["callable"],
+                "runtime": {
+                    "args": {"required": True},
+                    "kwargs": {"required": True},
+                },
+            },
+            "final_output_refs": {
+                "result": {
+                    "__maze_output_ref__": True,
+                    "task_id": task_id,
+                    "output_key": "result",
+                },
+            },
+        }
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-               
-            payload = {
-                "workflow_id": self.workflow_id,
-                "task_id": wrapper._task_id,
-                "args": base64.b64encode(cloudpickle.dumps(args)).decode('utf-8'),
-                "kwargs": base64.b64encode(cloudpickle.dumps(kwargs)).decode('utf-8'),
+            spec = {
+                **template,
+                "run": {
+                    "artifact_mode": False,
+                    "tags": ["langgraph"],
+                    "metadata": {"adapter": "langgraph"},
+                    "inputs": {
+                        "args": _dumps(args),
+                        "kwargs": _dumps(kwargs),
+                    },
+                },
             }
-
             try:
-                response: Response = requests.post(f"http://{self.maze_server_addr}/run_langgraph_task", json=payload)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    return data["result"]
-                else:
-                    print(f"Request failed, status code: {response.status_code}")
-                    print("Response content:", response.text)
+                submission = self._client.submit_workflow(
+                    spec,
+                    artifact_mode=False,
+                )
+                run = self._client.wait_run(submission["run_id"])
+                if run.get("status") != "succeeded":
+                    raise RuntimeError(
+                        f"Run {submission['run_id']} ended with {run.get('status')}: "
+                        f"{run.get('error_summary') or 'unknown error'}"
+                    )
+                encoded_result = (run.get("result_summary") or {}).get("result")
+                if not isinstance(encoded_result, str):
+                    raise RuntimeError("succeeded run is missing result_summary.result")
+                return _loads(encoded_result)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to execute remote task {func.__name__}: {exc}"
+                ) from exc
 
-            except Exception as e:
-                raise RuntimeError(f"Failed to execute remote task: {str(e)}")
-
-       
-        data = self._send_post_request(f"http://{self.maze_server_addr}/add_langgraph_task",data={
-            "workflow_id": self.workflow_id,
-            "task_type": "langgraph",
-            "task_name": func.__name__,
-            "code_ser": base64.b64encode(cloudpickle.dumps(func)).decode('utf-8'),
-            "resources" : resources,
-            "task_kind": task_kind,
-        })
-        
-        wrapper._task_id = data["task_id"]
+        wrapper._task_id = task_id
+        wrapper._workflow_id = workflow_id
         wrapper._is_maze_task = True
-        
         return wrapper

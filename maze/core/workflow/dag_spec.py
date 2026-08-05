@@ -43,20 +43,28 @@ def dag_spec_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     _validate_graph(node_ids, normalized_edges)
 
     run = _normalize_run(payload.get("run") or {})
+    input_contract = _normalize_input_contract(payload.get("input_contract"))
     metadata = dict(payload.get("metadata") or {})
     metadata.setdefault("workflow_name", payload.get("name") or "dag-workflow")
     metadata.setdefault("run_kind", "dag")
-    metadata["dag_spec"] = {
+    stored_spec = {
         "schema": payload.get("schema") or "maze.workflow/v1",
+        "workflow_id": _optional_workflow_id(payload.get("workflow_id")),
         "name": payload.get("name") or "dag-workflow",
         "description": payload.get("description"),
         "nodes": normalized_nodes,
         "edges": normalized_edges,
-        "run": run,
+        "run": _stored_run_config(run),
     }
+    if input_contract is not None:
+        stored_spec["input_contract"] = input_contract
+    if "final_output_refs" in payload:
+        stored_spec["final_output_refs"] = copy.deepcopy(payload["final_output_refs"])
+    metadata["dag_spec"] = stored_spec
 
-    return {
+    spec = {
         "schema": payload.get("schema") or "maze.workflow/v1",
+        "workflow_id": _optional_workflow_id(payload.get("workflow_id")),
         "name": str(payload.get("name") or "dag-workflow"),
         "description": payload.get("description"),
         "nodes": normalized_nodes,
@@ -65,6 +73,11 @@ def dag_spec_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tags": [str(item) for item in payload.get("tags") or []],
         "metadata": metadata,
     }
+    if input_contract is not None:
+        spec["input_contract"] = input_contract
+    if "final_output_refs" in payload:
+        spec["final_output_refs"] = copy.deepcopy(payload["final_output_refs"])
+    return spec
 
 
 def build_dag_workflow(workflow_id: str, spec: Dict[str, Any]) -> Workflow:
@@ -93,7 +106,24 @@ def build_dag_workflow(workflow_id: str, spec: Dict[str, Any]) -> Workflow:
     for edge in spec["edges"]:
         workflow.add_edge(edge["source_task_id"], edge["target_task_id"])
 
+    input_contract = spec.get("input_contract")
+    if input_contract is not None:
+        workflow.graph.graph["workflow_input_contract"] = copy.deepcopy(input_contract)
+    workflow.graph.graph["dag_definition"] = dag_definition_from_spec(spec)
+
     return workflow
+
+
+def dag_definition_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the immutable graph portion used to validate a stable workflow id."""
+    definition = {
+        "schema": spec["schema"],
+        "nodes": copy.deepcopy(spec["nodes"]),
+        "edges": copy.deepcopy(spec["edges"]),
+    }
+    if spec.get("input_contract") is not None:
+        definition["input_contract"] = copy.deepcopy(spec["input_contract"])
+    return definition
 
 
 def dag_file_context(
@@ -178,6 +208,20 @@ def _normalize_inputs(inputs: Any, node_id: str) -> Dict[str, Dict[str, Any]]:
         data_type = "any"
         if isinstance(value, dict) and ("from" in value or "value" in value or "data_type" in value):
             data_type = str(value.get("data_type") or "any")
+            if value.get("input_schema") == "from_run":
+                run_value = copy.deepcopy(value.get("value"))
+                if _validate_run_input_refs(run_value) == 0:
+                    raise DagSpecError(
+                        f"node {node_id} input {input_name} has a malformed run input reference"
+                    )
+                normalized[input_name] = {
+                    "key": input_name,
+                    "input_schema": "from_run",
+                    "value": run_value,
+                    "data_type": data_type,
+                    "has_value": False,
+                }
+                continue
             if value.get("input_schema") == "from_task":
                 normalized[input_name] = {
                     "key": input_name,
@@ -328,7 +372,7 @@ def _build_task_output(node: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_run(run: Any) -> Dict[str, Any]:
     run = dict(_ensure_mapping(run, "run")) if run else {}
-    return {
+    normalized = {
         "workspace_dir": run.get("workspace_dir") or run.get("workspace"),
         "artifact_mode": bool(run.get("artifact_mode", True)),
         "file_context": run.get("file_context"),
@@ -336,6 +380,76 @@ def _normalize_run(run: Any) -> Dict[str, Any]:
         "tags": [str(item) for item in run.get("tags") or []],
         "metadata": dict(run.get("metadata") or {}),
     }
+    if "inputs" in run:
+        if run["inputs"] is not None and not isinstance(run["inputs"], dict):
+            raise DagSpecError("run inputs must be an object")
+        normalized["inputs"] = copy.deepcopy(run["inputs"])
+    if "idempotency_key" in run or "idempotency_fingerprint" in run:
+        normalized["idempotency_key"] = run.get("idempotency_key")
+        normalized["idempotency_fingerprint"] = run.get("idempotency_fingerprint")
+    return normalized
+
+
+def _stored_run_config(run: Dict[str, Any]) -> Dict[str, Any]:
+    stored = copy.deepcopy(run)
+    stored.pop("inputs", None)
+    stored.pop("idempotency_key", None)
+    stored.pop("idempotency_fingerprint", None)
+    return stored
+
+
+def _normalize_input_contract(value: Any) -> Dict[str, Any] | None:
+    if value is None:
+        return None
+    contract = _ensure_mapping(value, "input_contract")
+    constants = contract.get("constants")
+    runtime = contract.get("runtime")
+    if not isinstance(constants, list) or not all(isinstance(key, str) for key in constants):
+        raise DagSpecError("workflow input constants must be a list of names")
+    if len(constants) != len(set(constants)) or not isinstance(runtime, dict):
+        raise DagSpecError("malformed workflow input contract")
+    if not all(isinstance(key, str) for key in runtime):
+        raise DagSpecError("workflow runtime input names must be strings")
+    if set(constants) & set(runtime):
+        raise DagSpecError("workflow input cannot be both constant and runtime-bound")
+    normalized_runtime = {}
+    for key, raw_spec in runtime.items():
+        if not isinstance(raw_spec, dict) or not isinstance(raw_spec.get("required"), bool):
+            raise DagSpecError(f"malformed workflow runtime input: {key}")
+        expected = {"required"} if raw_spec["required"] else {"required", "default"}
+        if set(raw_spec) != expected:
+            raise DagSpecError(f"malformed workflow runtime input: {key}")
+        normalized_runtime[key] = copy.deepcopy(raw_spec)
+    return {
+        "constants": sorted(constants),
+        "runtime": normalized_runtime,
+    }
+
+
+def _validate_run_input_refs(value: Any) -> int:
+    if isinstance(value, dict):
+        if "__maze_run_input__" in value:
+            valid = (
+                set(value) == {"__maze_run_input__", "key"}
+                and value["__maze_run_input__"] is True
+                and isinstance(value.get("key"), str)
+                and bool(value["key"])
+            )
+            if not valid:
+                raise DagSpecError("malformed workflow run input reference")
+            return 1
+        return sum(_validate_run_input_refs(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_validate_run_input_refs(item) for item in value)
+    return 0
+
+
+def _optional_workflow_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise DagSpecError("workflow_id must be a non-empty string without surrounding whitespace")
+    return value
 
 
 def _normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:

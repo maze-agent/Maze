@@ -1271,8 +1271,10 @@ class LlmInstanceManager():
         lease_id: str | None = None,
         process_group_id: int | None = None,
         generation_id: str | None = None,
+        served_model: str | None = None,
     ):
         backend, _ = validate_model_backend(backend)
+        served_model = served_model or model
         addr = node_ip + ":" + str(port)
         endpoint = "http://" + addr + "/v1"
         with self.lock:
@@ -1281,6 +1283,7 @@ class LlmInstanceManager():
                 **existing_detail,
                 "instance_id": instance_id,
                 "model": model,
+                "served_model": served_model,
                 "backend": backend,
                 "host": node_ip,
                 "port": str(port),
@@ -1311,6 +1314,7 @@ class LlmInstanceManager():
                 **previous_metadata,
                 "instance_id": instance_id,
                 "model": model,
+                "served_model": served_model,
                 "backend": backend,
                 "node_id": node_id,
                 "node_ip": node_ip,
@@ -1349,7 +1353,9 @@ class LlmInstanceManager():
         resources: dict,
         lease_id: str | None,
         generation_id: str | None = None,
+        served_model: str | None = None,
     ) -> None:
+        served_model = served_model or model
         with self.lock:
             if instance_id in self.cancelled_start_ids:
                 raise RuntimeError(f"LLM instance {instance_id} startup was cancelled")
@@ -1360,6 +1366,7 @@ class LlmInstanceManager():
             self.id_to_resource_detail[instance_id] = {
                 "instance_id": instance_id,
                 "model": model,
+                "served_model": served_model,
                 "backend": backend,
                 "host": node_ip,
                 "port": None,
@@ -1420,12 +1427,13 @@ class LlmInstanceManager():
                 lease_id=detail.get("lease_id"),
                 process_group_id=detail.get("process_group_id"),
                 generation_id=detail.get("generation_id"),
+                served_model=detail.get("served_model"),
             )
 
     def get_instance_info(self, instance_id: str) -> dict:
         with self.lock:
             detail = self.id_to_resource_detail[instance_id]
-            return {
+            info = {
                 key: detail[key]
                 for key in (
                     "instance_id",
@@ -1437,6 +1445,9 @@ class LlmInstanceManager():
                     "status",
                 )
             }
+            if detail.get("served_model") != detail["model"]:
+                info["served_model"] = detail["served_model"]
+            return info
 
     def _cleanup_remote(
         self,
@@ -1857,6 +1868,7 @@ class LlmInstanceManager():
                 self.pending_model_requests[key] = 0
             return {
                 "model": model,
+                "served_model": selected.get("served_model") or model,
                 "backend": backend,
                 "instance_id": selected["instance_id"],
                 "endpoint": selected["endpoint"],
@@ -1970,7 +1982,7 @@ class LlmInstanceManager():
             return recommendations
 
     def lru_scale_in_candidates(self, now: float | None = None, idle_seconds: float | None = None):
-        now = now or time.time()
+        now = time.time() if now is None else float(now)
         idle_seconds = self.idle_scale_in_seconds if idle_seconds is None else float(idle_seconds)
         with self.lock:
             candidates = []
@@ -1989,6 +2001,8 @@ class LlmInstanceManager():
                     continue
                 candidates.append({
                     **dict(metadata),
+                    "state": "idle",
+                    "idle_since": last_used_time,
                     "idle_for_seconds": idle_for,
                     "reason": "lru_idle",
                 })
@@ -2001,13 +2015,38 @@ class LlmInstanceManager():
             )
             return candidates
 
-    def claim_lru_scale_in(self, instance_id: str) -> bool:
+    def claim_lru_scale_in(
+        self,
+        instance_id: str,
+        *,
+        expected_idle_since: float | None = None,
+        now: float | None = None,
+        idle_seconds: float | None = None,
+    ) -> bool:
         """Atomically remove an idle instance from routing before cleanup."""
+        now = time.time() if now is None else float(now)
+        idle_seconds = (
+            self.idle_scale_in_seconds
+            if idle_seconds is None
+            else float(idle_seconds)
+        )
         with self.lock:
             if self.id_to_state.get(instance_id) != "ready":
                 return False
             metadata = self.id_to_instance_metadata.get(instance_id)
             if metadata is None or metadata.get("inflight_requests", 0) != 0:
+                return False
+            idle_since = (
+                metadata.get("last_used_time")
+                or metadata.get("created_time")
+                or now
+            )
+            if (
+                expected_idle_since is not None
+                and idle_since != expected_idle_since
+            ):
+                return False
+            if now - idle_since < idle_seconds:
                 return False
             self.id_to_state[instance_id] = "stopping"
             self.id_to_resource_detail[instance_id]["status"] = "stopping"
@@ -2015,6 +2054,27 @@ class LlmInstanceManager():
             self.id_to_cleanup_error.pop(instance_id, None)
             self.id_to_stop_event.setdefault(instance_id, threading.Event()).clear()
             self.id_to_scale_in_claim.add(instance_id)
+            return True
+
+    def cancel_lru_scale_in_claim(self, instance_id: str) -> bool:
+        """Restore routing when an idle cleanup could not be submitted."""
+        with self.lock:
+            if (
+                instance_id not in self.id_to_scale_in_claim
+                or self.id_to_state.get(instance_id) != "stopping"
+            ):
+                return False
+            metadata = self.id_to_instance_metadata.get(instance_id)
+            detail = self.id_to_resource_detail.get(instance_id)
+            if metadata is None or detail is None:
+                return False
+            self.id_to_scale_in_claim.discard(instance_id)
+            self.id_to_state[instance_id] = "ready"
+            detail["status"] = "ready"
+            metadata["status"] = "ready"
+            self.model_to_instances[(metadata["model"], metadata["backend"])].add(
+                instance_id
+            )
             return True
 
     def start_llm_instance(
@@ -2027,6 +2087,7 @@ class LlmInstanceManager():
         resources: dict,
         backend: str = "vllm",
         backend_args: dict | None = None,
+        launch_model: str | None = None,
         lease_id: str | None = None,
         startup_timeout: float = 300,
         return_info: bool = False,
@@ -2037,8 +2098,10 @@ class LlmInstanceManager():
         deadline = time.monotonic() + startup_timeout
 
         backend, backend_args = validate_model_backend(backend, backend_args)
+        launch_model = str(launch_model or model)
+        served_model = str(backend_args.get("served_model_name") or launch_model)
         if backend == "transformers":
-            validate_transformers_model(model)
+            validate_transformers_model(launch_model)
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 f"LLM instance {instance_id} actor creation timed out after "
@@ -2047,7 +2110,7 @@ class LlmInstanceManager():
 
         actor_args = {
             "instance_id": instance_id,
-            "model": model,
+            "model": launch_model,
             "gpu_id": gpu_id,
             "backend": backend,
             "backend_args": backend_args,
@@ -2214,6 +2277,7 @@ class LlmInstanceManager():
                         resources,
                         lease_id,
                         generation.generation_id,
+                        served_model=served_model,
                     )
                 except BaseException as exc:
                     start_error = exc
@@ -2268,7 +2332,7 @@ class LlmInstanceManager():
                 actor,
                 node_ip,
                 port,
-                model,
+                launch_model,
                 backend,
                 backend_args,
                 timeout=remaining,

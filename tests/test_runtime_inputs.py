@@ -1,5 +1,4 @@
 import copy
-import importlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -7,13 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from maze import task, workflow
-from maze.client.maze.decorator import get_task_metadata
-from maze.client.maze.models import MaTask
 from maze.client.maze.workflow import MaWorkflow
 from maze.client.maze.workflow_authoring import RUN_INPUT_REF_MARKER
 from maze.core.path.path import MaPath
 from maze.core.scheduler.runtime_estimator import RuntimeEstimator
 from maze.core.workflow.task import CodeTask
+from maze.core.workflow.dag_spec import DagSpecError, build_dag_workflow, dag_spec_from_payload
 from maze.core.workflow.workflow import Workflow
 
 
@@ -54,28 +52,40 @@ def _compared_runtime_input(question: str):
     )
 
 
-class _RecordingWorkflow:
+class _RecordingClient:
     def __init__(self):
-        self.task_inputs = []
+        self.server_url = "http://maze.test"
+        self.request_timeout = None
+        self.submissions = []
 
-    def add_task(self, task_func, inputs):
-        metadata = get_task_metadata(task_func)
-        self.task_inputs.append(MaWorkflow._build_task_input(self, inputs, metadata))
-        return MaTask(
-            f"task-{len(self.task_inputs)}",
-            "template",
-            "http://maze.invalid",
-            metadata.func_name,
-            metadata.outputs,
-        )
+    def _build_file_context(self, file_context=None, **_kwargs):
+        return copy.deepcopy(file_context)
+
+    def submit_workflow(self, spec, **_kwargs):
+        self.submissions.append(copy.deepcopy(spec))
+        return {
+            "status": "success",
+            "workflow_id": spec["workflow_id"],
+            "run_id": "run-1",
+        }
 
 
-class _Response:
-    status_code = 200
-    text = "ok"
+class _RecordingWorkflow(MaWorkflow):
+    def __init__(self):
+        self.client = _RecordingClient()
+        super().__init__("template", self.client)
 
-    def json(self):
-        return {"status": "success", "run_id": "run-1"}
+    @property
+    def task_inputs(self):
+        return [
+            {
+                "input_params": {
+                    str(index): {"key": key, **copy.deepcopy(value)}
+                    for index, (key, value) in enumerate(node["inputs"].items(), start=1)
+                }
+            }
+            for node in self._nodes.values()
+        ]
 
 
 def _ref(key):
@@ -225,63 +235,63 @@ def test_legacy_fully_bound_workflow_has_no_runtime_inputs():
     )
 
 
-def test_client_run_sends_input_payload(monkeypatch):
-    requests = []
-    workflow_module = importlib.import_module("maze.client.maze.workflow")
-    monkeypatch.setattr(
-        workflow_module.requests,
-        "post",
-        lambda url, json: requests.append((url, json)) or _Response(),
-    )
-    authored = _RecordingWorkflow()
-    _authored_workflow.build(authored, inputs={"endpoint": "http://model/v1"})
-    client_workflow = MaWorkflow("template", "http://maze.test")
-    client_workflow._workflow_input_contract = authored._workflow_input_contract
+def test_client_run_sends_input_payload_once():
+    client_workflow = _RecordingWorkflow()
+    _authored_workflow.build(client_workflow, inputs={"endpoint": "http://model/v1"})
 
     caller_inputs = {"question": {"marker": "A"}, "temperature": 0.75}
     assert client_workflow.run(inputs=caller_inputs) == "run-1"
-    assert requests[0][1]["inputs"] == caller_inputs
-    assert len(requests) == 1
+    assert client_workflow.client.submissions[0]["run"]["inputs"] == caller_inputs
+    assert len(client_workflow.client.submissions) == 1
 
 
-def test_client_build_persists_runtime_contract_with_task(monkeypatch):
-    requests = []
-    workflow_module = importlib.import_module("maze.client.maze.workflow")
-
-    class Response:
-        status_code = 200
-        text = "ok"
-
-        def __init__(self, payload):
-            self.payload = payload
-
-        def json(self):
-            return self.payload
-
-    def post(url, json):
-        requests.append((url, copy.deepcopy(json)))
-        if url.endswith("/add_task"):
-            return Response({"status": "success", "task_id": "task-1"})
-        return Response({"status": "success"})
-
-    monkeypatch.setattr(workflow_module.requests, "post", post)
-    client_workflow = MaWorkflow("template", "http://maze.test")
-
+def test_client_build_persists_runtime_contract_with_task():
+    client_workflow = _RecordingWorkflow()
     _authored_workflow.build(
         client_workflow,
         inputs={"endpoint": "http://model/v1"},
     )
+    assert client_workflow.client.submissions == []
+    assert client_workflow.run(inputs={"question": "Q"}) == "run-1"
 
-    save_payload = requests[1][1]
-    assert save_payload["workflow_input_contract"] == {
+    spec = client_workflow.client.submissions[0]
+    assert spec["input_contract"] == {
         "constants": ["endpoint"],
         "runtime": {
             "question": {"required": True},
             "temperature": {"required": False, "default": 0.25},
         },
     }
-    assert save_payload["task_kind"] == "cpu"
-    assert save_payload["task_input"]["input_params"]["1"]["input_schema"] == "from_run"
+    assert spec["nodes"][0]["task_kind"] == "cpu"
+    assert spec["nodes"][0]["inputs"]["payload"]["input_schema"] == "from_run"
+
+    normalized = dag_spec_from_payload(spec)
+    core_workflow = build_dag_workflow(spec["workflow_id"], normalized)
+    assert core_workflow.graph.graph["workflow_input_contract"] == spec["input_contract"]
+    input_params = next(iter(core_workflow.tasks.values())).task_input["input_params"]
+    assert input_params["1"]["input_schema"] == "from_run"
+    assert input_params["1"]["value"] == {"question": _ref("question")}
+
+
+def test_dag_spec_rejects_malformed_nested_run_input_reference():
+    with pytest.raises(DagSpecError, match="malformed workflow run input reference"):
+        dag_spec_from_payload({
+            "nodes": [{
+                "id": "task",
+                "code": "def task(value):\n    return {'result': value}",
+                "inputs": {
+                    "value": {
+                        "input_schema": "from_run",
+                        "value": [
+                            _ref("valid"),
+                            {RUN_INPUT_REF_MARKER: False, "key": "invalid"},
+                        ],
+                    }
+                },
+                "outputs": ["result"],
+            }],
+            "edges": [],
+        })
 
 
 @pytest.mark.parametrize(

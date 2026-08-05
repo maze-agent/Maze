@@ -1,5 +1,4 @@
-export type NodeType = 'task' | 'tool';
-export type NodeCategory = 'builtin' | 'custom' | 'workspace' | 'agent';
+export type NodeCategory = 'builtin' | 'custom' | 'workspace';
 
 export interface Resources {
   cpu_num: number;
@@ -95,17 +94,6 @@ export interface TaskOutputConfig {
   dataType: string;
 }
 
-export interface BuiltinTaskMeta {
-  name: string;
-  displayName: string;
-  description?: string;
-  inputs: Array<{ name: string; dataType: string }>;
-  outputs: Array<{ name: string; dataType: string }>;
-  resources?: Resources;
-  functionRef: string;
-  module: string;
-}
-
 export interface WorkspaceTaskMeta {
   name: string;
   displayName: string;
@@ -127,30 +115,6 @@ export interface WorkspaceTasksResponse {
   tasks: WorkspaceTaskMeta[];
   errors?: Array<{
     relativePath: string;
-    error: string;
-    traceback?: string;
-  }>;
-}
-
-export interface WorkspaceSkillMeta {
-  name: string;
-  path: string;
-  description?: string;
-  metadata?: Record<string, any>;
-  resources?: Array<Record<string, any>>;
-  truncated?: boolean;
-  original_chars?: number;
-  returned_chars?: number;
-}
-
-export interface WorkspaceSkillsResponse {
-  success: boolean;
-  workspaceId?: string;
-  workspaceDir: string;
-  workspaceManifestVersion?: number;
-  skillsDir: string;
-  skills: WorkspaceSkillMeta[];
-  errors?: Array<{
     error: string;
     traceback?: string;
   }>;
@@ -216,7 +180,6 @@ export interface WorkspaceManifest {
   files_dir?: string;
   workflows_dir?: string;
   tasks_dir?: string;
-  skills_dir?: string;
   runs_dir?: string;
   policy_path?: string;
   imports?: Array<Record<string, any>>;
@@ -233,7 +196,7 @@ export interface WorkspaceContextResponse {
 }
 
 export interface SystemCatalogItem {
-  type: 'workflows' | 'tasks' | 'skills' | string;
+  type: 'workflows' | 'tasks';
   id: string;
   name: string;
   path: string;
@@ -242,13 +205,12 @@ export interface SystemCatalogItem {
   updatedAt?: string;
   description?: string;
   tags?: string[];
-  recommendedSkills?: string[];
 }
 
 export interface SystemCatalogResponse {
   success: boolean;
   catalogDir: string;
-  catalog: Record<'workflows' | 'tasks' | 'skills', SystemCatalogItem[]>;
+  catalog: Record<'workflows' | 'tasks', SystemCatalogItem[]>;
 }
 
 export interface TaskDefinition {
@@ -268,23 +230,17 @@ export interface WorkflowNode {
   position: { x: number; y: number };
   data: {
     category: NodeCategory;
-    nodeType: NodeType;
+    nodeType: 'task';
     label: string;
     taskRef?: string;  // 内置任务引用 (module.functionName)
     customCode?: string;
     workspaceDir?: string;
     taskPath?: string;
     functionName?: string;
-    agentKind?: 'react';
-    reactMode?: 'local' | 'online';
     prompt?: string;
-    maxSteps?: number;
-    maxTokens?: number;
     taskTimeout?: number;
     localModel?: string;
     modelAnchor?: ModelAnchor;
-    skills?: string[];
-    recommendedSkills?: string[];
     execBackend?: 'workspace_sandbox' | 'docker';
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
@@ -716,7 +672,6 @@ export interface UnifiedRunSnapshot {
   error_summary?: any;
   error?: any;
   final_result?: any;
-  maze_run_id?: string | null;
   metadata?: Record<string, any>;
   tags?: string[];
   max_tasks?: number;

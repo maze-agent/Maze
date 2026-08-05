@@ -1,32 +1,27 @@
 """Minimal GAIA validation runner for Maze's reason and file workflows.
 
 The runner expects a GAIA directory containing ``gaia_query.jsonl`` and
-``2023/validation/metadata.jsonl``, plus running Maze Core and Playground
-backend services. Reports contain validation answers and must not be published
+``2023/validation/metadata.jsonl``, plus a running Maze Core service. Reports
+contain validation answers and must not be published
 with the gated GAIA dataset.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
-from http.client import HTTPException
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import secrets
 import stat
-import threading
 import time
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from maze import MaClient
 from maze.client.maze.workflow import _encode_output_refs
@@ -46,7 +41,7 @@ SUPPORTED_FILE_EXTENSIONS = frozenset({".txt", ".md", ".pdf"})
 FINAL_ANSWER_MARKER = "FINAL ANSWER:"
 API_KEY_ENV_PATTERN = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*\Z")
 PRIVATE_STATE_DIR_NAME = ".gaia-validation-state"
-PRIVATE_STATE_SCHEMA_VERSION = 1
+PRIVATE_STATE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -68,8 +63,6 @@ class ValidationConfig:
     output_dir: Path
     base_url: str
     model: str
-    playground_url: str = "http://127.0.0.1:3001"
-    playground_workspace_id: str = "default"
     api_key: str = ""
     limit: int | None = None
     max_in_flight_runs: int | None = None
@@ -80,10 +73,6 @@ class ValidationConfig:
     def validate(self) -> None:
         if not self.server_url.strip():
             raise ValueError("server_url is required")
-        if not self.playground_url.strip():
-            raise ValueError("playground_url is required")
-        if not self.playground_workspace_id.strip():
-            raise ValueError("playground_workspace_id is required")
         if not self.base_url.strip():
             raise ValueError("base_url is required")
         if not self.model.strip():
@@ -102,431 +91,6 @@ class ValidationConfig:
             raise ValueError(
                 "api_key must be empty or an env:VARIABLE_NAME reference"
             )
-
-
-class PlaygroundGaiaError(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        playground_run_id: str = "",
-        maze_run_id: str = "",
-        status_code: int | None = None,
-        transport_failure: bool = False,
-        retryable: bool | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.playground_run_id = playground_run_id
-        self.maze_run_id = maze_run_id
-        self.status_code = status_code
-        self.transport_failure = transport_failure
-        self.retryable = (
-            transport_failure or (status_code is not None and status_code >= 500)
-            if retryable is None
-            else retryable
-        )
-
-
-class PlaygroundGaiaClient:
-    """Submit GAIA Maze runs through the Playground trace boundary."""
-
-    def __init__(
-        self,
-        base_url: str,
-        workspace_id: str,
-        request_timeout: float = 30.0,
-        retry_attempts: int = 3,
-        retry_delay: float = 0.05,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.workspace_id = workspace_id
-        self.request_timeout = request_timeout
-        self.retry_attempts = max(1, int(retry_attempts))
-        self.retry_delay = max(0.0, float(retry_delay))
-        self._capabilities: dict[str, tuple[str, str]] = {}
-        self._capabilities_lock = threading.Lock()
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, object],
-    ) -> dict[str, object]:
-        request = Request(
-            f"{self.base_url}{path}",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method=method,
-        )
-        try:
-            with urlopen(request, timeout=self.request_timeout) as response:
-                raw_response = response.read()
-                value = json.loads(raw_response.decode("utf-8"))
-        except HTTPError as exc:
-            try:
-                value = json.loads(exc.read().decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                value = {}
-            if not isinstance(value, dict):
-                value = {}
-            raise PlaygroundGaiaError(
-                str(value.get("error") or f"Playground request failed with HTTP {exc.code}"),
-                playground_run_id=str(value.get("playgroundRunId") or ""),
-                maze_run_id=str(value.get("mazeRunId") or ""),
-                status_code=exc.code,
-            ) from exc
-        except (TimeoutError, URLError, OSError, HTTPException) as exc:
-            reason = getattr(exc, "reason", exc)
-            raise PlaygroundGaiaError(
-                f"Playground request failed: {reason}",
-                transport_failure=True,
-            ) from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise PlaygroundGaiaError(
-                "Playground returned a malformed response",
-                transport_failure=True,
-            ) from exc
-        if not isinstance(value, dict):
-            raise PlaygroundGaiaError(
-                "Playground returned a non-object response",
-                transport_failure=True,
-            )
-        return value
-
-    def _pause_before_retry(self, attempt: int) -> None:
-        if self.retry_delay:
-            time.sleep(self.retry_delay * (attempt + 1))
-
-    def _remember_capability(
-        self,
-        playground_run_id: str,
-        sample_ref: str,
-        submission_token: str,
-    ) -> None:
-        if not playground_run_id:
-            return
-        with self._capabilities_lock:
-            self._capabilities[playground_run_id] = (sample_ref, submission_token)
-
-    def _capability_for(self, playground_run_id: str) -> tuple[str, str]:
-        with self._capabilities_lock:
-            capability = self._capabilities.get(playground_run_id)
-        if capability is None:
-            raise PlaygroundGaiaError(
-                "No GAIA submission capability is available for this Playground run",
-                playground_run_id=playground_run_id,
-            )
-        return capability
-
-    def _lookup_run(
-        self,
-        sample_ref: str,
-        submission_token: str,
-        *,
-        attempts: int | None = None,
-        require_maze_run_id: bool = False,
-    ) -> dict[str, object]:
-        last_error: PlaygroundGaiaError | None = None
-        for attempt in range(attempts or self.retry_attempts):
-            try:
-                response = self._request(
-                    "POST",
-                    "/api/benchmarks/gaia/runs/lookup",
-                    {
-                        "sampleRef": sample_ref,
-                        "submissionToken": submission_token,
-                        "playgroundWorkspaceId": self.workspace_id,
-                    },
-                )
-                playground_run_id = str(response.get("playgroundRunId") or "")
-                maze_run_id = str(response.get("mazeRunId") or "")
-                self._remember_capability(
-                    playground_run_id,
-                    sample_ref,
-                    submission_token,
-                )
-                if not playground_run_id or (require_maze_run_id and not maze_run_id):
-                    raise PlaygroundGaiaError(
-                        "Playground lookup response is missing run ids",
-                        playground_run_id=playground_run_id,
-                        maze_run_id=maze_run_id,
-                        retryable=True,
-                    )
-                return response
-            except PlaygroundGaiaError as exc:
-                last_error = exc
-                if not exc.retryable and exc.status_code != 404:
-                    raise
-            if attempt + 1 < (attempts or self.retry_attempts):
-                self._pause_before_retry(attempt)
-        if last_error is not None:
-            raise last_error
-        raise PlaygroundGaiaError("Playground lookup failed")
-
-    @staticmethod
-    def _public_terminal_status(status: str) -> str:
-        normalized = status.strip().lower()
-        return {
-            "succeeded": "completed",
-            "cancelled": "canceled",
-        }.get(normalized, normalized)
-
-    @staticmethod
-    def _is_terminal_public_status(status: object) -> bool:
-        return str(status or "").strip().lower() in {
-            "completed",
-            "failed",
-            "canceled",
-            "timed_out",
-            "interrupted",
-        }
-
-    def submit_run(
-        self,
-        *,
-        workflow: str,
-        sample_ref: str,
-        maze_workflow_id: str,
-        final_output_refs: dict[str, object],
-        inputs: dict[str, object],
-        timeout_seconds: float,
-        execution_file: Path | None = None,
-        submission_token: str | None = None,
-    ) -> tuple[str, str]:
-        submission_token = submission_token or secrets.token_hex(32)
-        if re.fullmatch(r"[0-9a-f]{64}", submission_token) is None:
-            raise ValueError(
-                "submission_token must be 64 lowercase hexadecimal characters"
-            )
-        payload: dict[str, object] = {
-            "workflow": workflow,
-            "sampleRef": sample_ref,
-            "mazeWorkflowId": maze_workflow_id,
-            "finalOutputRefs": final_output_refs,
-            "inputs": inputs,
-            "timeoutSeconds": timeout_seconds,
-            "playgroundWorkspaceId": self.workspace_id,
-            "submissionToken": submission_token,
-        }
-        if execution_file is not None:
-            content = Path(execution_file).read_bytes()
-            payload["executionFile"] = {
-                "name": Path(execution_file).name,
-                "contentBase64": base64.b64encode(content).decode("ascii"),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-
-        last_error: PlaygroundGaiaError | None = None
-        best_playground_run_id = ""
-        best_maze_run_id = ""
-        for attempt in range(self.retry_attempts):
-            try:
-                response = self._request(
-                    "POST",
-                    "/api/benchmarks/gaia/runs",
-                    payload,
-                )
-                playground_run_id = str(response.get("playgroundRunId") or "")
-                maze_run_id = str(response.get("mazeRunId") or "")
-                if not playground_run_id or not maze_run_id:
-                    raise PlaygroundGaiaError(
-                        "Playground submission response is missing run ids",
-                        playground_run_id=playground_run_id,
-                        maze_run_id=maze_run_id,
-                        retryable=True,
-                    )
-                self._remember_capability(
-                    playground_run_id,
-                    sample_ref,
-                    submission_token,
-                )
-                return playground_run_id, maze_run_id
-            except PlaygroundGaiaError as exc:
-                last_error = exc
-                best_playground_run_id = (
-                    exc.playground_run_id or best_playground_run_id
-                )
-                best_maze_run_id = exc.maze_run_id or best_maze_run_id
-                self._remember_capability(
-                    best_playground_run_id,
-                    sample_ref,
-                    submission_token,
-                )
-                if not exc.retryable:
-                    raise
-            if attempt + 1 < self.retry_attempts:
-                self._pause_before_retry(attempt)
-
-        try:
-            response = self._lookup_run(
-                sample_ref,
-                submission_token,
-                require_maze_run_id=True,
-            )
-            return (
-                str(response.get("playgroundRunId") or ""),
-                str(response.get("mazeRunId") or ""),
-            )
-        except PlaygroundGaiaError as lookup_error:
-            best_playground_run_id = (
-                lookup_error.playground_run_id or best_playground_run_id
-            )
-            best_maze_run_id = lookup_error.maze_run_id or best_maze_run_id
-            if last_error is not None:
-                last_error.playground_run_id = (
-                    best_playground_run_id or last_error.playground_run_id
-                )
-                last_error.maze_run_id = best_maze_run_id or last_error.maze_run_id
-                raise last_error
-            raise
-
-    def lookup_run(
-        self,
-        sample_ref: str,
-        submission_token: str,
-        *,
-        attempts: int | None = None,
-        require_maze_run_id: bool = False,
-    ) -> dict[str, object]:
-        """Recover a persisted GAIA submission without issuing another submit."""
-
-        return self._lookup_run(
-            sample_ref,
-            submission_token,
-            attempts=attempts,
-            require_maze_run_id=require_maze_run_id,
-        )
-
-    def restore_capability(
-        self,
-        playground_run_id: str,
-        sample_ref: str,
-        submission_token: str,
-    ) -> None:
-        self._remember_capability(
-            playground_run_id,
-            sample_ref,
-            submission_token,
-        )
-
-    def _confirm_finalization(
-        self,
-        playground_run_id: str,
-        sample_ref: str,
-        submission_token: str,
-        expected_status: str | None,
-    ) -> dict[str, object] | None:
-        try:
-            response = self._lookup_run(
-                sample_ref,
-                submission_token,
-                attempts=1,
-            )
-        except PlaygroundGaiaError:
-            return None
-        status = str(response.get("status") or "").strip().lower()
-        if expected_status is not None:
-            if status != self._public_terminal_status(expected_status):
-                return None
-        elif not self._is_terminal_public_status(status):
-            return None
-        if str(response.get("playgroundRunId") or "") != playground_run_id:
-            return None
-        return response
-
-    def _finalize_run(
-        self,
-        playground_run_id: str,
-        action: str,
-        payload: dict[str, object],
-        *,
-        expected_status: str | None,
-    ) -> dict[str, object]:
-        sample_ref, submission_token = self._capability_for(playground_run_id)
-        request_payload = {
-            **payload,
-            "submissionToken": submission_token,
-            "playgroundWorkspaceId": self.workspace_id,
-        }
-        last_error: PlaygroundGaiaError | None = None
-        for attempt in range(self.retry_attempts):
-            try:
-                response = self._request(
-                    "POST",
-                    (
-                        "/api/benchmarks/gaia/runs/"
-                        f"{quote(playground_run_id, safe='')}/{action}"
-                    ),
-                    request_payload,
-                )
-                response_status = str(response.get("status") or "").strip().lower()
-                if expected_status is not None:
-                    if response_status != self._public_terminal_status(expected_status):
-                        raise PlaygroundGaiaError(
-                            "Playground persisted an unexpected terminal status",
-                            playground_run_id=playground_run_id,
-                        )
-                elif not self._is_terminal_public_status(response_status):
-                    raise PlaygroundGaiaError(
-                        "Playground did not persist a terminal status",
-                        playground_run_id=playground_run_id,
-                        retryable=True,
-                    )
-                return response
-            except PlaygroundGaiaError as exc:
-                last_error = exc
-                if not exc.retryable:
-                    raise
-                confirmed = self._confirm_finalization(
-                    playground_run_id,
-                    sample_ref,
-                    submission_token,
-                    expected_status,
-                )
-                if confirmed is not None:
-                    return confirmed
-            if attempt + 1 < self.retry_attempts:
-                self._pause_before_retry(attempt)
-
-        confirmed = self._confirm_finalization(
-            playground_run_id,
-            sample_ref,
-            submission_token,
-            expected_status,
-        )
-        if confirmed is not None:
-            return confirmed
-        if last_error is not None:
-            raise last_error
-        raise PlaygroundGaiaError(
-            "Playground finalization failed",
-            playground_run_id=playground_run_id,
-        )
-
-    def finish_run(
-        self,
-        playground_run_id: str,
-        status: str,
-    ) -> dict[str, object]:
-        return self._finalize_run(
-            playground_run_id,
-            "finish",
-            {"status": status},
-            expected_status=status,
-        )
-
-    def cancel_run(
-        self,
-        playground_run_id: str,
-        outcome: str = "canceled",
-    ) -> dict[str, object]:
-        return self._finalize_run(
-            playground_run_id,
-            "cancel",
-            {"outcome": outcome},
-            expected_status=None,
-        )
-
 
 def extract_final_answer(raw_answer: str) -> str | None:
     marker_index = raw_answer.rfind(FINAL_ANSWER_MARKER)
@@ -862,6 +426,25 @@ def _sample_identity(sample: GaiaSample) -> str:
     return hashlib.sha256(_stable_json_bytes(payload)).hexdigest()
 
 
+def _submission_identity(sample: GaiaSample) -> str:
+    source_sha256 = (
+        _file_sha256(sample.source_file)
+        if sample.source_file is not None and sample.source_file.is_file()
+        else None
+    )
+    return hashlib.sha256(
+        _stable_json_bytes(
+            {
+                "query_index": sample.query_index,
+                "dag_id": sample.dag_id,
+                "workflow": sample.workflow,
+                "question": sample.question,
+                "source_sha256": source_sha256,
+            }
+        )
+    ).hexdigest()
+
+
 def _validation_identity(
     config: ValidationConfig,
     selected: list[GaiaSample],
@@ -873,8 +456,6 @@ def _validation_identity(
         "schema_version": PRIVATE_STATE_SCHEMA_VERSION,
         "config": {
             "server_url": config.server_url,
-            "playground_url": config.playground_url,
-            "playground_workspace_id": config.playground_workspace_id,
             "data_root": str(config.data_root),
             "base_url": config.base_url,
             "model": config.model,
@@ -1021,40 +602,41 @@ class _ValidationState:
         self,
         sample: GaiaSample,
         *,
-        maze_workflow_id: str,
+        workflow_id: str,
         final_output_refs: dict[str, object],
     ) -> tuple[dict[str, object], bool]:
         path = self._sample_path(self.submissions_dir, sample)
         journal = _read_private_json(path)
         if journal is not None:
             self._validate_sample_wrapper(sample, journal, kind="submission")
-            token = str(journal.get("submission_token") or "")
-            sample_ref = str(journal.get("sample_ref") or "")
             if (
-                re.fullmatch(r"[0-9a-f]{64}", token) is None
-                or re.fullmatch(r"gaia-[0-9a-f]{32}", sample_ref) is None
-                or journal.get("workflow") != sample.workflow
-                or not str(journal.get("maze_workflow_id") or "")
+                journal.get("workflow") != sample.workflow
+                or not str(journal.get("workflow_id") or "")
                 or not isinstance(journal.get("final_output_refs"), dict)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(journal.get("idempotency_fingerprint") or ""),
+                )
+                is None
             ):
                 raise ValueError("private submission journal is invalid")
             return journal, True
 
         now = datetime.now(timezone.utc).isoformat()
+        sample_identity = self.sample_identities[sample.query_index]
+        submission_identity = _submission_identity(sample)
         journal = {
             "schema_version": PRIVATE_STATE_SCHEMA_VERSION,
             "kind": "submission",
             "query_index": sample.query_index,
-            "sample_identity_sha256": self.sample_identities[sample.query_index],
+            "sample_identity_sha256": sample_identity,
             "workflow": sample.workflow,
-            "sample_ref": f"gaia-{secrets.token_hex(16)}",
-            "submission_token": secrets.token_hex(32),
-            "maze_workflow_id": maze_workflow_id,
+            "workflow_id": workflow_id,
             "final_output_refs": final_output_refs,
             "submission_state": "prepared",
-            "playground_run_id": "",
-            "maze_run_id": "",
-            "last_public_status": "",
+            "idempotency_key": f"gaia-{submission_identity}",
+            "idempotency_fingerprint": submission_identity,
+            "run_id": "",
             "created_at": now,
             "updated_at": now,
         }
@@ -1066,9 +648,7 @@ class _ValidationState:
         sample: GaiaSample,
         *,
         submission_state: str | None = None,
-        playground_run_id: str = "",
-        maze_run_id: str = "",
-        public_status: str = "",
+        run_id: str = "",
     ) -> dict[str, object]:
         path = self._sample_path(self.submissions_dir, sample)
         journal = _read_private_json(path)
@@ -1077,12 +657,8 @@ class _ValidationState:
         self._validate_sample_wrapper(sample, journal, kind="submission")
         if submission_state is not None:
             journal["submission_state"] = submission_state
-        if playground_run_id:
-            journal["playground_run_id"] = playground_run_id
-        if maze_run_id:
-            journal["maze_run_id"] = maze_run_id
-        if public_status:
-            journal["last_public_status"] = public_status
+        if run_id:
+            journal["run_id"] = run_id
         journal["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(path, journal)
         return journal
@@ -1093,9 +669,6 @@ def _empty_result(sample: GaiaSample) -> dict[str, object]:
         "query_index": sample.query_index,
         "dag_id": sample.dag_id,
         "workflow": sample.workflow,
-        "sample_ref": "",
-        "playground_run_id": "",
-        "maze_run_id": "",
         "run_id": "",
         "status": "failed",
         "raw_answer": "",
@@ -1115,14 +688,6 @@ def _run_error(run: dict[str, object]) -> str:
     if isinstance(error, str):
         return error
     return json.dumps(error, ensure_ascii=False, sort_keys=True)
-
-
-def _core_status_from_public(status: object) -> str:
-    normalized = str(status or "").strip().lower()
-    return {
-        "completed": "succeeded",
-        "canceled": "cancelled",
-    }.get(normalized, normalized)
 
 
 def _stage_validation_execution_file(
@@ -1157,109 +722,26 @@ def _run_sample(
     *,
     template: Any,
     client: MaClient,
-    playground_client: PlaygroundGaiaClient,
     config: ValidationConfig,
     validation_state: _ValidationState,
 ) -> _SampleOutcome:
     result = _empty_result(sample)
     started = time.perf_counter()
-    playground_run_id = ""
-    maze_run_id = ""
-    trace_finalized = False
+    run_id = ""
     journal: dict[str, object] | None = None
 
-    def update_trace_ids(
-        *,
-        candidate_playground_run_id: object = "",
-        candidate_maze_run_id: object = "",
-        public_status: object = "",
-        submission_state: str | None = None,
-    ) -> None:
-        nonlocal journal, playground_run_id, maze_run_id
-        candidate_playground = str(candidate_playground_run_id or "")
-        candidate_maze = str(candidate_maze_run_id or "")
-        playground_run_id = candidate_playground or playground_run_id
-        maze_run_id = candidate_maze or maze_run_id
-        result["playground_run_id"] = playground_run_id
-        result["maze_run_id"] = maze_run_id
-        result["run_id"] = maze_run_id
-        if journal is not None:
-            journal = validation_state.update_submission(
-                sample,
-                submission_state=submission_state,
-                playground_run_id=playground_run_id,
-                maze_run_id=maze_run_id,
-                public_status=str(public_status or ""),
-            )
-
-    def restore_capability() -> None:
-        if not playground_run_id or journal is None:
-            return
-        restore = getattr(playground_client, "restore_capability", None)
-        if restore is not None:
-            restore(
-                playground_run_id,
-                str(journal["sample_ref"]),
-                str(journal["submission_token"]),
-            )
-
-    def lookup_submission() -> dict[str, object] | None:
-        if journal is None:
-            return None
-        lookup = getattr(playground_client, "lookup_run", None)
-        if lookup is None:
-            return None
-        response = lookup(
-            str(journal["sample_ref"]),
-            str(journal["submission_token"]),
-            require_maze_run_id=False,
-        )
-        update_trace_ids(
-            candidate_playground_run_id=response.get("playgroundRunId"),
-            candidate_maze_run_id=response.get("mazeRunId"),
-            public_status=response.get("status"),
-            submission_state=("bound" if response.get("mazeRunId") else None),
-        )
-        restore_capability()
-        return response
-
-    def terminal_without_maze_run(
-        response: dict[str, object] | None,
-        error: str,
-    ) -> _SampleOutcome | None:
-        if response is None or maze_run_id:
-            return None
-        status = _core_status_from_public(response.get("status"))
-        if status not in {
-            "succeeded",
-            "failed",
-            "cancelled",
-            "timed_out",
-            "interrupted",
-        }:
-            return None
-        result["status"] = "failed" if status == "succeeded" else status
-        result["error"] = error
-        update_trace_ids(public_status=response.get("status"), submission_state="terminal")
-        return _SampleOutcome(result, complete=True)
-
     try:
-        maze_workflow_id = str(getattr(template, "workflow_id", "")).strip()
+        workflow_id = str(getattr(template, "workflow_id", "")).strip()
         final_output_refs = getattr(template, "final_output_refs", None)
-        if not maze_workflow_id or not isinstance(final_output_refs, dict):
+        if not workflow_id or not isinstance(final_output_refs, dict):
             raise ValueError("GAIA workflow template is missing its submission contract")
-        encoded_final_output_refs = _encode_output_refs(final_output_refs)
-        journal, resumed = validation_state.load_or_create_submission(
+        journal, _ = validation_state.load_or_create_submission(
             sample,
-            maze_workflow_id=maze_workflow_id,
-            final_output_refs=encoded_final_output_refs,
+            workflow_id=workflow_id,
+            final_output_refs=_encode_output_refs(final_output_refs),
         )
-        result["sample_ref"] = str(journal["sample_ref"])
-        update_trace_ids(
-            candidate_playground_run_id=journal.get("playground_run_id"),
-            candidate_maze_run_id=journal.get("maze_run_id"),
-        )
-        restore_capability()
+        run_id = str(journal.get("run_id") or "")
+        result["run_id"] = run_id
 
         inputs: dict[str, object] = {
             "dag_id": sample.dag_id,
@@ -1267,157 +749,73 @@ def _run_sample(
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
         }
-        execution_file = None
+        file_context = None
         if sample.workflow == "file":
             execution_file = _stage_validation_execution_file(
                 sample,
                 config.output_dir,
             )
             inputs["supplementary_path"] = execution_file.name
+            file_context = {
+                "enabled": True,
+                "private": True,
+                "workspace_dir": str(execution_file.parent.parent),
+                "artifact_store": {
+                    "type": "head_http",
+                    "base_url": config.server_url,
+                    "private": True,
+                },
+            }
 
-        if resumed and (
-            journal.get("submission_state") != "prepared"
-            or playground_run_id
-            or maze_run_id
-        ):
-            try:
-                recovered = lookup_submission()
-            except PlaygroundGaiaError as lookup_error:
-                update_trace_ids(
-                    candidate_playground_run_id=lookup_error.playground_run_id,
-                    candidate_maze_run_id=lookup_error.maze_run_id,
-                    submission_state="indeterminate",
-                )
-            else:
-                terminal = terminal_without_maze_run(
-                    recovered,
-                    "persisted Playground submission ended without a Maze run",
-                )
-                if terminal is not None:
-                    return terminal
-
-        if not maze_run_id:
-            update_trace_ids(submission_state="submitting")
-            try:
-                submitted_playground_run_id, submitted_maze_run_id = (
-                    playground_client.submit_run(
-                        workflow=sample.workflow,
-                        sample_ref=str(journal["sample_ref"]),
-                        maze_workflow_id=str(journal["maze_workflow_id"]),
-                        final_output_refs=dict(journal["final_output_refs"]),
-                        inputs=inputs,
-                        timeout_seconds=config.timeout,
-                        execution_file=execution_file,
-                        submission_token=str(journal["submission_token"]),
-                    )
-                )
-            except PlaygroundGaiaError as exc:
-                update_trace_ids(
-                    candidate_playground_run_id=exc.playground_run_id,
-                    candidate_maze_run_id=exc.maze_run_id,
-                    submission_state="indeterminate",
-                )
-                restore_capability()
-                recovered = None
-                recovery_error = None
-                try:
-                    recovered = lookup_submission()
-                except Exception as lookup_error:
-                    recovery_error = lookup_error
-                    update_trace_ids(
-                        candidate_playground_run_id=getattr(
-                            lookup_error,
-                            "playground_run_id",
-                            "",
-                        ),
-                        candidate_maze_run_id=getattr(
-                            lookup_error,
-                            "maze_run_id",
-                            "",
-                        ),
-                        submission_state="indeterminate",
-                    )
-                terminal = terminal_without_maze_run(
-                    recovered,
-                    f"{type(exc).__name__}: {exc}",
-                )
-                if terminal is not None:
-                    return terminal
-                if not maze_run_id and playground_run_id:
-                    restore_capability()
-                    try:
-                        canceled = playground_client.cancel_run(
-                            playground_run_id,
-                            outcome="canceled",
-                        )
-                        trace_finalized = True
-                        update_trace_ids(
-                            public_status=canceled.get("status"),
-                            submission_state="terminal",
-                        )
-                    except Exception as cancel_error:
-                        recovery_error = recovery_error or cancel_error
-                if not maze_run_id:
-                    result["status"] = "failed"
-                    result["error"] = f"{type(exc).__name__}: {exc}"
-                    if recovery_error is not None:
-                        result["error"] += (
-                            "; submission recovery remains incomplete: "
-                            f"{type(recovery_error).__name__}: {recovery_error}"
-                        )
-                    return _SampleOutcome(result, complete=trace_finalized)
-            else:
-                update_trace_ids(
-                    candidate_playground_run_id=submitted_playground_run_id,
-                    candidate_maze_run_id=submitted_maze_run_id,
-                    submission_state="bound",
-                )
-                restore_capability()
+        if not run_id:
+            validation_state.update_submission(sample, submission_state="submitting")
+            resumable_template = copy.copy(template)
+            resumable_template.workflow_id = str(journal["workflow_id"])
+            resumable_template.final_output_refs = dict(journal["final_output_refs"])
+            run_id = resumable_template.run(
+                file_context=file_context,
+                timeout_seconds=config.timeout,
+                metadata={"benchmark": "gaia", "workflow": sample.workflow},
+                inputs=inputs,
+                idempotency_key=str(journal["idempotency_key"]),
+                idempotency_fingerprint=str(journal["idempotency_fingerprint"]),
+            )
+            if not run_id:
+                raise RuntimeError("Maze Core returned an empty run id")
+            result["run_id"] = run_id
+            journal = validation_state.update_submission(
+                sample,
+                submission_state="submitted",
+                run_id=run_id,
+            )
 
         try:
-            run = client.wait_run(maze_run_id, timeout=config.timeout)
+            run = client.wait_run(run_id, timeout=config.timeout)
         except TimeoutError:
             try:
-                finalized = playground_client.cancel_run(
-                    playground_run_id,
-                    outcome="timed_out",
+                client.cancel_run(
+                    run_id,
+                    reason=f"GAIA validation exceeded {config.timeout} seconds",
                 )
-                trace_finalized = True
             except Exception as exc:
                 result["status"] = "failed"
                 result["error"] = (
                     f"run exceeded timeout of {config.timeout} seconds; "
-                    "Playground timeout finalization failed: "
+                    "Core cancellation failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
-                update_trace_ids(submission_state="indeterminate")
                 return _SampleOutcome(result, complete=False)
-            # The benchmark deadline was exceeded even if Core completed while
-            # the cancellation request was in flight. Keep the authoritative
-            # Core/Playground status in its trace, but do not count this sample
-            # as a successful benchmark run.
             result["status"] = "timed_out"
             result["error"] = f"run exceeded timeout of {config.timeout} seconds"
-            update_trace_ids(
-                public_status=finalized.get("status"),
+            validation_state.update_submission(
+                sample,
                 submission_state="terminal",
             )
             return _SampleOutcome(result, complete=True)
 
         status = str(run.get("status", "failed"))
         result["status"] = status
-        try:
-            playground_client.finish_run(playground_run_id, status)
-            trace_finalized = True
-        except Exception as exc:
-            result["status"] = "failed"
-            result["error"] = (
-                "Playground trace finalization failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            update_trace_ids(submission_state="indeterminate")
-            return _SampleOutcome(result, complete=False)
-        update_trace_ids(submission_state="terminal")
+        validation_state.update_submission(sample, submission_state="terminal")
         if status != "succeeded":
             result["error"] = _run_error(run)
             return _SampleOutcome(result, complete=True)
@@ -1438,48 +836,11 @@ def _run_sample(
         result["parsed"] = True
         result["correct"] = question_scorer(prediction, sample.expected)
         return _SampleOutcome(result, complete=True)
-    except PlaygroundGaiaError as exc:
-        playground_run_id = playground_run_id or exc.playground_run_id
-        maze_run_id = maze_run_id or exc.maze_run_id
-        result["playground_run_id"] = playground_run_id
-        result["maze_run_id"] = maze_run_id
-        result["run_id"] = maze_run_id
-        result["status"] = "failed"
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        if journal is not None:
-            update_trace_ids(submission_state="indeterminate")
-        return _SampleOutcome(result, complete=False)
     except Exception as exc:
-        result["playground_run_id"] = playground_run_id
-        result["maze_run_id"] = maze_run_id
-        result["run_id"] = maze_run_id
+        result["run_id"] = run_id
         result["status"] = "failed"
         result["error"] = f"{type(exc).__name__}: {exc}"
-        cancellation_verified = False
-        if playground_run_id and not trace_finalized:
-            restore_capability()
-            try:
-                canceled = playground_client.cancel_run(
-                    playground_run_id,
-                    outcome="canceled",
-                )
-                cancellation_verified = True
-                if journal is not None:
-                    update_trace_ids(
-                        public_status=canceled.get("status"),
-                        submission_state="terminal",
-                    )
-            except Exception as finalize_exc:
-                result["error"] += (
-                    "; Playground cancellation failed: "
-                    f"{type(finalize_exc).__name__}: {finalize_exc}"
-                )
-        if journal is not None and not cancellation_verified:
-            update_trace_ids(submission_state="indeterminate")
-        return _SampleOutcome(
-            result,
-            complete=cancellation_verified or not playground_run_id,
-        )
+        return _SampleOutcome(result, complete=False)
     finally:
         result["latency"] = round(time.perf_counter() - started, 6)
 
@@ -1563,11 +924,6 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
             config.server_url,
             request_timeout=min(config.timeout, 60.0),
         )
-        playground_client = PlaygroundGaiaClient(
-            config.playground_url,
-            config.playground_workspace_id,
-            request_timeout=min(config.timeout, 60.0),
-        )
         template_definitions = {"reason": gaia_reason, "file": gaia_file}
         templates: dict[str, Any] = {}
         template_errors: dict[str, str] = {}
@@ -1591,13 +947,7 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
             result = _empty_result(sample)
             prior_result = incomplete_results.get(sample.query_index)
             if prior_result is not None:
-                for key in (
-                    "sample_ref",
-                    "playground_run_id",
-                    "maze_run_id",
-                    "run_id",
-                ):
-                    result[key] = prior_result.get(key, result[key])
+                result["run_id"] = prior_result.get("run_id", "")
             result["error"] = error
             results.append(
                 validation_state.save_result(
@@ -1617,7 +967,6 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
                     sample,
                     template=templates[sample.workflow],
                     client=client,
-                    playground_client=playground_client,
                     config=config,
                     validation_state=validation_state,
                 ): sample
@@ -1632,7 +981,7 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
     results.sort(key=lambda item: int(item["query_index"]))
     skipped = sum(item["status"] == "skipped" for item in results)
     supported = len(results) - skipped
-    submitted = sum(bool(item["maze_run_id"]) for item in results)
+    submitted = sum(bool(item["run_id"]) for item in results)
     succeeded = sum(item["status"] == "succeeded" for item in results)
     parsed = sum(bool(item["parsed"]) for item in results)
     correct = sum(bool(item["correct"]) for item in results)
@@ -1652,8 +1001,6 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
         "supported_subset_accuracy": _ratio(correct, supported),
         "config": {
             "server_url": config.server_url,
-            "playground_url": config.playground_url,
-            "playground_workspace_id": config.playground_workspace_id,
             "data_root": str(config.data_root.expanduser().resolve()),
             "base_url": config.base_url,
             "model": config.model,
@@ -1680,8 +1027,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run Maze GAIA reason/file validation and write scored reports."
     )
     parser.add_argument("--server-url", required=True)
-    parser.add_argument("--playground-url", default="http://127.0.0.1:3001")
-    parser.add_argument("--playground-workspace-id", default="default")
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--base-url", required=True)
@@ -1703,8 +1048,6 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     config = ValidationConfig(
         server_url=args.server_url,
-        playground_url=args.playground_url,
-        playground_workspace_id=args.playground_workspace_id,
         data_root=args.data_root,
         output_dir=args.output_dir,
         base_url=args.base_url,

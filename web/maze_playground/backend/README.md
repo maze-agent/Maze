@@ -1,6 +1,6 @@
 # Maze Playground Backend
 
-Express 后端负责 workspace、system catalog、Workspace Agent，以及 Maze Core API 代理。普通工作流在 Node 中编译后直接提交 Core；Python bridge 不执行普通工作流。
+Express 后端负责 workspace、system catalog 和 Maze Core API 代理。普通工作流在 Node 中编译后直接提交 Core；Python bridge 不执行工作流。
 
 ## 执行路径
 
@@ -20,16 +20,14 @@ POST /api/workflows/:id/run
 - `GET /api/runs/:runId/artifacts`
 - `GET /api/runs/:runId/tasks/:taskId/artifacts`
 
-GAIA Core Run 会从公开 `/api/runs*` 响应中过滤。GAIA 私有 trace 继续由 benchmark API 管理。
+GAIA Core Run 会从公开 `/api/runs*` 响应中过滤；提交、等待、取消和私有评分由 Python validation runner 直接调用 Core。
 
 ## Python Bridge
 
 `maze_bridge.py` 保留以下职责：
 
-- 解析 custom、workspace 和 catalog task
-- workspace task/skill 管理
-- Workspace Agent、ReAct 和 MCP 支持
-- GAIA 私有流程
+- 解析 custom 和 workspace task
+- workspace task 管理
 
 ## 配置
 

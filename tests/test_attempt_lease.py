@@ -307,6 +307,44 @@ def test_dispatch_adds_attempt_identity_without_mutating_base_file_context(
     assert task.file_manifest is None
 
 
+def test_gpu_dispatch_uses_single_call_runner(monkeypatch):
+    called = []
+
+    class FakeRemoteTask:
+        @classmethod
+        def options(cls, **_):
+            return cls
+
+        @classmethod
+        def remote(cls, **_):
+            called.append("cpu")
+            return "cpu-ref"
+
+    class FakeRemoteGpuTask(FakeRemoteTask):
+        @classmethod
+        def remote(cls, **_):
+            called.append("gpu")
+            return "gpu-ref"
+
+    monkeypatch.setattr(runtime_module, "remote_task_runner", FakeRemoteTask)
+    monkeypatch.setattr(runtime_module, "remote_gpu_task_runner", FakeRemoteGpuTask)
+    task = TaskRuntime(
+        "run-1",
+        "task-1",
+        task_input={"input_params": {}},
+        task_output={},
+        resources={"cpu_num": 1, "gpu_mem": 1024, "io_num": 0},
+        task_kind="gpu",
+        code_str="def task(): return {}",
+    )
+    manager = WorkflowRuntimeManager()
+    manager.add_task(task)
+
+    manager.run_task(task, SelectedNode("1" * 56, "127.0.0.1", gpu_id=0))
+
+    assert called == ["gpu"]
+
+
 def test_attempt_files_are_isolated_and_only_accepted_manifest_is_published(tmp_path):
     base_context = {
         "enabled": True,
@@ -765,7 +803,6 @@ def test_static_finish_replay_after_persistence_failure_is_idempotent(
     path.cluster_queue_requests = {}
     path.worker_registration_requests = {}
     path.cluster_control_requests = {}
-    path.langgraph_task_requests = {}
     path.llm_instance_async_que = {}
     path.dynamic_runs = {}
     path.static_runs = {run_id: static_run}
@@ -972,7 +1009,6 @@ def test_dynamic_finish_replay_after_snapshot_failure_is_idempotent(
     path.cluster_queue_requests = {}
     path.worker_registration_requests = {}
     path.cluster_control_requests = {}
-    path.langgraph_task_requests = {}
     path.llm_instance_async_que = {}
     path.dynamic_runs = {run_id: run}
     path.static_runs = {}
@@ -1030,3 +1066,173 @@ def test_dynamic_finish_replay_after_snapshot_failure_is_idempotent(
     )
     assert published["published"] is True
     assert published["lease_id"] == "lease-1"
+
+
+def test_core_run_id_overrides_external_file_context_run_id(tmp_path):
+    path = object.__new__(MaPath)
+    path.resource_history = ResourceHistoryStore(tmp_path / "resource-history.json")
+    path.runtime_estimator = RuntimeEstimator()
+
+    workflow = Workflow("template")
+    task = CodeTask("template", "task-1", "task-1")
+    task.save_task(
+        task_input={"input_params": {}},
+        task_output={"output_params": {}},
+        code_str="",
+        code_ser="",
+        resources=PUBLIC_TASK_RESOURCES,
+    )
+    workflow.add_task(task.task_id, task)
+    external_context = {
+        "enabled": True,
+        "workspace_dir": str(tmp_path),
+        "run_id": "playground-run",
+    }
+
+    static_payload = path._task_run_payload(
+        workflow,
+        task,
+        "core-static-run",
+        external_context,
+    )
+    dynamic_run = DynamicRun(
+        "core-dynamic-run",
+        file_context=external_context,
+    )
+    dynamic_task, _ = dynamic_run.append_task(
+        DynamicTaskSpec(
+            task_spec_id="task-spec",
+            task_name="task",
+            code_str="def task(): return {}",
+            code_ser=None,
+        )
+    )
+    prepared_context = path._prepare_initial_artifacts(
+        external_context,
+        "core-static-run",
+    )
+    dynamic_payload = path._dynamic_task_run_payload(dynamic_run, dynamic_task)
+
+    assert prepared_context["run_id"] == "core-static-run"
+    assert static_payload["file_context"]["run_id"] == "core-static-run"
+    assert dynamic_payload["file_context"]["run_id"] == "core-dynamic-run"
+    assert external_context["run_id"] == "playground-run"
+
+
+def test_invalid_finish_manifest_becomes_terminal_artifact_failure(tmp_path):
+    run_id = "core-run"
+    workflow = Workflow("template")
+    for task_id in ("parent", "child"):
+        task = CodeTask("template", task_id, task_id)
+        task.save_task(
+            task_input={"input_params": {}},
+            task_output={"output_params": {}},
+            code_str="",
+            code_ser="",
+            resources=PUBLIC_TASK_RESOURCES,
+        )
+        workflow.add_task(task_id, task)
+    workflow.add_edge("parent", "child")
+
+    static_run = StaticRun(run_id, "template", workflow)
+    identity = {
+        "workflow_id": run_id,
+        "task_id": "parent",
+        "attempt": 1,
+        "dispatch_id": "dispatch-1",
+        "lease_id": "lease-1",
+        "node_id": "node-1",
+    }
+    static_run.mark_task_started("parent", identity)
+    workflow.mark_task_started("parent")
+    finish_message = {
+        "type": "finish_task",
+        "data": {
+            **identity,
+            "result": {"value": "done"},
+            "file_manifest": {
+                "run_id": "playground-run",
+                "task_id": "parent",
+                "attempt": 1,
+                "dispatch_id": "dispatch-1",
+                "lease_id": "lease-1",
+                "published": False,
+                "files": [],
+            },
+        },
+    }
+
+    class SingleDeliverySocket:
+        def __init__(self, payload):
+            self.payload = json.dumps(payload).encode("utf-8")
+            self.calls = 0
+
+        async def recv_multipart(self):
+            self.calls += 1
+            if self.calls == 1:
+                return [b"scheduler", self.payload]
+            raise asyncio.CancelledError
+
+    class Metrics:
+        def on_task_finished(self, *_args, **_kwargs):
+            return None
+
+        def on_run_status_change(self, *_args, **_kwargs):
+            return None
+
+    path = object.__new__(MaPath)
+    path.lock = asyncio.Lock()
+    path.socket_from_scheduler = SingleDeliverySocket(finish_message)
+    path.cluster_resource_requests = {}
+    path.cluster_queue_requests = {}
+    path.worker_registration_requests = {}
+    path.cluster_control_requests = {}
+    path.llm_instance_async_que = {}
+    path.dynamic_runs = {}
+    path.static_runs = {run_id: static_run}
+    path.submit_workflows = {run_id: workflow}
+    path.async_que = {run_id: asyncio.Queue()}
+    path.static_run_store = StaticRunStore(tmp_path / "run-store")
+    path.resource_history = ResourceHistoryStore(tmp_path / "resource-history.json")
+    path.runtime_estimator = RuntimeEstimator()
+    path.task_attempts = {}
+    path.pre_dispatch_rejections = set()
+    path.global_metrics = Metrics()
+    path.strategy = "FCFS"
+    path._observe_task_runtime = lambda *_args, **_kwargs: None
+    sent_messages = []
+
+    def send_scheduler_message(message):
+        persisted = path.static_run_store.load_run(run_id)
+        assert persisted["status"] == "failed"
+        sent_messages.append(message)
+
+    path._send_scheduler_message = send_scheduler_message
+    assert path._accept_task_attempt_event("start_task", identity)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(path.monitor_coroutine())
+
+    attempt = path.task_attempts[(run_id, "parent")]
+    assert attempt["state"] == "terminal"
+    assert attempt["event_type"] == "task_exception"
+    assert static_run.status == "failed"
+    assert static_run.task_nodes["parent"]["status"] == "failed"
+    assert static_run.task_nodes["child"]["status"] == "pending"
+    assert static_run.task_nodes["parent"]["file_manifest"] is None
+    assert sent_messages == [{
+        "type": "stop_workflow",
+        "data": {"workflow_id": run_id},
+    }]
+    assert path.async_que[run_id].qsize() == 1
+    failure = path.async_que[run_id].get_nowait()
+    assert failure["type"] == "task_exception"
+    assert failure["data"]["error"]["error_type"] == "artifact_error"
+    assert failure["data"]["error"]["retryable"] is False
+    assert "does not match" in failure["data"]["error"]["message"]
+    assert "file_manifest" not in failure["data"]
+    persisted = path.static_run_store.load_run(run_id)
+    assert persisted["status"] == "failed"
+    events = path.static_run_store.load_events(run_id)
+    assert events[-1]["type"] == "task_exception"
+    assert events[-1]["data"]["error"]["error_type"] == "artifact_error"

@@ -1,8 +1,7 @@
 def main():
     # ponytail: Keep this tombstone until the next breaking release.
     raise SystemExit(
-        "maze-sandbox has been retired; use `maze start --head --playground` "
-        "and the Workspace Agent `workspace_sandbox` backend."
+        "maze-sandbox has been retired; use `maze start --head --playground`."
     )
 
 

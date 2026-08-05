@@ -1,6 +1,6 @@
 from networkx.classes.digraph import DiGraph
 from typing import Any,List
-from maze.core.workflow.task import CodeTask,LangGraphTask
+from maze.core.workflow.task import CodeTask
 from typing import Dict
 import networkx as nx
 import time
@@ -8,33 +8,6 @@ import time
 from maze.core.scheduler.strategy import DEFAULT_PREDICTED_DURATION_SECONDS
 
 HACS_TASK_TYPE_AVG_TIMES = dict(DEFAULT_PREDICTED_DURATION_SECONDS)
-
-class LangGraphWorkflow:
-    def __init__(self, id: str):
-        self.id: str = id
-        self.tasks: Dict[str, LangGraphTask] = {} 
-
-    def add_task(self, task_id: str, task: LangGraphTask) -> None:
-        """
-        Add a task to workflow
-        """
-        if task_id != task.task_id:
-            raise ValueError("task_id must match task.task_id")
-        self.tasks[task_id] = task
-        self.graph.add_node(task_id)
-
-    def del_task(self, task_id: str) -> None:
-        """
-        Delete a task from workflow
-        """
-        if task_id in self.tasks:
-            del self.tasks[task_id]
-        
-    def get_task(self, task_id: str) -> LangGraphTask:
-        """
-        Get a task from workflow
-        """
-        return self.tasks.get(task_id)
 
 class Workflow:
     def __init__(self, id: str):
@@ -55,15 +28,6 @@ class Workflow:
         self.graph.add_node(task_id)
         self.remaining_task_num += 1
 
-    def del_task(self, task_id: str) -> None:
-        """
-        Delete a task from workflow
-        """
-        if task_id in self.tasks:
-            del self.tasks[task_id]
-        self.graph.remove_node(task_id)
-        self.remaining_task_num -= 1
-
     def get_task(self, task_id: str) -> CodeTask:
         """
         Get a task from workflow
@@ -78,17 +42,9 @@ class Workflow:
             raise ValueError("Both tasks must exist in the workflow before adding an edge.")
         self.graph.add_edge(source_task_id, target_task_id)
         if not nx.is_directed_acyclic_graph(self.graph):
-            self.remove_edge(source_task_id, target_task_id)
+            self.graph.remove_edge(source_task_id, target_task_id)
             raise ValueError("The edge would make the workflow contain a cycle.")
        
-    def del_edge(self, source_task_id: str, target_task_id: str) -> None:
-        """
-        Delete a edge from workflow
-        """
-        if source_task_id not in self.graph or target_task_id not in self.graph:
-            raise ValueError("Both tasks must exist in the workflow before deleting an edge.")
-        self.graph.remove_edge(source_task_id, target_task_id)
-
     def get_start_task(self) -> List[CodeTask]:
         """
         Get start tasks from workflow (tasks with no incoming edges)

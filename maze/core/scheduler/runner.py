@@ -1,7 +1,6 @@
 import ray
 import ast
 import time
-import binascii
 import base64
 import cloudpickle
 import json
@@ -44,7 +43,9 @@ def _apply_model_route_env(model_route: dict | None):
     os.environ["MAZE_MODEL_ROUTE"] = json.dumps(model_route)
     os.environ["MAZE_MODEL_ENDPOINT"] = str(model_route.get("endpoint") or "")
     os.environ["MAZE_MODEL_INSTANCE_ID"] = str(model_route.get("instance_id") or "")
-    os.environ["MAZE_MODEL_NAME"] = str(model_route.get("model") or "")
+    os.environ["MAZE_MODEL_NAME"] = str(
+        model_route.get("served_model") or model_route.get("model") or ""
+    )
 
 
 def _apply_cuda_visible_devices(cuda_visible_devices: str | None):
@@ -275,22 +276,6 @@ def run_code_task(
         )
 
 
-def run_langgraph_task(code_ser: str, args: str, kwargs: str):
-    try:
-        func = cloudpickle.loads(base64.b64decode(code_ser))
-        loaded_args = cloudpickle.loads(base64.b64decode(args))
-        loaded_kwargs = cloudpickle.loads(base64.b64decode(kwargs))
-        return func(*loaded_args, **loaded_kwargs)
-    except Exception as exc:
-        return task_error_result(
-            exception_to_error_envelope(
-                "user_code",
-                exc,
-                origin="runner",
-            )
-        )
-
-
 def execute_code_task_in_worker(
     code_str: str = None,
     code_ser: str = None,
@@ -315,18 +300,6 @@ def execute_code_task_in_worker(
     return _wrap_with_envelope(output, started_at, finished_at, reported)
 
 
-def execute_langgraph_task_in_worker(
-    code_ser: str,
-    args: str,
-    kwargs: str,
-    cuda_visible_devices: str | None = None,
-    model_route: dict | None = None,
-):
-    _apply_model_route_env(model_route)
-    _apply_cuda_visible_devices(cuda_visible_devices)
-    return run_langgraph_task(code_ser, args, kwargs)
-
-
 @ray.remote(max_retries=0)
 def remote_task_runner(
     code_str: str = None,
@@ -346,19 +319,21 @@ def remote_task_runner(
     )
 
 
-@ray.remote(max_retries=0)
-def remote_lgraph_task_runner(
-    code_ser: str,
-    args: str,
-    kwargs: str,
+@ray.remote(max_retries=0, max_calls=1)
+def remote_gpu_task_runner(
+    code_str: str = None,
+    code_ser: str = None,
+    task_input_data: dict = None,
     cuda_visible_devices: str | None = None,
+    file_context: dict | None = None,
     model_route: dict | None = None,
 ):
-    return execute_langgraph_task_in_worker(
+    return execute_code_task_in_worker(
+        code_str=code_str,
         code_ser=code_ser,
-        args=args,
-        kwargs=kwargs,
+        task_input_data=task_input_data,
         cuda_visible_devices=cuda_visible_devices,
+        file_context=file_context,
         model_route=model_route,
     )
 

@@ -1,597 +1,63 @@
-"""
-Maze Client 桥接模块 - 完整版
-用于Node.js后端调用Python Maze Client
-"""
+"""Small Python bridge for Playground workspace task authoring."""
 
-import asyncio
-import ipaddress
-import sys
+import hashlib
+import importlib.util
+import inspect
+import io
 import json
 import os
-import traceback
-import io
 import re
-import ast
-import operator
+import sys
 import tempfile
-from types import SimpleNamespace
-from urllib.parse import urlsplit
+import traceback
+
 
 sys.dont_write_bytecode = True
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# 设置标准输出和标准错误为 UTF-8 编码
-if sys.platform == 'win32':
-    # Windows 平台需要特殊处理
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+sys.path.insert(0, PROJECT_ROOT)
 
-# 添加项目根目录到Python路径
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
-sys.path.insert(0, project_root)
-
-workspace_root = os.path.abspath(os.path.expanduser(
+WORKSPACE_ROOT = os.path.abspath(os.path.expanduser(
     os.environ.get("MAZE_WORKSPACE_ROOT_DIR")
     or os.environ.get("MAZE_WORKSPACE_DIR")
-    or os.path.join(project_root, "workspaces")
+    or os.path.join(PROJECT_ROOT, "workspaces")
 ))
-workspaces_dir = os.path.abspath(os.path.expanduser(
-    os.environ.get("MAZE_WORKSPACES_DIR")
-    or workspace_root
+WORKSPACES_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("MAZE_WORKSPACES_DIR") or WORKSPACE_ROOT
 ))
-default_workspace_dir = os.path.abspath(os.path.expanduser(
+DEFAULT_WORKSPACE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("MAZE_DEFAULT_WORKSPACE_DIR")
-    or os.path.join(workspaces_dir, os.environ.get("MAZE_DEFAULT_WORKSPACE_ID", "default"))
+    or os.path.join(WORKSPACES_DIR, os.environ.get("MAZE_DEFAULT_WORKSPACE_ID", "default"))
 ))
 
-# 使用客户端模块
-from maze.client.maze.client import MaClient as DynamicMaClient
-from maze.client.maze.agent_exec import run_agent_exec_code
-from maze.client.maze.agent_mcp import close_mcp_manager_blocking, discover_mcp_tools_blocking
-from maze.client.maze.agent_permissions import permission_error_payload
-from maze.client.maze.agent_sandbox import build_workspace_sandbox
-from maze.client.maze.agent_sandbox import resolve_workspace_file as sandbox_resolve_workspace_file
-from maze.client.maze.react_llm import create_openai_react_llm_task
-from maze.client.maze.agent_skills import AgentSkillRegistry
-from maze import task, get_task_metadata
-import inspect
-import importlib
-import importlib.util
-import hashlib
-
-
-OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-    ast.USub: operator.neg,
-    ast.UAdd: operator.pos,
-}
-
-
-def evaluate_arithmetic(expression: str):
-    node = ast.parse(expression, mode="eval").body
-
-    def visit(current):
-        if isinstance(current, ast.Constant) and isinstance(current.value, (int, float)):
-            return current.value
-        if isinstance(current, ast.BinOp) and type(current.op) in OPERATORS:
-            return OPERATORS[type(current.op)](visit(current.left), visit(current.right))
-        if isinstance(current, ast.UnaryOp) and type(current.op) in OPERATORS:
-            return OPERATORS[type(current.op)](visit(current.operand))
-        raise ValueError(f"Unsupported arithmetic expression: {expression}")
-
-    return visit(node)
-
-
-@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
-def playground_react_decide(prompt: str, history: list, tools: dict, step: int):
-    if not history:
-        return {
-            "action": {
-                "tool": "web_search",
-                "args": {
-                    "query": "18 * 7",
-                },
-            }
-        }
-
-    last_observation = history[-1]["observation"]
-    if last_observation.get("error_type") == "tool_not_allowed":
-        return {
-            "action": {
-                "tool": "calculator",
-                "args": {
-                    "expression": "18 * 7",
-                },
-            }
-        }
-
-    result = last_observation["result"]["result"]
-    return {
-        "action": {
-            "final": f"The answer is {result}.",
-        }
-    }
-
-
-@task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
-def calculator(expression: str):
-    result = evaluate_arithmetic(expression)
-    return {"result": result}
-
-
-_BLOCKED_WORKSPACE_AGENT_TOOLS = {
-    "save_workflow_draft",
-    "run_workflow_draft",
-}
-
-
-def _maze_core_url():
-    return str(os.environ.get("MAZE_CORE_URL") or "http://localhost:8000").rstrip("/")
-
-
-def _maze_head_node_id(core_url):
-    import requests
-
-    response = requests.get(f"{core_url}/cluster/resources", timeout=10)
-    response.raise_for_status()
-    head_node_id = str(response.json().get("cluster", {}).get("head_node_id") or "").strip()
-    if not head_node_id:
-        raise RuntimeError("Maze Core did not report a head node id")
-    return head_node_id
-
-
-def _normalize_workspace_agent_tools(value):
-    if not isinstance(value, list):
-        raise TypeError("workspaceAgentTools must be an OpenAI function-tool list")
-
-    normalized = []
-    names = set()
-    for entry in value:
-        if not isinstance(entry, dict) or entry.get("type") != "function":
-            raise TypeError("Each workspaceAgentTools entry must be a function tool")
-        function = entry.get("function")
-        if not isinstance(function, dict):
-            raise TypeError("Each workspaceAgentTools function must be an object")
-        name = str(function.get("name") or "").strip()
-        if not name:
-            raise ValueError("Each workspaceAgentTools entry needs a name")
-        if name.lower() in _BLOCKED_WORKSPACE_AGENT_TOOLS:
-            continue
-        if name in names:
-            raise ValueError(f"Duplicate workspaceAgentTools name: {name}")
-
-        input_schema = function.get("parameters") or {"type": "object", "properties": {}}
-        if not isinstance(input_schema, dict):
-            raise TypeError(f"workspaceAgentTools {name} input schema must be an object")
-        properties = input_schema.get("properties") or {}
-        required = input_schema.get("required") or []
-        if not isinstance(properties, dict):
-            raise TypeError(f"workspaceAgentTools {name} properties must be an object")
-        if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
-            raise TypeError(f"workspaceAgentTools {name} required must be a list of strings")
-
-        names.add(name)
-        normalized.append({
-            "name": name,
-            "description": str(function.get("description") or ""),
-            "input_schema": {
-                "type": "object",
-                **input_schema,
-                "properties": dict(properties),
-                "required": list(required),
-            },
-            "output_schema": None,
-        })
-
-    return normalized
-
-
-def _redact_capability(value, capability):
-    if isinstance(value, str):
-        return value.replace(capability, "<redacted>") if capability else value
-    if isinstance(value, list):
-        return [_redact_capability(item, capability) for item in value]
-    if isinstance(value, dict):
-        return {
-            _redact_capability(key, capability): _redact_capability(item, capability)
-            for key, item in value.items()
-        }
-    return value
-
-
-def _is_loopback_http_url(value):
-    parsed = urlsplit(str(value or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return False
-    if parsed.username is not None or parsed.password is not None:
-        return False
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname == "localhost" or hostname.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
-
-
-class _WorkspaceAgentMCPClient:
-    name = "workspace-agent"
-    server_name = "workspace-agent"
-    _maze_agent_tool_prefix = ""
-
-    def __init__(self, *, url, token, tools, timeout):
-        if not _is_loopback_http_url(url):
-            raise ValueError("workspaceAgentToolUrl must be an HTTP(S) loopback URL")
-        if not str(token or ""):
-            raise ValueError("MAZE_WORKSPACE_AGENT_TOOL_TOKEN is required")
-        normalized_tools = _normalize_workspace_agent_tools(tools)
-        if not normalized_tools:
-            raise ValueError("workspaceAgentTools must include at least one allowed tool")
-
-        self.is_connected = False
-        self._url = str(url).strip()
-        self._token = str(token)
-        self._timeout = min(max(float(timeout or 120), 1.0), 3600.0)
-        self._tools = {tool["name"]: tool for tool in normalized_tools}
-
-    async def connect(self):
-        self.is_connected = True
-
-    async def close(self):
-        self.is_connected = False
-        self._token = ""
-
-    async def list_tools(self):
-        return [
-            SimpleNamespace(
-                name=tool["name"],
-                description=tool["description"],
-                inputSchema=tool["input_schema"],
-                outputSchema=tool["output_schema"],
-            )
-            for tool in self._tools.values()
-        ]
-
-    async def call_tool(self, tool_name, **kwargs):
-        if tool_name not in self._tools:
-            return self._result({
-                "ok": False,
-                "error": f"Unknown Workspace Agent tool: {tool_name}",
-                "error_type": "tool_not_allowed",
-                "repairable": True,
-            }, is_error=True)
-        return await asyncio.to_thread(self._call_tool_blocking, tool_name, kwargs)
-
-    def _call_tool_blocking(self, tool_name, tool_input):
-        import requests
-
-        try:
-            response = requests.post(
-                self._url,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                },
-                json={"name": tool_name, "input": tool_input},
-                timeout=self._timeout,
-            )
-        except requests.Timeout:
-            return self._result({
-                "ok": False,
-                "error": "Workspace Agent tool request timed out",
-                "error_type": "timeout",
-                "repairable": True,
-            }, is_error=True)
-        except requests.RequestException as exc:
-            message = _redact_capability(str(exc), self._token)
-            return self._result({
-                "ok": False,
-                "error": message,
-                "error_type": type(exc).__name__,
-                "repairable": True,
-            }, is_error=True)
-
-        if response.status_code in {401, 403}:
-            return self._result({
-                "ok": False,
-                "error": "Workspace Agent tool authorization failed",
-                "error_type": "authorization_error",
-                "status": response.status_code,
-                "repairable": True,
-            }, is_error=True)
-
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {
-                "ok": False,
-                "error": str(response.text or "")[:1000] or f"HTTP {response.status_code}",
-                "error_type": "invalid_response",
-                "repairable": True,
-            }
-        payload = _redact_capability(payload, self._token)
-        if (
-            isinstance(payload, dict)
-            and payload.get("success") is True
-            and "result" in payload
-        ):
-            payload = payload["result"]
-
-        is_error = not response.ok
-        if isinstance(payload, dict):
-            is_error = is_error or payload.get("success") is False or payload.get("ok") is False
-            if is_error:
-                payload.setdefault("repairable", True)
-                payload.setdefault("status", response.status_code)
-        return self._result(payload, is_error=is_error)
-
-    @staticmethod
-    def _result(payload, *, is_error):
-        return SimpleNamespace(
-            structuredContent=payload,
-            content=[],
-            isError=bool(is_error),
-        )
-
-
-def build_react_workspace_tools(
-    workspace_dir,
-    default_exec_backend="workspace_sandbox",
-    default_exec_timeout=20,
-):
-    resolved_workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir)
-    if workspace_error:
-        raise ValueError(workspace_error["error"])
-    sandbox = build_workspace_sandbox(resolved_workspace_dir)
-    files_dir = str(sandbox.files_dir)
-    try:
-        default_exec_timeout = int(default_exec_timeout or 20)
-    except (TypeError, ValueError):
-        default_exec_timeout = 20
-    default_exec_timeout = min(max(default_exec_timeout, 1), 3600)
-
-    def env_flag(name, default=True):
-        value = os.environ.get(name)
-        if value is None:
-            return default
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-    def env_int(name, default, minimum, maximum):
-        try:
-            value = int(os.environ.get(name, default))
-        except (TypeError, ValueError):
-            value = default
-        return min(max(value, minimum), maximum)
-
-    def resolve_workspace_file(relative_path, permission):
-        current_sandbox = build_workspace_sandbox(resolved_workspace_dir)
-        full_path, normalized, decision = sandbox_resolve_workspace_file(
-            relative_path,
-            current_sandbox.files_dir,
-            policy=current_sandbox.policy,
-            permission=permission,
-        )
-        return str(full_path), normalized, decision
-
-    @task(
-        data_types={"path": "str", "content": "str", "append": "bool"},
-        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
-    )
-    def write_file(path: str, content: str, append: bool = False):
-        try:
-            full_path, normalized, decision = resolve_workspace_file(path, "write")
-            append_flag = append
-            if isinstance(append_flag, str):
-                append_flag = append_flag.strip().lower() in {"1", "true", "yes", "y", "on"}
-            else:
-                append_flag = bool(append_flag)
-
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            mode = "a" if append_flag else "w"
-            text = str(content or "")
-            max_bytes = env_int("MAZE_AGENT_WRITE_MAX_BYTES", 200000, 1, 5_000_000)
-            text_bytes = text.encode("utf-8")
-            if len(text_bytes) > max_bytes:
-                raise ValueError(f"content is too large for write_file ({len(text_bytes)} > {max_bytes} bytes)")
-            with open(full_path, mode, encoding="utf-8") as handle:
-                handle.write(text)
-
-            work_dir = os.environ.get("MAZE_WORK_DIR") or os.getcwd()
-            sandbox_output_path = os.path.abspath(os.path.join(work_dir, normalized))
-            if sandbox_output_path.startswith(os.path.abspath(work_dir) + os.sep):
-                os.makedirs(os.path.dirname(sandbox_output_path), exist_ok=True)
-                with open(sandbox_output_path, mode, encoding="utf-8") as handle:
-                    handle.write(text)
-
-            return {
-                "path": normalized,
-                "bytes": len(text_bytes),
-                "appended": append_flag,
-                "error": None,
-                "metadata": {
-                    "permission": decision.to_dict() if decision is not None else None,
-                },
-            }
-        except Exception as exc:
-            return {
-                "path": str(path or ""),
-                "bytes": 0,
-                "appended": False,
-                "error": str(exc),
-                "metadata": permission_error_payload(exc),
-            }
-
-    @task(
-        data_types={"path": "str", "max_bytes": "int"},
-        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
-    )
-    def read_file(path: str, max_bytes: int = 20000):
-        try:
-            full_path, normalized, decision = resolve_workspace_file(path, "read")
-            limit = int(max_bytes or 20000)
-            env_limit = env_int("MAZE_AGENT_READ_MAX_BYTES", 200000, 1, 5_000_000)
-            limit = min(max(limit, 1), env_limit)
-            with open(full_path, "rb") as handle:
-                raw = handle.read(limit + 1)
-            truncated = len(raw) > limit
-            content = raw[:limit].decode("utf-8", errors="replace")
-            return {
-                "path": normalized,
-                "content": content,
-                "bytes": len(raw[:limit]),
-                "truncated": truncated,
-                "error": None,
-                "metadata": {
-                    "permission": decision.to_dict() if decision is not None else None,
-                },
-            }
-        except Exception as exc:
-            return {
-                "path": str(path or ""),
-                "content": "",
-                "bytes": 0,
-                "truncated": False,
-                "error": str(exc),
-                "metadata": permission_error_payload(exc),
-            }
-
-    @task(
-        data_types={
-            "path": "str",
-            "code": "str",
-            "timeout_seconds": "int",
-            "backend": "str",
-            "cpu": "int",
-            "cpu_mem": "int",
-            "gpu": "int",
-            "gpu_mem": "int",
-            "target_node_id": "str",
-        },
-        resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
-    )
-    def exec_code(
-        path: str = "",
-        code: str = "",
-        timeout_seconds: int = 0,
-        backend: str = "",
-        cpu: int = 1,
-        cpu_mem: int = 128,
-        gpu: int = 0,
-        gpu_mem: int = 0,
-        target_node_id: str = "",
-    ):
-        result = run_agent_exec_code(
-            path=path,
-            code=code,
-            timeout_seconds=timeout_seconds or default_exec_timeout,
-            workspace_dir=resolved_workspace_dir,
-            backend=backend or default_exec_backend,
-        )
-        metadata = dict(result.get("metadata", {}) or {})
-        metadata["resource_request"] = {
-            "cpu": cpu,
-            "cpu_mem": cpu_mem,
-            "gpu": gpu,
-            "gpu_mem": gpu_mem,
-            "target_node_id": target_node_id,
-        }
-        return {
-            "path": result.get("path", str(path or "")),
-            "backend": result.get("backend", backend or default_exec_backend),
-            "returncode": result.get("returncode"),
-            "stdout": result.get("stdout", ""),
-            "stderr": result.get("stderr", ""),
-            "error": result.get("error"),
-            "timed_out": result.get("timed_out", False),
-            "stdout_truncated": result.get("stdout_truncated", False),
-            "stderr_truncated": result.get("stderr_truncated", False),
-            "generated_files": result.get("generated_files", []),
-            "metadata": metadata,
-        }
-
-    return [write_file, read_file, exec_code]
-
-
-def emit_progress(event):
-    """Emit structured progress to the Node.js process via stderr."""
-    try:
-        print(
-            "__MAZE_PROGRESS__" + json.dumps(event, ensure_ascii=False),
-            file=sys.stderr,
-            flush=True,
-        )
-    except Exception as e:
-        print(f"[WARNING] Failed to emit progress: {e}", file=sys.stderr)
-
-
-def parse_custom_function(code):
-    """Parse user-submitted custom function"""
-    import tempfile
-    
-    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8')
-    try:
-        temp_file.write(code)
-        temp_file.close()
-        
-        # Dynamically load module
-        spec = importlib.util.spec_from_file_location("custom_task", temp_file.name)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        
-        # Find decorated function
-        for name, obj in inspect.getmembers(module):
-            if hasattr(obj, '_maze_task_metadata'):
-                return _task_metadata_payload(obj, name, code)
-        
-        return {"error": "No function decorated with @task found"}
-    
-    except SyntaxError as e:
-        return {"error": f"Syntax error: {e}", "traceback": traceback.format_exc()}
-    
-    except ImportError as e:
-        return {"error": f"Import failed: {e}. Please use 'from maze import task'", "traceback": traceback.format_exc()}
-    
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
-    
-    finally:
-        try:
-            os.unlink(temp_file.name)
-        except:
-            pass
+from maze import get_task_metadata
 
 
 def _task_description(func, metadata):
-    """Build a compact task description for the UI."""
     description = inspect.getdoc(func) or ""
     if description:
         return description
-
-    input_names = ", ".join(metadata.inputs) or "none"
-    output_names = ", ".join(metadata.outputs) or "none"
-    return f"Inputs: {input_names}. Outputs: {output_names}."
+    inputs = ", ".join(metadata.inputs) or "none"
+    outputs = ", ".join(metadata.outputs) or "none"
+    return f"Inputs: {inputs}. Outputs: {outputs}."
 
 
 def _task_metadata_payload(func, name, code, workspace_dir=None, relative_path=None):
-    """Convert a decorated Maze task function to frontend metadata."""
     metadata = get_task_metadata(func)
     payload = {
         "name": name,
         "displayName": name.replace("_", " ").title(),
         "description": _task_description(func, metadata),
         "inputs": [
-            {"name": inp, "dataType": metadata.data_types.get(inp, "str")}
-            for inp in metadata.inputs
+            {"name": value, "dataType": metadata.data_types.get(value, "str")}
+            for value in metadata.inputs
         ],
         "outputs": [
-            {"name": out, "dataType": metadata.data_types.get(out, "str")}
-            for out in metadata.outputs
+            {"name": value, "dataType": metadata.data_types.get(value, "str")}
+            for value in metadata.outputs
         ],
         "resources": metadata.resources,
         "taskKind": metadata.task_kind,
@@ -605,109 +71,85 @@ def _task_metadata_payload(func, name, code, workspace_dir=None, relative_path=N
         "retryOn": metadata.retry_on,
         "timeoutSeconds": metadata.timeout_seconds,
     }
-
     if workspace_dir is not None:
         payload["workspaceDir"] = workspace_dir
     if relative_path is not None:
         payload["relativePath"] = relative_path
-
     return payload
 
 
-def _load_module_from_file(file_path, workspace_dir):
-    """Load a Python file as an isolated module while allowing local imports."""
-    module_hash = hashlib.sha1(file_path.encode("utf-8")).hexdigest()[:12]
-    module_name = f"maze_workspace_task_{module_hash}"
+def _load_module(file_path, workspace_dir):
+    module_name = f"maze_workspace_task_{hashlib.sha1(file_path.encode()).hexdigest()[:12]}"
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module from {file_path}")
-
     module = importlib.util.module_from_spec(spec)
-    original_sys_path = list(sys.path)
+    original_path = list(sys.path)
     try:
-        sys.path.insert(0, workspace_dir)
-        sys.path.insert(0, os.path.dirname(file_path))
+        sys.path[:0] = [workspace_dir, os.path.dirname(file_path)]
         spec.loader.exec_module(module)
     finally:
-        sys.path = original_sys_path
-
+        sys.path = original_path
     return module
 
 
-def _is_windows_drive_path(value):
-    return bool(re.match(r"^[a-zA-Z]:[\\/]", str(value or "").strip()))
+def _extract_tasks(file_path, workspace_dir, relative_path):
+    with open(file_path, "r", encoding="utf-8") as handle:
+        code = handle.read()
+    module = _load_module(file_path, workspace_dir)
+    tasks = [
+        _task_metadata_payload(
+            value,
+            name,
+            code,
+            workspace_dir=workspace_dir,
+            relative_path=relative_path,
+        )
+        for name, value in inspect.getmembers(module)
+        if hasattr(value, "_maze_task_metadata")
+    ]
+    if len(tasks) > 1:
+        names = ", ".join(task["functionName"] for task in tasks)
+        raise ValueError(
+            f"Workspace task files must define exactly one @task function. "
+            f"{relative_path} defines {len(tasks)} tasks: {names}"
+        )
+    return tasks
+
+
+def parse_custom_function(code):
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(code)
+            temp_path = handle.name
+        module = _load_module(temp_path, PROJECT_ROOT)
+        for name, value in inspect.getmembers(module):
+            if hasattr(value, "_maze_task_metadata"):
+                return _task_metadata_payload(value, name, code)
+        return {"error": "No function decorated with @task found"}
+    except SyntaxError as exc:
+        return {"error": f"Syntax error: {exc}", "traceback": traceback.format_exc()}
+    except ImportError as exc:
+        return {
+            "error": f"Import failed: {exc}. Please use 'from maze import task'",
+            "traceback": traceback.format_exc(),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc()}
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def _workspace_id_to_dir(workspace_id):
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(workspace_id or "").strip()).strip("-")
-    safe = safe[:80] or "default"
-    return os.path.join(workspaces_dir, safe)
-
-
-def _ensure_workspace_layout(resolved):
-    os.makedirs(resolved, exist_ok=True)
-    for name in ("files", "workflows", "tasks", "skills", "policies", "runs"):
-        os.makedirs(os.path.join(resolved, name), exist_ok=True)
-
-    manifest_path = os.path.join(resolved, "workspace.json")
-    if not os.path.exists(manifest_path):
-        workspace_id = os.path.basename(resolved.rstrip(os.sep)) or "default"
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc).isoformat()
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump({
-                "schema": "maze_workspace",
-                "schema_version": 1,
-                "manifest_version": 1,
-                "workspace_id": workspace_id,
-                "name": "Default workspace" if workspace_id == "default" else "Untitled workspace",
-                "created_at": now,
-                "updated_at": now,
-                "mode": "session",
-                "default_sandbox": "workspace_sandbox",
-                "files_dir": "files",
-                "workflows_dir": "workflows",
-                "tasks_dir": "tasks",
-                "skills_dir": "skills",
-                "runs_dir": "runs",
-                "policy_path": "policies/sandbox_policy.json",
-                "imports": [],
-                "local_mounts": [],
-            }, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-
-    policy_path = os.path.join(resolved, "policies", "sandbox_policy.json")
-    if not os.path.exists(policy_path):
-        with open(policy_path, "w", encoding="utf-8") as handle:
-            json.dump({
-                "schema": "maze_sandbox_policy",
-                "schema_version": 1,
-                "permission": {
-                    "read": {
-                        "*": "allow",
-                        ".env": "deny",
-                        ".env.*": "deny",
-                        "*secret*": "deny",
-                        "*credential*": "deny",
-                        "*token*": "deny",
-                        "api_key*": "deny",
-                    },
-                    "write": {
-                        "*": "ask",
-                        ".env": "deny",
-                        ".env.*": "deny",
-                        "*secret*": "deny",
-                        "*credential*": "deny",
-                        "*token*": "deny",
-                        "api_key*": "deny",
-                    },
-                    "exec_code": {"*": "ask", "python *": "allow", "rm *": "deny"},
-                    "mcp": {"*": "ask"},
-                    "skill": {"*": "allow"},
-                },
-            }, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+    return os.path.join(WORKSPACES_DIR, safe[:80] or "default")
 
 
 def _resolve_workspace_dir(workspace_dir=None, workspace_id=None):
@@ -715,724 +157,160 @@ def _resolve_workspace_dir(workspace_dir=None, workspace_id=None):
     if workspace_id and not raw:
         raw = _workspace_id_to_dir(workspace_id)
     if not raw:
-        raw = default_workspace_dir
-
-    if sys.platform != "win32":
-        if _is_windows_drive_path(raw):
-            return None, {"error": "Windows drive paths cannot be used as service-side workspace paths"}
-        if "\\" in raw:
-            return None, {"error": "Workspace paths must use POSIX-style separators on this service"}
-
-    if raw and not os.path.isabs(os.path.expanduser(raw)) and "/" not in raw and "\\" not in raw:
+        raw = DEFAULT_WORKSPACE_DIR
+    if sys.platform != "win32" and (re.match(r"^[A-Za-z]:[\\/]", raw) or "\\" in raw):
+        return None, {"error": "Workspace paths must use POSIX-style paths on this service"}
+    if not os.path.isabs(os.path.expanduser(raw)) and "/" not in raw and "\\" not in raw:
         raw = _workspace_id_to_dir(raw)
-
     resolved = os.path.abspath(os.path.expanduser(raw))
-    if resolved == project_root:
-        return None, {"error": f"Project root cannot be used as a workspace directory: {project_root}"}
-
+    if resolved == PROJECT_ROOT:
+        return None, {"error": "Project root cannot be used as a workspace directory"}
     try:
-        _ensure_workspace_layout(resolved)
+        for name in ("files", "workflows", "tasks", "policies", "runs"):
+            os.makedirs(os.path.join(resolved, name), exist_ok=True)
     except Exception as exc:
         return None, {"error": f"Failed to initialize workspace directory {resolved}: {exc}"}
-
-    if not os.path.isdir(resolved):
-        return None, {"error": f"Workspace directory does not exist: {resolved}"}
-
     return resolved, None
 
 
-def _string_list(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, (list, tuple, set)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return [str(value).strip()] if str(value).strip() else []
-
-
-def _mcp_server_summary(server):
-    if not isinstance(server, dict):
-        return {}
-    transport = str(server.get("transport") or "stdio")
-    summary = {
-        "name": str(server.get("name") or ""),
-        "transport": transport,
-        "tool_prefix": server.get("tool_prefix"),
-        "timeout": server.get("timeout"),
-        "has_env": bool(server.get("env")),
-        "has_headers": bool(server.get("headers")),
-    }
-    if transport == "stdio":
-        summary["command"] = str(server.get("command") or "")
-        summary["args_count"] = len(server.get("args") or []) if isinstance(server.get("args"), list) else 0
-        summary["cwd"] = str(server.get("cwd") or "") or None
-    elif server.get("url"):
-        parsed = urlsplit(str(server.get("url") or ""))
-        summary["url_scheme"] = parsed.scheme
-        summary["url_host"] = parsed.netloc
-    return summary
-
-
-def _mcp_tool_summary(tool):
-    input_schema = getattr(tool, "input_schema", None) or {}
-    properties = input_schema.get("properties") if isinstance(input_schema, dict) else {}
-    required = input_schema.get("required") if isinstance(input_schema, dict) else []
-    return {
-        "server": getattr(tool, "server_name", None),
-        "tool": getattr(tool, "tool_name", None),
-        "agent_tool": getattr(tool, "agent_tool_name", None),
-        "description": getattr(tool, "description", "") or "",
-        "input_schema": input_schema if isinstance(input_schema, dict) else {},
-        "inputs": sorted((properties or {}).keys()) if isinstance(properties, dict) else [],
-        "required_inputs": list(required or []) if isinstance(required, list) else [],
-    }
-
-
-def discover_mcp_tools(params):
-    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
-    if not isinstance(mcp_servers, list):
-        return {"success": False, "error": "mcpServers must be an array"}
-
-    manager = None
-    try:
-        manager, tools = discover_mcp_tools_blocking(configs=mcp_servers)
-        server_summary = [
-            summary
-            for summary in (_mcp_server_summary(server) for server in mcp_servers)
-            if summary
-        ]
-        tool_summary = [_mcp_tool_summary(tool) for tool in tools]
-        return {
-            "success": True,
-            "servers": server_summary,
-            "tools": tool_summary,
-            "serverCount": len(server_summary),
-            "toolCount": len(tool_summary),
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "errorType": type(exc).__name__,
-            "servers": [
-                summary
-                for summary in (_mcp_server_summary(server) for server in mcp_servers)
-                if summary
-            ],
-            "traceback": traceback.format_exc(),
-        }
-    finally:
-        close_mcp_manager_blocking(manager)
-
-
-def _normalize_task_relative_path(relative_path):
-    relative_path = (relative_path or "tasks/custom_task.py").replace("\\", "/").strip()
-    relative_path = relative_path.lstrip("/")
-
-    if not relative_path.startswith("tasks/"):
-        relative_path = f"tasks/{relative_path}"
-
-    normalized = os.path.normpath(relative_path).replace("\\", "/")
-    if normalized == "tasks" or not normalized.endswith(".py"):
-        normalized = f"{normalized}.py"
-
-    if normalized.startswith("../") or "/../" in normalized or normalized == "..":
-        raise ValueError("Task path must stay inside the workspace tasks directory")
-
-    return normalized
-
-
 def _task_file_path(workspace_dir, relative_path):
-    normalized = _normalize_task_relative_path(relative_path)
-    full_path = os.path.abspath(os.path.join(workspace_dir, normalized))
+    relative = (relative_path or "tasks/custom_task.py").replace("\\", "/").strip().lstrip("/")
+    if not relative.startswith("tasks/"):
+        relative = f"tasks/{relative}"
+    relative = os.path.normpath(relative).replace("\\", "/")
+    if not relative.endswith(".py"):
+        relative = f"{relative}.py"
+    full_path = os.path.abspath(os.path.join(workspace_dir, relative))
     tasks_dir = os.path.abspath(os.path.join(workspace_dir, "tasks"))
-
-    if not (full_path == tasks_dir or full_path.startswith(tasks_dir + os.sep)):
+    if not full_path.startswith(tasks_dir + os.sep):
         raise ValueError("Task path must stay inside the workspace tasks directory")
-
-    return normalized, full_path
-
-
-def _extract_tasks_from_file(file_path, workspace_dir, relative_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        code = f.read()
-
-    module = _load_module_from_file(file_path, workspace_dir)
-    tasks = []
-    for name, obj in inspect.getmembers(module):
-        if hasattr(obj, "_maze_task_metadata"):
-            tasks.append(_task_metadata_payload(
-                obj,
-                name,
-                code,
-                workspace_dir=workspace_dir,
-                relative_path=relative_path,
-            ))
-
-    return tasks
-
-
-def _extract_single_task_from_file(file_path, workspace_dir, relative_path):
-    tasks = _extract_tasks_from_file(file_path, workspace_dir, relative_path)
-    if len(tasks) > 1:
-        task_names = ", ".join(task["functionName"] for task in tasks)
-        raise ValueError(
-            f"Workspace task files must define exactly one @task function. "
-            f"{relative_path} defines {len(tasks)} tasks: {task_names}"
-        )
-
-    return tasks
+    return relative, full_path
 
 
 def get_workspace_tasks(workspace_dir):
-    """Scan <workspace>/tasks/**/*.py and return decorated Maze tasks."""
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
     if error:
         return error
-
     tasks_dir = os.path.join(workspace_dir, "tasks")
     tasks = []
     errors = []
-
-    if not os.path.isdir(tasks_dir):
-        return {
-            "workspaceDir": workspace_dir,
-            "tasksDir": tasks_dir,
-            "tasks": [],
-            "errors": [],
-        }
-
     for root, _, files in os.walk(tasks_dir):
-        for file_name in files:
-            if not file_name.endswith(".py") or file_name.startswith("__"):
+        for name in files:
+            if not name.endswith(".py") or name.startswith("__"):
                 continue
-
-            file_path = os.path.join(root, file_name)
+            file_path = os.path.join(root, name)
             relative_path = os.path.relpath(file_path, workspace_dir).replace("\\", "/")
             try:
-                tasks.extend(_extract_single_task_from_file(file_path, workspace_dir, relative_path))
-            except Exception as e:
+                tasks.extend(_extract_tasks(file_path, workspace_dir, relative_path))
+            except Exception as exc:
                 errors.append({
                     "relativePath": relative_path,
-                    "error": str(e),
+                    "error": str(exc),
                     "traceback": traceback.format_exc(),
                 })
-
-    return {
-        "workspaceDir": workspace_dir,
-        "tasksDir": tasks_dir,
-        "tasks": tasks,
-        "errors": errors,
-    }
-
-
-def list_workspace_skills(workspace_dir):
-    """Scan <workspace>/skills and return Maze agent skill metadata."""
-    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
-    if error:
-        return error
-
-    skills_dir = os.path.join(workspace_dir, "skills")
-    os.makedirs(skills_dir, exist_ok=True)
-
-    try:
-        registry = AgentSkillRegistry([skills_dir])
-        return {
-            "success": True,
-            "workspaceDir": workspace_dir,
-            "skillsDir": skills_dir,
-            "skills": registry.list_skills(),
-            "errors": [],
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "workspaceDir": workspace_dir,
-            "skillsDir": skills_dir,
-            "skills": [],
-            "errors": [{
-                "error": str(e),
-                "traceback": traceback.format_exc(),
-            }],
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-        }
+    return {"workspaceDir": workspace_dir, "tasksDir": tasks_dir, "tasks": tasks, "errors": errors}
 
 
 def save_workspace_task(workspace_dir, relative_path, code, parse=True):
-    """Save a workspace task file, optionally parsing it afterwards."""
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
     if error:
         return error
-
-    if code is None:
+    if code is None or (parse and not code.strip()):
         return {"error": "Task code cannot be empty"}
-
-    if parse and not code.strip():
-        return {"error": "Task code cannot be empty"}
-
     try:
         relative_path, file_path = _task_file_path(workspace_dir, relative_path)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(code)
-
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.write(code)
         response = {
             "success": True,
             "workspaceDir": workspace_dir,
             "tasksDir": os.path.join(workspace_dir, "tasks"),
             "relativePath": relative_path,
         }
-
         if parse:
-            tasks = _extract_single_task_from_file(file_path, workspace_dir, relative_path)
+            tasks = _extract_tasks(file_path, workspace_dir, relative_path)
             if not tasks:
-                return {
-                    **response,
-                    "success": False,
-                    "error": "No function decorated with @task found",
-                }
-            response["tasks"] = tasks
-            response["task"] = tasks[0]
-
+                return {**response, "success": False, "error": "No function decorated with @task found"}
+            response.update({"tasks": tasks, "task": tasks[0]})
         return response
-    except SyntaxError as e:
-        return {"error": f"Syntax error: {e}", "traceback": traceback.format_exc()}
-    except ImportError as e:
-        return {"error": f"Import failed: {e}", "traceback": traceback.format_exc()}
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc()}
 
 
 def delete_workspace_task(workspace_dir, relative_path):
-    """Delete a task file from <workspace>/tasks."""
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
     if error:
         return error
-
     try:
         relative_path, file_path = _task_file_path(workspace_dir, relative_path)
-
         if not os.path.isfile(file_path):
             return {"error": f"Workspace task file not found: {relative_path}"}
-
         os.unlink(file_path)
-        return {
-            "success": True,
-            "workspaceDir": workspace_dir,
-            "relativePath": relative_path,
-        }
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
+        return {"success": True, "workspaceDir": workspace_dir, "relativePath": relative_path}
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc()}
 
 
-def _normalize_python_identifier(name):
-    raw_name = (name or "").strip()
-    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw_name):
-        return raw_name
-
-    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw_name).strip("_").lower()
-    if not normalized:
-        raise ValueError("Task name cannot be empty")
-    if normalized[0].isdigit():
-        normalized = f"task_{normalized}"
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", normalized):
-        raise ValueError("Task name must be a valid Python identifier")
-
-    return normalized
-
-
-def rename_workspace_task(workspace_dir, relative_path, old_function_name, new_name):
-    """Rename a decorated task function inside a workspace task file."""
+def rename_workspace_task(workspace_dir, relative_path, old_name, new_name):
     workspace_dir, error = _resolve_workspace_dir(workspace_dir)
     if error:
         return error
-
     try:
-        new_function_name = _normalize_python_identifier(new_name)
+        normalized = re.sub(r"[^A-Za-z0-9_]+", "_", str(new_name or "").strip()).strip("_").lower()
+        if normalized and normalized[0].isdigit():
+            normalized = f"task_{normalized}"
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", normalized or ""):
+            raise ValueError("Task name must be a valid Python identifier")
         relative_path, file_path = _task_file_path(workspace_dir, relative_path)
-
         if not os.path.isfile(file_path):
             return {"error": f"Workspace task file not found: {relative_path}"}
-
-        with open(file_path, "r", encoding="utf-8") as f:
-            code = f.read()
-
-        pattern = re.compile(
-            r"(\b(?:async\s+def|def)\s+)" + re.escape(old_function_name) + r"(\s*\()"
-        )
-        code, count = pattern.subn(r"\1" + new_function_name + r"\2", code, count=1)
-
-        if count == 0:
-            return {"error": f"Task function not found: {old_function_name}"}
-
+        with open(file_path, "r", encoding="utf-8") as handle:
+            code = handle.read()
+        pattern = re.compile(r"(\b(?:async\s+def|def)\s+)" + re.escape(old_name) + r"(\s*\()")
+        code, count = pattern.subn(r"\1" + normalized + r"\2", code, count=1)
+        if not count:
+            return {"error": f"Task function not found: {old_name}"}
         result = save_workspace_task(workspace_dir, relative_path, code, parse=True)
         if result.get("error") or result.get("success") is False:
             return result
-
-        result["oldFunctionName"] = old_function_name
-        result["newFunctionName"] = new_function_name
+        result.update({"oldFunctionName": old_name, "newFunctionName": normalized})
         return result
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
-
-
-def run_react_workflow(params):
-    mode = str(params.get("mode") or "local").strip().lower()
-    prompt = str(params.get("prompt") or "").strip()
-    workspace_agent_message = str(
-        params.get("workspaceAgentMessage")
-        or prompt
-    )
-    max_steps = int(params.get("maxSteps") or params.get("max_steps") or 4)
-    task_timeout = int(params.get("taskTimeout") or params.get("task_timeout") or 120)
-    task_timeout = min(max(task_timeout, 10), 3600)
-    timeout_seconds = int(
-        params.get("timeoutSeconds")
-        or params.get("timeout_seconds")
-        or max(90, max_steps * task_timeout * 2 + 60)
-    )
-    timeout_seconds = min(max(timeout_seconds, task_timeout + 30), 24 * 3600)
-    workspace_id = str(params.get("workspaceId") or params.get("workspace_id") or "").strip()
-    workspace_dir = str(params.get("workspaceDir") or params.get("workspace_dir") or "").strip()
-    workspace_manifest_version = params.get("workspaceManifestVersion") or params.get("workspace_manifest_version")
-    skill_names = _string_list(params.get("skills") or [])
-    skill_dirs = _string_list(params.get("skillDirs") or params.get("skill_dirs") or [])
-    has_explicit_skill_dirs = bool(skill_dirs)
-    max_skill_chars = int(params.get("maxSkillChars") or params.get("max_skill_chars") or 12000)
-    permission_policy = params.get("permissionPolicy") or params.get("permission_policy")
-    mcp_servers = params.get("mcpServers") or params.get("mcp_servers") or []
-    mcp_profile_name = str(params.get("mcpProfileName") or params.get("mcp_profile_name") or "").strip()
-    mcp_profile_summary = params.get("mcpProfileSummary") or params.get("mcp_profile_summary")
-    if not isinstance(mcp_profile_summary, dict):
-        mcp_profile_summary = None
-    if not isinstance(mcp_servers, list):
-        mcp_servers = []
-    mcp_server_summary = [
-        summary
-        for summary in (_mcp_server_summary(server) for server in mcp_servers)
-        if summary
-    ]
-    exec_backend = str(
-        params.get("execBackend")
-        or params.get("exec_backend")
-        or os.environ.get("MAZE_AGENT_EXEC_BACKEND")
-        or "workspace_sandbox"
-    ).strip() or "workspace_sandbox"
-    core_url = _maze_core_url()
-    requested_system_prompt = str(
-        params.get("systemPrompt") or params.get("system_prompt") or ""
-    ).strip()
-    workspace_agent_tools = params.get("workspaceAgentTools") or []
-    workspace_agent_tool_url = str(
-        params.get("workspaceAgentToolUrl")
-        or ""
-    ).strip()
-    workspace_agent_tool_token = str(os.environ.get("MAZE_WORKSPACE_AGENT_TOOL_TOKEN") or "")
-    config_path = None
-
-    if not prompt:
-        return {"success": False, "error": "Prompt is required"}
-    if max_steps < 1:
-        return {"success": False, "error": "maxSteps must be at least 1"}
-
-    react = None
-    try:
-        workspace_dir, workspace_error = _resolve_workspace_dir(workspace_dir, workspace_id=workspace_id)
-        if workspace_error:
-            return {"success": False, "error": workspace_error["error"]}
-        workspace_id = workspace_id or os.path.basename(workspace_dir.rstrip(os.sep))
-        os.makedirs(os.path.join(workspace_dir, "files"), exist_ok=True)
-        if not skill_dirs:
-            skill_dirs = [os.path.join(workspace_dir, "skills")]
-        skill_dirs = [
-            os.path.abspath(os.path.expanduser(skill_dir))
-            if os.path.isabs(skill_dir)
-            else os.path.abspath(os.path.join(workspace_dir, skill_dir))
-            for skill_dir in skill_dirs
-        ]
-        if not has_explicit_skill_dirs:
-            os.makedirs(skill_dirs[0], exist_ok=True)
-
-        client = DynamicMaClient(server_url=core_url)
-        workspace_agent_mcp_clients = []
-        workspace_agent_tool_names = []
-        if mode == "workspace-agent":
-            workspace_agent_client = _WorkspaceAgentMCPClient(
-                url=workspace_agent_tool_url,
-                token=workspace_agent_tool_token,
-                tools=workspace_agent_tools,
-                timeout=task_timeout,
-            )
-            workspace_agent_mcp_clients.append(workspace_agent_client)
-            workspace_agent_tool_names = list(workspace_agent_client._tools)
-            base_tools = []
-        else:
-            workspace_tools = build_react_workspace_tools(
-                workspace_dir,
-                default_exec_backend=exec_backend,
-                default_exec_timeout=task_timeout,
-            )
-            base_tools = [calculator, *workspace_tools]
-
-        if mode == "local":
-            llm_task = playground_react_decide
-            tools = base_tools
-            system_prompt = requested_system_prompt or None
-            max_steps = max(max_steps, 3)
-        elif mode in {"online", "workspace-agent"}:
-            base_url = str(params.get("baseUrl") or "").strip()
-            model = str(params.get("model") or "").strip()
-            api_key = os.environ.get("MAZE_REACT_API_KEY", "")
-            if requested_system_prompt:
-                system_prompt = requested_system_prompt
-            elif mode == "workspace-agent":
-                system_prompt = (
-                    "You are the Maze Workspace Agent controller. Return strict JSON only. "
-                    "Use only the available Workspace Agent tools. Draft and validation tools "
-                    "may be used proactively; saving and running require a separate confirmed "
-                    "Node action and are intentionally unavailable here."
-                )
-            else:
-                system_prompt = (
-                    "You are a ReAct controller for Maze. Return strict JSON only. "
-                    "Use available tools to make progress. When no direct domain tool exists, "
-                    "write a Python helper under workspace/files with write_file, inspect it "
-                    "with read_file when needed, and run it with exec_code. Do not answer that "
-                    "a tool is unavailable before considering whether you can create and execute "
-                    "a small helper script."
-                )
-
-            if not base_url:
-                return {"success": False, "error": f"Base URL is required for {mode} ReAct runs"}
-            if not model:
-                return {"success": False, "error": f"Model is required for {mode} ReAct runs"}
-            if not api_key:
-                return {"success": False, "error": f"API key is required for {mode} ReAct runs"}
-
-            config_file = tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".json",
-                delete=False,
-                encoding="utf-8",
-            )
-            config_path = config_file.name
-            try:
-                json.dump({
-                    "url": base_url,
-                    "key": api_key,
-                    "model": model,
-                }, config_file)
-            finally:
-                config_file.close()
-
-            llm_task = create_openai_react_llm_task(
-                config_path=config_path,
-                task_name=(
-                    "playground_workspace_agent_react_decide"
-                    if mode == "workspace-agent"
-                    else "playground_openai_react_decide"
-                ),
-                system_prompt=system_prompt,
-                max_tokens=int(params.get("maxTokens") or params.get("max_tokens") or 2048),
-                timeout=task_timeout,
-                resources={
-                    "cpu_num": 1,
-                    "gpu_mem": 0,
-                    "io_num": 1,
-                    "target_node_id": _maze_head_node_id(core_url),
-                },
-            )
-            tools = base_tools
-        else:
-            return {"success": False, "error": f"Unsupported ReAct mode: {mode}"}
-
-        react = client.create_react_workflow(
-            llm_task=llm_task,
-            tools=tools,
-            max_steps=max_steps,
-            system_prompt=system_prompt,
-            timeout_seconds=timeout_seconds,
-            task_timeout=task_timeout,
-            file_context={
-                "enabled": True,
-                "workspace_dir": workspace_dir,
-                "workspace_id": workspace_id,
-                "workspace_manifest_version": workspace_manifest_version,
-            },
-            workspace_dir=workspace_dir,
-            agent_skills=skill_names,
-            skill_dirs=skill_dirs,
-            max_skill_chars=max_skill_chars,
-            permission_policy=permission_policy if isinstance(permission_policy, dict) else None,
-            mcp_clients=workspace_agent_mcp_clients or None,
-            mcp_servers=mcp_servers,
-            mcp_profile_name=mcp_profile_name or None,
-            mcp_profile=mcp_profile_summary,
-        )
-        if mcp_profile_name:
-            try:
-                react.dynamic_run.emit_event(
-                    "agent_mcp_profile_selected",
-                    {
-                        "name": mcp_profile_name,
-                        "profile": mcp_profile_summary,
-                    },
-                )
-            except Exception:
-                pass
-        if mode == "workspace-agent":
-            react.dynamic_run.emit_event(
-                "workspace_agent_turn_started",
-                {"message": workspace_agent_message},
-            )
-        emit_progress({
-            "type": "react_run_created",
-            "data": {
-                "run_id": react.run_id,
-                "mode": mode,
-                "workspace_id": workspace_id,
-                "workspace_dir": workspace_dir,
-                "workspace_manifest_version": workspace_manifest_version,
-                "skills": skill_names,
-                "exec_backend": exec_backend,
-                "max_steps": max_steps,
-                "timeout_seconds": timeout_seconds,
-                "task_timeout": task_timeout,
-                "mcp_servers": mcp_server_summary,
-                "mcp_server_count": len(mcp_server_summary),
-                "mcp_profile_name": mcp_profile_name or None,
-                "mcp_profile": mcp_profile_summary,
-                "workspace_agent_tools": workspace_agent_tool_names,
-                "workspace_agent_tool_count": len(workspace_agent_tool_names),
-            },
-        })
-        answer = react.run(prompt)
-        status = react.status()
-        events = react.get_events()
-        emit_progress({
-            "type": "react_run_completed",
-            "data": {
-                "run_id": react.run_id,
-                "status": status.get("status"),
-            },
-        })
-
-        return {
-            "success": True,
-            "runId": react.run_id,
-            "workspaceId": workspace_id,
-            "workspaceDir": workspace_dir,
-            "workspaceManifestVersion": workspace_manifest_version,
-            "answer": answer,
-            "status": status.get("status"),
-            "skills": skill_names,
-            "execBackend": exec_backend,
-            "mcpServers": mcp_server_summary,
-            "mcpProfileName": mcp_profile_name or None,
-            "mcpProfile": mcp_profile_summary,
-            "maxSteps": max_steps,
-            "timeoutSeconds": timeout_seconds,
-            "taskTimeout": task_timeout,
-            "eventTypes": [
-                event.get("type")
-                for event in events
-                if str(event.get("type", "")).startswith(("agent_", "react_"))
-            ],
-        }
-    except Exception as e:
-        response = {
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-        }
-        failed_run_id = getattr(e, "maze_run_id", None)
-        if failed_run_id:
-            response["runId"] = failed_run_id
-            try:
-                failed_run = DynamicMaClient(server_url=core_url).get_dynamic_run(failed_run_id)
-                response["status"] = failed_run.get_status().get("status")
-            except Exception:
-                pass
-        if react is not None:
-            response["runId"] = react.run_id
-            try:
-                response["status"] = react.status().get("status")
-            except Exception:
-                pass
-        return response
-    finally:
-        if config_path:
-            try:
-                os.unlink(config_path)
-            except OSError:
-                pass
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc()}
 
 
 def main():
-    """主函数 - 根据命令行参数执行不同操作"""
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Missing action parameter"}, ensure_ascii=False))
-        sys.exit(1)
-    
-    action = sys.argv[1]
-    params = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
-    
-    result = None
-    
-    try:
-        if action == 'get_workspace_tasks':
-            result = get_workspace_tasks(params.get('workspaceDir', ''))
-
-        elif action == 'list_workspace_skills':
-            result = list_workspace_skills(params.get('workspaceDir', ''))
-
-        elif action == 'save_workspace_task':
-            result = save_workspace_task(
-                params.get('workspaceDir', ''),
-                params.get('relativePath', ''),
-                params.get('code', ''),
-                params.get('parse', True),
-            )
-
-        elif action == 'delete_workspace_task':
-            result = delete_workspace_task(
-                params.get('workspaceDir', ''),
-                params.get('relativePath', ''),
-            )
-
-        elif action == 'rename_workspace_task':
-            result = rename_workspace_task(
-                params.get('workspaceDir', ''),
-                params.get('relativePath', ''),
-                params.get('oldFunctionName', ''),
-                params.get('newName', ''),
-            )
-        
-        elif action == 'parse_custom_function':
-            result = parse_custom_function(params.get('code', ''))
-
-        elif action == 'run_react_workflow':
-            result = run_react_workflow(params)
-
-        elif action == 'discover_mcp_tools':
-            result = discover_mcp_tools(params)
-        
-        else:
-            result = {"error": f"Unknown action: {action}"}
-    
-    except Exception as e:
-        result = {
-            "error": str(e),
-            "traceback": traceback.format_exc()
+        result = {"error": "Missing action parameter"}
+    else:
+        action = sys.argv[1]
+        params = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+        actions = {
+            "get_workspace_tasks": lambda: get_workspace_tasks(params.get("workspaceDir", "")),
+            "save_workspace_task": lambda: save_workspace_task(
+                params.get("workspaceDir", ""),
+                params.get("relativePath", ""),
+                params.get("code", ""),
+                params.get("parse", True),
+            ),
+            "delete_workspace_task": lambda: delete_workspace_task(
+                params.get("workspaceDir", ""), params.get("relativePath", "")
+            ),
+            "rename_workspace_task": lambda: rename_workspace_task(
+                params.get("workspaceDir", ""),
+                params.get("relativePath", ""),
+                params.get("oldFunctionName", ""),
+                params.get("newName", ""),
+            ),
+            "parse_custom_function": lambda: parse_custom_function(params.get("code", "")),
         }
-    
-    # 确保输出 UTF-8 编码的 JSON，不转义中文
+        try:
+            result = actions[action]() if action in actions else {"error": f"Unknown action: {action}"}
+        except Exception as exc:
+            result = {"error": str(exc), "traceback": traceback.format_exc()}
     print(json.dumps(result, ensure_ascii=False))
-    sys.stdout.flush()  # 确保输出被刷新
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

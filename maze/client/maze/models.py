@@ -1,168 +1,54 @@
-"""
-Data model classes for Maze client
-"""
+from __future__ import annotations
 
-import requests
-from typing import Dict, Any, Optional
+from typing import Optional
 
 
 class TaskOutput:
-    """
-    Task output reference for passing data between tasks
-    
-    Example:
-        task1 = workflow.add_task(func1, inputs={"in": "value"})
-        task2 = workflow.add_task(func2, inputs={"in": task1.outputs["out"]})
-    """
-    
+    """A reference to one output of a task in the same local workflow draft."""
+
     def __init__(self, task_id: str, output_key: str):
         self.task_id = task_id
         self.output_key = output_key
-        
+
     def to_reference_string(self) -> str:
-        """Convert to server-recognizable reference string format"""
         return f"{self.task_id}.output.{self.output_key}"
-    
+
     def __repr__(self) -> str:
         return f"TaskOutput({self.task_id[:8]}...:{self.output_key})"
 
 
 class TaskOutputs:
-    """
-    Task output collection with dictionary-style access
-    
-    Example:
-        outputs = task.outputs
-        output_ref = outputs["output_key"]
-    """
-    
-    def __init__(self, task_id: str, output_keys: list):
+    def __init__(self, task_id: str, output_keys: list[str]):
         self.task_id = task_id
         self._outputs = {key: TaskOutput(task_id, key) for key in output_keys}
-    
+
     def __getitem__(self, key: str) -> TaskOutput:
         if key not in self._outputs:
-            raise KeyError(f"Task does not have output parameter named '{key}'")
+            raise KeyError(f"Task does not have output parameter named {key!r}")
         return self._outputs[key]
-    
+
     def keys(self):
         return self._outputs.keys()
-    
+
     def __repr__(self) -> str:
-        return f"TaskOutputs({list(self._outputs.keys())})"
+        return f"TaskOutputs({list(self._outputs)})"
 
 
 class MaTask:
-    """
-    Maze task object for configuring and managing individual tasks
-    
-    Example:
-        task = workflow.add_task(task_func, inputs={"input_key": "value"})
-        next_task = workflow.add_task(next_func, inputs={"in": task.outputs["out"]})
-    """
-    
-    def __init__(self, 
-                 task_id: str, 
-                 workflow_id: str, 
-                 server_url: str, 
-                 task_name: Optional[str] = None,
-                 output_keys: Optional[list] = None,
-                 request_timeout: Optional[float] = None):
-        """
-        Initialize task object
-        
-        Args:
-            task_id: Task ID
-            workflow_id: Workflow ID this task belongs to
-            server_url: Server address
-            task_name: Task name (optional)
-            output_keys: List of output parameter names (optional)
-            request_timeout: Optional timeout in seconds for HTTP requests
-        """
+    """A task node in a local ``MaWorkflow`` draft."""
+
+    def __init__(
+        self,
+        task_id: str,
+        workflow_id: str,
+        task_name: Optional[str] = None,
+        output_keys: Optional[list[str]] = None,
+    ):
         self.task_id = task_id
         self.workflow_id = workflow_id
-        self.server_url = server_url.rstrip('/')
         self.task_name = task_name
-        self.request_timeout = request_timeout
-        
-        # Create output reference object
-        if output_keys:
-            self.outputs = TaskOutputs(task_id, output_keys)
-        else:
-            self.outputs = None
-        
-    def save(self, 
-             code_str: str,
-             task_input: Dict[str, Any],
-             task_output: Dict[str, Any],
-             resources: Dict[str, Any],
-             max_retries: int | None = None,
-             retry_backoff_seconds: float = 0,
-             retry_on: list[str] | None = None,
-             timeout_seconds: float | None = None) -> None:
-        """
-        Save task configuration (inputs, outputs, code, resource requirements)
-        
-        Args:
-            code_str: Task code string
-            task_input: Task input parameter configuration
-            task_output: Task output parameter configuration
-            resources: Resource requirements configuration
-            
-        Raises:
-            Exception: If save fails
-        """
-        url = f"{self.server_url}/save_task"
-        data = {
-            'workflow_id': self.workflow_id,
-            'task_id': self.task_id,
-            'code_str': code_str,
-            'task_input': task_input,
-            'task_output': task_output,
-            'resources': resources,
-            'max_retries': max_retries,
-            'retry_backoff_seconds': retry_backoff_seconds,
-            'retry_on': retry_on,
-            'timeout_seconds': timeout_seconds,
-        }
-        
-        request_kwargs = (
-            {} if self.request_timeout is None else {"timeout": self.request_timeout}
-        )
-        response = requests.post(url, json=data, **request_kwargs)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("status") != "success":
-                raise Exception(f"Failed to save task: {result.get('message', 'Unknown error')}")
-        else:
-            raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
-    
-    def delete(self) -> None:
-        """
-        Delete task
-        
-        Raises:
-            Exception: If deletion fails
-        """
-        url = f"{self.server_url}/del_task"
-        data = {
-            'workflow_id': self.workflow_id,
-            'task_id': self.task_id,
-        }
-        
-        request_kwargs = (
-            {} if self.request_timeout is None else {"timeout": self.request_timeout}
-        )
-        response = requests.post(url, json=data, **request_kwargs)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("status") != "success":
-                raise Exception(f"Failed to delete task: {result.get('message', 'Unknown error')}")
-        else:
-            raise Exception(f"Request failed, status code: {response.status_code}, response: {response.text}")
-    
+        self.outputs = TaskOutputs(task_id, output_keys) if output_keys else None
+
     def __repr__(self) -> str:
         name = f", name='{self.task_name}'" if self.task_name else ""
         return f"MaTask(id='{self.task_id[:8]}...'{name})"

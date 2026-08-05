@@ -19,6 +19,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_ROOT = PROJECT_ROOT / "system_catalog"
 RESOURCE_WORKFLOW = CATALOG_ROOT / "workflows" / "resource_mix_demo.json"
+GAIA_REASON_WORKFLOW = CATALOG_ROOT / "workflows" / "gaia_reason_demo.json"
 RESOURCE_TASKS = CATALOG_ROOT / "tasks"
 BACKEND_ROOT = PROJECT_ROOT / "web" / "maze_playground" / "backend"
 
@@ -122,6 +123,103 @@ def _load_resource_workflow(api_base, workspace_id):
     )
 
 
+def _load_gaia_reason_workflow(api_base, workspace_id):
+    return _request_json(
+        api_base,
+        "/system-catalog/workflows/load",
+        method="POST",
+        payload={"workspaceId": workspace_id, "sourceId": GAIA_REASON_WORKFLOW.name},
+    )
+
+
+def test_gaia_reason_bundle_uses_scheduler_model_routes():
+    payload = json.loads(GAIA_REASON_WORKFLOW.read_text(encoding="utf-8"))
+    workflow = payload["workflow"]
+    definitions = {
+        item["relativePath"]: item
+        for item in payload["includedTasks"]
+    }
+    expected_task_paths = {
+        "tasks/gaia_reason_prepare.py",
+        "tasks/gaia_reason_answer.py",
+        "tasks/gaia_reason_fuse.py",
+    }
+
+    assert len(workflow["nodes"]) == 4
+    assert len(workflow["edges"]) == 5
+    assert set(definitions) == expected_task_paths
+    for relative_path, definition in definitions.items():
+        task_file = CATALOG_ROOT / relative_path
+        assert definition["code"] == task_file.read_text(encoding="utf-8")
+        assert definition["code"].count("@task(") == 1
+
+    prepare = next(node for node in workflow["nodes"] if node["id"] == "gaia-prepare")
+    model_nodes = [node for node in workflow["nodes"] if node["id"] != "gaia-prepare"]
+    assert prepare["data"]["task_kind"] == "cpu"
+    assert all(node["data"]["task_kind"] == "gpu" for node in model_nodes)
+    assert all(node["data"]["localModel"] == "Qwen2.5-3B-Instruct" for node in model_nodes)
+    assert all(
+        node["data"]["modelAnchor"] == {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192,
+        }
+        for node in model_nodes
+    )
+    model_code = "\n".join(
+        definitions[path]["code"]
+        for path in (
+            "tasks/gaia_reason_answer.py",
+            "tasks/gaia_reason_fuse.py",
+        )
+    )
+    assert "MAZE_MODEL_ENDPOINT" in model_code
+    assert "MAZE_MODEL_NAME" in model_code
+    assert "api_key=\"\"" in model_code
+    assert "Qwen3" not in model_code
+    assert "DeepSeek" not in model_code
+    serialized_workflow = json.dumps(workflow).lower()
+    assert "api_key" not in serialized_workflow
+    assert "expected_answer" not in serialized_workflow
+    assert "gold_answer" not in serialized_workflow
+
+
+def test_system_catalog_loads_gaia_reason_bundle_idempotently(playground_backend):
+    api_base, _ = playground_backend
+    workspace = _create_workspace(api_base, "gaia-system-workflow")
+
+    first = _load_gaia_reason_workflow(api_base, workspace["workspaceId"])
+    assert first["workflow"]["name"] == "GAIA Reason Demo - Qwen2.5-3B"
+    assert len(first["workflow"]["nodes"]) == 4
+    assert len(first["workflow"]["edges"]) == 5
+    assert len(first["importedTaskDefinitions"]["imported"]) == 3
+
+    tasks = _request_json(
+        api_base,
+        "/workspace-tasks",
+        query={"workspaceDir": first["workspaceDir"]},
+    )
+    assert tasks["errors"] == []
+    assert {
+        (task["relativePath"], task["functionName"])
+        for task in tasks["tasks"]
+    } == {
+        ("tasks/gaia_reason_prepare.py", "gaia_prepare_question"),
+        ("tasks/gaia_reason_answer.py", "gaia_model_answer"),
+        ("tasks/gaia_reason_fuse.py", "gaia_fuse_answers"),
+    }
+
+    second = _load_gaia_reason_workflow(api_base, workspace["workspaceId"])
+    assert second["importedTaskDefinitions"]["imported"] == []
+    assert second["importedTaskDefinitions"]["skipped"] == [
+        {"relativePath": "tasks/gaia_reason_prepare.py", "reason": "exists-same"},
+        {"relativePath": "tasks/gaia_reason_answer.py", "reason": "exists-same"},
+        {"relativePath": "tasks/gaia_reason_fuse.py", "reason": "exists-same"},
+    ]
+    assert second["workspaceManifestVersion"] == first["workspaceManifestVersion"]
+
+
 def test_resource_mix_bundle_matches_catalog_tasks_and_uses_cpu_gpu_queues_only():
     payload = json.loads(RESOURCE_WORKFLOW.read_text(encoding="utf-8"))
     workflow = payload["workflow"]
@@ -195,7 +293,14 @@ def test_resource_mix_quality_gate_requires_cuda_for_pass():
 def test_system_catalog_loads_bundle_idempotently_into_fresh_workspace(playground_backend):
     api_base, _ = playground_backend
     catalog = _request_json(api_base, "/system-catalog")["catalog"]
-    assert [item["id"] for item in catalog["workflows"]] == [RESOURCE_WORKFLOW.name]
+    assert [item["id"] for item in catalog["workflows"]] == [
+        GAIA_REASON_WORKFLOW.name,
+        RESOURCE_WORKFLOW.name,
+    ]
+    assert [item["name"] for item in catalog["workflows"]] == [
+        "GAIA Reason Demo - Qwen2.5-3B",
+        "Resource Mix CPU GPU Artifact Demo",
+    ]
     assert all(item["id"].endswith(".py") for item in catalog["tasks"])
     assert all("__pycache__" not in item["id"] for item in catalog["tasks"])
 
