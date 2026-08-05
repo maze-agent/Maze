@@ -16,9 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 from maze.core.path.path import (
     MaPath,
     SchedulerUnavailableError,
-    WorkflowIdempotencyConflictError,
     WorkflowRunConflictError,
-    WorkflowIdempotencyStateError,
     WorkflowInitializationError,
     WorkflowNotFoundError,
     validate_run_workflow_file_context,
@@ -826,7 +824,7 @@ async def run_app(req: Request):
             timeout_seconds=spec.get("timeout_seconds"),
             tags=tags,
             metadata=metadata,
-            **({"run_id": run_config["run_id"]} if "run_id" in run_config else {}),
+            **({"run_id": data["run_id"]} if "run_id" in data else {}),
         )
         return {
             "status": "success",
@@ -947,15 +945,7 @@ async def submit_dag_workflow(req: Request):
                 if "final_output_refs" in spec
                 else {}
             ),
-            **(
-                {
-                    "idempotency_key": run_config.get("idempotency_key"),
-                    "idempotency_fingerprint": run_config.get("idempotency_fingerprint"),
-                }
-                if "idempotency_key" in run_config
-                or "idempotency_fingerprint" in run_config
-                else {}
-            ),
+            **({"run_id": run_config["run_id"]} if "run_id" in run_config else {}),
         )
         response = {
             "status": "success",
@@ -963,19 +953,14 @@ async def submit_dag_workflow(req: Request):
             "run_id": run_id,
             "spec": spec,
         }
-        if run_config.get("idempotency_key") is not None:
-            response["idempotency_key"] = run_config["idempotency_key"]
-            response["idempotency_fingerprint"] = run_config["idempotency_fingerprint"]
         return response
     except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except (WorkflowIdempotencyConflictError, WorkflowRunConflictError) as e:
+    except WorkflowRunConflictError as e:
         raise HTTPException(status_code=409, detail=e.detail())
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=e.detail())
     except WorkflowInitializationError as e:
-        raise HTTPException(status_code=500, detail=e.detail())
-    except WorkflowIdempotencyStateError as e:
         raise HTTPException(status_code=500, detail=e.detail())
     except SchedulerUnavailableError as e:
         raise HTTPException(status_code=503, detail=e.detail())
@@ -1120,12 +1105,12 @@ async def cancel_run(run_id: str, req: Request):
             "run_id": run_id,
             "run_status": snapshot.get("status"),
         }
-        initialization = snapshot.get("idempotency_initialization")
+        dispatch = snapshot.get("dispatch")
         if (
-            isinstance(initialization, dict)
-            and initialization.get("status") == "cleanup_pending"
+            isinstance(dispatch, dict)
+            and dispatch.get("status") == "cleanup_pending"
         ):
-            response["initialization_status"] = "cleanup_pending"
+            response["dispatch_status"] = "cleanup_pending"
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

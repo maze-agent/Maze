@@ -140,7 +140,7 @@ class MaClient:
 |---|---|
 | `add_task(task_func, inputs=None, task_name=None)` | Add a decorated task; `TaskOutput` inputs create dependency edges automatically. |
 | `get_tasks() -> list[dict]` | List tasks in the local draft. |
-| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, idempotency_key=None, idempotency_fingerprint=None) -> str` | Atomically submit the DAG and return the Core `run_id`. |
+| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, run_id=None) -> str` | Atomically submit the DAG and return the Core `run_id`. Reusing a `run_id` replays only an identical submission. |
 
 Use `MaClient.get_run()`, `wait_run()`, `stream_run()`, and `cancel_run()`
 for run state, events, results, and cancellation.

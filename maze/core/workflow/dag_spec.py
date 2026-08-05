@@ -395,8 +395,9 @@ def _normalize_run(run: Any) -> Dict[str, Any]:
             raise DagSpecError("run_id must be a canonical UUID")
         normalized["run_id"] = run_id
     if "idempotency_key" in run or "idempotency_fingerprint" in run:
-        normalized["idempotency_key"] = run.get("idempotency_key")
-        normalized["idempotency_fingerprint"] = run.get("idempotency_fingerprint")
+        raise DagSpecError(
+            "idempotency_key and idempotency_fingerprint were removed; use run_id"
+        )
     return normalized
 
 
@@ -404,8 +405,6 @@ def _stored_run_config(run: Dict[str, Any]) -> Dict[str, Any]:
     stored = copy.deepcopy(run)
     stored.pop("inputs", None)
     stored.pop("run_id", None)
-    stored.pop("idempotency_key", None)
-    stored.pop("idempotency_fingerprint", None)
     return stored
 
 

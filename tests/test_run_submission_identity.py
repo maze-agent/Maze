@@ -24,7 +24,7 @@ def _path(tmp_path):
         })
         return kwargs["run_id"]
 
-    path._start_workflow_with_durable_initialization = MethodType(start, path)
+    path._start_workflow = MethodType(start, path)
     return path, starts
 
 

@@ -35,70 +35,27 @@ def _dynamic_snapshot(run_id: str):
     }
 
 
-def _ambiguous_initialization():
+def _dispatch(status: str):
     return {
         "schema_version": 1,
-        "status": "initializing",
-        "phase": "root_dispatch:task:sending",
-        "started_time": 1.0,
-        "completed_time": None,
-        "failed_time": None,
+        "status": status,
         "root_task_ids": ["task"],
-        "root_dispatch": {"task": "sending"},
         "artifact_status": "none",
         "artifact_owner_id": None,
         "artifact_store_root": None,
-        "cleanup_request_id": None,
-        "error": None,
-        "journal": [
-            {"seq": 1, "event": "reserved", "phase": "artifacts", "timestamp": 1.0},
-            {"seq": 2, "event": "artifacts_ready", "phase": "metrics", "timestamp": 2.0},
-            {"seq": 3, "event": "event_recorded", "phase": "event", "timestamp": 3.0},
+        "cleanup_request_id": (
+            "cleanup-request" if status == "cleanup_pending" else None
+        ),
+        "error": (
             {
-                "seq": 4,
-                "event": "root_sending",
-                "phase": "root_dispatch:task:sending",
-                "timestamp": 4.0,
-                "task_id": "task",
-            },
-        ],
-    }
-
-
-def _cleanup_pending_initialization():
-    root_dispatch = {"task": "pending"}
-    request_id = "cleanup-request"
-    return {
-        "schema_version": 1,
-        "status": "cleanup_pending",
-        "phase": "cleanup",
-        "started_time": 1.0,
-        "completed_time": None,
-        "failed_time": None,
-        "root_task_ids": ["task"],
-        "root_dispatch": root_dispatch,
-        "artifact_status": "none",
-        "artifact_owner_id": None,
-        "artifact_store_root": None,
-        "cleanup_request_id": request_id,
-        "error": {
-            "error_type": "workflow_initialization_failed",
-            "phase": "event",
-            "root_dispatch": root_dispatch,
-            "message": "cleanup required",
-        },
-        "journal": [
-            {"seq": 1, "event": "reserved", "phase": "artifacts", "timestamp": 1.0},
-            {"seq": 2, "event": "artifacts_ready", "phase": "metrics", "timestamp": 2.0},
-            {"seq": 3, "event": "event_recorded", "phase": "event", "timestamp": 3.0},
-            {
-                "seq": 4,
-                "event": "cleanup_requested",
-                "phase": "cleanup",
-                "timestamp": 4.0,
-                "request_id": request_id,
-            },
-        ],
+                "error_type": "workflow_initialization_failed",
+                "message": "cleanup required",
+                "phase": "dispatching",
+                "cause_type": "RuntimeError",
+            }
+            if status == "cleanup_pending"
+            else None
+        ),
     }
 
 
@@ -222,17 +179,14 @@ def test_static_load_events_rejects_duplicate_or_reverse_sequence(
         store.load_events(run_id)
 
 
-def test_static_recovery_defers_ambiguous_initialization_without_mutation(tmp_path):
+def test_static_recovery_defers_ambiguous_dispatch_without_mutation(tmp_path):
     store = StaticRunStore(tmp_path)
     run_id = "static-ambiguous"
     snapshot = {
         **_static_snapshot(run_id),
         "status": "created",
-        "idempotency_initialization": _ambiguous_initialization(),
+        "dispatch": _dispatch("dispatching"),
     }
-    MaPath._validate_idempotency_initialization(
-        snapshot["idempotency_initialization"]
-    )
     store.save_run(snapshot)
     store.append_event(
         run_id,
@@ -246,12 +200,12 @@ def test_static_recovery_defers_ambiguous_initialization_without_mutation(tmp_pa
     events = store.load_events(run_id)
     assert [event["type"] for event in events] == ["workflow_submitted"]
     assert not any(
-        event["type"] in {"interrupt_workflow", "workflow_initialization_failed"}
+        event["type"] in {"interrupt_workflow", "workflow_submission_failed"}
         for event in events
     )
 
 
-def test_static_recovery_defers_cleanup_pending_even_when_all_roots_pending(
+def test_static_recovery_defers_cleanup_pending_dispatch(
     tmp_path,
 ):
     store = StaticRunStore(tmp_path)
@@ -259,11 +213,8 @@ def test_static_recovery_defers_cleanup_pending_even_when_all_roots_pending(
     snapshot = {
         **_static_snapshot(run_id),
         "status": "created",
-        "idempotency_initialization": _cleanup_pending_initialization(),
+        "dispatch": _dispatch("cleanup_pending"),
     }
-    MaPath._validate_idempotency_initialization(
-        snapshot["idempotency_initialization"]
-    )
     store.save_run(snapshot)
 
     assert store.recover_interrupted_runs() == []
@@ -620,14 +571,14 @@ def test_mapath_startup_reconciles_static_and_dynamic_event_logs(
     assert all(json.loads(line)["seq"] for line in dynamic_lines)
 
 
-def test_mapath_startup_keeps_ambiguous_initialization_active(tmp_path, monkeypatch):
+def test_mapath_startup_keeps_ambiguous_dispatch_active(tmp_path, monkeypatch):
     monkeypatch.setenv("MAZE_WORKSPACE_DIR", str(tmp_path))
     store = StaticRunStore(tmp_path)
     run_id = "static-ambiguous-startup"
     store.save_run({
         **_static_snapshot(run_id),
         "status": "created",
-        "idempotency_initialization": _ambiguous_initialization(),
+        "dispatch": _dispatch("dispatching"),
     })
     store.append_event(
         run_id,
@@ -638,7 +589,7 @@ def test_mapath_startup_keeps_ambiguous_initialization_active(tmp_path, monkeypa
     try:
         snapshot = path.static_run_store.load_run(run_id)
         assert snapshot["status"] == "created"
-        assert snapshot["idempotency_initialization"]["status"] == "initializing"
+        assert snapshot["dispatch"]["status"] == "dispatching"
         events = path.static_run_store.load_events(run_id)
         assert [event["type"] for event in events] == ["workflow_submitted"]
     finally:

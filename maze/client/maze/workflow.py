@@ -127,8 +127,6 @@ class MaWorkflow:
         metadata: Optional[Dict[str, Any]],
         inputs: Optional[Dict[str, Any]],
         run_id: Optional[str],
-        idempotency_key: Optional[str],
-        idempotency_fingerprint: Optional[str],
     ) -> Dict[str, Any]:
         if not self._nodes:
             raise ValueError("Workflow has no tasks")
@@ -151,9 +149,6 @@ class MaWorkflow:
             run["inputs"] = copy.deepcopy(inputs)
         if run_id is not None:
             run["run_id"] = run_id
-        if idempotency_key is not None or idempotency_fingerprint is not None:
-            run["idempotency_key"] = idempotency_key
-            run["idempotency_fingerprint"] = idempotency_fingerprint
 
         spec: Dict[str, Any] = {
             "schema": "maze.workflow/v1",
@@ -183,8 +178,6 @@ class MaWorkflow:
         metadata: Optional[Dict[str, Any]] = None,
         inputs: Optional[Dict[str, Any]] = None,
         run_id: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
-        idempotency_fingerprint: Optional[str] = None,
     ) -> str:
         spec = self._build_spec(
             file_context=file_context,
@@ -195,8 +188,6 @@ class MaWorkflow:
             metadata=metadata,
             inputs=inputs,
             run_id=run_id,
-            idempotency_key=idempotency_key,
-            idempotency_fingerprint=idempotency_fingerprint,
         )
         result = self._client.submit_workflow(spec, artifact_mode=artifact_mode)
         self.workflow_id = result["workflow_id"]

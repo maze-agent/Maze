@@ -15,7 +15,7 @@ class _Request:
             {
                 "run_id": "run",
                 "status": "cancelled",
-                "idempotency_initialization": {"status": "ready"},
+                "dispatch": {"status": "active"},
             },
             {
                 "status": "success",
@@ -27,13 +27,13 @@ class _Request:
             {
                 "run_id": "run",
                 "status": "created",
-                "idempotency_initialization": {"status": "cleanup_pending"},
+                "dispatch": {"status": "cleanup_pending"},
             },
             {
                 "status": "success",
                 "run_id": "run",
                 "run_status": "created",
-                "initialization_status": "cleanup_pending",
+                "dispatch_status": "cleanup_pending",
             },
         ),
     ],

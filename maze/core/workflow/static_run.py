@@ -1,7 +1,6 @@
 import copy
 import contextlib
 import json
-import math
 import os
 import shutil
 import tempfile
@@ -143,117 +142,6 @@ def _event_sequence(event: Dict[str, Any]) -> int:
     ):
         raise ValueError("Static event seq must be a positive integer")
     return sequence
-
-
-def _initialization_recovery_requires_scheduler(snapshot: Dict[str, Any]) -> bool:
-    initialization = snapshot.get("idempotency_initialization")
-    if initialization is None:
-        return False
-    if not isinstance(initialization, dict):
-        raise ValueError("Stored workflow initialization state is invalid")
-    if initialization.get("schema_version") != 1:
-        raise ValueError("Stored workflow initialization schema is invalid")
-
-    status = initialization.get("status")
-    if status not in {"initializing", "cleanup_pending", "ready", "failed"}:
-        raise ValueError("Stored workflow initialization status is invalid")
-    root_task_ids = initialization.get("root_task_ids")
-    root_dispatch = initialization.get("root_dispatch")
-    if (
-        not isinstance(root_task_ids, list)
-        or not all(
-            isinstance(task_id, str) and task_id for task_id in root_task_ids
-        )
-        or len(root_task_ids) != len(set(root_task_ids))
-        or not isinstance(root_dispatch, dict)
-        or set(root_dispatch) != set(root_task_ids)
-        or any(
-            state not in {"pending", "sending", "sent"}
-            for state in root_dispatch.values()
-        )
-    ):
-        raise ValueError("Stored workflow root dispatch state is invalid")
-
-    if status not in {"initializing", "cleanup_pending"}:
-        return False
-    return status == "cleanup_pending" or any(
-        state in {"sending", "sent"} for state in root_dispatch.values()
-    )
-
-
-def _durable_initialization_failure_event(
-    snapshot: Dict[str, Any],
-    events: List[Dict[str, Any]],
-) -> Dict[str, Any] | None:
-    failure_events = [
-        event
-        for event in events
-        if event.get("type") == "workflow_initialization_failed"
-    ]
-    if not failure_events:
-        return None
-    run_id = snapshot.get("run_id")
-    if len(failure_events) != 1:
-        raise ValueError(
-            f"Duplicate workflow_initialization_failed event for run {run_id}"
-        )
-    if any(event.get("type") == "interrupt_workflow" for event in events):
-        raise ValueError(
-            f"Conflicting initialization failure and interrupt events for run {run_id}"
-        )
-
-    event = failure_events[0]
-    expected_event_keys = {
-        "type",
-        "seq",
-        "ts",
-        "timestamp",
-        "schema_version",
-        "data",
-    }
-    data = event.get("data")
-    error = data.get("error") if isinstance(data, dict) else None
-    if (
-        set(event) != expected_event_keys
-        or event.get("schema_version") != SCHEMA_VERSION
-        or not isinstance(event.get("timestamp"), str)
-        or not event["timestamp"]
-        or isinstance(event.get("ts"), bool)
-        or not isinstance(event.get("ts"), (int, float))
-        or not math.isfinite(float(event["ts"]))
-        or not isinstance(data, dict)
-        or set(data) != {"run_id", "workflow_id", "error"}
-        or data.get("run_id") != run_id
-        or data.get("workflow_id") != snapshot.get("workflow_id")
-        or not isinstance(error, dict)
-        or set(error)
-        != {
-            "error_type",
-            "message",
-            "phase",
-            "cause_type",
-            "root_dispatch",
-        }
-        or error.get("error_type") != "workflow_initialization_failed"
-        or not isinstance(error.get("message"), str)
-        or not error["message"]
-        or not isinstance(error.get("phase"), str)
-        or not error["phase"]
-        or not isinstance(error.get("cause_type"), str)
-        or not error["cause_type"]
-        or not isinstance(error.get("root_dispatch"), dict)
-    ):
-        raise ValueError(
-            f"Invalid workflow_initialization_failed event for run {run_id}"
-        )
-    if event.get("seq") != max(
-        (int(candidate["seq"]) for candidate in events),
-        default=0,
-    ):
-        raise ValueError(
-            f"Workflow initialization failure is not the final event for run {run_id}"
-        )
-    return event
 
 
 def _duration_seconds(started_time: float | None, finished_time: float | None) -> float | None:
@@ -955,165 +843,6 @@ class StaticRunStore:
         shutil.rmtree(self.run_dir(run_id))
         _fsync_directory(self.runs_dir)
 
-    def _recover_durable_initialization_failure(
-        self,
-        snapshot: Dict[str, Any],
-        failure_event: Dict[str, Any],
-        persisted_events: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        recovered = copy.deepcopy(snapshot)
-        run_id = recovered["run_id"]
-        initialization = recovered.get("idempotency_initialization")
-        if not isinstance(initialization, dict):
-            raise ValueError(
-                f"Initialization failure event has no state for run {run_id}"
-            )
-        _initialization_recovery_requires_scheduler(recovered)
-        if initialization.get("status") not in {
-            "initializing",
-            "cleanup_pending",
-        }:
-            raise ValueError(
-                f"Initialization failure event conflicts with run {run_id} state"
-            )
-
-        error = copy.deepcopy(failure_event["data"]["error"])
-        root_task_ids = initialization.get("root_task_ids")
-        root_dispatch = initialization.get("root_dispatch")
-        if (
-            error.get("root_dispatch") != root_dispatch
-            or set(root_dispatch) != set(root_task_ids)
-        ):
-            raise ValueError(
-                f"Initialization failure event dispatch conflicts for run {run_id}"
-            )
-
-        journal = initialization.get("journal")
-        if not isinstance(journal, list) or not journal:
-            raise ValueError(
-                f"Initialization failure event has no journal for run {run_id}"
-            )
-        previous_timestamp = None
-        for expected_sequence, entry in enumerate(journal, start=1):
-            timestamp = entry.get("timestamp") if isinstance(entry, dict) else None
-            if (
-                not isinstance(entry, dict)
-                or entry.get("seq") != expected_sequence
-                or isinstance(timestamp, bool)
-                or not isinstance(timestamp, (int, float))
-                or not math.isfinite(float(timestamp))
-                or (
-                    previous_timestamp is not None
-                    and float(timestamp) < previous_timestamp
-                )
-                or entry.get("event") in {"cleanup_confirmed", "failed"}
-            ):
-                raise ValueError(
-                    f"Initialization failure event conflicts with journal for run {run_id}"
-                )
-            previous_timestamp = float(timestamp)
-
-        cleanup_request_id = initialization.get("cleanup_request_id")
-        if initialization["status"] == "cleanup_pending":
-            if (
-                not isinstance(cleanup_request_id, str)
-                or not cleanup_request_id
-                or journal[-1].get("event") != "cleanup_requested"
-                or journal[-1].get("request_id") != cleanup_request_id
-                or initialization.get("error") != error
-            ):
-                raise ValueError(
-                    f"Initialization cleanup proof conflicts for run {run_id}"
-                )
-        elif (
-            cleanup_request_id is not None
-            or initialization.get("error") is not None
-            or any(
-                entry.get("event") == "cleanup_requested"
-                for entry in journal
-            )
-        ):
-            raise ValueError(
-                f"Initialization failure event conflicts with active run {run_id}"
-            )
-
-        owner_id = initialization.get("artifact_owner_id")
-        artifact_status = initialization.get("artifact_status")
-        if owner_id is not None:
-            if owner_id != run_id:
-                raise ValueError(
-                    f"Initialization artifact owner conflicts for run {run_id}"
-                )
-            if artifact_status != "revoked":
-                from maze.core.files.artifact_store import LocalCASArtifactStore
-
-                LocalCASArtifactStore(
-                    initialization.get("artifact_store_root")
-                ).revoke_owner_capabilities(owner_id)
-                initialization["artifact_status"] = "revoked"
-        legacy_reservation = recovered.get("artifact_reservation")
-        if isinstance(legacy_reservation, dict):
-            legacy_owner = legacy_reservation.get("owner_id")
-            if legacy_owner is not None and legacy_owner != run_id:
-                raise ValueError(
-                    f"Legacy artifact owner conflicts for run {run_id}"
-                )
-            legacy_reservation["status"] = "revoked"
-
-        failed_time = max(
-            float(failure_event["ts"]),
-            float(previous_timestamp or 0.0),
-        )
-        if initialization["status"] == "cleanup_pending":
-            journal.append({
-                "seq": len(journal) + 1,
-                "event": "cleanup_confirmed",
-                "phase": "cleanup",
-                "timestamp": failed_time,
-                "request_id": cleanup_request_id,
-            })
-        journal.append({
-            "seq": len(journal) + 1,
-            "event": "failed",
-            "phase": error["phase"],
-            "timestamp": failed_time,
-        })
-        initialization["status"] = "failed"
-        initialization["phase"] = error["phase"]
-        initialization["completed_time"] = None
-        initialization["failed_time"] = failed_time
-        initialization["error"] = copy.deepcopy(error)
-
-        recovered["status"] = "failed"
-        recovered["finished_time"] = failed_time
-        recovered["updated_time"] = failed_time
-        recovered["error_summary"] = copy.deepcopy(error)
-        for task in (recovered.get("task_nodes") or {}).values():
-            if task.get("status") not in {"pending", "queued", "running"}:
-                continue
-            task["status"] = "cancelled"
-            task["finished_time"] = failed_time
-            task["pending_reason"] = None
-            task["error"] = copy.deepcopy(error)
-        recovered["task_counts"] = _snapshot_task_counts(recovered)
-        total = recovered["task_counts"]["total"] or 1
-        completed = sum(
-            recovered["task_counts"][status]
-            for status in ("succeeded", "failed", "cancelled", "timed_out")
-        )
-        recovered["progress"] = {
-            "completed": completed,
-            "total": recovered["task_counts"]["total"],
-            "fraction": round(completed / total, 6),
-        }
-        recovered["event_count"] = len(persisted_events)
-        recovered["last_event_seq"] = max(
-            (int(event["seq"]) for event in persisted_events),
-            default=0,
-        )
-        self.save_run(recovered)
-        return recovered
-
     def recover_interrupted_runs(self) -> List[Dict[str, Any]]:
         recovered = []
         for snapshot in self.list_runs():
@@ -1122,19 +851,6 @@ class StaticRunStore:
 
             run_id = snapshot["run_id"]
             persisted_events = self.load_events(run_id)
-            failure_event = _durable_initialization_failure_event(
-                snapshot,
-                persisted_events,
-            )
-            if failure_event is not None:
-                recovered.append(
-                    self._recover_durable_initialization_failure(
-                        snapshot,
-                        failure_event,
-                        persisted_events,
-                    )
-                )
-                continue
             interrupt_events = [
                 event
                 for event in persisted_events
@@ -1144,14 +860,31 @@ class StaticRunStore:
                 raise ValueError(
                     f"Duplicate interrupt_workflow event for run {run_id}"
                 )
-            if _initialization_recovery_requires_scheduler(snapshot):
+            dispatch = snapshot.get("dispatch")
+            if dispatch is not None and (
+                not isinstance(dispatch, dict)
+                or dispatch.get("schema_version") != 1
+                or dispatch.get("status")
+                not in {
+                    "prepared",
+                    "dispatching",
+                    "active",
+                    "cleanup_pending",
+                    "terminal",
+                }
+            ):
+                raise ValueError(f"Invalid workflow dispatch state for run {run_id}")
+            if (
+                isinstance(dispatch, dict)
+                and dispatch.get("status")
+                in {"prepared", "dispatching", "cleanup_pending"}
+            ):
                 if interrupt_events:
                     raise ValueError(
-                        "Ambiguous workflow initialization has a terminal "
+                        "Incomplete workflow dispatch has a terminal "
                         f"interrupt event for run {run_id}"
                     )
-                # A task may have reached the Scheduler. Keep the run, tasks,
-                # artifacts, and log active until workflow_stopped is acked.
+                # Core owns cleanup because a task may already be in Scheduler.
                 continue
 
             artifact_reservation = snapshot.get("artifact_reservation")

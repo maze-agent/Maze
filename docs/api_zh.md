@@ -130,7 +130,7 @@ class MaClient:
 |---|---|
 | `add_task(task_func, inputs=None, task_name=None)` | 添加 `@task` 节点；`TaskOutput` 输入会自动生成依赖边 |
 | `get_tasks() -> list[dict]` | 列出草稿中的任务 |
-| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, idempotency_key=None, idempotency_fingerprint=None) -> str` | 原子提交 DAG 并返回 Core `run_id` |
+| `run(file_context=None, workspace_dir=None, artifact_mode=False, timeout_seconds=None, tags=None, metadata=None, inputs=None, run_id=None) -> str` | 原子提交 DAG 并返回 Core `run_id`；复用 `run_id` 时只接受完全相同的提交 |
 
 执行状态、事件、结果和取消统一使用 `MaClient.get_run()`、`wait_run()`、
 `stream_run()` 和 `cancel_run()`。

@@ -6,10 +6,8 @@ import uuid
 import httpx
 import json
 import copy
-import contextlib
 import logging
 import queue
-import re
 import socket
 import threading
 import ray
@@ -63,16 +61,9 @@ SCHEDULER_FATAL_TERMINATE_TIMEOUT_SECONDS = 5.0
 SCHEDULER_FATAL_KILL_TIMEOUT_SECONDS = 5.0
 SCHEDULER_PROCESS_EXIT_POLL_SECONDS = 0.05
 SCHEDULER_START_ABORT_CLEANUP_ATTEMPTS = 3
-RUN_WORKFLOW_IDEMPOTENCY_KEY_MAX_BYTES = 256
-RUN_WORKFLOW_IDEMPOTENCY_FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
-RUN_WORKFLOW_IDEMPOTENCY_UNSET = object()
-RUN_WORKFLOW_INITIALIZATION_FIELD = "idempotency_initialization"
-RUN_WORKFLOW_PAYLOAD_FINGERPRINT_FIELD = "idempotency_payload_fingerprint"
-RUN_WORKFLOW_CLEANUP_RETRY_INITIAL_SECONDS = 0.25
-RUN_WORKFLOW_CLEANUP_RETRY_MAX_SECONDS = 5.0
-_RUN_WORKFLOW_STORE_LOCKS_GUARD = threading.Lock()
-_RUN_WORKFLOW_STORE_LOCKS: Dict[str, threading.RLock] = {}
-_RUN_WORKFLOW_STORE_LOCK_LOCAL = threading.local()
+RUN_WORKFLOW_DISPATCH_FIELD = "dispatch"
+RUN_WORKFLOW_CLEANUP_RETRY_SECONDS = 0.25
+RUN_WORKFLOW_CLEANUP_MAX_ATTEMPTS = 5
 
 
 def _global_metrics_static_status(status: Any) -> str:
@@ -112,36 +103,6 @@ class WorkflowNotFoundError(LookupError):
             "code": self.error_code,
             "message": str(self),
             "workflow_id": self.workflow_id,
-        }
-
-
-class WorkflowIdempotencyConflictError(ValueError):
-    error_code = "workflow_idempotency_conflict"
-
-    def __init__(
-        self,
-        idempotency_key: str,
-        *,
-        existing_run_id: str,
-        existing_workflow_id: str,
-        existing_fingerprint: str | None,
-    ):
-        super().__init__(
-            "Idempotency key is already bound to a different workflow submission"
-        )
-        self.idempotency_key = idempotency_key
-        self.existing_run_id = existing_run_id
-        self.existing_workflow_id = existing_workflow_id
-        self.existing_fingerprint = existing_fingerprint
-
-    def detail(self) -> Dict[str, Any]:
-        return {
-            "code": self.error_code,
-            "message": str(self),
-            "idempotency_key": self.idempotency_key,
-            "existing_run_id": self.existing_run_id,
-            "existing_workflow_id": self.existing_workflow_id,
-            "existing_idempotency_fingerprint": self.existing_fingerprint,
         }
 
 
@@ -186,61 +147,6 @@ class WorkflowInitializationError(RuntimeError):
             "workflow_id": self.workflow_id,
             "phase": self.phase,
         }
-
-
-class WorkflowIdempotencyStateError(RuntimeError):
-    error_code = "workflow_idempotency_state_invalid"
-
-    def __init__(self, message: str):
-        super().__init__(message)
-
-    def detail(self) -> Dict[str, Any]:
-        return {
-            "code": self.error_code,
-            "message": str(self),
-        }
-
-
-def _validate_run_workflow_idempotency(
-    idempotency_key: Any,
-    idempotency_fingerprint: Any,
-) -> tuple[str | None, str | None]:
-    if (
-        idempotency_key is RUN_WORKFLOW_IDEMPOTENCY_UNSET
-        and idempotency_fingerprint is RUN_WORKFLOW_IDEMPOTENCY_UNSET
-    ):
-        return None, None
-    if (
-        idempotency_key is RUN_WORKFLOW_IDEMPOTENCY_UNSET
-        or idempotency_fingerprint is RUN_WORKFLOW_IDEMPOTENCY_UNSET
-        or idempotency_key is None
-        or idempotency_fingerprint is None
-    ):
-        raise ValueError(
-            "idempotency_key and idempotency_fingerprint must be provided together"
-        )
-    if not isinstance(idempotency_key, str):
-        raise TypeError("idempotency_key must be a string")
-    if not idempotency_key or idempotency_key != idempotency_key.strip():
-        raise ValueError(
-            "idempotency_key must be a non-empty string without surrounding whitespace"
-        )
-    if any(not character.isprintable() for character in idempotency_key):
-        raise ValueError("idempotency_key must not contain control characters")
-    if len(idempotency_key.encode("utf-8")) > RUN_WORKFLOW_IDEMPOTENCY_KEY_MAX_BYTES:
-        raise ValueError(
-            "idempotency_key must be at most "
-            f"{RUN_WORKFLOW_IDEMPOTENCY_KEY_MAX_BYTES} UTF-8 bytes"
-        )
-    if not isinstance(idempotency_fingerprint, str):
-        raise TypeError("idempotency_fingerprint must be a string")
-    if RUN_WORKFLOW_IDEMPOTENCY_FINGERPRINT_PATTERN.fullmatch(
-        idempotency_fingerprint
-    ) is None:
-        raise ValueError(
-            "idempotency_fingerprint must be exactly 64 lowercase hexadecimal characters"
-        )
-    return idempotency_key, idempotency_fingerprint
 
 
 def validate_run_workflow_file_context(
@@ -468,7 +374,7 @@ def _bind_workflow_run_inputs(
 class MaPath:
     def __init__(self):
         self.lock = lock = asyncio.Lock()
-        self._run_workflow_idempotency_index: Dict[str, Dict[str, str]] = {}
+        self._workflow_submission_lock = threading.RLock()
 
         self.workflows: Dict[str, Workflow] = {}
         self.submit_workflows: Dict[str, Workflow] = {}
@@ -495,17 +401,14 @@ class MaPath:
         self.cluster_queue_requests: Dict[str, asyncio.Queue] = {}
         self.worker_registration_requests: Dict[str, asyncio.Queue] = {}
         self.cluster_control_requests: Dict[str, asyncio.Queue] = {}
-        self.idempotency_cleanup_requests: Dict[str, str] = {}
-        self.idempotency_cleanup_retries: Dict[str, Dict[str, Any]] = {}
+        self.workflow_cleanup_requests: Dict[str, str] = {}
+        self.workflow_cleanup_retries: Dict[str, Dict[str, Any]] = {}
         self._scheduler_failure_handled: tuple[int | None, int | None] | None = None
 
         self.global_metrics = GlobalMetrics()
         self.resource_history = ResourceHistoryStore()
         self.runtime_estimator = RuntimeEstimator()
         for snapshot in self.static_run_store.list_runs():
-            initialization = snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-            if initialization is not None:
-                self._validate_idempotency_initialization(initialization)
             run_id = snapshot.get("run_id")
             self.global_metrics.on_run_submitted(run_id)
             metrics_status = _global_metrics_static_status(snapshot.get("status"))
@@ -1371,8 +1274,6 @@ class MaPath:
         final_output_refs:Any=FINAL_OUTPUT_REFS_UNSET,
         inputs:Dict[str,Any]|None=None,
         run_id:Any=None,
-        idempotency_key:Any=RUN_WORKFLOW_IDEMPOTENCY_UNSET,
-        idempotency_fingerprint:Any=RUN_WORKFLOW_IDEMPOTENCY_UNSET,
     ):
         """
         Start a workflow.
@@ -1380,54 +1281,8 @@ class MaPath:
         if not isinstance(workflow_id, str) or not workflow_id:
             raise ValueError("workflow_id must be a non-empty string")
         validate_run_workflow_file_context(file_context)
-        run_id = _validate_run_workflow_run_id(run_id)
-        if run_id is not None:
-            submission_digest = _run_workflow_payload_fingerprint(
-                workflow_id,
-                file_context=file_context,
-                timeout_seconds=timeout_seconds,
-                tags=tags,
-                metadata=metadata,
-                final_output_refs=final_output_refs,
-                inputs=inputs,
-            )
-            with self._run_workflow_idempotency_guard():
-                run_path = self.static_run_store.run_json_path(run_id)
-                if run_path.exists():
-                    existing = self.static_run_store.load_run(run_id)
-                    if existing.get("submission_digest") != submission_digest:
-                        raise WorkflowRunConflictError(
-                            run_id,
-                            existing.get("workflow_id"),
-                        )
-                    return run_id
-                return self._start_workflow_with_durable_initialization(
-                    workflow_id,
-                    run_id=run_id,
-                    submission_digest=submission_digest,
-                    file_context=file_context,
-                    timeout_seconds=timeout_seconds,
-                    tags=tags,
-                    metadata=metadata,
-                    final_output_refs=final_output_refs,
-                    inputs=inputs,
-                )
-        idempotency_key, idempotency_fingerprint = _validate_run_workflow_idempotency(
-            idempotency_key,
-            idempotency_fingerprint,
-        )
-        if idempotency_key is None:
-            return self._run_workflow_without_idempotency(
-                workflow_id,
-                file_context=file_context,
-                timeout_seconds=timeout_seconds,
-                tags=tags,
-                metadata=metadata,
-                final_output_refs=final_output_refs,
-                inputs=inputs,
-            )
-
-        payload_fingerprint = _run_workflow_payload_fingerprint(
+        run_id = _validate_run_workflow_run_id(run_id) or str(uuid.uuid4())
+        submission_digest = _run_workflow_payload_fingerprint(
             workflow_id,
             file_context=file_context,
             timeout_seconds=timeout_seconds,
@@ -1436,21 +1291,25 @@ class MaPath:
             final_output_refs=final_output_refs,
             inputs=inputs,
         )
-
-        with self._run_workflow_idempotency_guard():
-            existing = self._find_idempotent_workflow_run(
-                idempotency_key,
-                idempotency_fingerprint,
-                payload_fingerprint,
+        submission_lock = getattr(self, "_workflow_submission_lock", None)
+        if submission_lock is None:
+            submission_lock = threading.RLock()
+            self._workflow_submission_lock = submission_lock
+        with submission_lock:
+            run_json_path = getattr(self.static_run_store, "run_json_path", None)
+            run_path = run_json_path(run_id) if run_json_path is not None else None
+            if run_path is not None and run_path.exists():
+                existing = self.static_run_store.load_run(run_id)
+                if existing.get("submission_digest") != submission_digest:
+                    raise WorkflowRunConflictError(
+                        run_id,
+                        existing.get("workflow_id"),
+                    )
+                return run_id
+            return self._start_workflow(
                 workflow_id,
-            )
-            if existing is not None:
-                return self._resolve_idempotent_workflow_replay(existing)
-            return self._start_idempotent_workflow(
-                workflow_id,
-                idempotency_key=idempotency_key,
-                idempotency_fingerprint=idempotency_fingerprint,
-                payload_fingerprint=payload_fingerprint,
+                run_id=run_id,
+                submission_digest=submission_digest,
                 file_context=file_context,
                 timeout_seconds=timeout_seconds,
                 tags=tags,
@@ -1459,7 +1318,7 @@ class MaPath:
                 inputs=inputs,
             )
 
-    def _run_workflow_without_idempotency(
+    def _start_workflow(
         self,
         workflow_id: str,
         *,
@@ -1469,65 +1328,13 @@ class MaPath:
         metadata: Dict[str, Any] | None,
         final_output_refs: Any,
         inputs: Dict[str, Any] | None,
-    ) -> str:
-        return self._start_workflow_with_durable_initialization(
-            workflow_id,
-            file_context=file_context,
-            timeout_seconds=timeout_seconds,
-            tags=tags,
-            metadata=metadata,
-            final_output_refs=final_output_refs,
-            inputs=inputs,
-        )
-
-    def _start_idempotent_workflow(
-        self,
-        workflow_id: str,
-        *,
-        idempotency_key: str,
-        idempotency_fingerprint: str,
-        payload_fingerprint: str,
-        file_context: Dict[str, Any] | None,
-        timeout_seconds: float | None,
-        tags: List[str] | None,
-        metadata: Dict[str, Any] | None,
-        final_output_refs: Any,
-        inputs: Dict[str, Any] | None,
-    ) -> str:
-        return self._start_workflow_with_durable_initialization(
-            workflow_id,
-            idempotency_key=idempotency_key,
-            idempotency_fingerprint=idempotency_fingerprint,
-            payload_fingerprint=payload_fingerprint,
-            file_context=file_context,
-            timeout_seconds=timeout_seconds,
-            tags=tags,
-            metadata=metadata,
-            final_output_refs=final_output_refs,
-            inputs=inputs,
-        )
-
-    def _start_workflow_with_durable_initialization(
-        self,
-        workflow_id: str,
-        *,
-        file_context: Dict[str, Any] | None,
-        timeout_seconds: float | None,
-        tags: List[str] | None,
-        metadata: Dict[str, Any] | None,
-        final_output_refs: Any,
-        inputs: Dict[str, Any] | None,
-        run_id: str | None = None,
-        submission_digest: str | None = None,
-        idempotency_key: str | None = None,
-        idempotency_fingerprint: str | None = None,
-        payload_fingerprint: str | None = None,
+        run_id: str,
+        submission_digest: str,
     ) -> str:
         validate_run_workflow_file_context(file_context)
         self._require_scheduler_available()
         submit_workflow = self._workflow_for_submission(workflow_id)
         run_inputs = _bind_workflow_run_inputs(submit_workflow, inputs)
-        submit_id = run_id or str(uuid.uuid4())
         artifact_store_context = (file_context or {}).get("artifact_store") or {}
         artifact_enabled = bool(
             file_context
@@ -1549,7 +1356,7 @@ class MaPath:
         submit_workflow.prepare_for_strategy(self.strategy)
         submit_workflow.graph.graph["submission_time"] = time.time()
         static_run = StaticRun(
-            submit_id,
+            run_id,
             workflow_id,
             submit_workflow,
             timeout_seconds=timeout_seconds,
@@ -1559,75 +1366,35 @@ class MaPath:
             run_inputs=run_inputs,
         )
         static_run.submitted_time = submit_workflow.graph.graph["submission_time"]
-        if submission_digest is not None:
-            static_run._submission_digest = submission_digest
+        static_run._submission_digest = submission_digest
         root_task_ids = [task.task_id for task in submit_workflow.get_start_task()]
-
-        if idempotency_key is not None:
-            static_run._idempotency_key = idempotency_key
-            static_run._idempotency_fingerprint = idempotency_fingerprint
-            static_run._idempotency_payload_fingerprint = payload_fingerprint
-        elif private_artifacts:
-            # Preserve the legacy non-keyed crash-recovery marker while the
-            # common initialization journal owns the authoritative protocol.
-            static_run._artifact_reservation = {
-                "schema_version": 1,
-                "owner_id": submit_id,
-                "artifact_store_root": artifact_store_root,
-                "status": "pending",
-            }
-        initialization_started = time.time()
-        static_run._idempotency_initialization = {
+        static_run._dispatch = {
             "schema_version": 1,
-            "status": "initializing",
-            "phase": "artifacts",
-            "started_time": initialization_started,
-            "completed_time": None,
-            "failed_time": None,
+            "status": "prepared",
             "root_task_ids": root_task_ids,
-            "root_dispatch": {
-                task_id: "pending" for task_id in root_task_ids
-            },
             "artifact_status": "pending" if artifact_enabled else "none",
-            "artifact_owner_id": submit_id if private_artifacts else None,
+            "artifact_owner_id": run_id if private_artifacts else None,
             "artifact_store_root": artifact_store_root,
             "cleanup_request_id": None,
             "error": None,
-            "journal": [],
         }
-        self._append_idempotency_initialization_journal(
-            static_run._idempotency_initialization,
-            "reserved",
-            phase="artifacts",
-            timestamp=initialization_started,
-        )
-        self.submit_workflows[submit_id] = submit_workflow
-        self.async_que[submit_id] = asyncio.Queue()
-        self.static_runs[submit_id] = static_run
+        self.submit_workflows[run_id] = submit_workflow
+        self.async_que[run_id] = asyncio.Queue()
+        self.static_runs[run_id] = static_run
         try:
-            self._persist_static_run(submit_id)
+            self._persist_static_run(run_id)
         except Exception:
-            self.static_runs.pop(submit_id, None)
-            self.submit_workflows.pop(submit_id, None)
-            self.async_que.pop(submit_id, None)
+            self.static_runs.pop(run_id, None)
+            self.submit_workflows.pop(run_id, None)
+            self.async_que.pop(run_id, None)
             raise
 
-        if idempotency_key is not None:
-            assert idempotency_fingerprint is not None
-            assert payload_fingerprint is not None
-            self._remember_idempotent_workflow_run(
-                idempotency_key,
-                idempotency_fingerprint,
-                payload_fingerprint,
-                workflow_id,
-                submit_id,
-            )
         try:
             prepared_file_context = (
                 self._prepare_initial_artifacts(
                     file_context,
-                    submit_id,
-                    capability_owner_id=submit_id,
+                    run_id,
+                    capability_owner_id=run_id,
                 )
                 if file_context
                 else None
@@ -1641,7 +1408,7 @@ class MaPath:
                 data = self._task_run_payload(
                     submit_workflow,
                     task,
-                    submit_id,
+                    run_id,
                     prepared_file_context,
                 )
                 data["priority"] = (
@@ -1653,82 +1420,38 @@ class MaPath:
                     (task.task_id, {"type": "run_task", "data": data})
                 )
             if [task_id for task_id, _ in root_messages] != root_task_ids:
-                raise RuntimeError("Workflow root tasks changed during initialization")
+                raise RuntimeError("Workflow root tasks changed during submission")
 
-            initialization = static_run._idempotency_initialization
-            initialization["artifact_status"] = (
+            dispatch = static_run._dispatch
+            dispatch["artifact_status"] = (
                 "ready" if artifact_enabled else "none"
             )
-            legacy_reservation = getattr(
-                static_run,
-                "_artifact_reservation",
-                None,
-            )
-            if legacy_reservation is not None:
-                legacy_reservation["status"] = "ready"
-            initialization["phase"] = "metrics"
-            self._append_idempotency_initialization_journal(
-                initialization,
-                "artifacts_ready",
-                phase="metrics",
-            )
-            self._persist_static_run(submit_id)
+            self._persist_static_run(run_id)
 
-            static_run._idempotency_metrics_started = True
-            self.global_metrics.on_run_submitted(submit_id)
+            static_run._metrics_started = True
+            self.global_metrics.on_run_submitted(run_id)
 
-            static_run._idempotency_initialization["phase"] = "event"
-            self._record_static_event(submit_id, {
+            self._record_static_event(run_id, {
                 "type": "start_workflow",
                 "data": {
-                    "run_id": submit_id,
+                    "run_id": run_id,
                     "workflow_id": workflow_id,
                     "run_type": "static",
                     "total_task_num": submit_workflow.get_total_task_num(),
                 },
             }, persist_run=False)
-            self._append_idempotency_initialization_journal(
-                static_run._idempotency_initialization,
-                "event_recorded",
-                phase="event",
-            )
-            self._persist_static_run(submit_id)
+            # ponytail: one conservative boundary replaces per-root dispatch journals.
+            dispatch["status"] = "dispatching"
+            self._persist_static_run(run_id)
 
-            for task_id, message in root_messages:
-                initialization = static_run._idempotency_initialization
-                initialization["phase"] = f"root_dispatch:{task_id}:sending"
-                initialization["root_dispatch"][task_id] = "sending"
-                self._append_idempotency_initialization_journal(
-                    initialization,
-                    "root_sending",
-                    phase=initialization["phase"],
-                    task_id=task_id,
-                )
-                self._persist_static_run(submit_id)
+            for _, message in root_messages:
                 self._send_scheduler_message(message)
-                initialization["phase"] = f"root_dispatch:{task_id}:confirming"
-                initialization["root_dispatch"][task_id] = "sent"
-                self._append_idempotency_initialization_journal(
-                    initialization,
-                    "root_sent",
-                    phase=initialization["phase"],
-                    task_id=task_id,
-                )
-                self._persist_static_run(submit_id)
 
-            initialization = static_run._idempotency_initialization
-            initialization["status"] = "ready"
-            initialization["phase"] = "ready"
-            initialization["completed_time"] = time.time()
-            self._append_idempotency_initialization_journal(
-                initialization,
-                "ready",
-                phase="ready",
-            )
-            self._persist_static_run(submit_id)
-            return submit_id
+            dispatch["status"] = "active"
+            self._persist_static_run(run_id)
+            return run_id
         except Exception as exc:
-            raise self._fail_idempotent_workflow_initialization(
+            raise self._fail_workflow_dispatch(
                 static_run,
                 exc,
             ) from exc
@@ -1741,832 +1464,64 @@ class MaPath:
         return copy.deepcopy(workflow)
 
     @staticmethod
-    def _append_idempotency_initialization_journal(
-        initialization: Dict[str, Any],
-        event: str,
-        *,
-        phase: str,
-        task_id: str | None = None,
-        request_id: str | None = None,
-        timestamp: float | None = None,
-    ) -> None:
-        journal = initialization["journal"]
-        entry = {
-            "seq": len(journal) + 1,
-            "event": event,
-            "phase": phase,
-            "timestamp": time.time() if timestamp is None else timestamp,
-        }
-        if task_id is not None:
-            entry["task_id"] = task_id
-        if request_id is not None:
-            entry["request_id"] = request_id
-        journal.append(entry)
-
-    @staticmethod
-    def _run_workflow_store_lock_key(store) -> str:
-        runs_dir = getattr(store, "runs_dir", None)
-        if runs_dir is None:
-            return f"store-object:{id(store)}"
-        return str(Path(runs_dir).expanduser().resolve())
-
-    def _get_run_workflow_idempotency_lock(self):
-        lock_key = self._run_workflow_store_lock_key(self.static_run_store)
-        with _RUN_WORKFLOW_STORE_LOCKS_GUARD:
-            lock = _RUN_WORKFLOW_STORE_LOCKS.get(lock_key)
-            if lock is None:
-                lock = threading.RLock()
-                _RUN_WORKFLOW_STORE_LOCKS[lock_key] = lock
-        if not hasattr(self, "_run_workflow_idempotency_index"):
-            self._run_workflow_idempotency_index = {}
-        return lock
-
-    @contextlib.contextmanager
-    def _run_workflow_idempotency_guard(self):
-        lock_key = self._run_workflow_store_lock_key(self.static_run_store)
-        thread_lock = self._get_run_workflow_idempotency_lock()
-        with thread_lock:
-            depths = getattr(_RUN_WORKFLOW_STORE_LOCK_LOCAL, "depths", None)
-            if depths is None:
-                depths = {}
-                _RUN_WORKFLOW_STORE_LOCK_LOCAL.depths = depths
-            if depths.get(lock_key, 0):
-                depths[lock_key] += 1
-                try:
-                    yield
-                finally:
-                    depths[lock_key] -= 1
-                return
-
-            runs_dir = getattr(self.static_run_store, "runs_dir", None)
-            if runs_dir is None:
-                depths[lock_key] = 1
-                try:
-                    yield
-                finally:
-                    depths.pop(lock_key, None)
-                return
-            claim_guard = getattr(self.static_run_store, "claim_guard", None)
-            if claim_guard is None:
-                depths[lock_key] = 1
-                try:
-                    yield
-                finally:
-                    depths.pop(lock_key, None)
-                return
-            with claim_guard():
-                depths[lock_key] = 1
-                try:
-                    yield
-                finally:
-                    depths.pop(lock_key, None)
-
-    @staticmethod
-    def _idempotency_record_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any] | None:
-        has_key = "idempotency_key" in snapshot
-        has_fingerprint = "idempotency_fingerprint" in snapshot
-        has_payload_fingerprint = RUN_WORKFLOW_PAYLOAD_FINGERPRINT_FIELD in snapshot
-        has_initialization = RUN_WORKFLOW_INITIALIZATION_FIELD in snapshot
-        if not has_key:
-            if has_fingerprint or has_payload_fingerprint:
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow run has a partial idempotency identity"
-                )
-            if has_initialization:
-                initialization = copy.deepcopy(
-                    snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-                )
-                MaPath._validate_idempotency_initialization(initialization)
-                if (
-                    initialization["status"] == "failed"
-                    and snapshot.get("status") != "failed"
-                ):
-                    raise WorkflowIdempotencyStateError(
-                        "Stored failed workflow initialization has a non-failed run status"
-                    )
-            return None
-        if not has_fingerprint:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow run has a partial idempotency identity"
-            )
-
-        key = snapshot.get("idempotency_key")
-        fingerprint = snapshot.get("idempotency_fingerprint")
-        try:
-            _validate_run_workflow_idempotency(key, fingerprint)
-        except (TypeError, ValueError) as exc:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow run has an invalid idempotency identity"
-            ) from exc
-        payload_fingerprint = snapshot.get(RUN_WORKFLOW_PAYLOAD_FINGERPRINT_FIELD)
-        if has_initialization and not has_payload_fingerprint:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow run has no server payload fingerprint"
-            )
-        if has_payload_fingerprint and (
-            not isinstance(payload_fingerprint, str)
-            or RUN_WORKFLOW_IDEMPOTENCY_FINGERPRINT_PATTERN.fullmatch(
-                payload_fingerprint
-            ) is None
-        ):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow run has an invalid server payload fingerprint"
-            )
-        run_id = snapshot.get("run_id")
-        workflow_id = snapshot.get("workflow_id")
-        if not isinstance(run_id, str) or not run_id:
-            raise WorkflowIdempotencyStateError(
-                "Stored idempotency claim has an invalid run_id"
-            )
-        if not isinstance(workflow_id, str) or not workflow_id:
-            raise WorkflowIdempotencyStateError(
-                "Stored idempotency claim has an invalid workflow_id"
-            )
-
-        initialization = copy.deepcopy(
-            snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-        )
-        if has_initialization:
-            MaPath._validate_idempotency_initialization(initialization)
-            if (
-                initialization["status"] == "failed"
-                and snapshot.get("status") != "failed"
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "Stored failed workflow initialization has a non-failed run status"
-                )
-        return {
-            "idempotency_key": key,
-            "idempotency_fingerprint": fingerprint,
-            "idempotency_payload_fingerprint": payload_fingerprint,
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-            "run_status": snapshot.get("status"),
-            "initialization": initialization,
-        }
-
-    @staticmethod
-    def _validate_idempotency_initialization(initialization: Any) -> None:
-        if not isinstance(initialization, dict):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization state is invalid"
-            )
-        if initialization.get("schema_version") != 1:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization schema is invalid"
-            )
-        status = initialization.get("status")
-        if status not in {
-            "initializing",
-            "cleanup_pending",
-            "ready",
-            "failed",
-        }:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization status is invalid"
-            )
-        phase = initialization.get("phase")
-        if not isinstance(phase, str) or not phase:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization phase is invalid"
-            )
-        root_task_ids = initialization.get("root_task_ids")
-        root_dispatch = initialization.get("root_dispatch")
-        if (
-            not isinstance(root_task_ids, list)
-            or not all(isinstance(task_id, str) and task_id for task_id in root_task_ids)
-            or len(root_task_ids) != len(set(root_task_ids))
-            or not isinstance(root_dispatch, dict)
-            or set(root_dispatch) != set(root_task_ids)
-            or any(
-                state not in {"pending", "sending", "sent"}
-                for state in root_dispatch.values()
-            )
-        ):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow root dispatch state is invalid"
-            )
-        artifact_status = initialization.get("artifact_status")
-        artifact_owner_id = initialization.get("artifact_owner_id")
-        artifact_store_root = initialization.get("artifact_store_root")
-        cleanup_request_id = initialization.get("cleanup_request_id")
-        if artifact_status not in {"none", "pending", "ready", "revoked"}:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow artifact reservation state is invalid"
-            )
-        if (artifact_owner_id is None) != (artifact_store_root is None) or (
-            artifact_owner_id is not None
-            and (
-                not isinstance(artifact_owner_id, str)
-                or not artifact_owner_id
-                or not isinstance(artifact_store_root, str)
-                or not artifact_store_root
-            )
-        ):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow artifact reservation owner is invalid"
-            )
-        if cleanup_request_id is not None and (
-            not isinstance(cleanup_request_id, str) or not cleanup_request_id
-        ):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow cleanup request is invalid"
-            )
-
-        def valid_timestamp(value: Any) -> bool:
-            return (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-            )
-
-        started_time = initialization.get("started_time")
-        completed_time = initialization.get("completed_time")
-        failed_time = initialization.get("failed_time")
-        error = initialization.get("error")
-        if not valid_timestamp(started_time):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization time is invalid"
-            )
-        if status == "ready":
-            times_are_valid = (
-                valid_timestamp(completed_time)
-                and failed_time is None
-                and error is None
-                and cleanup_request_id is None
-            )
-        elif status == "failed":
-            times_are_valid = (
-                completed_time is None
-                and valid_timestamp(failed_time)
-                and isinstance(error, dict)
-                and error.get("error_type") == "workflow_initialization_failed"
-                and error.get("phase") == phase
-                and error.get("root_dispatch") == root_dispatch
-            )
-        elif status == "cleanup_pending":
-            times_are_valid = (
-                completed_time is None
-                and failed_time is None
-                and isinstance(error, dict)
-                and error.get("error_type") == "workflow_initialization_failed"
-                and error.get("root_dispatch") == root_dispatch
-                and isinstance(cleanup_request_id, str)
-                and bool(cleanup_request_id)
-            )
-        else:
-            times_are_valid = (
-                completed_time is None
-                and failed_time is None
-                and error is None
-                and cleanup_request_id is None
-            )
-        if not times_are_valid:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization terminal state is invalid"
-            )
-
-        journal = initialization.get("journal")
-        if not isinstance(journal, list) or not journal:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency initialization journal is invalid"
-            )
-        allowed_events = {
-            "reserved",
-            "artifacts_ready",
-            "event_recorded",
-            "root_sending",
-            "root_sent",
-            "cleanup_requested",
-            "cleanup_confirmed",
-            "ready",
-            "failed",
-        }
-        previous_timestamp = None
-        for expected_seq, entry in enumerate(journal, start=1):
-            if not isinstance(entry, dict):
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency journal entry is invalid"
-                )
-            event = entry.get("event")
-            expected_keys = {"seq", "event", "phase", "timestamp"}
-            if event in {"root_sending", "root_sent"}:
-                expected_keys.add("task_id")
-            if event in {"cleanup_requested", "cleanup_confirmed"}:
-                expected_keys.add("request_id")
-            if (
-                set(entry) != expected_keys
-                or entry.get("seq") != expected_seq
-                or event not in allowed_events
-                or not isinstance(entry.get("phase"), str)
-                or not entry["phase"]
-                or not valid_timestamp(entry.get("timestamp"))
-                or (
-                    previous_timestamp is not None
-                    and entry["timestamp"] < previous_timestamp
-                )
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency journal sequence is invalid"
-                )
-            previous_timestamp = entry["timestamp"]
-
-        has_failed_entry = journal[-1]["event"] == "failed"
-        if has_failed_entry != (status == "failed"):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency journal terminal event is invalid"
-            )
-        transitions = journal[:-1] if has_failed_entry else list(journal)
-        cleanup_entries = []
-        if transitions and transitions[-1]["event"] == "cleanup_confirmed":
-            cleanup_entries.insert(0, transitions.pop())
-        if transitions and transitions[-1]["event"] == "cleanup_requested":
-            cleanup_entries.insert(0, transitions.pop())
-        if cleanup_entries:
-            if (
-                len(cleanup_entries) not in {1, 2}
-                or cleanup_entries[0]["event"] != "cleanup_requested"
-                or any(entry["phase"] != "cleanup" for entry in cleanup_entries)
-                or any(
-                    entry["request_id"] != cleanup_request_id
-                    for entry in cleanup_entries
-                )
-                or (status == "cleanup_pending" and len(cleanup_entries) != 1)
-                or (status == "failed" and len(cleanup_entries) != 2)
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow cleanup journal is invalid"
-                )
-        elif status == "cleanup_pending" or (
-            status == "failed" and cleanup_request_id is not None
-        ):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow cleanup journal is incomplete"
-            )
-        expected_transitions = [
-            ("reserved", "artifacts", None),
-            ("artifacts_ready", "metrics", None),
-            ("event_recorded", "event", None),
-        ]
-        for task_id in root_task_ids:
-            expected_transitions.extend([
-                (
-                    "root_sending",
-                    f"root_dispatch:{task_id}:sending",
-                    task_id,
-                ),
-                (
-                    "root_sent",
-                    f"root_dispatch:{task_id}:confirming",
-                    task_id,
-                ),
-            ])
-        expected_transitions.append(("ready", "ready", None))
-        if not transitions or len(transitions) > len(expected_transitions):
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency journal transitions are invalid"
-            )
-        for entry, (event, event_phase, task_id) in zip(
-            transitions,
-            expected_transitions,
-        ):
-            if (
-                entry["event"] != event
-                or entry["phase"] != event_phase
-                or entry.get("task_id") != task_id
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency journal transitions are invalid"
-                )
-
-        if status == "ready" and len(transitions) != len(expected_transitions):
-            raise WorkflowIdempotencyStateError(
-                "Stored ready workflow has an incomplete initialization journal"
-            )
-        if status == "initializing" and transitions[-1]["event"] == "ready":
-            raise WorkflowIdempotencyStateError(
-                "Stored initializing workflow has a terminal journal event"
-            )
-        if status == "failed":
-            failed_entry = journal[-1]
-            if failed_entry["phase"] != phase:
-                raise WorkflowIdempotencyStateError(
-                    "Stored failed workflow journal phase is invalid"
-                )
-        elif status == "cleanup_pending":
-            if phase != "cleanup" or journal[-1]["event"] != "cleanup_requested":
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow cleanup phase is invalid"
-                )
-        elif transitions[-1]["phase"] != phase:
-            recoverable_event_append_window = (
-                status == "initializing"
-                and phase == "event"
-                and transitions[-1]["event"] == "artifacts_ready"
-                and all(state == "pending" for state in root_dispatch.values())
-            )
-            if not recoverable_event_append_window:
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency journal phase is invalid"
-                )
-
-        journal_dispatch = {task_id: "pending" for task_id in root_task_ids}
-        for entry in transitions:
-            if entry["event"] == "root_sending":
-                journal_dispatch[entry["task_id"]] = "sending"
-            elif entry["event"] == "root_sent":
-                if journal_dispatch[entry["task_id"]] != "sending":
-                    raise WorkflowIdempotencyStateError(
-                        "Stored workflow idempotency root transition is invalid"
-                    )
-                journal_dispatch[entry["task_id"]] = "sent"
-        if journal_dispatch != root_dispatch:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow root dispatch disagrees with its journal"
-            )
-
-    def _persistent_snapshots_for_idempotency(self) -> List[Dict[str, Any]]:
-        runs_dir = getattr(self.static_run_store, "runs_dir", None)
-        if runs_dir is None:
-            try:
-                snapshots = self.static_run_store.list_runs()
-            except Exception as exc:
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency claims could not be read"
-                ) from exc
-            if not isinstance(snapshots, list):
-                raise WorkflowIdempotencyStateError(
-                    "Stored workflow idempotency claims are invalid"
-                )
-            return snapshots
-
-        try:
-            run_paths = sorted(Path(runs_dir).glob("*/run.json"))
-        except Exception as exc:
-            raise WorkflowIdempotencyStateError(
-                "Stored workflow idempotency claims could not be enumerated"
-            ) from exc
-        snapshots = []
-        for run_path in run_paths:
-            directory_run_id = run_path.parent.name
-            try:
-                snapshot = self.static_run_store.load_run(directory_run_id)
-            except Exception as exc:
-                raise WorkflowIdempotencyStateError(
-                    "A stored workflow run could not be verified for idempotency"
-                ) from exc
-            if not isinstance(snapshot, dict):
-                raise WorkflowIdempotencyStateError(
-                    "A stored workflow run is not a JSON object"
-                )
-            if snapshot.get("run_id") != directory_run_id:
-                raise WorkflowIdempotencyStateError(
-                    "A stored workflow run_id does not match its directory"
-                )
-            snapshots.append(snapshot)
-        return snapshots
-
-    @staticmethod
-    def _validate_cached_idempotency_record(record: Any) -> None:
-        if not isinstance(record, dict):
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index is invalid"
-            )
-        required = {
-            "idempotency_key",
-            "idempotency_fingerprint",
-            "workflow_id",
-            "run_id",
-        }
-        if not required.issubset(record):
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index is incomplete"
-            )
-        try:
-            _validate_run_workflow_idempotency(
-                record["idempotency_key"],
-                record["idempotency_fingerprint"],
-            )
-        except (TypeError, ValueError) as exc:
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index has an invalid identity"
-            ) from exc
-        payload_fingerprint = record.get("idempotency_payload_fingerprint")
-        if payload_fingerprint is not None and (
-            not isinstance(payload_fingerprint, str)
-            or RUN_WORKFLOW_IDEMPOTENCY_FINGERPRINT_PATTERN.fullmatch(
-                payload_fingerprint
-            ) is None
-        ):
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index has an invalid payload fingerprint"
-            )
-        if (
-            not isinstance(record["workflow_id"], str)
-            or not record["workflow_id"]
-            or not isinstance(record["run_id"], str)
-            or not record["run_id"]
-        ):
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index has an invalid binding"
-            )
-
-    def _find_idempotent_workflow_run(
-        self,
-        idempotency_key: str,
-        idempotency_fingerprint: str,
-        payload_fingerprint: str,
-        workflow_id: str,
-    ) -> Dict[str, Any] | None:
-        records: Dict[str, Dict[str, Any]] = {}
-        memory_claims: Dict[str, Dict[str, Any]] = {}
-
-        def add_record(record: Dict[str, Any]) -> None:
-            run_id = record["run_id"]
-            previous = records.get(run_id)
-            if previous is not None and any(
-                previous.get(field) != record.get(field)
-                for field in (
-                    "idempotency_key",
-                    "idempotency_fingerprint",
-                    "idempotency_payload_fingerprint",
-                    "workflow_id",
-                )
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "Workflow idempotency bindings disagree across memory and storage"
-                )
-            records[run_id] = record
-
-        index = getattr(self, "_run_workflow_idempotency_index", None)
-        if index is None:
-            index = {}
-            self._run_workflow_idempotency_index = index
-        if not isinstance(index, dict):
-            raise WorkflowIdempotencyStateError(
-                "In-memory workflow idempotency index is invalid"
-            )
-        for indexed_key, indexed_record in index.items():
-            self._validate_cached_idempotency_record(indexed_record)
-            if (
-                not isinstance(indexed_key, str)
-                or indexed_record["idempotency_key"] != indexed_key
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "In-memory workflow idempotency index key does not match its claim"
-                )
-        cached = index.get(idempotency_key)
-        if cached is not None:
-            add_record(cached)
-
-        for run_id, static_run in getattr(self, "static_runs", {}).items():
-            has_key = hasattr(static_run, "_idempotency_key")
-            has_fingerprint = hasattr(static_run, "_idempotency_fingerprint")
-            if has_key != has_fingerprint:
-                raise WorkflowIdempotencyStateError(
-                    "In-memory workflow run has a partial idempotency identity"
-                )
-            if not has_key:
-                continue
-            if getattr(static_run, "run_id", None) != run_id:
-                raise WorkflowIdempotencyStateError(
-                    "In-memory workflow run_id does not match its index"
-                )
-            memory_record = {
-                "idempotency_key": static_run._idempotency_key,
-                "idempotency_fingerprint": getattr(
-                    static_run,
-                    "_idempotency_fingerprint",
-                    None,
-                ),
-                "idempotency_payload_fingerprint": getattr(
-                    static_run,
-                    "_idempotency_payload_fingerprint",
-                    None,
-                ),
-                "workflow_id": static_run.workflow_id,
-                "run_id": run_id,
-                "run_status": static_run.status,
-                "initialization": copy.deepcopy(getattr(
-                    static_run,
-                    "_idempotency_initialization",
-                    None,
-                )),
-            }
-            self._validate_cached_idempotency_record(memory_record)
-            initialization = memory_record.get("initialization")
-            if initialization is not None:
-                self._validate_idempotency_initialization(initialization)
-            previous_memory_claim = memory_claims.get(
-                memory_record["idempotency_key"]
-            )
-            if (
-                previous_memory_claim is not None
-                and previous_memory_claim["run_id"] != run_id
-            ):
-                raise WorkflowIdempotencyStateError(
-                    "A workflow idempotency key is bound to multiple in-memory runs"
-                )
-            memory_claims[memory_record["idempotency_key"]] = memory_record
-            if memory_record["idempotency_key"] == idempotency_key:
-                add_record(memory_record)
-
-        persistent_claims = {}
-        persistent_runs = {}
-        for snapshot in self._persistent_snapshots_for_idempotency():
-            record = self._idempotency_record_from_snapshot(snapshot)
-            if record is None:
-                continue
-            previous = persistent_claims.get(record["idempotency_key"])
-            if previous is not None and previous["run_id"] != record["run_id"]:
-                raise WorkflowIdempotencyStateError(
-                    "A workflow idempotency key is bound to multiple stored runs"
-                )
-            persistent_claims[record["idempotency_key"]] = record
-            persistent_runs[record["run_id"]] = record
-
-        for source, source_claims in (
-            ("index", index),
-            ("in-memory run", memory_claims),
-        ):
-            for claim in source_claims.values():
-                persistent_record = persistent_runs.get(claim["run_id"])
-                if persistent_record is None or any(
-                    persistent_record[field] != claim[field]
-                    for field in (
-                        "idempotency_key",
-                        "idempotency_fingerprint",
-                        "idempotency_payload_fingerprint",
-                        "workflow_id",
-                    )
-                ):
-                    raise WorkflowIdempotencyStateError(
-                        f"Workflow idempotency {source} does not match persistent storage"
-                    )
-        persistent = persistent_claims.get(idempotency_key)
-        if persistent is not None:
-            add_record(persistent)
-
-        if not records:
-            return None
-        if len(records) != 1:
-            raise WorkflowIdempotencyStateError(
-                "A workflow idempotency key is bound to multiple runs"
-            )
-
-        record = next(iter(records.values()))
-        index[idempotency_key] = record
-        if (
-            record["idempotency_fingerprint"] != idempotency_fingerprint
-            or (
-                record.get("idempotency_payload_fingerprint") is not None
-                and record["idempotency_payload_fingerprint"]
-                != payload_fingerprint
-            )
-            or record["workflow_id"] != workflow_id
-        ):
-            raise WorkflowIdempotencyConflictError(
-                idempotency_key,
-                existing_run_id=record["run_id"],
-                existing_workflow_id=record["workflow_id"],
-                existing_fingerprint=record["idempotency_fingerprint"],
-            )
-        return record
-
-    def _remember_idempotent_workflow_run(
-        self,
-        idempotency_key: str,
-        idempotency_fingerprint: str,
-        payload_fingerprint: str,
-        workflow_id: str,
-        run_id: str,
-    ) -> None:
-        self._run_workflow_idempotency_index[idempotency_key] = {
-            "idempotency_key": idempotency_key,
-            "idempotency_fingerprint": idempotency_fingerprint,
-            "idempotency_payload_fingerprint": payload_fingerprint,
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-        }
-
-    def _resolve_idempotent_workflow_replay(
-        self,
-        record: Dict[str, Any],
-    ) -> str:
-        initialization = record.get("initialization")
-        if isinstance(initialization, dict):
-            initialization_status = initialization.get("status")
-            if initialization_status == "ready":
-                return record["run_id"]
-            if initialization_status == "failed":
-                raise self._initialization_error_from_record(record)
-        elif record.get("run_status") in {
-            "succeeded",
-            "failed",
-            "cancelled",
-            "timed_out",
-        }:
-            # Compatibility for completed keyed runs created before the
-            # initialization marker was introduced.
-            return record["run_id"]
-
-        try:
-            self._terminate_incomplete_idempotent_workflow(record)
-        except Exception as exc:
-            initialization = record.get("initialization") or {}
-            phase = str(initialization.get("phase") or "unknown")
-            raise WorkflowInitializationError(
-                record["run_id"],
-                record["workflow_id"],
-                phase=phase,
-                message=(
-                    "Workflow initialization is incomplete and could not be "
-                    f"terminated safely: {str(exc).strip() or type(exc).__name__}"
-                ),
-            ) from exc
-        raise self._initialization_error_from_record(
-            self._idempotency_record_from_snapshot(
-                self.static_run_store.load_run(record["run_id"])
-            )
-            or record
-        )
-
-    @staticmethod
-    def _initialization_error_from_record(
-        record: Dict[str, Any],
-    ) -> WorkflowInitializationError:
-        initialization = record.get("initialization") or {}
-        error = initialization.get("error") or {}
-        phase = str(error.get("phase") or initialization.get("phase") or "unknown")
-        message = str(
-            error.get("message")
-            or "Workflow initialization did not complete and cannot be replayed safely"
-        )
-        return WorkflowInitializationError(
-            record["run_id"],
-            record["workflow_id"],
-            phase=phase,
-            message=message,
-        )
-
-    @staticmethod
-    def _initialization_error_envelope(
-        initialization: Dict[str, Any],
-        exc: Exception,
-    ) -> Dict[str, Any]:
-        phase = str(initialization.get("phase") or "unknown")
-        cause_message = str(exc).strip() or type(exc).__name__
+    def _dispatch_error(dispatch: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
         return {
             "error_type": "workflow_initialization_failed",
-            "message": f"Workflow initialization failed during {phase}: {cause_message}",
-            "phase": phase,
+            "message": str(exc) or type(exc).__name__,
+            "phase": str(dispatch.get("status") or "prepared"),
             "cause_type": type(exc).__name__,
-            "root_dispatch": copy.deepcopy(initialization.get("root_dispatch") or {}),
         }
 
     @staticmethod
-    def _legacy_incomplete_idempotency_initialization() -> Dict[str, Any]:
-        started_time = time.time()
-        return {
-            "schema_version": 1,
-            "status": "initializing",
-            "phase": "legacy_or_unknown",
-            "started_time": started_time,
-            "completed_time": None,
-            "failed_time": None,
-            "root_task_ids": [],
-            "root_dispatch": {},
-            "artifact_status": "none",
-            "artifact_owner_id": None,
-            "artifact_store_root": None,
-            "cleanup_request_id": None,
-            "error": None,
-            "journal": [{
-                "seq": 1,
-                "event": "reserved",
-                "phase": "artifacts",
-                "timestamp": started_time,
-            }],
-        }
+    def _dispatch_requires_cleanup(static_run: StaticRun | None) -> bool:
+        if static_run is None:
+            return False
+        dispatch = getattr(static_run, "_dispatch", None)
+        return bool(
+            isinstance(dispatch, dict)
+            and dispatch.get("status") in {"dispatching", "cleanup_pending"}
+        )
 
     @staticmethod
-    def _mark_static_run_initialization_failed(
+    def _validate_dispatch(dispatch: Any) -> Dict[str, Any]:
+        if (
+            not isinstance(dispatch, dict)
+            or dispatch.get("schema_version") != 1
+            or dispatch.get("status")
+            not in {
+                "prepared",
+                "dispatching",
+                "active",
+                "cleanup_pending",
+                "terminal",
+            }
+        ):
+            raise ValueError("Stored workflow dispatch state is invalid")
+        return dispatch
+
+    @staticmethod
+    def _revoke_dispatch_artifacts(
+        run_id: str,
+        dispatch: Dict[str, Any],
+    ) -> None:
+        owner_id = dispatch.get("artifact_owner_id")
+        if not owner_id or dispatch.get("artifact_status") == "revoked":
+            return
+        if owner_id != run_id:
+            raise ValueError("Stored artifact owner does not match its run")
+        LocalCASArtifactStore(
+            dispatch.get("artifact_store_root")
+        ).revoke_owner_capabilities(owner_id)
+        dispatch["artifact_status"] = "revoked"
+
+    @staticmethod
+    def _mark_static_dispatch_failed(
         static_run: StaticRun,
         error: Dict[str, Any],
     ) -> None:
         now = time.time()
-        initialization = static_run._idempotency_initialization
-        initialization["status"] = "failed"
-        initialization["phase"] = error["phase"]
-        initialization["completed_time"] = None
-        initialization["failed_time"] = now
-        initialization["error"] = copy.deepcopy(error)
-        MaPath._append_idempotency_initialization_journal(
-            initialization,
-            "failed",
-            phase=error["phase"],
-            timestamp=now,
-        )
+        static_run._dispatch["status"] = "terminal"
+        static_run._dispatch["error"] = copy.deepcopy(error)
         static_run.status = "failed"
         static_run.finished_time = now
         static_run.error_summary = copy.deepcopy(error)
@@ -2580,38 +1535,21 @@ class MaPath:
         static_run._touch()
 
     @staticmethod
-    def _mark_snapshot_initialization_failed(
+    def _mark_snapshot_dispatch_failed(
         snapshot: Dict[str, Any],
-        initialization: Dict[str, Any],
+        dispatch: Dict[str, Any],
         error: Dict[str, Any],
     ) -> None:
         now = time.time()
-        initialization["status"] = "failed"
-        initialization["phase"] = error["phase"]
-        initialization["completed_time"] = None
-        initialization["failed_time"] = now
-        initialization["error"] = copy.deepcopy(error)
-        MaPath._append_idempotency_initialization_journal(
-            initialization,
-            "failed",
-            phase=error["phase"],
-            timestamp=now,
-        )
-        snapshot[RUN_WORKFLOW_INITIALIZATION_FIELD] = initialization
+        dispatch["status"] = "terminal"
+        dispatch["error"] = copy.deepcopy(error)
+        snapshot[RUN_WORKFLOW_DISPATCH_FIELD] = dispatch
         snapshot["status"] = "failed"
         snapshot["finished_time"] = now
         snapshot["updated_time"] = now
         snapshot["error_summary"] = copy.deepcopy(error)
-        task_nodes = snapshot.get("task_nodes") or {}
-        for task in task_nodes.values():
-            if task.get("status") not in {"pending", "queued", "running"}:
-                continue
-            task["status"] = "cancelled"
-            task["finished_time"] = now
-            task["pending_reason"] = None
-            task["error"] = copy.deepcopy(error)
         counts = {
-            "total": len(task_nodes),
+            "total": 0,
             "pending": 0,
             "queued": 0,
             "running": 0,
@@ -2620,346 +1558,185 @@ class MaPath:
             "cancelled": 0,
             "timed_out": 0,
         }
-        for task in task_nodes.values():
-            task_status = task.get("status")
-            if task_status in counts:
-                counts[task_status] += 1
-        snapshot["task_counts"] = counts
-        total = counts["total"] or 1
+        for task in (snapshot.get("task_nodes") or {}).values():
+            if task.get("status") in {"pending", "queued", "running"}:
+                task["status"] = "cancelled"
+                task["finished_time"] = now
+                task["pending_reason"] = None
+                task["error"] = copy.deepcopy(error)
+            counts["total"] += 1
+            if task.get("status") in counts:
+                counts[task["status"]] += 1
         completed = sum(
             counts[name]
             for name in ("succeeded", "failed", "cancelled", "timed_out")
         )
+        snapshot["task_counts"] = counts
         snapshot["progress"] = {
             "completed": completed,
             "total": counts["total"],
-            "fraction": round(completed / total, 6),
+            "fraction": round(completed / (counts["total"] or 1), 6),
         }
 
-    @staticmethod
-    def _initialization_needs_scheduler_cleanup(
-        initialization: Dict[str, Any],
-    ) -> bool:
-        return any(
-            state in {"sending", "sent"}
-            for state in (initialization.get("root_dispatch") or {}).values()
-        )
-
-    @staticmethod
-    def _initialization_requires_scheduler_ack(
-        initialization: Dict[str, Any],
-    ) -> bool:
-        status = initialization.get("status")
-        if status not in {"initializing", "cleanup_pending"}:
-            return False
-        return (
-            status == "cleanup_pending"
-            or MaPath._initialization_needs_scheduler_cleanup(initialization)
-        )
-
-    @staticmethod
-    def _static_run_initialization_requires_scheduler_ack(
-        static_run: StaticRun | None,
-    ) -> bool:
-        if static_run is None:
-            return False
-        initialization = getattr(
-            static_run,
-            "_idempotency_initialization",
-            None,
-        )
-        return bool(
-            isinstance(initialization, dict)
-            and MaPath._initialization_requires_scheduler_ack(initialization)
-        )
-
-    @staticmethod
-    def _revoke_idempotent_artifact_reservation(
-        run_id: str,
-        initialization: Dict[str, Any],
-    ) -> None:
-        owner_id = initialization.get("artifact_owner_id")
-        if not owner_id or initialization.get("artifact_status") == "revoked":
-            return
-        if owner_id != run_id:
-            raise WorkflowIdempotencyStateError(
-                "Stored artifact reservation owner does not match its run"
-            )
-        LocalCASArtifactStore(
-            initialization.get("artifact_store_root")
-        ).revoke_owner_capabilities(owner_id)
-        initialization["artifact_status"] = "revoked"
-
-    def _record_initialization_failure_outcome(
-        self,
-        static_run: StaticRun,
-        error: Dict[str, Any],
-        *,
-        previous_status: str = "submitted",
-    ) -> None:
-        snapshot = self._static_run_snapshot(static_run)
-        event = self._persist_snapshot_initialization_failure_outcome(
-            snapshot,
-            error,
-        )
-        try:
-            persisted_events = self.static_run_store.load_events(static_run.run_id)
-        except Exception:
-            logger.exception(
-                "Could not reload durable events for failed workflow initialization %s",
-                static_run.run_id,
-            )
-        else:
-            static_run.event_log = copy.deepcopy(persisted_events)
-            static_run.event_seq = max(
-                (int(item["seq"]) for item in persisted_events),
-                default=0,
-            )
-
-        queue_for_run = self.async_que.get(static_run.run_id)
-        if queue_for_run is not None:
-            try:
-                queue_for_run.put_nowait(copy.deepcopy(event))
-            except Exception:
-                logger.exception(
-                    "Could not notify workflow %s initialization failure",
-                    static_run.run_id,
-                )
-
-        if not getattr(static_run, "_idempotency_metrics_started", False):
-            return
-        on_status_change = getattr(
-            self.global_metrics,
-            "on_run_status_change",
-            None,
-        )
-        if on_status_change is None:
-            return
-        try:
-            on_status_change(
-                static_run.run_id,
-                _global_metrics_static_status(previous_status),
-                "failed",
-            )
-        except Exception:
-            logger.exception(
-                "Could not update metrics for failed workflow initialization %s",
-                static_run.run_id,
-            )
-
-    def _persist_snapshot_initialization_failure_outcome(
+    def _record_snapshot_dispatch_failure(
         self,
         snapshot: Dict[str, Any],
         error: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> None:
         run_id = snapshot["run_id"]
-        expected_data = {
-            "run_id": run_id,
-            "workflow_id": snapshot.get("workflow_id"),
-            "error": copy.deepcopy(error),
-        }
         events = self.static_run_store.load_events(run_id)
-        failure_events = [
-            event
+        if not any(
+            event.get("type") == "workflow_submission_failed"
             for event in events
-            if event.get("type") == "workflow_initialization_failed"
-        ]
-        if len(failure_events) > 1:
-            raise WorkflowIdempotencyStateError(
-                f"Stored workflow {run_id} has duplicate initialization failure events"
-            )
-        failure_event = failure_events[0] if failure_events else None
-        if failure_event is not None:
-            if (
-                failure_event.get("data") != expected_data
-                or failure_event.get("schema_version") != 1
-                or not isinstance(failure_event.get("timestamp"), str)
-                or not failure_event["timestamp"]
-            ):
-                raise WorkflowIdempotencyStateError(
-                    f"Stored workflow {run_id} has a conflicting initialization failure event"
-                )
-        else:
-            sequences = []
-            for event in events:
-                sequence = event.get("seq")
-                if (
-                    isinstance(sequence, bool)
-                    or not isinstance(sequence, int)
-                    or sequence <= 0
-                ):
-                    raise WorkflowIdempotencyStateError(
-                        f"Stored workflow {run_id} has an invalid event sequence"
-                    )
-                sequences.append(sequence)
-            if len(sequences) != len(set(sequences)):
-                raise WorkflowIdempotencyStateError(
-                    f"Stored workflow {run_id} has duplicate event sequences"
-                )
-            now = time.time()
-            failure_event = {
-                "type": "workflow_initialization_failed",
-                "seq": max(sequences, default=0) + 1,
-                "ts": now,
+        ):
+            event = {
+                "type": "workflow_submission_failed",
+                "seq": max(
+                    (int(event.get("seq", 0)) for event in events),
+                    default=0,
+                ) + 1,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "schema_version": 1,
-                "data": expected_data,
+                "data": {
+                    "run_id": run_id,
+                    "workflow_id": snapshot.get("workflow_id"),
+                    "run_status": "failed",
+                    "error": copy.deepcopy(error),
+                },
             }
-            self.static_run_store.append_event(run_id, failure_event)
-
-        persisted_events = self.static_run_store.load_events(run_id)
-        matching_events = [
-            event
-            for event in persisted_events
-            if event.get("type") == "workflow_initialization_failed"
-        ]
-        if len(matching_events) != 1 or matching_events[0] != failure_event:
-            raise WorkflowIdempotencyStateError(
-                f"Stored workflow {run_id} initialization failure event changed during persistence"
-            )
-        snapshot["event_count"] = len(persisted_events)
+            self.static_run_store.append_event(run_id, event)
+            events.append(event)
+        snapshot["event_count"] = len(events)
         snapshot["last_event_seq"] = max(
-            (int(event["seq"]) for event in persisted_events),
+            (int(event.get("seq", 0)) for event in events),
             default=0,
         )
         self.static_run_store.save_run(snapshot)
-        return copy.deepcopy(failure_event)
 
-    def _idempotency_cleanup_clock(self) -> float:
-        clock = getattr(self, "_idempotency_cleanup_monotonic", None)
-        return float(clock() if clock is not None else time.monotonic())
+    def _finish_workflow_dispatch_failure(
+        self,
+        run_id: str,
+        error: Dict[str, Any],
+    ) -> None:
+        static_run = self.static_runs.get(run_id)
+        if static_run is not None:
+            dispatch = self._validate_dispatch(static_run._dispatch)
+            if dispatch.get("status") == "terminal":
+                return
+            previous_status = static_run.status
+            self._revoke_dispatch_artifacts(run_id, dispatch)
+            self._mark_static_dispatch_failed(static_run, error)
+            event = self._record_static_event(run_id, {
+                "type": "workflow_submission_failed",
+                "data": {"error": copy.deepcopy(error)},
+            })
+            queue_for_run = self.async_que.get(run_id)
+            if queue_for_run is not None:
+                queue_for_run.put_nowait(copy.deepcopy(event))
+            if getattr(static_run, "_metrics_started", False):
+                self.global_metrics.on_run_status_change(
+                    run_id,
+                    _global_metrics_static_status(previous_status),
+                    "failed",
+                )
+            return
 
-    def _idempotency_cleanup_retry_bounds(self) -> tuple[float, float]:
-        initial = max(
-            0.01,
-            float(getattr(
-                self,
-                "_idempotency_cleanup_retry_initial_seconds",
-                RUN_WORKFLOW_CLEANUP_RETRY_INITIAL_SECONDS,
-            )),
+        snapshot = self.static_run_store.load_run(run_id)
+        dispatch = self._validate_dispatch(
+            copy.deepcopy(snapshot.get(RUN_WORKFLOW_DISPATCH_FIELD))
         )
-        maximum = max(
-            initial,
-            float(getattr(
-                self,
-                "_idempotency_cleanup_retry_max_seconds",
-                RUN_WORKFLOW_CLEANUP_RETRY_MAX_SECONDS,
-            )),
-        )
-        return initial, maximum
+        if dispatch.get("status") == "terminal":
+            return
+        previous_status = snapshot.get("status")
+        self._revoke_dispatch_artifacts(run_id, dispatch)
+        self._mark_snapshot_dispatch_failed(snapshot, dispatch, error)
+        self._record_snapshot_dispatch_failure(snapshot, error)
+        on_status_change = getattr(self.global_metrics, "on_run_status_change", None)
+        if on_status_change is not None:
+            on_status_change(
+                run_id,
+                _global_metrics_static_status(previous_status),
+                "failed",
+            )
 
-    def _register_idempotent_workflow_cleanup_retry(
+    def _fail_workflow_dispatch(
+        self,
+        static_run: StaticRun,
+        exc: Exception,
+    ) -> WorkflowInitializationError:
+        dispatch = self._validate_dispatch(static_run._dispatch)
+        error = self._dispatch_error(dispatch, exc)
+        if dispatch["status"] == "prepared":
+            self._finish_workflow_dispatch_failure(static_run.run_id, error)
+        else:
+            self._request_workflow_cleanup(
+                static_run.run_id,
+                static_run.workflow_id,
+                dispatch,
+                error,
+                lambda: self._persist_static_run(static_run.run_id),
+            )
+        return WorkflowInitializationError(
+            static_run.run_id,
+            static_run.workflow_id,
+            phase=error["phase"],
+            message=error["message"],
+        )
+
+    def _cleanup_maps(self) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+        requests = getattr(self, "workflow_cleanup_requests", None)
+        retries = getattr(self, "workflow_cleanup_retries", None)
+        if requests is None:
+            requests = self.workflow_cleanup_requests = {}
+        if retries is None:
+            retries = self.workflow_cleanup_retries = {}
+        return requests, retries
+
+    def _register_workflow_cleanup(
         self,
         run_id: str,
         workflow_id: str,
         request_id: str,
     ) -> Dict[str, Any]:
-        cleanup_requests = getattr(self, "idempotency_cleanup_requests", None)
-        if cleanup_requests is None:
-            cleanup_requests = {}
-            self.idempotency_cleanup_requests = cleanup_requests
-        mapped_run_id = cleanup_requests.get(request_id)
-        if mapped_run_id is not None and mapped_run_id != run_id:
-            raise WorkflowIdempotencyStateError(
-                "A workflow cleanup request is bound to multiple runs"
-            )
-        cleanup_requests[request_id] = run_id
-
-        retries = getattr(self, "idempotency_cleanup_retries", None)
-        if retries is None:
-            retries = {}
-            self.idempotency_cleanup_retries = retries
-        retry = retries.get(request_id)
-        if retry is None:
-            retry = {
-                "run_id": run_id,
-                "workflow_id": workflow_id,
-                "request_id": request_id,
-                "attempts": 0,
-                "delay_seconds": 0.0,
-                "next_attempt": self._idempotency_cleanup_clock(),
-            }
-            retries[request_id] = retry
-        elif (
-            retry.get("run_id") != run_id
-            or retry.get("workflow_id") != workflow_id
-        ):
-            raise WorkflowIdempotencyStateError(
-                "A workflow cleanup retry is bound to multiple runs"
-            )
+        requests, retries = self._cleanup_maps()
+        mapped_run_id = requests.get(request_id)
+        if mapped_run_id not in {None, run_id}:
+            raise ValueError("Workflow cleanup request belongs to another run")
+        requests[request_id] = run_id
+        retry = retries.setdefault(request_id, {
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "attempts": 0,
+            "next_attempt": 0.0,
+        })
+        if retry["run_id"] != run_id or retry["workflow_id"] != workflow_id:
+            raise ValueError("Workflow cleanup retry belongs to another run")
         return retry
 
-    def _clear_idempotent_workflow_cleanup_retry(
-        self,
-        request_id: str,
-    ) -> None:
-        getattr(self, "idempotency_cleanup_requests", {}).pop(request_id, None)
-        getattr(self, "idempotency_cleanup_retries", {}).pop(request_id, None)
+    def _clear_workflow_cleanup(self, request_id: str) -> None:
+        requests, retries = self._cleanup_maps()
+        requests.pop(request_id, None)
+        retries.pop(request_id, None)
 
-    def _idempotent_workflow_cleanup_is_pending(
+    def _send_workflow_cleanup_request(
         self,
         run_id: str,
+        workflow_id: str,
         request_id: str,
-    ) -> bool:
-        static_run = getattr(self, "static_runs", {}).get(run_id)
-        if static_run is not None:
-            initialization = getattr(
-                static_run,
-                "_idempotency_initialization",
-                None,
+    ) -> None:
+        retry = self._register_workflow_cleanup(
+            run_id,
+            workflow_id,
+            request_id,
+        )
+        retry["attempts"] += 1
+        retry["next_attempt"] = (
+            time.monotonic()
+            + min(
+                5.0,
+                RUN_WORKFLOW_CLEANUP_RETRY_SECONDS
+                * (2 ** (retry["attempts"] - 1)),
             )
-        else:
-            try:
-                snapshot = self.static_run_store.load_run(run_id)
-            except (OSError, ValueError):
-                return False
-            initialization = snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-        return bool(
-            isinstance(initialization, dict)
-            and initialization.get("status") == "cleanup_pending"
-            and initialization.get("cleanup_request_id") == request_id
-        )
-
-    def _schedule_idempotent_workflow_cleanup_retry(
-        self,
-        run_id: str,
-        workflow_id: str,
-        request_id: str,
-    ) -> None:
-        if not self._idempotent_workflow_cleanup_is_pending(run_id, request_id):
-            self._clear_idempotent_workflow_cleanup_retry(request_id)
-            return
-        retry = self._register_idempotent_workflow_cleanup_retry(
-            run_id,
-            workflow_id,
-            request_id,
-        )
-        initial, maximum = self._idempotency_cleanup_retry_bounds()
-        previous_delay = float(retry.get("delay_seconds") or 0.0)
-        delay = initial if previous_delay <= 0 else min(maximum, previous_delay * 2)
-        retry["attempts"] = int(retry.get("attempts") or 0) + 1
-        retry["delay_seconds"] = delay
-        retry["next_attempt"] = self._idempotency_cleanup_clock() + delay
-
-    @staticmethod
-    def _scheduler_cleanup_result_data(result: Any) -> Dict[str, Any] | None:
-        if not isinstance(result, dict):
-            return None
-        if result.get("type") == "workflow_stopped":
-            data = result.get("data")
-            return data if isinstance(data, dict) else None
-        return result
-
-    def _send_idempotent_workflow_cleanup_request(
-        self,
-        run_id: str,
-        workflow_id: str,
-        request_id: str,
-    ) -> bool:
-        self._register_idempotent_workflow_cleanup_retry(
-            run_id,
-            workflow_id,
-            request_id,
         )
         try:
             result = self._send_scheduler_message({
@@ -2975,510 +1752,178 @@ class MaPath:
                 run_id,
                 request_id,
             )
-            self._schedule_idempotent_workflow_cleanup_retry(
-                run_id,
-                workflow_id,
-                request_id,
-            )
-            return False
-
-        result_data = self._scheduler_cleanup_result_data(result)
-        confirmed = result is True or (
-            result_data is not None
-            and result_data.get("ok") is True
-            and result_data.get("request_id", request_id) == request_id
-            and result_data.get("workflow_id", run_id) == run_id
-        )
-        if confirmed:
-            self._confirm_idempotent_workflow_cleanup(
-                run_id,
-                request_id,
-                workflow_id=workflow_id,
-            )
-            return True
-
-        if result_data is not None and result_data.get("ok") is False:
-            logger.error(
-                "Scheduler rejected workflow %s cleanup request %s: %s",
-                run_id,
-                request_id,
-                result_data.get("error") or "unknown error",
-            )
-        self._schedule_idempotent_workflow_cleanup_retry(
-            run_id,
-            workflow_id,
-            request_id,
-        )
-        return False
-
-    def _retry_pending_idempotent_workflow_cleanups(self) -> None:
-        retries = getattr(self, "idempotency_cleanup_retries", None)
-        if not retries:
             return
-        now = self._idempotency_cleanup_clock()
-        for request_id, retry in list(retries.items()):
-            run_id = retry["run_id"]
-            workflow_id = retry["workflow_id"]
-            if not self._idempotent_workflow_cleanup_is_pending(
-                run_id,
-                request_id,
-            ):
-                self._clear_idempotent_workflow_cleanup_retry(request_id)
-                continue
-            if now < float(retry.get("next_attempt") or 0.0):
-                continue
-            self._send_idempotent_workflow_cleanup_request(
-                run_id,
-                workflow_id,
-                request_id,
-            )
+        if result is True:
+            self._confirm_workflow_cleanup(run_id, request_id)
+        elif isinstance(result, dict):
+            data = result.get("data", result)
+            if data.get("ok") is True:
+                self._confirm_workflow_cleanup(run_id, request_id)
 
-    def _ensure_static_initialization_cleanup(
-        self,
-        static_run: StaticRun,
-        cause: Exception,
-    ) -> bool:
-        initialization = static_run._idempotency_initialization
-        error = copy.deepcopy(initialization.get("error"))
-        if error is None:
-            error = self._initialization_error_envelope(initialization, cause)
-        return self._request_idempotent_workflow_cleanup(
-            static_run.run_id,
-            static_run.workflow_id,
-            initialization,
-            error,
-            lambda: self._persist_static_run(static_run.run_id),
-        )
-
-    def _request_idempotent_workflow_cleanup(
+    def _request_workflow_cleanup(
         self,
         run_id: str,
         workflow_id: str,
-        initialization: Dict[str, Any],
+        dispatch: Dict[str, Any],
         error: Dict[str, Any],
         persist,
-    ) -> bool:
-        request_id = initialization.get("cleanup_request_id")
-        if initialization.get("status") != "cleanup_pending":
-            original_initialization = copy.deepcopy(initialization)
-            request_id = str(uuid.uuid4())
-            initialization["status"] = "cleanup_pending"
-            initialization["phase"] = "cleanup"
-            initialization["completed_time"] = None
-            initialization["failed_time"] = None
-            initialization["error"] = copy.deepcopy(error)
-            initialization["cleanup_request_id"] = request_id
-            self._append_idempotency_initialization_journal(
-                initialization,
-                "cleanup_requested",
-                phase="cleanup",
-                request_id=request_id,
-            )
-            try:
-                persist()
-            except Exception:
-                initialization.clear()
-                initialization.update(original_initialization)
-                raise
+    ) -> None:
+        if dispatch.get("status") != "cleanup_pending":
+            dispatch["status"] = "cleanup_pending"
+            dispatch["cleanup_request_id"] = str(uuid.uuid4())
+            dispatch["error"] = copy.deepcopy(error)
+            persist()
+        request_id = dispatch.get("cleanup_request_id")
         if not isinstance(request_id, str) or not request_id:
-            raise WorkflowIdempotencyStateError(
-                "A pending workflow cleanup has no request identity"
-            )
-        return self._send_idempotent_workflow_cleanup_request(
+            raise ValueError("Pending workflow cleanup has no request ID")
+        self._send_workflow_cleanup_request(
             run_id,
             workflow_id,
             request_id,
         )
 
-    def _confirm_idempotent_workflow_cleanup(
+    def _confirm_workflow_cleanup(
         self,
         run_id: str,
         request_id: str,
-        *,
-        workflow_id: str | None = None,
     ) -> None:
         static_run = self.static_runs.get(run_id)
         if static_run is not None:
-            initialization = static_run._idempotency_initialization
-            if (
-                initialization.get("status") != "cleanup_pending"
-                or initialization.get("cleanup_request_id") != request_id
-            ):
-                if initialization.get("status") != "cleanup_pending":
-                    self._clear_idempotent_workflow_cleanup_retry(request_id)
-                return
-            run_state = copy.deepcopy(static_run.__dict__)
-            previous_status = static_run.status
-            error = copy.deepcopy(initialization["error"])
-            try:
-                self._revoke_idempotent_artifact_reservation(run_id, initialization)
-                legacy_reservation = getattr(
-                    static_run,
-                    "_artifact_reservation",
-                    None,
-                )
-                if legacy_reservation is not None:
-                    legacy_reservation["status"] = "revoked"
-                self._append_idempotency_initialization_journal(
-                    initialization,
-                    "cleanup_confirmed",
-                    phase="cleanup",
-                    request_id=request_id,
-                )
-                self._mark_static_run_initialization_failed(static_run, error)
-                self._record_initialization_failure_outcome(
-                    static_run,
-                    error,
-                    previous_status=previous_status,
-                )
-            except Exception:
-                static_run.__dict__.clear()
-                static_run.__dict__.update(run_state)
-                raise
+            dispatch = self._validate_dispatch(static_run._dispatch)
+            workflow_id = static_run.workflow_id
         else:
             snapshot = self.static_run_store.load_run(run_id)
-            previous_status = snapshot.get("status")
-            initialization = copy.deepcopy(
-                snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
+            dispatch = self._validate_dispatch(
+                snapshot.get(RUN_WORKFLOW_DISPATCH_FIELD)
             )
-            if (
-                not isinstance(initialization, dict)
-                or initialization.get("status") != "cleanup_pending"
-                or initialization.get("cleanup_request_id") != request_id
-            ):
-                if (
-                    not isinstance(initialization, dict)
-                    or initialization.get("status") != "cleanup_pending"
-                ):
-                    self._clear_idempotent_workflow_cleanup_retry(request_id)
-                return
-            error = copy.deepcopy(initialization["error"])
-            self._revoke_idempotent_artifact_reservation(run_id, initialization)
-            legacy_reservation = snapshot.get("artifact_reservation")
-            if isinstance(legacy_reservation, dict):
-                legacy_reservation["status"] = "revoked"
-            self._append_idempotency_initialization_journal(
-                initialization,
-                "cleanup_confirmed",
-                phase="cleanup",
-                request_id=request_id,
-            )
-            self._mark_snapshot_initialization_failed(snapshot, initialization, error)
-            self._persist_snapshot_initialization_failure_outcome(snapshot, error)
-            on_status_change = getattr(
-                self.global_metrics,
-                "on_run_status_change",
-                None,
-            )
-            if on_status_change is not None:
-                try:
-                    on_status_change(
-                        run_id,
-                        _global_metrics_static_status(previous_status),
-                        "failed",
-                    )
-                except Exception:
-                    logger.exception(
-                        "Could not update metrics for recovered workflow initialization %s",
-                        run_id,
-                    )
-        self._clear_idempotent_workflow_cleanup_retry(request_id)
+            workflow_id = snapshot.get("workflow_id")
+        if (
+            dispatch.get("status") != "cleanup_pending"
+            or dispatch.get("cleanup_request_id") != request_id
+        ):
+            self._clear_workflow_cleanup(request_id)
+            return
+        error = copy.deepcopy(dispatch.get("error")) or {
+            "error_type": "workflow_initialization_failed",
+            "message": "Workflow submission failed",
+            "phase": "cleanup",
+            "cause_type": "RuntimeError",
+        }
+        self._finish_workflow_dispatch_failure(run_id, error)
+        self._clear_workflow_cleanup(request_id)
+        logger.info(
+            "Scheduler confirmed cleanup for workflow %s (%s)",
+            run_id,
+            workflow_id,
+        )
 
-    def _handle_idempotent_workflow_cleanup_response(
+    def _handle_workflow_cleanup_response(
         self,
         data: Dict[str, Any],
     ) -> None:
         request_id = data.get("request_id")
-        mapped_run_id = getattr(
-            self,
-            "idempotency_cleanup_requests",
-            {},
-        ).get(request_id)
-        response_run_id = data.get("workflow_id")
-        if (
-            mapped_run_id is not None
-            and response_run_id is not None
-            and mapped_run_id != response_run_id
-        ):
-            logger.error(
-                "Ignoring workflow cleanup response %s for mismatched run %s",
-                request_id,
-                response_run_id,
-            )
+        requests, _ = self._cleanup_maps()
+        run_id = requests.get(request_id) or data.get("workflow_id")
+        if not isinstance(request_id, str) or not isinstance(run_id, str):
             return
-        run_id = mapped_run_id or response_run_id
-        if not request_id or not run_id:
+        if data.get("workflow_id") not in {None, run_id}:
+            logger.error("Ignoring mismatched workflow cleanup response %s", request_id)
             return
-        if data.get("ok") is not True:
+        if data.get("ok") is True:
+            self._confirm_workflow_cleanup(run_id, request_id)
+        else:
             logger.error(
                 "Scheduler rejected workflow %s cleanup request %s: %s",
                 run_id,
                 request_id,
                 data.get("error") or "unknown error",
             )
-            snapshot = None
-            static_run = getattr(self, "static_runs", {}).get(run_id)
-            workflow_id = getattr(static_run, "workflow_id", None)
-            if workflow_id is None:
-                try:
-                    snapshot = self.static_run_store.load_run(run_id)
-                except (OSError, ValueError):
-                    return
-                workflow_id = snapshot.get("workflow_id")
-            if isinstance(workflow_id, str) and workflow_id:
-                self._schedule_idempotent_workflow_cleanup_retry(
-                    run_id,
-                    workflow_id,
-                    request_id,
-                )
-            return
-        with self._run_workflow_idempotency_guard():
-            self._confirm_idempotent_workflow_cleanup(run_id, request_id)
 
-    def _fail_idempotent_workflow_initialization(
-        self,
-        static_run: StaticRun,
-        exc: Exception,
-    ) -> WorkflowInitializationError:
-        error = self._initialization_error_envelope(
-            static_run._idempotency_initialization,
-            exc,
-        )
-        run_state_before_failure = copy.deepcopy(static_run.__dict__)
-        initialization = static_run._idempotency_initialization
-        needs_scheduler_cleanup = self._initialization_needs_scheduler_cleanup(
-            initialization
-        )
-        if not needs_scheduler_cleanup:
-            try:
-                self._revoke_idempotent_artifact_reservation(
-                    static_run.run_id,
-                    initialization,
-                )
-                legacy_reservation = getattr(
-                    static_run,
-                    "_artifact_reservation",
-                    None,
-                )
-                if legacy_reservation is not None:
-                    legacy_reservation["status"] = "revoked"
-            except Exception:
-                logger.exception(
-                    "Workflow %s private artifact rollback requires coordinated retry",
-                    static_run.run_id,
-                )
-                needs_scheduler_cleanup = True
-        if needs_scheduler_cleanup:
-            self._request_idempotent_workflow_cleanup(
-                static_run.run_id,
-                static_run.workflow_id,
-                initialization,
-                error,
-                lambda: self._persist_static_run(static_run.run_id),
-            )
-        else:
-            previous_status = static_run.status
-            try:
-                self._mark_static_run_initialization_failed(static_run, error)
-                self._record_initialization_failure_outcome(
-                    static_run,
-                    error,
-                    previous_status=previous_status,
-                )
-            except Exception:
-                static_run.__dict__.clear()
-                static_run.__dict__.update(run_state_before_failure)
-                logger.exception(
-                    "Could not persist initialization failure for workflow %s",
-                    static_run.run_id,
-                )
-
-        return WorkflowInitializationError(
-            static_run.run_id,
-            static_run.workflow_id,
-            phase=error["phase"],
-            message=error["message"],
-        )
-
-    def _terminate_incomplete_idempotent_workflow(
-        self,
-        record: Dict[str, Any],
-    ) -> None:
-        run_id = record["run_id"]
+    def _cleanup_is_pending(self, run_id: str, request_id: str) -> bool:
         static_run = self.static_runs.get(run_id)
         if static_run is not None:
-            initialization = getattr(
-                static_run,
-                "_idempotency_initialization",
-                None,
-            )
-            if not isinstance(initialization, dict):
-                initialization = self._legacy_incomplete_idempotency_initialization()
-                static_run._idempotency_initialization = initialization
-            if initialization.get("status") == "failed":
-                return
-            error = initialization.get("error") or self._initialization_error_envelope(
-                initialization,
-                RuntimeError(
-                    "incomplete persisted initialization has ambiguous dispatch state"
-                ),
-            )
-            if not self._initialization_requires_scheduler_ack(initialization):
-                run_state = copy.deepcopy(static_run.__dict__)
-                previous_status = static_run.status
-                try:
-                    self._revoke_idempotent_artifact_reservation(
-                        run_id,
-                        initialization,
-                    )
-                    self._mark_static_run_initialization_failed(static_run, error)
-                    self._record_initialization_failure_outcome(
-                        static_run,
-                        error,
-                        previous_status=previous_status,
-                    )
-                except Exception:
-                    static_run.__dict__.clear()
-                    static_run.__dict__.update(run_state)
-                    raise
-                return
-            self._request_idempotent_workflow_cleanup(
-                run_id,
-                static_run.workflow_id,
-                initialization,
-                error,
-                lambda: self._persist_static_run(run_id),
-            )
-            return
-
-        snapshot = self.static_run_store.load_run(run_id)
-        initialization = copy.deepcopy(
-            snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-            or self._legacy_incomplete_idempotency_initialization()
-        )
-        error = self._initialization_error_envelope(
-            initialization,
-            RuntimeError(
-                "incomplete persisted initialization has ambiguous dispatch state"
-            ),
-        )
-        if not self._initialization_requires_scheduler_ack(initialization):
-            previous_status = snapshot.get("status")
-            self._revoke_idempotent_artifact_reservation(run_id, initialization)
-            self._mark_snapshot_initialization_failed(snapshot, initialization, error)
-            self._persist_snapshot_initialization_failure_outcome(snapshot, error)
-            on_status_change = getattr(
-                self.global_metrics,
-                "on_run_status_change",
-                None,
-            )
-            if on_status_change is not None:
-                on_status_change(
-                    run_id,
-                    _global_metrics_static_status(previous_status),
-                    "failed",
-                )
+            dispatch = getattr(static_run, "_dispatch", None)
         else:
-            self._request_idempotent_workflow_cleanup(
-                run_id,
-                record["workflow_id"],
-                initialization,
-                error,
-                lambda: self.static_run_store.save_run({
-                    **snapshot,
-                    RUN_WORKFLOW_INITIALIZATION_FIELD: initialization,
-                }),
-            )
-            snapshot = self.static_run_store.load_run(run_id)
-        self._run_workflow_idempotency_index[record["idempotency_key"]] = (
-            self._idempotency_record_from_snapshot(snapshot)
+            try:
+                dispatch = self.static_run_store.load_run(run_id).get(
+                    RUN_WORKFLOW_DISPATCH_FIELD
+                )
+            except (OSError, ValueError):
+                return False
+        return bool(
+            isinstance(dispatch, dict)
+            and dispatch.get("status") == "cleanup_pending"
+            and dispatch.get("cleanup_request_id") == request_id
         )
 
-    def _recover_incomplete_workflow_initializations(self) -> List[str]:
-        """Terminate durable initialization attempts left by a prior Head."""
+    def _retry_pending_workflow_cleanups(self) -> None:
+        _, retries = self._cleanup_maps()
+        now = time.monotonic()
+        for request_id, retry in list(retries.items()):
+            run_id = retry["run_id"]
+            if not self._cleanup_is_pending(run_id, request_id):
+                self._clear_workflow_cleanup(request_id)
+                continue
+            if now < retry["next_attempt"]:
+                continue
+            if retry["attempts"] >= RUN_WORKFLOW_CLEANUP_MAX_ATTEMPTS:
+                error = {
+                    "error_type": "workflow_initialization_failed",
+                    "message": (
+                        "Scheduler cleanup could not be confirmed after "
+                        f"{retry['attempts']} attempts; Scheduler shutdown requested"
+                    ),
+                    "phase": "cleanup",
+                    "cause_type": "SchedulerUnavailableError",
+                }
+                self.request_scheduler_shutdown()
+                self._finish_workflow_dispatch_failure(run_id, error)
+                self._clear_workflow_cleanup(request_id)
+                continue
+            self._send_workflow_cleanup_request(
+                run_id,
+                retry["workflow_id"],
+                request_id,
+            )
+
+    def _recover_incomplete_workflow_dispatches(self) -> List[str]:
         recovered = []
-        with self._run_workflow_idempotency_guard():
-            snapshots = self._persistent_snapshots_for_idempotency()
-            for snapshot in snapshots:
-                initialization = copy.deepcopy(
-                    snapshot.get(RUN_WORKFLOW_INITIALIZATION_FIELD)
-                )
-                if initialization is None:
-                    continue
-                self._validate_idempotency_initialization(initialization)
-                if initialization["status"] in {"ready", "failed"}:
-                    continue
-
-                run_id = snapshot.get("run_id")
-                workflow_id = snapshot.get("workflow_id")
-                if not isinstance(run_id, str) or not run_id:
-                    raise WorkflowIdempotencyStateError(
-                        "Stored workflow initialization has an invalid run_id"
-                    )
-                if not isinstance(workflow_id, str) or not workflow_id:
-                    raise WorkflowIdempotencyStateError(
-                        "Stored workflow initialization has an invalid workflow_id"
-                    )
-
-                error = copy.deepcopy(initialization.get("error"))
-                if error is None:
-                    error = self._initialization_error_envelope(
-                        initialization,
-                        RuntimeError(
-                            "Head process restarted before workflow initialization completed"
-                        ),
-                    )
-
-                needs_cleanup = self._initialization_requires_scheduler_ack(
-                    initialization
-                )
-                if needs_cleanup:
-                    def persist_cleanup(
-                        snapshot=snapshot,
-                        initialization=initialization,
-                    ):
+        for snapshot in self.static_run_store.list_runs():
+            dispatch = snapshot.get(RUN_WORKFLOW_DISPATCH_FIELD)
+            if dispatch is None:
+                continue
+            dispatch = self._validate_dispatch(copy.deepcopy(dispatch))
+            status = dispatch["status"]
+            if status in {"active", "terminal"}:
+                continue
+            run_id = snapshot.get("run_id")
+            workflow_id = snapshot.get("workflow_id")
+            if not isinstance(run_id, str) or not isinstance(workflow_id, str):
+                raise ValueError("Stored workflow dispatch identity is invalid")
+            error = copy.deepcopy(dispatch.get("error")) or {
+                "error_type": "workflow_initialization_failed",
+                "message": "Head restarted before workflow submission completed",
+                "phase": status,
+                "cause_type": "ProcessRestart",
+            }
+            if status == "prepared":
+                self._revoke_dispatch_artifacts(run_id, dispatch)
+                self._mark_snapshot_dispatch_failed(snapshot, dispatch, error)
+                self._record_snapshot_dispatch_failure(snapshot, error)
+            else:
+                self._request_workflow_cleanup(
+                    run_id,
+                    workflow_id,
+                    dispatch,
+                    error,
+                    lambda snapshot=snapshot, dispatch=dispatch: (
                         self.static_run_store.save_run({
                             **snapshot,
-                            RUN_WORKFLOW_INITIALIZATION_FIELD: initialization,
+                            RUN_WORKFLOW_DISPATCH_FIELD: dispatch,
                         })
-
-                    self._request_idempotent_workflow_cleanup(
-                        run_id,
-                        workflow_id,
-                        initialization,
-                        error,
-                        persist_cleanup,
-                    )
-                else:
-                    previous_status = snapshot.get("status")
-                    self._revoke_idempotent_artifact_reservation(
-                        run_id,
-                        initialization,
-                    )
-                    legacy_reservation = snapshot.get("artifact_reservation")
-                    if isinstance(legacy_reservation, dict):
-                        legacy_reservation["status"] = "revoked"
-                    self._mark_snapshot_initialization_failed(
-                        snapshot,
-                        initialization,
-                        error,
-                    )
-                    self._persist_snapshot_initialization_failure_outcome(
-                        snapshot,
-                        error,
-                    )
-                    on_status_change = getattr(
-                        self.global_metrics,
-                        "on_run_status_change",
-                        None,
-                    )
-                    if on_status_change is not None:
-                        on_status_change(
-                            run_id,
-                            _global_metrics_static_status(previous_status),
-                            "failed",
-                        )
-                recovered.append(run_id)
+                    ),
+                )
+            recovered.append(run_id)
         return recovered
 
     async def create_dynamic_run(
@@ -3839,31 +2284,26 @@ class MaPath:
         for run_id, static_run in list(self.static_runs.items()):
             previous_status = static_run.status
             deadline = static_run.deadline_time()
-            if self._static_run_initialization_requires_scheduler_ack(static_run):
+            if self._dispatch_requires_cleanup(static_run):
                 if deadline is not None and time.time() > deadline:
                     try:
-                        initialization = static_run._idempotency_initialization
-                        if initialization.get("status") == "cleanup_pending":
-                            request_id = initialization.get("cleanup_request_id")
-                            if not isinstance(request_id, str) or not request_id:
-                                raise WorkflowIdempotencyStateError(
-                                    "A pending workflow cleanup has no request identity"
-                                )
-                            self._register_idempotent_workflow_cleanup_retry(
-                                run_id,
-                                static_run.workflow_id,
-                                request_id,
-                            )
-                        else:
-                            self._ensure_static_initialization_cleanup(
-                                static_run,
-                                TimeoutError(
-                                    "Workflow initialization exceeded the run deadline"
-                                ),
-                            )
+                        dispatch = static_run._dispatch
+                        error = dispatch.get("error") or self._dispatch_error(
+                            dispatch,
+                            TimeoutError(
+                                "Workflow submission exceeded the run deadline"
+                            ),
+                        )
+                        self._request_workflow_cleanup(
+                            run_id,
+                            static_run.workflow_id,
+                            dispatch,
+                            error,
+                            lambda: self._persist_static_run(run_id),
+                        )
                     except Exception:
                         logger.exception(
-                            "Could not request deadline cleanup for initializing workflow %s",
+                            "Could not request deadline cleanup for workflow %s",
                             run_id,
                         )
                 continue
@@ -4211,45 +2651,37 @@ class MaPath:
                     continue
                 try:
                     static_run = entry["run"]
-                    if self._static_run_initialization_requires_scheduler_ack(
-                        static_run
-                    ):
-                        initialization = static_run._idempotency_initialization
-                        request_id = entry.get(
-                            "initialization_cleanup_request_id"
-                        )
+                    if self._dispatch_requires_cleanup(static_run):
+                        dispatch = static_run._dispatch
+                        request_id = entry.get("dispatch_cleanup_request_id")
                         if request_id is None:
-                            if initialization.get("status") == "cleanup_pending":
-                                request_id = initialization.get(
-                                    "cleanup_request_id"
-                                )
+                            if dispatch.get("status") == "cleanup_pending":
+                                request_id = dispatch.get("cleanup_request_id")
                                 if not isinstance(request_id, str) or not request_id:
-                                    raise WorkflowIdempotencyStateError(
-                                        "A pending workflow cleanup has no request identity"
+                                    raise ValueError(
+                                        "Pending workflow cleanup has no request ID"
                                     )
-                                self._register_idempotent_workflow_cleanup_retry(
+                                self._register_workflow_cleanup(
                                     run_id,
                                     static_run.workflow_id,
                                     request_id,
                                 )
                             else:
-                                self._ensure_static_initialization_cleanup(
-                                    static_run,
-                                    RuntimeError(reason),
+                                self._request_workflow_cleanup(
+                                    run_id,
+                                    static_run.workflow_id,
+                                    dispatch,
+                                    self._dispatch_error(
+                                        dispatch,
+                                        RuntimeError(reason),
+                                    ),
+                                    lambda: self._persist_static_run(run_id),
                                 )
-                                request_id = initialization.get(
-                                    "cleanup_request_id"
-                                )
-                            entry["initialization_cleanup_request_id"] = request_id
+                                request_id = dispatch.get("cleanup_request_id")
+                            entry["dispatch_cleanup_request_id"] = request_id
                         if progress["ray_cleanup_complete"]:
-                            self._confirm_idempotent_workflow_cleanup(
-                                run_id,
-                                request_id,
-                                workflow_id=static_run.workflow_id,
-                            )
-                            if not self._static_run_initialization_requires_scheduler_ack(
-                                static_run
-                            ):
+                            self._confirm_workflow_cleanup(run_id, request_id)
+                            if not self._dispatch_requires_cleanup(static_run):
                                 entry["complete"] = True
                         continue
                     if entry["interrupted"] is None:
@@ -4357,23 +2789,17 @@ class MaPath:
             for run_id, entry in progress["static"].items():
                 if entry["complete"]:
                     continue
-                request_id = entry.get("initialization_cleanup_request_id")
+                request_id = entry.get("dispatch_cleanup_request_id")
                 if request_id is None:
                     continue
                 static_run = entry["run"]
                 try:
-                    self._confirm_idempotent_workflow_cleanup(
-                        run_id,
-                        request_id,
-                        workflow_id=static_run.workflow_id,
-                    )
-                    if not self._static_run_initialization_requires_scheduler_ack(
-                        static_run
-                    ):
+                    self._confirm_workflow_cleanup(run_id, request_id)
+                    if not self._dispatch_requires_cleanup(static_run):
                         entry["complete"] = True
                 except Exception:
                     logger.exception(
-                        "Could not persist globally verified initialization cleanup for workflow %s; will retry",
+                        "Could not persist globally verified dispatch cleanup for workflow %s; will retry",
                         run_id,
                     )
 
@@ -4395,7 +2821,7 @@ class MaPath:
             try:
                 if not getattr(self, "_cleanup_started", False):
                     await self._handle_scheduler_exit()
-                    self._retry_pending_idempotent_workflow_cleanups()
+                    self._retry_pending_workflow_cleanups()
                     await self._sweep_run_deadlines()
                 await asyncio.sleep(max(0.1, float(interval_seconds)))
             except asyncio.CancelledError:
@@ -4600,40 +3026,12 @@ class MaPath:
     @staticmethod
     def _static_run_snapshot(static_run: StaticRun) -> Dict[str, Any]:
         snapshot = static_run.snapshot()
-        artifact_reservation = getattr(
-            static_run,
-            "_artifact_reservation",
-            None,
-        )
-        if artifact_reservation is not None:
-            snapshot["artifact_reservation"] = copy.deepcopy(
-                artifact_reservation
-            )
-        initialization = getattr(
-            static_run,
-            "_idempotency_initialization",
-            None,
-        )
-        if initialization is not None:
-            snapshot[RUN_WORKFLOW_INITIALIZATION_FIELD] = copy.deepcopy(
-                initialization
-            )
-        idempotency_key = getattr(static_run, "_idempotency_key", None)
+        dispatch = getattr(static_run, "_dispatch", None)
+        if dispatch is not None:
+            snapshot[RUN_WORKFLOW_DISPATCH_FIELD] = copy.deepcopy(dispatch)
         submission_digest = getattr(static_run, "_submission_digest", None)
         if submission_digest is not None:
             snapshot["submission_digest"] = submission_digest
-        if idempotency_key is not None:
-            snapshot["idempotency_key"] = idempotency_key
-            snapshot["idempotency_fingerprint"] = getattr(
-                static_run,
-                "_idempotency_fingerprint",
-                None,
-            )
-            snapshot[RUN_WORKFLOW_PAYLOAD_FINGERPRINT_FIELD] = getattr(
-                static_run,
-                "_idempotency_payload_fingerprint",
-                None,
-            )
         return snapshot
 
     def _record_static_event(
@@ -5187,7 +3585,7 @@ class MaPath:
 
     async def _continue_static_finish(self, run_id: str, task_id: str) -> None:
         static_run = self.static_runs[run_id]
-        if self._static_run_initialization_requires_scheduler_ack(static_run):
+        if self._dispatch_requires_cleanup(static_run):
             return
         workflow = self.submit_workflows[run_id]
         continuation = static_run.finish_continuations[task_id]
@@ -5430,7 +3828,7 @@ class MaPath:
             return
 
         static_run = self.static_runs.get(submit_id)
-        if self._static_run_initialization_requires_scheduler_ack(static_run):
+        if self._dispatch_requires_cleanup(static_run):
             self._rollback_task_attempt_event_transaction(attempt_transaction)
             return
         if static_run is not None and static_run.is_terminal():
@@ -5772,7 +4170,7 @@ class MaPath:
 
         try:
             self._wait_for_scheduler_ready()
-            self._recover_incomplete_workflow_initializations()
+            self._recover_incomplete_workflow_dispatches()
         except Exception:
             self._abort_scheduler_start()
             raise
@@ -5830,9 +4228,7 @@ class MaPath:
                         continue
 
                     if message_type == "workflow_stopped":
-                        self._handle_idempotent_workflow_cleanup_response(
-                            message_data
-                        )
+                        self._handle_workflow_cleanup_response(message_data)
                         continue
 
                     attempt_transaction = None
@@ -5846,9 +4242,7 @@ class MaPath:
                         static_run = self.static_runs.get(
                             message_data.get("workflow_id")
                         )
-                        if self._static_run_initialization_requires_scheduler_ack(
-                            static_run
-                        ):
+                        if self._dispatch_requires_cleanup(static_run):
                             continue
 
                     if message_type in {
@@ -6073,12 +4467,19 @@ class MaPath:
         '''
         async with self.lock:
             static_run = self.static_runs.get(submit_id)
-            if self._static_run_initialization_requires_scheduler_ack(static_run):
-                self._ensure_static_initialization_cleanup(
-                    static_run,
-                    RuntimeError(
-                        "Workflow was stopped before initialization completed"
+            if self._dispatch_requires_cleanup(static_run):
+                dispatch = static_run._dispatch
+                self._request_workflow_cleanup(
+                    submit_id,
+                    static_run.workflow_id,
+                    dispatch,
+                    dispatch.get("error") or self._dispatch_error(
+                        dispatch,
+                        RuntimeError(
+                            "Workflow was stopped before submission completed"
+                        ),
                     ),
+                    lambda: self._persist_static_run(submit_id),
                 )
                 return
 

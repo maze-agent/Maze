@@ -119,8 +119,6 @@ def test_submit_forwards_atomic_python_run_contract(endpoint):
         "inputs": {"question": "Q"},
         "timeout_seconds": 12,
         "run_id": run_id,
-        "idempotency_key": "submission-1",
-        "idempotency_fingerprint": "a" * 64,
     })
     spec.update({
         "workflow_id": "python-template",
@@ -140,8 +138,6 @@ def test_submit_forwards_atomic_python_run_contract(endpoint):
     response = _submit(server, {"spec": spec})
 
     assert response["workflow_id"] == "workflow-1"
-    assert response["idempotency_key"] == "submission-1"
-    assert response["idempotency_fingerprint"] == "a" * 64
     submitted_spec = path.created_specs[0]
     assert submitted_spec["workflow_id"] == "python-template"
     assert submitted_spec["input_contract"] == spec["input_contract"]
@@ -150,8 +146,6 @@ def test_submit_forwards_atomic_python_run_contract(endpoint):
     assert run_kwargs["inputs"] == {"question": "Q"}
     assert run_kwargs["run_id"] == run_id
     assert run_kwargs["final_output_refs"] == spec["final_output_refs"]
-    assert run_kwargs["idempotency_key"] == "submission-1"
-    assert run_kwargs["idempotency_fingerprint"] == "a" * 64
 
 
 def test_stable_workflow_id_reuses_only_the_same_dag():
@@ -277,6 +271,23 @@ def test_submit_explicitly_rejects_unsupported_run_fields(endpoint, field):
 
     assert error.value.status_code == 400
     assert error.value.detail == f"/workflows/submit does not support fields: {field}"
+    assert path.created_specs == []
+    assert path.run_calls == []
+    assert reachable_contexts == []
+
+
+def test_submit_rejects_removed_nested_idempotency_fields(endpoint):
+    server, path, reachable_contexts = endpoint
+
+    with pytest.raises(HTTPException) as error:
+        _submit(server, {
+            "spec": _spec(run={"idempotency_key": "legacy"}),
+        })
+
+    assert error.value.status_code == 400
+    assert error.value.detail == (
+        "idempotency_key and idempotency_fingerprint were removed; use run_id"
+    )
     assert path.created_specs == []
     assert path.run_calls == []
     assert reachable_contexts == []
