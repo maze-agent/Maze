@@ -344,12 +344,11 @@ export default function BuiltinTasksSidebar({
     setWorkflowSaveState,
     addNode,
     selectNode,
-    clearRunResults,
+    setSelectedRunId,
     staticRuns,
     setStaticRuns,
     upsertStaticRun,
     setStaticRunEvents,
-    openRunViewer,
     reset,
     isRunning,
     acquireWorkflowOperation,
@@ -778,7 +777,7 @@ export default function BuiltinTasksSidebar({
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);
       selectNode(null);
-      clearRunResults();
+      setSelectedRunId(null);
       setWorkspaceContext(loaded);
       setWorkspaceDir(loaded.workspaceDir);
       setWorkspaceInput(loaded.workspaceDir);
@@ -836,7 +835,8 @@ export default function BuiltinTasksSidebar({
   };
 
   const openRecentRun = async (runId: string) => {
-    openRunViewer(runId);
+    setSelectedRunId(runId);
+    onOpenRuns?.();
     try {
       const [runResult, eventsResult] = await Promise.all([
         api.getRun(runId),
@@ -1328,7 +1328,7 @@ export default function BuiltinTasksSidebar({
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);
       selectNode(null);
-      clearRunResults();
+      setSelectedRunId(null);
       setWorkspaceContext(loaded);
       setWorkspaceDir(loaded.workspaceDir);
       setWorkspaceInput(loaded.workspaceDir);
@@ -1386,7 +1386,7 @@ export default function BuiltinTasksSidebar({
       setNodes(loaded.workflow.nodes);
       setEdges(loaded.workflow.edges);
       selectNode(null);
-      clearRunResults();
+      setSelectedRunId(null);
       setWorkspaceContext(loaded);
       setWorkspaceDir(loaded.workspaceDir);
       setWorkspaceInput(loaded.workspaceDir);

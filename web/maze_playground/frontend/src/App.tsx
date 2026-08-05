@@ -6,7 +6,6 @@ import Toolbar from './components/Toolbar';
 import BuiltinTasksSidebar from './components/BuiltinTasksSidebar';
 import WorkflowCanvas from './components/WorkflowCanvas';
 import NodePanel from './components/NodePanel';
-import ResultsModal from './components/ResultsModal';
 import RunsInspector from './components/RunsInspector';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import WorkbenchShell from './components/WorkbenchShell';
@@ -44,6 +43,7 @@ function App() {
     edges,
     isRunning,
     activeRunId,
+    selectedRunId,
     workflowSaveState,
     workflowOperation,
     setWorkflowId,
@@ -334,6 +334,12 @@ function App() {
   }, [saveWorkflowToWorkspace]);
 
   useEffect(() => {
+    if (activeRunId) {
+      setRunsOpen(true);
+    }
+  }, [activeRunId]);
+
+  useEffect(() => {
     if (!activeRunId) {
       return undefined;
     }
@@ -408,11 +414,11 @@ function App() {
         )}
         canvas={<WorkflowCanvas />}
         nodePanel={<NodePanel open={nodePanelOpen} onClose={() => setNodePanelOpen(false)} />}
-        resultsModal={<ResultsModal />}
         runsInspector={(
           <RunsInspector
             open={runsOpen}
             onClose={() => setRunsOpen(false)}
+            focusStaticRunId={selectedRunId}
           />
         )}
         clusterDrawer={(

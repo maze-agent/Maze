@@ -20,7 +20,6 @@ interface WorkbenchShellProps {
   leftSidebar: ReactNode;
   canvas: ReactNode;
   nodePanel: ReactNode;
-  resultsModal: ReactNode;
   runsInspector: ReactNode;
   clusterDrawer: ReactNode;
   onOpenNodePanel?: () => void;
@@ -259,7 +258,6 @@ export default function WorkbenchShell({
   leftSidebar,
   canvas,
   nodePanel,
-  resultsModal,
   runsInspector,
   clusterDrawer,
   onOpenNodePanel,
@@ -398,7 +396,6 @@ export default function WorkbenchShell({
       </div>
 
       {nodePanel}
-      {resultsModal}
       {runsInspector}
       {clusterDrawer}
     </div>

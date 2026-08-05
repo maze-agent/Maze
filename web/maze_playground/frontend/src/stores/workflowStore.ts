@@ -6,7 +6,6 @@ import type {
   WorkspaceWorkflowMeta,
   WorkspaceManifest,
   LocalWorkspaceFileMeta,
-  RunResult,
   UnifiedRunEvent,
   UnifiedRunSnapshot,
 } from '@/types/workflow';
@@ -62,10 +61,8 @@ interface WorkflowStore {
   
   // Run state
   isRunning: boolean;
-  runResults: RunResult[];
   activeRunId: string | null;
   selectedRunId: string | null;
-  runViewerOpen: boolean;
   staticRuns: UnifiedRunSnapshot[];
   staticRunEvents: Record<string, UnifiedRunEvent[]>;
   
@@ -107,16 +104,12 @@ interface WorkflowStore {
   setLocalWorkspaceFiles: (files: LocalWorkspaceFileMeta[], version: string, syncedAt?: string | null) => void;
   clearLocalWorkspace: () => void;
   setIsRunning: (isRunning: boolean) => void;
-  addRunResult: (result: RunResult) => void;
-  clearRunResults: () => void;
+  setSelectedRunId: (runId: string | null) => void;
   setActiveRun: (run: UnifiedRunSnapshot | null) => void;
   upsertStaticRun: (run: UnifiedRunSnapshot) => void;
   setStaticRuns: (runs: UnifiedRunSnapshot[]) => void;
-  addStaticRunEvent: (runId: string, event: UnifiedRunEvent) => void;
   setStaticRunEvents: (runId: string, events: UnifiedRunEvent[]) => void;
   removeStaticRun: (runId: string) => void;
-  openRunViewer: (runId: string) => void;
-  closeRunViewer: () => void;
   reset: () => void;
 }
 
@@ -146,10 +139,8 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   localWorkspaceVersion: '',
   localWorkspaceLastSyncedAt: null,
   isRunning: false,
-  runResults: [],
   activeRunId: null,
   selectedRunId: null,
-  runViewerOpen: false,
   staticRuns: [],
   staticRunEvents: {},
 
@@ -272,12 +263,8 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   }),
   
   setIsRunning: (isRunning) => set({ isRunning }),
-  
-  addRunResult: (result) => set((state) => ({
-    runResults: [...state.runResults, result],
-  })),
-  
-  clearRunResults: () => set({ runResults: [], selectedRunId: null }),
+
+  setSelectedRunId: (runId) => set({ selectedRunId: runId }),
 
   setActiveRun: (run) => set((state) => {
     if (!run) {
@@ -287,7 +274,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     return {
       activeRunId: run.run_id,
       selectedRunId: run.run_id,
-      runViewerOpen: true,
       staticRuns: [run, ...existing],
     };
   }),
@@ -303,13 +289,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   })),
 
   setStaticRuns: (runs) => set({ staticRuns: runs }),
-
-  addStaticRunEvent: (runId, event) => set((state) => ({
-    staticRunEvents: {
-      ...state.staticRunEvents,
-      [runId]: [...(state.staticRunEvents[runId] || []), event],
-    },
-  })),
 
   setStaticRunEvents: (runId, events) => set((state) => ({
     staticRunEvents: {
@@ -329,15 +308,10 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
       staticRunEvents: remainingEvents,
       activeRunId: removingActiveRun ? null : state.activeRunId,
       selectedRunId: removingSelectedRun ? null : state.selectedRunId,
-      runViewerOpen: removingSelectedRun ? false : state.runViewerOpen,
       isRunning: removingActiveRun ? false : state.isRunning,
     };
   }),
 
-  openRunViewer: (runId) => set({ selectedRunId: runId, runViewerOpen: true }),
-
-  closeRunViewer: () => set({ runViewerOpen: false }),
-  
   reset: () => set({
     workflowId: createLocalWorkflowId(),
     workflowName: 'Untitled Workflow',
@@ -350,9 +324,7 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     workflowDraftError: null,
     currentWorkspaceWorkflowPath: null,
     isRunning: false,
-    runResults: [],
     activeRunId: null,
     selectedRunId: null,
-    runViewerOpen: false,
   }),
 }));

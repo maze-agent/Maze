@@ -567,15 +567,6 @@ export interface ClusterConsoleRunResponse {
   error?: string;
 }
 
-export interface RunResult {
-  taskId: string;
-  taskName: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  result?: any;
-  error?: string;
-  timestamp: string;
-}
-
 export type UnifiedRunStatus =
   | 'created'
   | 'queued'

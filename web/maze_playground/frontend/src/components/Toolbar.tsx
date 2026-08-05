@@ -46,7 +46,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     selectNode,
     setCurrentWorkspaceWorkflowPath,
     setWorkspaceWorkflows,
-    clearRunResults,
+    setSelectedRunId,
     setIsRunning,
     setActiveRun,
     acquireWorkflowOperation,
@@ -285,7 +285,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       setCurrentWorkspaceWorkflowPath(null);
       setWorkspaceContext(imported);
       setWorkspaceDir(imported.workspaceDir);
-      clearRunResults();
+      setSelectedRunId(null);
 
       const [tasksResult, workflowsResult] = await Promise.all([
         api.getWorkspaceTasks(imported.workspaceDir),

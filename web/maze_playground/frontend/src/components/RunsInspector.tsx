@@ -494,7 +494,7 @@ export default function RunsInspector({
     workspaceDir,
     upsertStaticRun,
     setStaticRunEvents,
-    openRunViewer,
+    setSelectedRunId,
   } = useWorkflowStore();
   const [runs, setRuns] = useState<UnifiedRunSnapshot[]>([]);
   const [selectedRunKey, setSelectedRunKey] = useState<string | null>(null);
@@ -656,7 +656,7 @@ export default function RunsInspector({
           setDynamicEvents([]);
           upsertStaticRun(run);
           setStaticRunEvents(runId, events);
-          openRunViewer(runId);
+          setSelectedRunId(runId);
         }
       } catch (error: any) {
         if (version !== detailRequestVersionRef.current) return;
@@ -677,7 +677,7 @@ export default function RunsInspector({
     })();
     detailRequestRef.current = { key, version, promise: request };
     return request;
-  }, [openRunViewer, setStaticRunEvents, upsertStaticRun]);
+  }, [setSelectedRunId, setStaticRunEvents, upsertStaticRun]);
 
   const selectRun = useCallback((item: RunItem, silent = false) => {
     setSelectedRunKey(runKey(item));
@@ -1259,6 +1259,15 @@ export default function RunsInspector({
           run: selectedStaticRun,
           nodes: selectedStaticTaskNodes,
         })}
+
+        <div>
+          <Title level={5}>Final Result</Title>
+          {selectedStaticRun.final_result == null && selectedStaticRun.result_summary == null ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No final result recorded" />
+          ) : (
+            renderJsonValue(selectedStaticRun.final_result ?? selectedStaticRun.result_summary)
+          )}
+        </div>
 
         {renderRunLogs()}
 
