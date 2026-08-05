@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import { spawn } from 'child_process';
-import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
@@ -19,7 +18,6 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const localWorkspaceManifests = new Map();
 const PROJECT_ROOT = path.resolve(__dirname, '../../../..');
 const WORKSPACE_ROOT_DIR = path.resolve(process.env.MAZE_WORKSPACE_ROOT_DIR || process.env.MAZE_WORKSPACE_DIR || path.join(PROJECT_ROOT, 'workspaces'));
 const WORKSPACES_DIR = path.resolve(process.env.MAZE_WORKSPACES_DIR || WORKSPACE_ROOT_DIR);
@@ -306,10 +304,6 @@ async function ensureWorkspacePolicy(workspaceDir) {
   }
 }
 
-function workspacePolicyPath(workspaceDir) {
-  return path.join(workspaceDir, 'policies', 'sandbox_policy.json');
-}
-
 async function ensureWorkspaceDirs(workspaceDir) {
   const resolved = resolveWorkspaceDirInput(workspaceDir);
   await fs.mkdir(resolved, { recursive: true });
@@ -549,14 +543,6 @@ function normalizeWorkspaceFileRelativePath(relativePath = '') {
     throw new Error('Workspace file path must stay inside workspace/files');
   }
   return normalized;
-}
-
-function normalizeLocalWorkspaceId(value = '') {
-  return String(value || '')
-    .trim()
-    .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 120) || 'default';
 }
 
 function resolveWorkspaceFilePath(workspaceDir, relativePath = '') {
@@ -1982,7 +1968,7 @@ async function submitPlaygroundWorkflow({
   playgroundWorkflowId,
   workflowPath = null,
 }) {
-  const submissionId = uuidv4();
+  const submissionId = crypto.randomUUID();
   const definitions = await resolveWorkflowDefinitions(workflow, context.workspaceDir);
   let spec;
   try {
@@ -2198,22 +2184,6 @@ app.post('/api/workspaces', async (req, res) => {
   }
 });
 
-app.get('/api/workspaces/current', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    res.json({
-      success: true,
-      workspaceId: context.workspaceId,
-      workspaceDir: context.workspaceDir,
-      workspaceManifestVersion: context.workspaceManifestVersion,
-      manifest: context.manifest,
-    });
-  } catch (error) {
-    console.error('❌ 获取当前 workspace 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.get('/api/workspaces/:workspaceId', async (req, res) => {
   try {
     const context = await resolveWorkspaceContext({ workspaceId: req.params.workspaceId });
@@ -2333,54 +2303,6 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
   }
 });
 
-app.get('/api/workspace-policy', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const policyPath = workspacePolicyPath(context.workspaceDir);
-    const policy = await readJsonFile(policyPath, null);
-    res.json({
-      success: true,
-      ...workspaceResponseFields(context),
-      policyPath: path.relative(context.workspaceDir, policyPath).split(path.sep).join('/'),
-      policy: policy || {},
-    });
-  } catch (error) {
-    console.error('❌ 获取 workspace policy 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/workspace-policy', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir,
-      policy,
-    } = req.body || {};
-    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
-      return res.status(400).json({ error: 'policy must be a JSON object' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir });
-    const policyPath = workspacePolicyPath(context.workspaceDir);
-    await writeJsonAtomic(policyPath, policy);
-    const manifest = await recordWorkspaceMutation(context.workspaceDir, 'policy_updated', {
-      path: 'policies/sandbox_policy.json',
-    });
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir: context.workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      policyPath: 'policies/sandbox_policy.json',
-      policy,
-    });
-  } catch (error) {
-    console.error('❌ 更新 workspace policy 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // 1.1 获取工作目录任务列表
 app.get('/api/workspace-tasks', async (req, res) => {
   try {
@@ -2460,98 +2382,6 @@ app.post('/api/workspace-tasks', async (req, res) => {
   }
 });
 
-// 1.2.1 删除工作目录任务
-app.delete('/api/workspace-tasks', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-    } = req.body;
-
-    if (!relativePath) {
-      return res.status(400).json({ error: 'relativePath is required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    console.log(`🗑️ 删除工作区任务: ${workspaceDir}/${relativePath}`);
-
-    const result = await callPython('delete_workspace_task', {
-      workspaceDir,
-      relativePath,
-    });
-
-    if (result.error || result.success === false) {
-      console.error('❌ 删除工作区任务失败:', result.error);
-      return res.status(400).json({ error: result.error, traceback: result.traceback });
-    }
-
-    clearWorkspaceTasksCache(workspaceDir);
-    console.log('✅ 工作区任务删除成功');
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'task_deleted', {
-      path: result.relativePath || relativePath,
-    });
-    res.json({
-      ...result,
-      workspaceId: manifest.workspace_id,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-    });
-  } catch (error) {
-    console.error('❌ 删除工作区任务失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 1.2.2 重命名工作目录任务
-app.patch('/api/workspace-tasks/rename', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-      oldFunctionName,
-      newName,
-    } = req.body;
-
-    if (!relativePath || !oldFunctionName || !newName) {
-      return res.status(400).json({ error: 'relativePath, oldFunctionName, and newName are required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    console.log(`✏️ 重命名工作区任务: ${relativePath} ${oldFunctionName} -> ${newName}`);
-
-    const result = await callPython('rename_workspace_task', {
-      workspaceDir,
-      relativePath,
-      oldFunctionName,
-      newName,
-    });
-
-    if (result.error || result.success === false) {
-      console.error('❌ 重命名工作区任务失败:', result.error);
-      return res.status(400).json({ error: result.error, traceback: result.traceback });
-    }
-
-    clearWorkspaceTasksCache(workspaceDir);
-    console.log('✅ 工作区任务重命名成功');
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'task_renamed', {
-      path: result.relativePath || relativePath,
-      oldFunctionName,
-      newFunctionName: result.newFunctionName,
-    });
-    res.json({
-      ...result,
-      workspaceId: manifest.workspace_id,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-    });
-  } catch (error) {
-    console.error('❌ 重命名工作区任务失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // 1.3 Workspace files
 app.get('/api/workspace-files', async (req, res) => {
   try {
@@ -2580,101 +2410,6 @@ app.get('/api/workspace-files', async (req, res) => {
     res.json({ success: true, ...workspaceResponseFields(context), filesDir, path: relativePath, files });
   } catch (error) {
     console.error('❌ 获取 workspace files 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/local-workspaces/:workspaceId/manifest', async (req, res) => {
-  try {
-    const workspaceId = normalizeLocalWorkspaceId(req.params.workspaceId);
-    const files = Array.isArray(req.body?.files) ? req.body.files : [];
-    const normalizedFiles = [];
-    const seen = new Set();
-
-    for (const item of files) {
-      const relativePath = normalizeWorkspaceFileRelativePath(item?.relativePath || item?.path || '');
-      if (!relativePath || seen.has(relativePath)) {
-        continue;
-      }
-      seen.add(relativePath);
-      normalizedFiles.push({
-        relativePath,
-        name: path.posix.basename(relativePath),
-        type: item?.type === 'directory' ? 'directory' : 'file',
-        size: Number.isFinite(Number(item?.size)) ? Number(item.size) : null,
-        updatedAt: item?.updatedAt ? String(item.updatedAt) : null,
-        source: 'local',
-      });
-    }
-
-    const manifest = {
-      workspaceId,
-      displayName: String(req.body?.displayName || workspaceId),
-      version: String(req.body?.version || Date.now()),
-      updatedAt: new Date().toISOString(),
-      files: normalizedFiles,
-    };
-    localWorkspaceManifests.set(workspaceId, manifest);
-    res.json({ success: true, manifest });
-  } catch (error) {
-    console.error('❌ 更新 local workspace manifest 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/local-workspaces/:workspaceId/manifest', (req, res) => {
-  const workspaceId = normalizeLocalWorkspaceId(req.params.workspaceId);
-  res.json({
-    success: true,
-    manifest: localWorkspaceManifests.get(workspaceId) || {
-      workspaceId,
-      displayName: workspaceId,
-      version: null,
-      updatedAt: null,
-      files: [],
-    },
-  });
-});
-
-app.post('/api/workspace-files/missing', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      paths = [],
-    } = req.body || {};
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const normalizedPaths = [];
-    const seen = new Set();
-
-    for (const rawPath of Array.isArray(paths) ? paths : []) {
-      const relativePath = normalizeWorkspaceFileRelativePath(rawPath);
-      if (!relativePath || seen.has(relativePath)) {
-        continue;
-      }
-      seen.add(relativePath);
-      normalizedPaths.push(relativePath);
-    }
-
-    const missing = [];
-    const present = [];
-    for (const relativePath of normalizedPaths) {
-      const { fullPath } = resolveWorkspaceFilePath(workspaceDir, relativePath);
-      const stat = await fs.stat(fullPath).catch((error) => {
-        if (error.code === 'ENOENT') return null;
-        throw error;
-      });
-      if (stat && stat.isFile()) {
-        present.push(relativePath);
-      } else {
-        missing.push(relativePath);
-      }
-    }
-
-    res.json({ success: true, ...workspaceResponseFields(context), present, missing });
-  } catch (error) {
-    console.error('❌ 检查 workspace file 缺失失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2736,112 +2471,6 @@ app.post('/api/artifacts/promote', async (req, res) => {
     res.status(error.status || 500).json({ error: error.message });
   } finally {
     clientRequest.dispose();
-  }
-});
-
-app.post('/api/workspace-files/mkdir', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-    } = req.body || {};
-
-    if (!relativePath) {
-      return res.status(400).json({ error: 'relativePath is required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const { fullPath, filesDir } = resolveWorkspaceFilePath(workspaceDir, relativePath);
-    await fs.mkdir(fullPath, { recursive: true });
-    const file = await describeWorkspaceFile(filesDir, fullPath);
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'folder_created', {
-      path: file.relativePath,
-    });
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      file,
-    });
-  } catch (error) {
-    console.error('❌ 创建 workspace folder 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/workspace-files', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-    } = req.body || {};
-
-    if (!relativePath) {
-      return res.status(400).json({ error: 'relativePath is required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const { fullPath } = resolveWorkspaceFilePath(workspaceDir, relativePath);
-    await fs.rm(fullPath, { recursive: true, force: true });
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'file_deleted', {
-      path: relativePath,
-    });
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      relativePath,
-      deleted: true,
-    });
-  } catch (error) {
-    console.error('❌ 删除 workspace file 失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/workspace-files/preview', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const workspaceDir = context.workspaceDir;
-    const { fullPath, relativePath } = resolveWorkspaceFilePath(workspaceDir, req.query.path || '');
-    const stat = await fs.stat(fullPath);
-
-    if (!stat.isFile()) {
-      return res.status(400).json({ error: 'Workspace file path is not a file' });
-    }
-    if (stat.size > 512 * 1024) {
-      return res.status(413).json({ error: 'File is too large to preview' });
-    }
-
-    const content = await fs.readFile(fullPath, 'utf-8');
-    res.json({ success: true, ...workspaceResponseFields(context), relativePath, content });
-  } catch (error) {
-    console.error('❌ 预览 workspace file 失败:', error);
-    res.status(statusForFileError(error)).json({ error: error.message });
-  }
-});
-
-app.get('/api/workspace-files/download', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.query);
-    const workspaceDir = context.workspaceDir;
-    const { fullPath } = resolveWorkspaceFilePath(workspaceDir, req.query.path || '');
-    const stat = await fs.stat(fullPath);
-
-    if (!stat.isFile()) {
-      return res.status(400).json({ error: 'Workspace file path is not a file' });
-    }
-
-    res.download(fullPath);
-  } catch (error) {
-    console.error('❌ 下载 workspace file 失败:', error);
-    res.status(statusForFileError(error)).json({ error: error.message });
   }
 });
 
@@ -2971,95 +2600,6 @@ app.get('/api/workspace-workflows', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 获取工作区工作流失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 1.3.1 删除工作目录工作流
-app.delete('/api/workspace-workflows', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-    } = req.body;
-
-    if (!relativePath) {
-      return res.status(400).json({ error: 'relativePath is required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, 'workflow');
-    await fs.unlink(fullPath);
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_deleted', {
-      path: workflowPath,
-    });
-
-    console.log(`🗑️ 工作流已删除: ${workflowPath}`);
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      relativePath: workflowPath,
-    });
-  } catch (error) {
-    console.error('❌ 删除工作区工作流失败:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 1.3.2 重命名工作目录工作流
-app.patch('/api/workspace-workflows/rename', async (req, res) => {
-  try {
-    const {
-      workspaceId,
-      workspaceDir: requestedWorkspaceDir,
-      relativePath,
-      name,
-    } = req.body;
-
-    if (!relativePath || !name || !String(name).trim()) {
-      return res.status(400).json({ error: 'relativePath and name are required' });
-    }
-
-    const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
-    const workspaceDir = context.workspaceDir;
-    const { relativePath: workflowPath, fullPath } = resolveWorkflowFile(workspaceDir, relativePath, name);
-    const raw = await fs.readFile(fullPath, 'utf-8');
-    const payload = JSON.parse(raw);
-    const normalized = normalizeWorkflowPayload(payload);
-    const workflowNodes = normalized.nodes.map((node) => stripNodeTaskCode(node, workspaceDir));
-    const nextPayload = {
-      schema: payload?.schema || 'maze-playground-workflow',
-      version: Math.max(payload?.version || 1, 3),
-      savedAt: new Date().toISOString(),
-      workflow: {
-        ...(payload?.workflow || {}),
-        name: String(name).trim(),
-        nodes: workflowNodes,
-        edges: normalized.edges,
-      },
-    };
-
-    await fs.writeFile(fullPath, JSON.stringify(nextPayload, null, 2), 'utf-8');
-    const manifest = await recordWorkspaceMutation(workspaceDir, 'workflow_renamed', {
-      path: workflowPath,
-      name: String(name).trim(),
-    });
-
-    console.log(`✏️ 工作流已重命名: ${workflowPath}`);
-    res.json({
-      success: true,
-      workspaceId: manifest.workspace_id,
-      workspaceDir,
-      workspaceManifestVersion: Number(manifest.manifest_version || context.workspaceManifestVersion),
-      relativePath: workflowPath,
-      workflow: nextPayload.workflow,
-    });
-  } catch (error) {
-    console.error('❌ 重命名工作区工作流失败:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3221,24 +2761,6 @@ app.post('/api/workspace-workflows/import', async (req, res) => {
   } catch (error) {
     console.error('❌ 导入工作区工作流失败:', error);
     res.status(500).json({ error: error.message });
-  }
-});
-
-// 1.7 Dynamic run inspector API proxy
-app.get('/api/dynamic-runs', async (req, res) => {
-  try {
-    const params = new URLSearchParams();
-    if (req.query.status) params.set('status', String(req.query.status));
-    if (req.query.limit) params.set('limit', String(req.query.limit));
-    const query = params.toString();
-    const result = await callMazeCore(`/dynamic_runs${query ? `?${query}` : ''}`);
-    res.json({
-      success: true,
-      runs: result.runs || [],
-    });
-  } catch (error) {
-    console.error('❌ 获取 dynamic runs 失败:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
   }
 });
 
@@ -3526,16 +3048,6 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-app.get('/api/resource-history', async (req, res) => {
-  try {
-    const result = await callMazeCore('/resource-history');
-    res.json(result);
-  } catch (error) {
-    console.error('Failed to get resource history:', error);
-    res.status(error.status || 500).json({ error: error.message || 'Failed to get resource history' });
-  }
-});
-
 app.post('/api/models/config', async (req, res) => {
   try {
     const result = await callMazeCore('/models/config', {
@@ -3587,21 +3099,6 @@ app.get('/api/runs/:runId', async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to get run:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.get('/api/runs/:runId/tasks', async (req, res) => {
-  try {
-    await requirePublicCoreRunId(req.params.runId);
-    const result = await callMazeCore(`/runs/${encodeURIComponent(req.params.runId)}/tasks`);
-    res.json({
-      success: true,
-      runId: result.run_id,
-      tasks: result.tasks || [],
-    });
-  } catch (error) {
-    console.error('Failed to get run tasks:', error);
     res.status(error.status || 500).json({ error: error.message, payload: error.payload });
   }
 });
@@ -3771,85 +3268,6 @@ app.post('/api/runs/:runId/retry', async (req, res) => {
   }
 });
 
-app.get('/api/dynamic-runs/:runId', async (req, res) => {
-  try {
-    const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}`);
-    res.json({
-      success: true,
-      run: result.run,
-    });
-  } catch (error) {
-    console.error('❌ 获取 dynamic run 失败:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.get('/api/dynamic-runs/:runId/events', async (req, res) => {
-  try {
-    const params = new URLSearchParams();
-    if (req.query.after !== undefined) params.set('after', String(req.query.after));
-    const query = params.toString();
-    const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}/events${query ? `?${query}` : ''}`);
-    res.json({
-      success: true,
-      runId: result.run_id,
-      events: result.events || [],
-    });
-  } catch (error) {
-    console.error('❌ 获取 dynamic run events 失败:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.post('/api/dynamic-runs/:runId/events', async (req, res) => {
-  try {
-    const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}/events`, {
-      method: 'POST',
-      body: req.body || {},
-    });
-    res.json({
-      success: true,
-      runId: result.run_id,
-      event: result.event,
-    });
-  } catch (error) {
-    console.error('Failed to write dynamic run event:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.post('/api/dynamic-runs/:runId/permission-requests/:requestId/decision', async (req, res) => {
-  try {
-    const action = String(req.body?.action || req.body?.decision?.action || '').trim().toLowerCase();
-    const reason = String(req.body?.reason || req.body?.decision?.reason || '').trim();
-    if (!['allow', 'deny'].includes(action)) {
-      res.status(400).json({ success: false, error: 'Permission decision action must be allow or deny' });
-      return;
-    }
-    const result = await callMazeCore(
-      `/dynamic_runs/${encodeURIComponent(req.params.runId)}/permission_requests/${encodeURIComponent(req.params.requestId)}/decision`,
-      {
-        method: 'POST',
-        body: {
-          decision: {
-            action,
-            reason,
-            decided_by: 'playground',
-          },
-        },
-      },
-    );
-    res.json({
-      success: true,
-      runId: result.run_id,
-      request: result.request,
-    });
-  } catch (error) {
-    console.error('Failed to decide dynamic run permission request:', error);
-    res.status(error.status || 500).json({ success: false, error: error.message, payload: error.payload });
-  }
-});
-
 app.delete('/api/dynamic-runs/:runId', async (req, res) => {
   try {
     const result = await callMazeCore(`/dynamic_runs/${encodeURIComponent(req.params.runId)}`, {
@@ -3862,22 +3280,6 @@ app.delete('/api/dynamic-runs/:runId', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 删除 dynamic run 失败:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.post('/api/dynamic-runs/cleanup', async (req, res) => {
-  try {
-    const result = await callMazeCore('/dynamic_runs/cleanup', {
-      method: 'POST',
-      body: req.body || {},
-    });
-    res.json({
-      success: true,
-      cleanup: result.cleanup,
-    });
-  } catch (error) {
-    console.error('❌ 清理 dynamic runs 失败:', error);
     res.status(error.status || 500).json({ error: error.message, payload: error.payload });
   }
 });

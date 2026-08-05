@@ -5,14 +5,11 @@ import type {
   WorkspaceFilesResponse,
   WorkspaceWorkflowsResponse,
   SystemCatalogResponse,
-  DynamicRunEvent,
-  DynamicRunSnapshot,
   ClusterQueuesResponse,
   ClusterConsoleRunResponse,
   ClusterResourcesResponse,
   ModelTestResponse,
   ModelsResponse,
-  ResourceHistoryResponse,
   WorkerProfile,
   WorkerProfileActionResponse,
   WorkerProfileDraftTestResponse,
@@ -35,14 +32,6 @@ export const api = {
     mode?: string;
   }): Promise<WorkspaceContextResponse> {
     const response = await axios.post(`${API_BASE}/workspaces`, data || {});
-    return response.data;
-  },
-
-  async getCurrentWorkspace(params?: {
-    workspaceId?: string;
-    workspaceDir?: string;
-  }): Promise<WorkspaceContextResponse> {
-    const response = await axios.get(`${API_BASE}/workspaces/current`, { params });
     return response.data;
   },
 
@@ -114,28 +103,6 @@ export const api = {
     return response.data;
   },
 
-  // Delete a workspace task file
-  async deleteWorkspaceTask(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-  }): Promise<any> {
-    const response = await axios.delete(`${API_BASE}/workspace-tasks`, { data });
-    return response.data;
-  },
-
-  // Rename a workspace task function
-  async renameWorkspaceTask(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-    oldFunctionName: string;
-    newName: string;
-  }): Promise<any> {
-    const response = await axios.patch(`${API_BASE}/workspace-tasks/rename`, data);
-    return response.data;
-  },
-
   async getWorkspaceFiles(params?: {
     workspaceDir?: string;
     path?: string;
@@ -151,38 +118,6 @@ export const api = {
     contentBase64: string;
   }): Promise<any> {
     const response = await axios.post(`${API_BASE}/workspace-files/upload`, data);
-    return response.data;
-  },
-
-  async getMissingWorkspaceFiles(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    paths: string[];
-  }): Promise<{
-    success: boolean;
-    workspaceDir: string;
-    present: string[];
-    missing: string[];
-  }> {
-    const response = await axios.post(`${API_BASE}/workspace-files/missing`, data);
-    return response.data;
-  },
-
-  async updateLocalWorkspaceManifest(
-    workspaceId: string,
-    data: {
-      displayName?: string;
-      version?: string;
-      files: Array<{
-        relativePath: string;
-        name?: string;
-        type: 'file' | 'directory';
-        size?: number | null;
-        updatedAt?: string | null;
-      }>;
-    },
-  ): Promise<any> {
-    const response = await axios.put(`${API_BASE}/local-workspaces/${encodeURIComponent(workspaceId)}/manifest`, data);
     return response.data;
   },
 
@@ -223,39 +158,6 @@ export const api = {
   }> {
     const response = await axios.post(`${API_BASE}/llm/generate-task`, data);
     return response.data;
-  },
-
-  async createWorkspaceFolder(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-  }): Promise<any> {
-    const response = await axios.post(`${API_BASE}/workspace-files/mkdir`, data);
-    return response.data;
-  },
-
-  async deleteWorkspaceFile(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-  }): Promise<any> {
-    const response = await axios.delete(`${API_BASE}/workspace-files`, { data });
-    return response.data;
-  },
-
-  async previewWorkspaceFile(
-    workspaceDir: string,
-    path: string,
-  ): Promise<{ success: boolean; workspaceDir: string; relativePath: string; content: string }> {
-    const response = await axios.get(`${API_BASE}/workspace-files/preview`, {
-      params: { workspaceDir, path },
-    });
-    return response.data;
-  },
-
-  getWorkspaceFileDownloadUrl(workspaceDir: string, path: string): string {
-    const params = new URLSearchParams({ workspaceDir, path });
-    return `${API_BASE}/workspace-files/download?${params.toString()}`;
   },
 
   async promoteArtifactToWorkspaceFile(data: {
@@ -350,27 +252,6 @@ export const api = {
     return response.data;
   },
 
-  // Delete a saved workspace workflow file
-  async deleteWorkspaceWorkflow(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-  }): Promise<any> {
-    const response = await axios.delete(`${API_BASE}/workspace-workflows`, { data });
-    return response.data;
-  },
-
-  // Rename a saved workspace workflow
-  async renameWorkspaceWorkflow(data: {
-    workspaceId?: string;
-    workspaceDir: string;
-    relativePath: string;
-    name: string;
-  }): Promise<any> {
-    const response = await axios.patch(`${API_BASE}/workspace-workflows/rename`, data);
-    return response.data;
-  },
-
   // Parse custom function
   async parseCustomFunction(code: string): Promise<{
     name: string;
@@ -411,52 +292,8 @@ export const api = {
     };
   },
 
-  async getDynamicRuns(params?: {
-    status?: string;
-    limit?: number;
-  }): Promise<{ success: boolean; runs: DynamicRunSnapshot[] }> {
-    const response = await axios.get(`${API_BASE}/dynamic-runs`, { params });
-    return response.data;
-  },
-
-  async getDynamicRun(runId: string): Promise<{ success: boolean; run: DynamicRunSnapshot }> {
-    const response = await axios.get(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}`);
-    return response.data;
-  },
-
-  async getDynamicRunEvents(
-    runId: string,
-    after?: number,
-  ): Promise<{ success: boolean; runId: string; events: DynamicRunEvent[] }> {
-    const response = await axios.get(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}/events`, {
-      params: after !== undefined ? { after } : undefined,
-    });
-    return response.data;
-  },
-
-  async decideDynamicPermissionRequest(
-    runId: string,
-    requestId: string,
-    data: { action: 'allow' | 'deny'; reason?: string },
-  ): Promise<{ success: boolean; runId: string; request: Record<string, any> }> {
-    const response = await axios.post(
-      `${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}/permission-requests/${encodeURIComponent(requestId)}/decision`,
-      data,
-    );
-    return response.data;
-  },
-
   async deleteDynamicRun(runId: string): Promise<{ success: boolean; runId: string; deleted: boolean }> {
     const response = await axios.delete(`${API_BASE}/dynamic-runs/${encodeURIComponent(runId)}`);
-    return response.data;
-  },
-
-  async cleanupDynamicRuns(data: {
-    statuses?: string[];
-    older_than_days?: number;
-    dry_run?: boolean;
-  }): Promise<{ success: boolean; cleanup: any }> {
-    const response = await axios.post(`${API_BASE}/dynamic-runs/cleanup`, data);
     return response.data;
   },
 
@@ -472,15 +309,6 @@ export const api = {
 
   async getRun(runId: string): Promise<{ success: boolean; run: UnifiedRunSnapshot }> {
     const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}`);
-    return response.data;
-  },
-
-  async getRunTasks(runId: string): Promise<{
-    success: boolean;
-    runId: string;
-    tasks: UnifiedRunTaskSnapshot[];
-  }> {
-    const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/tasks`);
     return response.data;
   },
 
@@ -580,11 +408,6 @@ export const api = {
 
   async getModels(): Promise<ModelsResponse> {
     const response = await axios.get(`${API_BASE}/models`);
-    return response.data;
-  },
-
-  async getResourceHistory(): Promise<ResourceHistoryResponse> {
-    const response = await axios.get(`${API_BASE}/resource-history`);
     return response.data;
   },
 

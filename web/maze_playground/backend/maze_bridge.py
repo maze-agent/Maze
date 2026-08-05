@@ -238,48 +238,6 @@ def save_workspace_task(workspace_dir, relative_path, code, parse=True):
         return {"error": str(exc), "traceback": traceback.format_exc()}
 
 
-def delete_workspace_task(workspace_dir, relative_path):
-    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
-    if error:
-        return error
-    try:
-        relative_path, file_path = _task_file_path(workspace_dir, relative_path)
-        if not os.path.isfile(file_path):
-            return {"error": f"Workspace task file not found: {relative_path}"}
-        os.unlink(file_path)
-        return {"success": True, "workspaceDir": workspace_dir, "relativePath": relative_path}
-    except Exception as exc:
-        return {"error": str(exc), "traceback": traceback.format_exc()}
-
-
-def rename_workspace_task(workspace_dir, relative_path, old_name, new_name):
-    workspace_dir, error = _resolve_workspace_dir(workspace_dir)
-    if error:
-        return error
-    try:
-        normalized = re.sub(r"[^A-Za-z0-9_]+", "_", str(new_name or "").strip()).strip("_").lower()
-        if normalized and normalized[0].isdigit():
-            normalized = f"task_{normalized}"
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", normalized or ""):
-            raise ValueError("Task name must be a valid Python identifier")
-        relative_path, file_path = _task_file_path(workspace_dir, relative_path)
-        if not os.path.isfile(file_path):
-            return {"error": f"Workspace task file not found: {relative_path}"}
-        with open(file_path, "r", encoding="utf-8") as handle:
-            code = handle.read()
-        pattern = re.compile(r"(\b(?:async\s+def|def)\s+)" + re.escape(old_name) + r"(\s*\()")
-        code, count = pattern.subn(r"\1" + normalized + r"\2", code, count=1)
-        if not count:
-            return {"error": f"Task function not found: {old_name}"}
-        result = save_workspace_task(workspace_dir, relative_path, code, parse=True)
-        if result.get("error") or result.get("success") is False:
-            return result
-        result.update({"oldFunctionName": old_name, "newFunctionName": normalized})
-        return result
-    except Exception as exc:
-        return {"error": str(exc), "traceback": traceback.format_exc()}
-
-
 def main():
     if len(sys.argv) < 2:
         result = {"error": "Missing action parameter"}
@@ -293,15 +251,6 @@ def main():
                 params.get("relativePath", ""),
                 params.get("code", ""),
                 params.get("parse", True),
-            ),
-            "delete_workspace_task": lambda: delete_workspace_task(
-                params.get("workspaceDir", ""), params.get("relativePath", "")
-            ),
-            "rename_workspace_task": lambda: rename_workspace_task(
-                params.get("workspaceDir", ""),
-                params.get("relativePath", ""),
-                params.get("oldFunctionName", ""),
-                params.get("newName", ""),
             ),
             "parse_custom_function": lambda: parse_custom_function(params.get("code", "")),
         }

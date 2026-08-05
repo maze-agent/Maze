@@ -993,20 +993,6 @@ export default function BuiltinTasksSidebar({
     }
   };
 
-  const publishLocalWorkspaceManifest = async (
-    workspaceId: string,
-    displayName: string,
-    files: LocalWorkspaceFileMeta[],
-    version = Date.now().toString(),
-  ) => {
-    await api.updateLocalWorkspaceManifest(workspaceId, {
-      displayName,
-      version,
-      files,
-    });
-    return version;
-  };
-
   const refreshLocalWorkspaceManifest = async (showSuccess = false) => {
     if (!localWorkspaceId || !localWorkspaceName || !useWorkflowStore.getState().localWorkspaceHandle) {
       message.warning('Select a local file cache first');
@@ -1029,7 +1015,7 @@ export default function BuiltinTasksSidebar({
         files = await collectLocalWorkspaceFiles(handle);
       }
 
-      const version = await publishLocalWorkspaceManifest(localWorkspaceId, localWorkspaceName, files);
+      const version = Date.now().toString();
       setLocalWorkspaceFiles(files, version);
       if (showSuccess) {
         message.success(`Local file cache refreshed: ${files.filter((file) => file.type === 'file').length} files`);
@@ -1051,7 +1037,7 @@ export default function BuiltinTasksSidebar({
         setSyncingLocalWorkspace(true);
         const files = await collectLocalWorkspaceFiles(handle);
         const workspaceId = localWorkspaceIdForName(handle.name);
-        const version = await publishLocalWorkspaceManifest(workspaceId, handle.name, files);
+        const version = Date.now().toString();
         setLocalWorkspace({
           id: workspaceId,
           name: handle.name,
@@ -1191,7 +1177,7 @@ export default function BuiltinTasksSidebar({
       });
 
       const workspaceId = localWorkspaceIdForName(selectionLabel);
-      const version = await publishLocalWorkspaceManifest(workspaceId, selectionLabel, manifestFiles);
+      const version = Date.now().toString();
       setLocalWorkspace({
         id: workspaceId,
         name: selectionLabel,

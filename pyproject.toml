@@ -56,9 +56,7 @@ dependencies = [
     "openai>=2.15.0",
     "transformers>=5.12.1",
     "accelerate>=1.14.0",
-    "safetensors>=0.8.0",
-    "dashscope>=1.25.8",
-    "uv>=0.9.26"
+    "safetensors>=0.8.0"
 ]
 
 [project.optional-dependencies]
