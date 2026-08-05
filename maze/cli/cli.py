@@ -131,7 +131,14 @@ async def _async_start_head(
                 backend_port=playground_backend_port,
             )
 
-        await asyncio.gather(server_task, monitor_coroutine, maintenance_coroutine)
+        done, _pending = await asyncio.wait(
+            (server_task, monitor_coroutine, maintenance_coroutine),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            error = task.exception()
+            if error is not None:
+                raise error
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down Maze head...")
     finally:

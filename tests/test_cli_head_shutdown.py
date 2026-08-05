@@ -1,5 +1,6 @@
 import logging
 import sys
+import asyncio
 from types import ModuleType
 
 import pytest
@@ -183,6 +184,60 @@ async def test_head_cleanup_exhaustion_fails_lifecycle(monkeypatch):
 
     assert mapath.shutdown_requests == 1
     assert mapath.cleanup_calls == cli.HEAD_CLEANUP_MAX_ATTEMPTS
+    assert server.should_exit is True
+
+
+@pytest.mark.asyncio
+async def test_head_server_exit_cancels_background_tasks_and_cleans_up(monkeypatch):
+    cancelled = []
+
+    class Mapath:
+        cleanup_calls = 0
+        shutdown_requests = 0
+
+        def init(self, **_kwargs):
+            return None
+
+        async def monitor_coroutine(self):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append("monitor")
+
+        async def maintenance_coroutine(self):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append("maintenance")
+
+        def request_scheduler_shutdown(self):
+            self.shutdown_requests += 1
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+            return True
+
+    class Server:
+        should_exit = False
+
+        async def serve(self):
+            return None
+
+    mapath = Mapath()
+    server = Server()
+    server_module = ModuleType("maze.core.server")
+    server_module.app = object()
+    server_module.mapath = mapath
+    monkeypatch.setitem(sys.modules, "maze.core.server", server_module)
+    monkeypatch.setattr(cli, "_ensure_port_available", lambda *_args: None)
+    monkeypatch.setattr(cli.uvicorn, "Config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli.uvicorn, "Server", lambda _config: server)
+
+    await cli._async_start_head(port=8000, ray_head_port=6379)
+
+    assert sorted(cancelled) == ["maintenance", "monitor"]
+    assert mapath.shutdown_requests == 1
+    assert mapath.cleanup_calls == 1
     assert server.should_exit is True
 
 
