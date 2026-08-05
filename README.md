@@ -48,8 +48,7 @@ The implementation is built on Ray for distributed processes and task execution.
 
 ## 📰 News
 
-- **2026-08**: Maze unified SDK, LangGraph, and Workbench DAG execution around Core-owned Runs and the `/workflows/submit` contract.
-- **2026-07**: Maze added paper-aligned heterogeneous scheduling, distributed recovery, run deadlines, and restart-safe discovery. The Maze research paper was accepted to SC26.
+- **2026-07**: Maze introduced paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS` and `HACS` scheduling, observed-runtime estimates, richer queue diagnostics, and an optional standby worker path. Distributed execution was hardened with worker re-registration after head or Ray restarts, current-cluster validation, run-level deadlines, explicit scheduler-failure states, and restart-safe run discovery. The Maze research paper was accepted to SC26.
 - **2026-06**: Maze added unified run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
 - **2026-05**: Maze added persisted DynamicRuns, workspace file execution, and the Workbench `Runs` and `Cluster` views.
 
