@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import uuid
 from typing import Any, Dict, List, Tuple
 
 import networkx as nx
@@ -384,6 +385,15 @@ def _normalize_run(run: Any) -> Dict[str, Any]:
         if run["inputs"] is not None and not isinstance(run["inputs"], dict):
             raise DagSpecError("run inputs must be an object")
         normalized["inputs"] = copy.deepcopy(run["inputs"])
+    if "run_id" in run:
+        run_id = run["run_id"]
+        try:
+            parsed_run_id = uuid.UUID(run_id) if isinstance(run_id, str) else None
+        except ValueError:
+            parsed_run_id = None
+        if parsed_run_id is None or str(parsed_run_id) != run_id:
+            raise DagSpecError("run_id must be a canonical UUID")
+        normalized["run_id"] = run_id
     if "idempotency_key" in run or "idempotency_fingerprint" in run:
         normalized["idempotency_key"] = run.get("idempotency_key")
         normalized["idempotency_fingerprint"] = run.get("idempotency_fingerprint")
@@ -393,6 +403,7 @@ def _normalize_run(run: Any) -> Dict[str, Any]:
 def _stored_run_config(run: Dict[str, Any]) -> Dict[str, Any]:
     stored = copy.deepcopy(run)
     stored.pop("inputs", None)
+    stored.pop("run_id", None)
     stored.pop("idempotency_key", None)
     stored.pop("idempotency_fingerprint", None)
     return stored

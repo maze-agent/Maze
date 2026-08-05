@@ -126,6 +126,7 @@ class MaWorkflow:
         tags: Optional[List[str]],
         metadata: Optional[Dict[str, Any]],
         inputs: Optional[Dict[str, Any]],
+        run_id: Optional[str],
         idempotency_key: Optional[str],
         idempotency_fingerprint: Optional[str],
     ) -> Dict[str, Any]:
@@ -148,6 +149,8 @@ class MaWorkflow:
             run["metadata"] = dict(metadata)
         if inputs is not None:
             run["inputs"] = copy.deepcopy(inputs)
+        if run_id is not None:
+            run["run_id"] = run_id
         if idempotency_key is not None or idempotency_fingerprint is not None:
             run["idempotency_key"] = idempotency_key
             run["idempotency_fingerprint"] = idempotency_fingerprint
@@ -179,6 +182,7 @@ class MaWorkflow:
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         inputs: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         idempotency_fingerprint: Optional[str] = None,
     ) -> str:
@@ -190,6 +194,7 @@ class MaWorkflow:
             tags=tags,
             metadata=metadata,
             inputs=inputs,
+            run_id=run_id,
             idempotency_key=idempotency_key,
             idempotency_fingerprint=idempotency_fingerprint,
         )

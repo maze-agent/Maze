@@ -145,6 +145,23 @@ class WorkflowIdempotencyConflictError(ValueError):
         }
 
 
+class WorkflowRunConflictError(ValueError):
+    error_code = "workflow_run_conflict"
+
+    def __init__(self, run_id: str, existing_workflow_id: str | None):
+        super().__init__("Run ID is already bound to a different workflow submission")
+        self.run_id = run_id
+        self.existing_workflow_id = existing_workflow_id
+
+    def detail(self) -> Dict[str, Any]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+            "run_id": self.run_id,
+            "existing_workflow_id": self.existing_workflow_id,
+        }
+
+
 class WorkflowInitializationError(RuntimeError):
     error_code = "workflow_initialization_failed"
 
@@ -289,6 +306,18 @@ def validate_run_workflow_file_context(
             )
 
     return file_context
+
+
+def _validate_run_workflow_run_id(run_id: Any) -> str | None:
+    if run_id is None:
+        return None
+    try:
+        parsed = uuid.UUID(run_id) if isinstance(run_id, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is None or str(parsed) != run_id:
+        raise ValueError("run_id must be a canonical UUID")
+    return run_id
 
 
 def _run_workflow_payload_fingerprint(
@@ -1341,6 +1370,7 @@ class MaPath:
         metadata:Dict[str,Any]|None=None,
         final_output_refs:Any=FINAL_OUTPUT_REFS_UNSET,
         inputs:Dict[str,Any]|None=None,
+        run_id:Any=None,
         idempotency_key:Any=RUN_WORKFLOW_IDEMPOTENCY_UNSET,
         idempotency_fingerprint:Any=RUN_WORKFLOW_IDEMPOTENCY_UNSET,
     ):
@@ -1350,6 +1380,38 @@ class MaPath:
         if not isinstance(workflow_id, str) or not workflow_id:
             raise ValueError("workflow_id must be a non-empty string")
         validate_run_workflow_file_context(file_context)
+        run_id = _validate_run_workflow_run_id(run_id)
+        if run_id is not None:
+            submission_digest = _run_workflow_payload_fingerprint(
+                workflow_id,
+                file_context=file_context,
+                timeout_seconds=timeout_seconds,
+                tags=tags,
+                metadata=metadata,
+                final_output_refs=final_output_refs,
+                inputs=inputs,
+            )
+            with self._run_workflow_idempotency_guard():
+                run_path = self.static_run_store.run_json_path(run_id)
+                if run_path.exists():
+                    existing = self.static_run_store.load_run(run_id)
+                    if existing.get("submission_digest") != submission_digest:
+                        raise WorkflowRunConflictError(
+                            run_id,
+                            existing.get("workflow_id"),
+                        )
+                    return run_id
+                return self._start_workflow_with_durable_initialization(
+                    workflow_id,
+                    run_id=run_id,
+                    submission_digest=submission_digest,
+                    file_context=file_context,
+                    timeout_seconds=timeout_seconds,
+                    tags=tags,
+                    metadata=metadata,
+                    final_output_refs=final_output_refs,
+                    inputs=inputs,
+                )
         idempotency_key, idempotency_fingerprint = _validate_run_workflow_idempotency(
             idempotency_key,
             idempotency_fingerprint,
@@ -1455,6 +1517,8 @@ class MaPath:
         metadata: Dict[str, Any] | None,
         final_output_refs: Any,
         inputs: Dict[str, Any] | None,
+        run_id: str | None = None,
+        submission_digest: str | None = None,
         idempotency_key: str | None = None,
         idempotency_fingerprint: str | None = None,
         payload_fingerprint: str | None = None,
@@ -1463,7 +1527,7 @@ class MaPath:
         self._require_scheduler_available()
         submit_workflow = self._workflow_for_submission(workflow_id)
         run_inputs = _bind_workflow_run_inputs(submit_workflow, inputs)
-        submit_id = str(uuid.uuid4())
+        submit_id = run_id or str(uuid.uuid4())
         artifact_store_context = (file_context or {}).get("artifact_store") or {}
         artifact_enabled = bool(
             file_context
@@ -1495,6 +1559,8 @@ class MaPath:
             run_inputs=run_inputs,
         )
         static_run.submitted_time = submit_workflow.graph.graph["submission_time"]
+        if submission_digest is not None:
+            static_run._submission_digest = submission_digest
         root_task_ids = [task.task_id for task in submit_workflow.get_start_task()]
 
         if idempotency_key is not None:
@@ -4553,6 +4619,9 @@ class MaPath:
                 initialization
             )
         idempotency_key = getattr(static_run, "_idempotency_key", None)
+        submission_digest = getattr(static_run, "_submission_digest", None)
+        if submission_digest is not None:
+            snapshot["submission_digest"] = submission_digest
         if idempotency_key is not None:
             snapshot["idempotency_key"] = idempotency_key
             snapshot["idempotency_fingerprint"] = getattr(

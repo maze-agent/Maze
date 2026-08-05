@@ -17,6 +17,7 @@ from maze.core.path.path import (
     MaPath,
     SchedulerUnavailableError,
     WorkflowIdempotencyConflictError,
+    WorkflowRunConflictError,
     WorkflowIdempotencyStateError,
     WorkflowInitializationError,
     WorkflowNotFoundError,
@@ -825,6 +826,7 @@ async def run_app(req: Request):
             timeout_seconds=spec.get("timeout_seconds"),
             tags=tags,
             metadata=metadata,
+            **({"run_id": run_config["run_id"]} if "run_id" in run_config else {}),
         )
         return {
             "status": "success",
@@ -967,7 +969,7 @@ async def submit_dag_workflow(req: Request):
         return response
     except DagSpecError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except WorkflowIdempotencyConflictError as e:
+    except (WorkflowIdempotencyConflictError, WorkflowRunConflictError) as e:
         raise HTTPException(status_code=409, detail=e.detail())
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=e.detail())

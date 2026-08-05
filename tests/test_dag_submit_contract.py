@@ -114,9 +114,11 @@ def test_submit_accepts_null_tags_and_uses_envelope_artifact_mode(endpoint):
 
 def test_submit_forwards_atomic_python_run_contract(endpoint):
     server, path, _reachable_contexts = endpoint
+    run_id = "d4c98c23-e3f3-4df8-889f-41cab7e5f2f2"
     spec = _spec(run={
         "inputs": {"question": "Q"},
         "timeout_seconds": 12,
+        "run_id": run_id,
         "idempotency_key": "submission-1",
         "idempotency_fingerprint": "a" * 64,
     })
@@ -146,6 +148,7 @@ def test_submit_forwards_atomic_python_run_contract(endpoint):
     assert submitted_spec["final_output_refs"] == spec["final_output_refs"]
     run_kwargs = path.run_calls[0][1]
     assert run_kwargs["inputs"] == {"question": "Q"}
+    assert run_kwargs["run_id"] == run_id
     assert run_kwargs["final_output_refs"] == spec["final_output_refs"]
     assert run_kwargs["idempotency_key"] == "submission-1"
     assert run_kwargs["idempotency_fingerprint"] == "a" * 64

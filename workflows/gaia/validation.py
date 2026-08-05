@@ -22,6 +22,7 @@ import secrets
 import stat
 import time
 from typing import Any
+import uuid
 
 from maze import MaClient
 from maze.client.maze.workflow import _encode_output_refs
@@ -609,17 +610,35 @@ class _ValidationState:
         journal = _read_private_json(path)
         if journal is not None:
             self._validate_sample_wrapper(sample, journal, kind="submission")
+            run_id = str(journal.get("run_id") or "")
+            legacy_fingerprint = str(
+                journal.get("idempotency_fingerprint") or ""
+            )
             if (
                 journal.get("workflow") != sample.workflow
                 or not str(journal.get("workflow_id") or "")
                 or not isinstance(journal.get("final_output_refs"), dict)
-                or re.fullmatch(
-                    r"[0-9a-f]{64}",
-                    str(journal.get("idempotency_fingerprint") or ""),
-                )
-                is None
             ):
                 raise ValueError("private submission journal is invalid")
+            try:
+                parsed_run_id = uuid.UUID(run_id) if run_id else None
+            except ValueError:
+                parsed_run_id = None
+            if parsed_run_id is None:
+                if re.fullmatch(r"[0-9a-f]{64}", legacy_fingerprint) is None:
+                    raise ValueError("private submission journal is invalid")
+                run_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"maze-gaia:{legacy_fingerprint}",
+                    )
+                )
+                journal["run_id"] = run_id
+            elif str(parsed_run_id) != run_id:
+                raise ValueError("private submission journal is invalid")
+            journal.pop("idempotency_key", None)
+            journal.pop("idempotency_fingerprint", None)
+            _atomic_write_json(path, journal)
             return journal, True
 
         now = datetime.now(timezone.utc).isoformat()
@@ -634,9 +653,12 @@ class _ValidationState:
             "workflow_id": workflow_id,
             "final_output_refs": final_output_refs,
             "submission_state": "prepared",
-            "idempotency_key": f"gaia-{submission_identity}",
-            "idempotency_fingerprint": submission_identity,
-            "run_id": "",
+            "run_id": str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"maze-gaia:{submission_identity}",
+                )
+            ),
             "created_at": now,
             "updated_at": now,
         }
@@ -659,6 +681,8 @@ class _ValidationState:
             journal["submission_state"] = submission_state
         if run_id:
             journal["run_id"] = run_id
+        journal.pop("idempotency_key", None)
+        journal.pop("idempotency_fingerprint", None)
         journal["updated_at"] = datetime.now(timezone.utc).isoformat()
         _atomic_write_json(path, journal)
         return journal
@@ -767,21 +791,20 @@ def _run_sample(
                 },
             }
 
-        if not run_id:
+        if journal.get("submission_state") != "submitted":
             validation_state.update_submission(sample, submission_state="submitting")
             resumable_template = copy.copy(template)
             resumable_template.workflow_id = str(journal["workflow_id"])
             resumable_template.final_output_refs = dict(journal["final_output_refs"])
-            run_id = resumable_template.run(
+            submitted_run_id = resumable_template.run(
                 file_context=file_context,
                 timeout_seconds=config.timeout,
                 metadata={"benchmark": "gaia", "workflow": sample.workflow},
                 inputs=inputs,
-                idempotency_key=str(journal["idempotency_key"]),
-                idempotency_fingerprint=str(journal["idempotency_fingerprint"]),
+                run_id=run_id,
             )
-            if not run_id:
-                raise RuntimeError("Maze Core returned an empty run id")
+            if submitted_run_id != run_id:
+                raise RuntimeError("Maze Core returned a different run id")
             result["run_id"] = run_id
             journal = validation_state.update_submission(
                 sample,

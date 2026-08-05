@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -166,7 +167,7 @@ class _FakeTemplate:
 
 
 class _FakeClient:
-    accepted_by_key: dict[str, str] = {}
+    accepted_by_run_id: dict[str, str] = {}
     accepted_lock = threading.Lock()
 
     def __init__(self, _server_url: str, request_timeout: float | None = None):
@@ -196,12 +197,12 @@ class _FakeClient:
     def submit(self, workflow_id: str, kwargs: dict[str, object]) -> str:
         record = {"workflow_id": workflow_id, **kwargs}
         self.submissions.append(record)
-        key = str(kwargs["idempotency_key"])
+        run_id = str(kwargs["run_id"])
+        dag_id = str(kwargs["inputs"]["dag_id"])
         with self.accepted_lock:
-            run_id = self.accepted_by_key.setdefault(
-                key,
-                f"core-{kwargs['inputs']['dag_id']}",
-            )
+            existing = self.accepted_by_run_id.setdefault(run_id, dag_id)
+            if existing != dag_id:
+                raise RuntimeError("run_id reused for a different GAIA sample")
         if self.fail_after_accept_once:
             self.fail_after_accept_once = False
             raise RuntimeError("lost submit response")
@@ -219,7 +220,7 @@ class _FakeClient:
         finally:
             with self.wait_lock:
                 self.active_waits -= 1
-        dag_id = run_id.removeprefix("core-")
+        dag_id = self.accepted_by_run_id[run_id]
         answers = {
             "reason-1": "GOLD_REASON_SECRET",
             "file-1": "GOLD_FILE_SECRET",
@@ -241,7 +242,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _clear_fake_core():
-    _FakeClient.accepted_by_key.clear()
+    _FakeClient.accepted_by_run_id.clear()
 
 
 def _install_client(monkeypatch, client: _FakeClient) -> None:
@@ -354,8 +355,12 @@ def test_runner_submits_directly_to_core_and_keeps_gold_private(tmp_path, monkey
         "benchmark": "gaia",
         "workflow": item["inputs"]["dag_id"].split("-")[0],
     } for item in client.submissions)
-    assert all(str(item["idempotency_key"]).startswith("gaia-") for item in client.submissions)
-    assert all(len(str(item["idempotency_fingerprint"])) == 64 for item in client.submissions)
+    assert all(
+        str(uuid.UUID(str(item["run_id"]))) == item["run_id"]
+        for item in client.submissions
+    )
+    assert all("idempotency_key" not in item for item in client.submissions)
+    assert all("idempotency_fingerprint" not in item for item in client.submissions)
 
     file_submit = next(item for item in client.submissions if item["inputs"]["dag_id"] == "file-1")
     file_context = file_submit["file_context"]
@@ -368,8 +373,7 @@ def test_runner_submits_directly_to_core_and_keeps_gold_private(tmp_path, monkey
 
     results = [json.loads(line) for line in (output_dir / "results.jsonl").read_text().splitlines()]
     assert {item["run_id"] for item in results if item["run_id"]} == {
-        "core-reason-1",
-        "core-file-1",
+        item["run_id"] for item in client.submissions
     }
     assert all("playground_run_id" not in item for item in results)
     assert stat.S_IMODE((output_dir / "results.jsonl").stat().st_mode) == 0o600
@@ -404,14 +408,15 @@ def test_runner_cancels_core_run_after_timeout(tmp_path, monkeypatch):
     ))
 
     assert summary["succeeded"] == 0
-    assert client.cancellations == [
-        ("core-slow", "GAIA validation exceeded 0.01 seconds"),
-    ]
+    assert client.cancellations == [(
+        client.submissions[0]["run_id"],
+        "GAIA validation exceeded 0.01 seconds",
+    )]
     result = json.loads((output_dir / "results.jsonl").read_text())
     assert result["status"] == "timed_out"
 
 
-def test_runner_recovers_lost_submit_response_with_core_idempotency(
+def test_runner_recovers_lost_submit_response_with_stable_run_id(
     tmp_path,
     monkeypatch,
 ):
@@ -422,8 +427,8 @@ def test_runner_recovers_lost_submit_response_with_core_idempotency(
     _install_client(monkeypatch, first)
 
     first_summary = run_validation(_config(data_root, output_dir))
-    assert first_summary["submitted"] == 0
-    assert len(_FakeClient.accepted_by_key) == 1
+    assert first_summary["submitted"] == 1
+    assert len(_FakeClient.accepted_by_run_id) == 1
 
     second = _FakeClient("unused")
     _install_client(monkeypatch, second)
@@ -431,10 +436,12 @@ def test_runner_recovers_lost_submit_response_with_core_idempotency(
 
     assert second_summary["submitted"] == 1
     assert second_summary["correct"] == 1
-    assert len(_FakeClient.accepted_by_key) == 1
+    assert len(_FakeClient.accepted_by_run_id) == 1
     assert second.submissions[0]["workflow_id"] == "workflow-1"
     journal = json.loads(next((output_dir / ".gaia-validation-state" / "submissions").iterdir()).read_text())
-    assert journal["run_id"] == "core-resume"
+    assert journal["run_id"] == second.submissions[0]["run_id"]
+    assert "idempotency_key" not in journal
+    assert "idempotency_fingerprint" not in journal
     assert "submission_token" not in journal
     assert "playground_run_id" not in journal
 
@@ -500,7 +507,7 @@ def test_cli_env_key_is_not_printed_or_persisted(tmp_path, monkeypatch, capsys):
     assert "TOP_SECRET_VALUE" not in persisted
 
 
-def test_maworkflow_forwards_core_idempotency():
+def test_maworkflow_forwards_stable_run_id():
     class Client:
         server_url = "http://maze.test"
         request_timeout = None
@@ -513,14 +520,14 @@ def test_maworkflow_forwards_core_idempotency():
 
         def submit_workflow(self, spec, **_kwargs):
             self.spec = spec
-            return {"workflow_id": spec["workflow_id"], "run_id": "core-run"}
+            return {
+                "workflow_id": spec["workflow_id"],
+                "run_id": spec["run"]["run_id"],
+            }
 
     client = Client()
     workflow = MaWorkflow("workflow", client)
     workflow._nodes["task"] = {"id": "task"}
-    assert workflow.run(
-        idempotency_key="gaia-key",
-        idempotency_fingerprint="a" * 64,
-    ) == "core-run"
-    assert client.spec["run"]["idempotency_key"] == "gaia-key"
-    assert client.spec["run"]["idempotency_fingerprint"] == "a" * 64
+    run_id = "d4c98c23-e3f3-4df8-889f-41cab7e5f2f2"
+    assert workflow.run(run_id=run_id) == run_id
+    assert client.spec["run"]["run_id"] == run_id
