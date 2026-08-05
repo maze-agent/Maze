@@ -8,6 +8,7 @@ import type {
   UnifiedRunEvent,
   UnifiedRunSnapshot,
 } from '@/types/workflow';
+import { clearWorkflowSource } from '@/utils/workflowBindings';
 
 const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
 
@@ -159,7 +160,10 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   })),
   
   deleteNode: (nodeId) => set((state) => {
-    const nodes = state.nodes.filter((node) => node.id !== nodeId);
+    const nodes = clearWorkflowSource(
+      state.nodes.filter((node) => node.id !== nodeId),
+      nodeId,
+    );
     return {
       nodes,
       edges: state.edges.filter(

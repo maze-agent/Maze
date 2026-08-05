@@ -21,6 +21,7 @@ import type {
   WorkflowNode,
 } from '@/types/workflow';
 import CustomNode from './CustomNode';
+import { bindWorkflowConnection, unbindWorkflowEdges } from '@/utils/workflowBindings';
 
 const nodeTypes = {
   taskNode: CustomNode,
@@ -283,11 +284,29 @@ export default function WorkflowCanvas() {
   const onConnect = useCallback(
     (params: Connection | Edge) => {
       if (isRunView) return;
+      const bound = bindWorkflowConnection(nodes, params);
+      if (bound.error) {
+        message.warning(bound.error);
+        return;
+      }
       const newEdges = addEdge(params, reactFlowEdges);
+      setNodes(bound.nodes);
+      setEdges(newEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle || undefined,
+        targetHandle: edge.targetHandle || undefined,
+      })));
       setReactFlowEdges(newEdges);
     },
-    [isRunView, reactFlowEdges, setReactFlowEdges]
+    [isRunView, nodes, reactFlowEdges, setEdges, setNodes, setReactFlowEdges]
   );
+
+  const onEdgesDelete = useCallback((deletedEdges: Edge[]) => {
+    if (isRunView) return;
+    setNodes(unbindWorkflowEdges(nodes, deletedEdges));
+  }, [isRunView, nodes, setNodes]);
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, clickedNode: any) => {
@@ -441,6 +460,7 @@ export default function WorkflowCanvas() {
         edges={reactFlowEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onEdgesDelete={onEdgesDelete}
         onConnect={onConnect}
         onNodeClick={onNodeClick}
         onNodesDelete={onNodesDelete}
