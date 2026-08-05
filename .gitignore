@@ -51,14 +51,8 @@ log.txt
 /.agent/
 /.codegraph/
 /updates/
+/workspace/
 /workspaces/
-workspace/workspace.json
-workspace/policies/
-workspace/files/
-workspace/workspaces/
-workspace/workspaces/*/files/
-workspace/workspaces/*/runs/
-workspace/workflow_runs/
 /files/
 /tasks/
 /workflow_runs/
