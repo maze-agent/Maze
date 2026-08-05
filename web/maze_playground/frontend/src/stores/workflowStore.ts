@@ -5,7 +5,6 @@ import type {
   WorkspaceTaskMeta,
   WorkspaceWorkflowMeta,
   WorkspaceManifest,
-  LocalWorkspaceFileMeta,
   UnifiedRunEvent,
   UnifiedRunSnapshot,
 } from '@/types/workflow';
@@ -52,12 +51,6 @@ interface WorkflowStore {
   workspaceTasks: WorkspaceTaskMeta[];
   workspaceWorkflows: WorkspaceWorkflowMeta[];
   currentWorkspaceWorkflowPath: string | null;
-  localWorkspaceId: string;
-  localWorkspaceName: string;
-  localWorkspaceHandle: any | null;
-  localWorkspaceFiles: LocalWorkspaceFileMeta[];
-  localWorkspaceVersion: string;
-  localWorkspaceLastSyncedAt: string | null;
   
   // Run state
   isRunning: boolean;
@@ -93,16 +86,6 @@ interface WorkflowStore {
   }) => void;
   acquireWorkflowOperation: (label: string) => WorkflowOperationToken | null;
   releaseWorkflowOperation: (token: WorkflowOperationToken) => void;
-  setLocalWorkspace: (workspace: {
-    id: string;
-    name: string;
-    handle: any | null;
-    files: LocalWorkspaceFileMeta[];
-    version: string;
-    syncedAt?: string | null;
-  }) => void;
-  setLocalWorkspaceFiles: (files: LocalWorkspaceFileMeta[], version: string, syncedAt?: string | null) => void;
-  clearLocalWorkspace: () => void;
   setIsRunning: (isRunning: boolean) => void;
   setSelectedRunId: (runId: string | null) => void;
   setActiveRun: (run: UnifiedRunSnapshot | null) => void;
@@ -132,12 +115,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   workspaceTasks: [],
   workspaceWorkflows: [],
   currentWorkspaceWorkflowPath: null,
-  localWorkspaceId: '',
-  localWorkspaceName: '',
-  localWorkspaceHandle: null,
-  localWorkspaceFiles: [],
-  localWorkspaceVersion: '',
-  localWorkspaceLastSyncedAt: null,
   isRunning: false,
   activeRunId: null,
   selectedRunId: null,
@@ -238,30 +215,6 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
       : state
   )),
 
-  setLocalWorkspace: (workspace) => set({
-    localWorkspaceId: workspace.id,
-    localWorkspaceName: workspace.name,
-    localWorkspaceHandle: workspace.handle,
-    localWorkspaceFiles: workspace.files,
-    localWorkspaceVersion: workspace.version,
-    localWorkspaceLastSyncedAt: workspace.syncedAt || new Date().toISOString(),
-  }),
-
-  setLocalWorkspaceFiles: (files, version, syncedAt) => set({
-    localWorkspaceFiles: files,
-    localWorkspaceVersion: version,
-    localWorkspaceLastSyncedAt: syncedAt || new Date().toISOString(),
-  }),
-
-  clearLocalWorkspace: () => set({
-    localWorkspaceId: '',
-    localWorkspaceName: '',
-    localWorkspaceHandle: null,
-    localWorkspaceFiles: [],
-    localWorkspaceVersion: '',
-    localWorkspaceLastSyncedAt: null,
-  }),
-  
   setIsRunning: (isRunning) => set({ isRunning }),
 
   setSelectedRunId: (runId) => set({ selectedRunId: runId }),

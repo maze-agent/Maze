@@ -18,7 +18,6 @@ import { createLocalWorkflowId, useWorkflowStore, type WorkflowOperationToken } 
 import type {
   ModelTestResponse,
   LocalModel,
-  LocalWorkspaceFileMeta,
   WorkflowNode,
   SystemCatalogItem,
   WorkspaceFileMeta,
@@ -176,45 +175,6 @@ function joinWorkspacePath(base: string, name: string) {
   return [base, name].filter(Boolean).join('/');
 }
 
-function normalizeLocalRelativePath(path: string) {
-  return path
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((part) => part && part !== '.' && part !== '..')
-    .join('/');
-}
-
-function stripTopLevelDirectory(path: string) {
-  const normalized = normalizeLocalRelativePath(path);
-  const parts = normalized.split('/').filter(Boolean);
-  if (parts.length <= 1) return normalized;
-  return parts.slice(1).join('/');
-}
-
-function describeLocalSelection(paths: string[]) {
-  const roots = Array.from(new Set(
-    paths
-      .map((item) => normalizeLocalRelativePath(item).split('/').filter(Boolean)[0])
-      .filter(Boolean),
-  ));
-  if (roots.length === 0) return '';
-  if (roots.length === 1) return roots[0];
-  return `${roots.length} local folders`;
-}
-
-function canUseDirectoryPicker() {
-  return typeof window !== 'undefined' && typeof (window as any).showDirectoryPicker === 'function';
-}
-
-function localWorkspaceIdForName(name: string) {
-  const safeName = String(name || 'local-workspace')
-    .trim()
-    .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80) || 'local-workspace';
-  return `${safeName}-${Date.now().toString(36)}`;
-}
-
 function formatFileSize(size?: number | null) {
   if (size === null || size === undefined) return '';
   if (size < 1024) return `${size} B`;
@@ -262,49 +222,6 @@ async function fileToBase64(file: File) {
   return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
 }
 
-type UploadCandidate = {
-  file: File;
-  relativePath: string;
-};
-
-async function collectLocalWorkspaceFiles(
-  directoryHandle: any,
-  basePath = '',
-): Promise<LocalWorkspaceFileMeta[]> {
-  const files: LocalWorkspaceFileMeta[] = [];
-
-  for await (const [name, handle] of directoryHandle.entries()) {
-    const relativePath = normalizeLocalRelativePath(joinWorkspacePath(basePath, name));
-    if (!relativePath) {
-      continue;
-    }
-    if (handle.kind === 'directory') {
-      files.push({
-        name,
-        relativePath,
-        type: 'directory',
-        size: null,
-        updatedAt: null,
-      });
-      files.push(...await collectLocalWorkspaceFiles(handle, relativePath));
-    } else if (handle.kind === 'file') {
-      const file = await handle.getFile();
-      files.push({
-        name,
-        relativePath,
-        type: 'file',
-        size: file.size,
-        updatedAt: new Date(file.lastModified).toISOString(),
-      });
-    }
-  }
-
-  return files.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
-    return a.relativePath.localeCompare(b.relativePath);
-  });
-}
-
 type BuiltinTasksSidebarProps = {
   onOpenRuns?: () => void;
   workspaceReady?: boolean;
@@ -325,12 +242,6 @@ export default function BuiltinTasksSidebar({
     setWorkspaceWorkflows,
     currentWorkspaceWorkflowPath,
     setCurrentWorkspaceWorkflowPath,
-    localWorkspaceId,
-    localWorkspaceName,
-    localWorkspaceFiles,
-    localWorkspaceLastSyncedAt,
-    setLocalWorkspace,
-    setLocalWorkspaceFiles,
     workflowId,
     setWorkflowId,
     workflowName,
@@ -394,11 +305,9 @@ export default function BuiltinTasksSidebar({
   const [workspaceFilesPath, setWorkspaceFilesPath] = useState('');
   const [workflowSearch, setWorkflowSearch] = useState('');
   const [clusterSummary, setClusterSummary] = useState<SidebarClusterSummary | null>(null);
-  const [syncingLocalWorkspace, setSyncingLocalWorkspace] = useState(false);
   const [selectedWorkflowPath, setSelectedWorkflowPath] = useState<string | null>(null);
   const initializedWorkspaceDirRef = useRef('');
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
-  const folderUploadInputRef = useRef<HTMLInputElement | null>(null);
   const fileUploadTargetPathRef = useRef('');
   const normalizedWorkspaceDir = workspaceDir.trim();
   const workspaceInteractionReady = Boolean(
@@ -466,14 +375,6 @@ export default function BuiltinTasksSidebar({
       canceled = true;
     };
   }, [workspaceDir]);
-
-  useEffect(() => {
-    if (!folderUploadInputRef.current) {
-      return;
-    }
-    folderUploadInputRef.current.setAttribute('webkitdirectory', '');
-    folderUploadInputRef.current.setAttribute('directory', '');
-  }, []);
 
   useEffect(() => {
     let canceled = false;
@@ -993,123 +894,34 @@ export default function BuiltinTasksSidebar({
     }
   };
 
-  const refreshLocalWorkspaceManifest = async (showSuccess = false) => {
-    if (!localWorkspaceId || !localWorkspaceName || !useWorkflowStore.getState().localWorkspaceHandle) {
-      message.warning('Select a local file cache first');
-      return null;
-    }
-
-    setSyncingLocalWorkspace(true);
-    try {
-      const handle = useWorkflowStore.getState().localWorkspaceHandle;
-      let files: LocalWorkspaceFileMeta[] = [];
-      if (handle?.kind === 'fileMap') {
-        files = Array.from<[string, File]>(handle.filesByPath.entries()).map(([relativePath, file]) => ({
-          name: file.name,
-          relativePath,
-          type: 'file' as const,
-          size: file.size,
-          updatedAt: new Date(file.lastModified).toISOString(),
-        })).filter((file) => file.relativePath);
-      } else {
-        files = await collectLocalWorkspaceFiles(handle);
-      }
-
-      const version = Date.now().toString();
-      setLocalWorkspaceFiles(files, version);
-      if (showSuccess) {
-        message.success(`Local file cache refreshed: ${files.filter((file) => file.type === 'file').length} files`);
-      }
-      return { files, version };
-    } catch (error: any) {
-      console.error('Failed to refresh local file cache:', error);
-      message.error(error?.message || 'Failed to refresh local file cache');
-      return null;
-    } finally {
-      setSyncingLocalWorkspace(false);
-    }
-  };
-
-  const startOpenLocalWorkspace = async () => {
-    if (canUseDirectoryPicker()) {
-      try {
-        const handle = await (window as any).showDirectoryPicker({ mode: 'read' });
-        setSyncingLocalWorkspace(true);
-        const files = await collectLocalWorkspaceFiles(handle);
-        const workspaceId = localWorkspaceIdForName(handle.name);
-        const version = Date.now().toString();
-        setLocalWorkspace({
-          id: workspaceId,
-          name: handle.name,
-          handle,
-          files,
-          version,
-        });
-        message.success(`Local file cache set: ${handle.name}`);
-      } catch (error: any) {
-        if (error?.name !== 'AbortError') {
-          console.error('Failed to select local file cache:', error);
-          message.error(error?.message || 'Failed to select local file cache');
-        }
-      } finally {
-        setSyncingLocalWorkspace(false);
-      }
-      return;
-    }
-
-    if (folderUploadInputRef.current) {
-      folderUploadInputRef.current.value = '';
-      folderUploadInputRef.current.click();
-    }
-  };
-
-  const uploadWorkspaceCandidates = async (
-    candidates: UploadCandidate[],
-    options: {
-      targetPath?: string;
-      preserveRelativePath?: boolean;
-      stripRoot?: boolean;
-      refreshPath?: string;
-      loadingLabel?: string;
-      successLabel?: (count: number) => string;
-    } = {},
-  ) => {
+  const uploadWorkspaceFiles = async (files: File[], targetPath: string) => {
     const activeWorkspace = workspaceDir || (await loadWorkspaceFiles()).workspaceDir;
-    const targetPath = options.targetPath ?? workspaceFilesPath;
-    const refreshPath = options.refreshPath ?? workspaceFilesPath;
 
-    if (candidates.length === 0) {
+    if (files.length === 0) {
       return;
     }
 
-    const hideLoading = message.loading(options.loadingLabel || 'Uploading files...', 0);
+    const hideLoading = message.loading('Uploading files...', 0);
     try {
       let lastUploadResult: any = null;
-      for (const candidate of candidates) {
-        const localPath = options.preserveRelativePath
-          ? (options.stripRoot ? stripTopLevelDirectory(candidate.relativePath) : normalizeLocalRelativePath(candidate.relativePath))
-          : candidate.file.name;
-        if (!localPath) {
-          continue;
-        }
-        const contentBase64 = await fileToBase64(candidate.file);
+      for (const file of files) {
+        const contentBase64 = await fileToBase64(file);
         lastUploadResult = await api.uploadWorkspaceFile({
           workspaceId: workspaceId || undefined,
           workspaceDir: activeWorkspace,
-          relativePath: joinWorkspacePath(targetPath, localPath),
+          relativePath: joinWorkspacePath(targetPath, file.name),
           contentBase64,
         });
       }
       if (lastUploadResult) {
         setWorkspaceContext(lastUploadResult);
       }
-      const refreshedFiles = await loadWorkspaceFiles(activeWorkspace, refreshPath);
+      const refreshedFiles = await loadWorkspaceFiles(activeWorkspace, workspaceFilesPath);
       await loadWorkspaceTasks(activeWorkspace);
-      const label = options.successLabel
-        ? options.successLabel(candidates.length)
-        : candidates.length === 1
-          ? 'File uploaded'
-          : `${candidates.length} files uploaded`;
+      const targetLabel = targetPath ? ` to ${targetPath}` : '';
+      const label = files.length === 1
+        ? `File uploaded${targetLabel}`
+        : `${files.length} files uploaded${targetLabel}`;
       message.success(label);
       return refreshedFiles;
     } catch (error: any) {
@@ -1130,68 +942,8 @@ export default function BuiltinTasksSidebar({
     }
 
     const targetPath = fileUploadTargetPathRef.current || workspaceFilesPath;
-    await uploadWorkspaceCandidates(
-      files.map((file) => ({ file, relativePath: file.name })),
-      {
-        targetPath,
-        refreshPath: workspaceFilesPath,
-        successLabel: (count) => {
-          const targetLabel = targetPath ? ` to ${targetPath}` : '';
-          return count === 1 ? `File uploaded${targetLabel}` : `${count} files uploaded${targetLabel}`;
-        },
-      },
-    );
+    await uploadWorkspaceFiles(files, targetPath);
     fileUploadTargetPathRef.current = workspaceFilesPath;
-  };
-
-  const handleOpenLocalWorkspace = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    event.target.value = '';
-
-    if (files.length === 0) {
-      return;
-    }
-
-    setSyncingLocalWorkspace(true);
-    try {
-      const rawPaths = files.map((file) => (file as any).webkitRelativePath || file.name);
-      const selectionLabel = describeLocalSelection(rawPaths) || 'Local File Cache';
-      const filesByPath = new Map<string, File>();
-      const manifestFiles: LocalWorkspaceFileMeta[] = [];
-
-      files.forEach((file) => {
-        const rawPath = (file as any).webkitRelativePath || file.name;
-        const relativePath = stripTopLevelDirectory(rawPath) || file.name;
-        const normalizedPath = normalizeLocalRelativePath(relativePath);
-        if (!normalizedPath) {
-          return;
-        }
-        filesByPath.set(normalizedPath, file);
-        manifestFiles.push({
-          name: file.name,
-          relativePath: normalizedPath,
-          type: 'file',
-          size: file.size,
-          updatedAt: new Date(file.lastModified).toISOString(),
-        });
-      });
-
-      const workspaceId = localWorkspaceIdForName(selectionLabel);
-      const version = Date.now().toString();
-      setLocalWorkspace({
-        id: workspaceId,
-        name: selectionLabel,
-        handle: {
-          kind: 'fileMap',
-          filesByPath,
-        },
-        files: manifestFiles,
-        version,
-      });
-      message.success(`Local file cache set: ${selectionLabel}`);
-    } finally {
-      setSyncingLocalWorkspace(false);
-    }
   };
 
   const createWorkspaceNode = (task: WorkspaceTaskMeta, position = getDefaultPosition()): WorkflowNode => ({
@@ -2146,13 +1898,6 @@ export default function BuiltinTasksSidebar({
           onChange={handleUploadWorkspaceFile}
           style={{ display: 'none' }}
         />
-        <input
-          ref={folderUploadInputRef}
-          type="file"
-          multiple
-          onChange={handleOpenLocalWorkspace}
-          style={{ display: 'none' }}
-        />
       {collapsed ? (
         <div style={{ display: 'flex', justifyContent: 'center', paddingTop: '12px' }}>
           {toggleButton}
@@ -2520,54 +2265,6 @@ export default function BuiltinTasksSidebar({
             <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
               Service-side workspace for workflows, tasks, files, and run artifacts.
             </Text>
-          </div>
-
-          <div>
-            <Space size={6} style={{ marginBottom: 8 }}>
-              <FolderOpenOutlined style={{ color: '#1677ff' }} />
-              <Text strong>Local File Cache</Text>
-            </Space>
-            <Space size={8} wrap>
-              <Tooltip title="Optional browser-local file cache. Missing files are copied into Workspace Files before runs.">
-                <Button
-                  icon={<FolderOpenOutlined />}
-                  onClick={startOpenLocalWorkspace}
-                  loading={syncingLocalWorkspace}
-                >
-                  Select Folder
-                </Button>
-              </Tooltip>
-              {localWorkspaceName && (
-                <Button
-                  onClick={() => refreshLocalWorkspaceManifest(true)}
-                  loading={syncingLocalWorkspace}
-                >
-                  Refresh Cache
-                </Button>
-              )}
-            </Space>
-            {localWorkspaceName ? (
-              <div className="local-workspace-summary" style={{ marginTop: 10 }}>
-                <Space size={[4, 4]} wrap>
-                  <Tag color="green" style={{ margin: 0 }}>cache</Tag>
-                  <Text strong ellipsis={{ tooltip: localWorkspaceName }} style={{ maxWidth: 280 }}>
-                    {localWorkspaceName}
-                  </Text>
-                  <Tag style={{ margin: 0 }}>
-                    {localWorkspaceFiles.filter((file) => file.type === 'file').length} files
-                  </Tag>
-                  {localWorkspaceLastSyncedAt && (
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      {formatUpdatedAt(localWorkspaceLastSyncedAt)}
-                    </Text>
-                  )}
-                </Space>
-              </div>
-            ) : (
-              <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
-                No local file cache selected.
-              </Text>
-            )}
           </div>
 
           <div>

@@ -3103,23 +3103,6 @@ app.get('/api/runs/:runId', async (req, res) => {
   }
 });
 
-app.get('/api/runs/:runId/tasks/:taskId', async (req, res) => {
-  try {
-    await requirePublicCoreRunId(req.params.runId);
-    const result = await callMazeCore(
-      `/runs/${encodeURIComponent(req.params.runId)}/tasks/${encodeURIComponent(req.params.taskId)}`
-    );
-    res.json({
-      success: true,
-      runId: result.run_id,
-      task: result.task,
-    });
-  } catch (error) {
-    console.error('Failed to get run task:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
 app.get('/api/runs/:runId/events', async (req, res) => {
   try {
     await requirePublicCoreRunId(req.params.runId);
@@ -3188,19 +3171,6 @@ app.get('/api/runs/:runId/tasks/:taskId/artifacts', async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to get run task artifacts:', error);
-    res.status(error.status || 500).json({ error: error.message, payload: error.payload });
-  }
-});
-
-app.get('/api/artifacts/sha256/:sha256/metadata', async (req, res) => {
-  try {
-    const result = await callMazeCore(`/artifacts/sha256/${encodeURIComponent(req.params.sha256)}/metadata`);
-    res.json({
-      success: true,
-      artifact: result.artifact,
-    });
-  } catch (error) {
-    console.error('Failed to get artifact metadata:', error);
     res.status(error.status || 500).json({ error: error.message, payload: error.payload });
   }
 });

@@ -17,7 +17,6 @@ import type {
   RunLogLine,
   UnifiedRunEvent,
   UnifiedRunSnapshot,
-  UnifiedRunTaskSnapshot,
   WorkflowEdge,
   WorkflowNode,
 } from '@/types/workflow';
@@ -309,17 +308,6 @@ export const api = {
 
   async getRun(runId: string): Promise<{ success: boolean; run: UnifiedRunSnapshot }> {
     const response = await axios.get(`${API_BASE}/runs/${encodeURIComponent(runId)}`);
-    return response.data;
-  },
-
-  async getRunTask(runId: string, taskId: string): Promise<{
-    success: boolean;
-    runId: string;
-    task: UnifiedRunTaskSnapshot;
-  }> {
-    const response = await axios.get(
-      `${API_BASE}/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}`
-    );
     return response.data;
   },
 

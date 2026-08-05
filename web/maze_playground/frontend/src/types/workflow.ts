@@ -137,14 +137,6 @@ export interface WorkspaceFileMeta {
   updatedAt?: string;
 }
 
-export interface LocalWorkspaceFileMeta {
-  name: string;
-  relativePath: string;
-  type: 'file' | 'directory';
-  size?: number | null;
-  updatedAt?: string | null;
-}
-
 export interface WorkspaceFilesResponse {
   success: boolean;
   workspaceId?: string;
