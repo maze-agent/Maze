@@ -29,19 +29,6 @@ import { DEFAULT_LLM_SETTINGS, SILICONFLOW_MODELS, loadLlmSettings, saveLlmSetti
 const { Text } = Typography;
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
 
-type WorkflowExample = {
-  key: string;
-  name: string;
-  description: string;
-  tags: string[];
-  color: string;
-  kind: 'distributed-smoke' | 'workspace-task' | 'resource-soak';
-  taskSourceId?: string;
-  taskRelativePath?: string;
-  workflowName?: string;
-  sleepSeconds?: number;
-};
-
 function normalizeResources(resources: any = {}) {
   return {
     cpu_num: Math.max(1, Number(resources.cpu_num ?? resources.cpu ?? 1) || 1),
@@ -49,43 +36,6 @@ function normalizeResources(resources: any = {}) {
     io_num: Math.max(0, Number(resources.io_num ?? 0) || 0),
   };
 }
-
-const WORKFLOW_EXAMPLES: WorkflowExample[] = [
-  {
-    key: 'distributed-smoke',
-    name: 'Distributed GPU Smoke',
-    description: 'Runs two GPU probe tasks so Run Detail can show head/worker placement.',
-    tags: ['distributed', 'GPU', 'placement'],
-    color: '#0958d9',
-    kind: 'distributed-smoke',
-    taskSourceId: 'distributed_gpu_probe.py',
-    taskRelativePath: 'tasks/examples/distributed_gpu_probe.py',
-    workflowName: 'Distributed GPU Smoke',
-  },
-  {
-    key: 'resource-soak',
-    name: 'CPU + GPU Resource Soak',
-    description: 'Runs long CPU and GPU tasks so cluster resources visibly change for about one minute.',
-    tags: ['resource', 'CPU', 'GPU'],
-    color: '#7a5af8',
-    kind: 'resource-soak',
-    taskSourceId: 'distributed_gpu_probe.py',
-    taskRelativePath: 'tasks/examples/distributed_gpu_probe.py',
-    workflowName: 'CPU + GPU Resource Soak',
-    sleepSeconds: 60,
-  },
-  {
-    key: 'file-sandbox-demo',
-    name: 'File Sandbox Demo',
-    description: 'Reads a workspace file and writes a report artifact without LLM setup.',
-    tags: ['sandbox', 'file', 'artifact'],
-    color: '#389e0d',
-    kind: 'workspace-task',
-    taskSourceId: 'file_sandbox_demo.py',
-    taskRelativePath: 'tasks/examples/file_sandbox_demo.py',
-    workflowName: 'File Sandbox Demo',
-  },
-];
 
 type SidebarClusterSummary = {
   totalNodes: number;
@@ -116,48 +66,6 @@ def ${functionName}(text: str = ""):
     """Process text and return a result."""
     return {"result": f"Processed: {text}"}
 `;
-
-const resourceSoakCpuTaskCode = `from maze import task
-
-@task(
-    data_types={
-        "probe_id": "int",
-        "sleep_seconds": "int",
-        "placement": "dict",
-    },
-    resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
-)
-def resource_soak_cpu(probe_id: int = 0, sleep_seconds: int = 60):
-    """Sleep for a short period and report CPU-side placement."""
-    import os
-    import platform
-    import socket
-    import time
-
-    delay = max(0, min(int(sleep_seconds or 0), 300))
-    placement = {
-        "probe_id": int(probe_id or 0),
-        "hostname": socket.gethostname(),
-        "platform_node": platform.node(),
-        "pid": os.getpid(),
-        "sleep_seconds": delay,
-    }
-
-    try:
-        import ray
-
-        placement["ray_node_id"] = ray.get_runtime_context().get_node_id()
-        placement["ray_node_ip"] = ray.util.get_node_ip_address()
-    except Exception as exc:
-        placement["ray_error"] = str(exc)
-
-    if delay:
-        time.sleep(delay)
-
-    return {"placement": placement}
-`;
-
-const RESOURCE_SOAK_CPU_TASK_PATH = 'tasks/examples/resource_soak_cpu.py';
 
 function safeTaskFunctionName(name: string, fallback = 'workspace_task') {
   const value = name
@@ -256,10 +164,6 @@ export default function BuiltinTasksSidebar({
     addNode,
     selectNode,
     setSelectedRunId,
-    staticRuns,
-    setStaticRuns,
-    upsertStaticRun,
-    setStaticRunEvents,
     reset,
     isRunning,
     acquireWorkflowOperation,
@@ -277,7 +181,6 @@ export default function BuiltinTasksSidebar({
   const [importingCatalogKey, setImportingCatalogKey] = useState<string | null>(null);
   const [catalogImportType, setCatalogImportType] = useState<'workflows' | 'tasks' | null>(null);
   const [workspaceWorkflowModalOpen, setWorkspaceWorkflowModalOpen] = useState(false);
-  const [importingExampleKey, setImportingExampleKey] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
   const [testingLlm, setTestingLlm] = useState(false);
@@ -354,8 +257,6 @@ export default function BuiltinTasksSidebar({
         await loadWorkspaceWorkflows(tasksResult.workspaceDir);
         if (canceled) return;
         await loadWorkspaceFiles(tasksResult.workspaceDir, '');
-        if (canceled) return;
-        await refreshWorkspaceRuns(tasksResult.workspaceDir);
         if (canceled) return;
         const restoredDraft = await restoreWorkspaceDraft(tasksResult.workspaceDir);
         if (!canceled && !restoredDraft) {
@@ -443,7 +344,6 @@ export default function BuiltinTasksSidebar({
     };
   }, []);
 
-  const recentRuns = staticRuns.slice(0, 3);
   const inputFiles = workspaceFiles.filter((file) => file.type === 'file').slice(0, 5);
   const clusterStatus = clusterSummary
     ? clusterSummary.runningTasks > 0
@@ -561,24 +461,6 @@ export default function BuiltinTasksSidebar({
       setImportingCatalogKey(null);
       releaseWorkflowOperation(operationToken);
     }
-  };
-
-  const importSystemCatalogItem = async (
-    type: 'workflows' | 'tasks',
-    sourceId: string,
-    targetPath?: string,
-  ) => {
-    const result = await api.importSystemCatalogItem({
-      workspaceId: workspaceId || undefined,
-      workspaceDir: workspaceDir || undefined,
-      type,
-      sourceId,
-      targetPath,
-    });
-    setWorkspaceContext(result);
-    setWorkspaceDir(result.workspaceDir);
-    setWorkspaceInput(result.workspaceDir);
-    return result;
   };
 
   const loadWorkspaceTasks = async (dir?: string, showSuccess = false) => {
@@ -703,54 +585,6 @@ export default function BuiltinTasksSidebar({
     }
   };
 
-  const refreshWorkspaceRuns = async (dir: string) => {
-    try {
-      const result = await api.getRuns({
-        kind: 'static',
-        limit: 20,
-        detail: false,
-      });
-      const activeWorkspaceId = String(useWorkflowStore.getState().workspaceId || '').trim();
-      const normalizeWorkspaceDir = (value: unknown) => (
-        String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
-      );
-      const activeWorkspaceDir = normalizeWorkspaceDir(dir);
-      const workspaceRuns = (result.runs || []).filter((run) => {
-        const metadata = run.metadata || {};
-        const runWorkspaceId = String(metadata.workspace_id || '').trim();
-        const runWorkspaceDir = normalizeWorkspaceDir(metadata.workspace_dir);
-
-        if (runWorkspaceId && activeWorkspaceId && runWorkspaceId !== activeWorkspaceId) {
-          return false;
-        }
-        if (runWorkspaceDir && activeWorkspaceDir && runWorkspaceDir !== activeWorkspaceDir) {
-          return false;
-        }
-        return true;
-      });
-      setStaticRuns(workspaceRuns);
-    } catch (error) {
-      console.debug('Failed to refresh workspace runs:', error);
-      setStaticRuns([]);
-    }
-  };
-
-  const openRecentRun = async (runId: string) => {
-    setSelectedRunId(runId);
-    onOpenRuns?.();
-    try {
-      const [runResult, eventsResult] = await Promise.all([
-        api.getRun(runId),
-        api.getRunEvents(runId),
-      ]);
-      upsertStaticRun(runResult.run);
-      setStaticRunEvents(runId, eventsResult.events || []);
-    } catch (error: any) {
-      console.error('Failed to load run details:', error);
-      message.error(error.response?.data?.error || 'Failed to load run details');
-    }
-  };
-
   const handleChangeWorkspace = async (dir: string) => {
     if (isRunning) {
       message.warning('Workflow is running, please change workspace after it finishes');
@@ -764,7 +598,6 @@ export default function BuiltinTasksSidebar({
       const tasksResult = await loadWorkspaceTasks(dir);
       await loadWorkspaceWorkflows(tasksResult.workspaceDir);
       await loadWorkspaceFiles(tasksResult.workspaceDir, '');
-      await refreshWorkspaceRuns(tasksResult.workspaceDir);
       const restoredDraft = await restoreWorkspaceDraft(tasksResult.workspaceDir, operationToken);
       if (!restoredDraft) {
         setCurrentWorkspaceWorkflowPath(null);
@@ -969,33 +802,6 @@ export default function BuiltinTasksSidebar({
       configured: true,
     },
   });
-
-  const createProbeNode = (
-    task: WorkspaceTaskMeta,
-    id: string,
-    label: string,
-    probeId: number,
-    sleepSeconds: number,
-    position: { x: number; y: number },
-  ): WorkflowNode => {
-    const node = createWorkspaceNode(task, position);
-    return {
-      ...node,
-      id,
-      data: {
-        ...node.data,
-        label,
-        inputs: node.data.inputs.map((input) => ({
-          ...input,
-          value: input.name === 'probe_id'
-            ? String(probeId)
-            : input.name === 'sleep_seconds'
-              ? String(sleepSeconds)
-              : input.value,
-        })),
-      },
-    };
-  };
 
   const handleSaveWorkspaceWorkflow = async () => {
     if (!requireWorkspaceInteraction()) {
@@ -1321,169 +1127,9 @@ export default function BuiltinTasksSidebar({
     await saveNewWorkspaceTask(newTaskGeneratedCode, newTaskRelativePath.trim() || `tasks/${safeTaskFunctionName(newTaskFunctionName)}.py`);
   };
 
-  const addDistributedSmokeTemplateToCanvas = async (template: WorkflowExample) => {
-    setWorkflowName(template.workflowName || template.name);
-    const task = await importWorkspaceExampleTask(template);
-    const position = getDefaultPosition();
-    const baseId = Date.now();
-    const smokeNodes = Array.from({ length: 2 }, (_, index) => createProbeNode(
-      task,
-      `node-${baseId}-${index + 1}`,
-      `GPU Probe ${index + 1}`,
-      index + 1,
-      1,
-      {
-        x: position.x + (index % 2) * 260,
-        y: position.y + Math.floor(index / 2) * 180,
-      },
-    ));
-
-    smokeNodes.forEach((node) => addNode(node));
-    selectNode(smokeNodes[0]);
-    setCatalogImportType(null);
-    message.success(`${template.name} added`);
-  };
-
-  const ensureResourceSoakCpuTask = async () => {
-    const activeWorkspace = workspaceInput.trim() || workspaceDir || (await loadWorkspaceTasks()).workspaceDir;
-    const saved = await api.saveWorkspaceTask({
-      workspaceId: workspaceId || undefined,
-      workspaceDir: activeWorkspace,
-      relativePath: RESOURCE_SOAK_CPU_TASK_PATH,
-      code: resourceSoakCpuTaskCode,
-      parse: true,
-    });
-    setWorkspaceContext(saved);
-    const tasksResult = await loadWorkspaceTasks(saved.workspaceDir || activeWorkspace);
-    const task = (tasksResult.tasks || []).find((item) => item.relativePath === RESOURCE_SOAK_CPU_TASK_PATH)
-      || saved.task;
-    if (!task) {
-      throw new Error(`Resource soak CPU task was not parsed: ${RESOURCE_SOAK_CPU_TASK_PATH}`);
-    }
-    return task;
-  };
-
-  const addResourceSoakTemplateToCanvas = async (template: WorkflowExample) => {
-    setWorkflowName(template.workflowName || template.name);
-    const sleepSeconds = template.sleepSeconds || 60;
-    const cpuTask = await ensureResourceSoakCpuTask();
-    const gpuTask = await importWorkspaceExampleTask(template);
-    const position = getDefaultPosition();
-    const baseId = Date.now();
-    const soakNodes: WorkflowNode[] = [
-      createProbeNode(
-        cpuTask,
-        `node-${baseId}-cpu-1`,
-        'CPU Soak 1',
-        1,
-        sleepSeconds,
-        { x: position.x, y: position.y },
-      ),
-      createProbeNode(
-        cpuTask,
-        `node-${baseId}-cpu-2`,
-        'CPU Soak 2',
-        2,
-        sleepSeconds,
-        { x: position.x, y: position.y + 170 },
-      ),
-      createProbeNode(
-        gpuTask,
-        `node-${baseId}-gpu-1`,
-        'GPU Soak 1',
-        101,
-        sleepSeconds,
-        { x: position.x + 280, y: position.y },
-      ),
-      createProbeNode(
-        gpuTask,
-        `node-${baseId}-gpu-2`,
-        'GPU Soak 2',
-        102,
-        sleepSeconds,
-        { x: position.x + 280, y: position.y + 170 },
-      ),
-    ];
-
-    soakNodes.forEach((node) => addNode(node));
-    selectNode(soakNodes[0]);
-    setCatalogImportType(null);
-    message.success(`${template.name} added (${sleepSeconds}s tasks)`);
-  };
-
-  const importWorkspaceExampleTask = async (template: WorkflowExample) => {
-    if (!template.taskSourceId) {
-      throw new Error('Example task source is missing');
-    }
-
-    const imported = await importSystemCatalogItem(
-      'tasks',
-      template.taskSourceId,
-      template.taskRelativePath || template.taskSourceId,
-    );
-    const tasksResult = await loadWorkspaceTasks(imported.workspaceDir);
-    const targetPath = imported.import?.targetPath || template.taskRelativePath || `tasks/${template.taskSourceId}`;
-    const task = (tasksResult.tasks || []).find((item) => item.relativePath === targetPath)
-      || (tasksResult.tasks || []).find((item) => item.relativePath.endsWith(template.taskSourceId || ''));
-    if (!task) {
-      throw new Error(`Imported task was not parsed: ${targetPath}`);
-    }
-
-    return task;
-  };
-
-  const addWorkspaceExampleTaskToCanvas = async (template: WorkflowExample) => {
-    setWorkflowName(template.workflowName || template.name);
-    const task = await importWorkspaceExampleTask(template);
-    const newNode = createWorkspaceNode(task);
-    addNode(newNode);
-    selectNode(newNode);
-    setCatalogImportType(null);
-    message.success(`${template.name} added`);
-  };
-
-  const addWorkflowExampleToCanvas = async (template: WorkflowExample) => {
-    if (!requireWorkspaceInteraction()) {
-      return;
-    }
-    if (isRunning) {
-      message.warning('Workflow is running, please update the canvas after it finishes');
-      return;
-    }
-    const operationToken = beginWorkflowOperation('Adding workflow template');
-    if (!operationToken) {
-      return;
-    }
-    setImportingExampleKey(template.key);
-    try {
-      if (template.kind === 'distributed-smoke') {
-        await addDistributedSmokeTemplateToCanvas(template);
-      } else if (template.kind === 'resource-soak') {
-        await addResourceSoakTemplateToCanvas(template);
-      } else {
-        await addWorkspaceExampleTaskToCanvas(template);
-      }
-    } catch (error: any) {
-      console.error('Failed to add workflow example:', error);
-      message.error(error.response?.data?.error || error.message || 'Failed to add workflow example');
-    } finally {
-      setImportingExampleKey(null);
-      releaseWorkflowOperation(operationToken);
-    }
-  };
-
   const formatUpdatedAt = (value: string) => {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-  };
-
-  const formatRunTime = (value?: number | null) => {
-    if (!value) return '';
-    const milliseconds = value > 1_000_000_000_000 ? value : value * 1000;
-    const date = new Date(milliseconds);
-    return Number.isNaN(date.getTime())
-      ? ''
-      : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
   const statusClassName = (status?: string) => {
@@ -1560,14 +1206,6 @@ export default function BuiltinTasksSidebar({
     }))
     : [];
 
-  const visibleRuns = recentRuns.length > 0
-    ? recentRuns.map((run) => ({
-      id: run.run_id,
-      label: run.workflow_name || `Run ${run.run_id.slice(0, 8)}`,
-      startedAt: formatRunTime(run.created_time),
-      status: run.status,
-    }))
-    : [];
   const importableCatalogItems = useMemo(() => {
     const workflows = (catalogItems.workflows || []).filter((item) => item.kind === 'file');
     const tasks = (catalogItems.tasks || []).filter((item) => (
@@ -1579,62 +1217,11 @@ export default function BuiltinTasksSidebar({
     return { workflows, tasks };
   }, [catalogItems]);
 
-  const renderWorkflowExamples = () => {
-    return (
-      <div>
-        <Space align="center" size={6} style={{ marginBottom: 8 }}>
-          <Text strong>Examples</Text>
-          <Tag color="purple" style={{ margin: 0 }}>canvas</Tag>
-        </Space>
-        <List
-          size="small"
-          dataSource={WORKFLOW_EXAMPLES}
-          renderItem={(template) => (
-            <List.Item
-              className="workspace-file-row"
-              actions={[
-                <Button
-                  key="add"
-                  type="primary"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  loading={importingExampleKey === template.key}
-                  disabled={!workspaceInteractionReady || workflowInteractionBlocked}
-                  onClick={() => addWorkflowExampleToCanvas(template)}
-                >
-                  Add
-                </Button>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={<AppstoreAddOutlined style={{ color: template.color }} />}
-                title={<Text strong>{template.name}</Text>}
-                description={
-                  <Space direction="vertical" size={4}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {template.description}
-                    </Text>
-                    <Space size={4} wrap>
-                      {template.tags.map((tag) => (
-                        <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
-                      ))}
-                    </Space>
-                  </Space>
-                }
-              />
-            </List.Item>
-          )}
-        />
-      </div>
-    );
-  };
-
   const renderCatalogList = (type: 'workflows' | 'tasks') => {
     const items = importableCatalogItems[type] || [];
 
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {type === 'workflows' && renderWorkflowExamples()}
         <div>
           <Space align="center" size={6} style={{ marginBottom: 8 }}>
             <Text strong>System Catalog</Text>
@@ -2165,34 +1752,14 @@ export default function BuiltinTasksSidebar({
 	            </button>
 	          </section>
 
-	          <section className="workbench-nav-section">
-	            <div className="workbench-nav-section-header">
-	              <span>RECENT RUNS</span>
-	              <span className="workbench-nav-count">{staticRuns.length}</span>
-	            </div>
-	            <div className="workbench-nav-list">
-	              {visibleRuns.map((run) => (
-	                <button
-	                  key={run.id}
-	                  type="button"
-	                  className="workbench-nav-row"
-	                  onClick={() => openRecentRun(run.id)}
-	                >
-	                  <span className={`workbench-status-dot ${statusClassName(run.status)}`} />
-	                  <span className="workbench-nav-row-label">{run.label}</span>
-	                  <span className={`workbench-run-status ${statusClassName(run.status)}`}>{run.status}</span>
-	                </button>
-	              ))}
-	              {visibleRuns.length === 0 && (
-	                <div className="workbench-nav-empty-row">No runs yet</div>
-	              )}
-	            </div>
-            {staticRuns.length > 0 && (
-              <button type="button" className="workbench-nav-link" onClick={onOpenRuns}>
-                View all runs
-              </button>
-            )}
-	          </section>
+          <section className="workbench-nav-section">
+            <div className="workbench-nav-section-header">
+              <span>RUNS</span>
+            </div>
+            <button type="button" className="workbench-nav-link" onClick={onOpenRuns}>
+              Open run history
+            </button>
+          </section>
 
           <section className="workbench-nav-section">
             <div className="workbench-nav-section-header">
