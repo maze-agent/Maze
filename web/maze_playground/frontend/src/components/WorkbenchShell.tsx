@@ -19,10 +19,8 @@ interface WorkbenchShellProps {
   topBar: ReactNode;
   leftSidebar: ReactNode;
   canvas: ReactNode;
-  nodePanel: ReactNode;
   runsInspector: ReactNode;
   clusterDrawer: ReactNode;
-  onOpenNodePanel?: () => void;
 }
 
 function normalizeTaskKey(value?: string | null) {
@@ -257,10 +255,8 @@ export default function WorkbenchShell({
   topBar,
   leftSidebar,
   canvas,
-  nodePanel,
   runsInspector,
   clusterDrawer,
-  onOpenNodePanel,
 }: WorkbenchShellProps) {
   const {
     nodes,
@@ -391,11 +387,10 @@ export default function WorkbenchShell({
               onClick={() => setInspectorCollapsed((value) => !value)}
             />
           </Tooltip>
-          {!inspectorCollapsed && <TaskInspector onOpenNodePanel={onOpenNodePanel} />}
+          {!inspectorCollapsed && <TaskInspector />}
         </aside>
       </div>
 
-      {nodePanel}
       {runsInspector}
       {clusterDrawer}
     </div>

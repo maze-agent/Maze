@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Button, Empty, Input, Select, Space, Tag, Typography } from 'antd';
+import { Button, Empty, Input, Popconfirm, Select, Space, Tag, Typography } from 'antd';
 import {
   AppstoreOutlined,
   CopyOutlined,
+  DeleteOutlined,
   EditOutlined,
   FileDoneOutlined,
   NodeIndexOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
+import CustomTaskEditor from '@/components/CustomTaskEditor';
+import { syncWorkflowInputEdges } from '@/utils/workflowBindings';
 import type {
   FaultToleranceTrace,
   LocalModel,
@@ -762,14 +765,16 @@ function OverviewPanel({ task }: { task: WorkbenchTask }) {
 function DefinitionPanel({
   task,
   taskNode,
+  nodes,
   readOnly,
-  onOpenNodePanel,
+  onEditCode,
   onUpdate,
 }: {
   task: WorkbenchTask;
   taskNode: WorkflowNode;
+  nodes: WorkflowNode[];
   readOnly: boolean;
-  onOpenNodePanel?: () => void;
+  onEditCode?: () => void;
   onUpdate: (updates: Record<string, unknown>) => void;
 }) {
   const executionMode = task.config.implementationType;
@@ -781,6 +786,15 @@ function DefinitionPanel({
   const functionName = task.config.functionName
     || taskNode.data.functionName
     || (taskNode.data.taskRef ? String(taskNode.data.taskRef).split('.').pop() : '');
+  const sourceNodes = nodes.filter((node) => node.id !== taskNode.id && node.data.outputs.length > 0);
+
+  function updateInput(index: number, updates: Partial<WorkflowNode['data']['inputs'][number]>) {
+    onUpdate({
+      inputs: taskNode.data.inputs.map((input, inputIndex) => (
+        inputIndex === index ? { ...input, ...updates } : input
+      )),
+    });
+  }
 
   return (
     <>
@@ -788,9 +802,9 @@ function DefinitionPanel({
       <section className="workbench-inspector-section">
         <div className="workbench-inspector-section-title workbench-inspector-section-title-row">
           <span>TASK DEFINITION</span>
-          {onOpenNodePanel && (
-            <Button size="small" type="primary" icon={<EditOutlined />} disabled={readOnly} onClick={onOpenNodePanel}>
-              Edit task
+          {onEditCode && (
+            <Button size="small" type="primary" icon={<EditOutlined />} disabled={readOnly} onClick={onEditCode}>
+              Edit code
             </Button>
           )}
         </div>
@@ -864,9 +878,83 @@ function DefinitionPanel({
 
       <section className="workbench-inspector-section">
         <div className="workbench-inspector-section-title">BINDINGS</div>
-        <FieldRow label="Inputs">
-          <InlineChips labels={unknownItems(taskNode.data.inputs)} empty="No inputs" />
-        </FieldRow>
+        {taskNode.data.inputs.length === 0 && <Text type="secondary">No inputs</Text>}
+        {taskNode.data.inputs.map((input, index) => {
+          const sourceNode = nodes.find((node) => node.id === input.taskSource?.taskId);
+          return (
+            <div key={input.name} className="workbench-inspector-subsection">
+              <Text type="secondary">{input.name} ({input.dataType})</Text>
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <Select
+                  size="small"
+                  value={input.source}
+                  disabled={readOnly}
+                  options={[
+                    { value: 'user', label: 'User input' },
+                    { value: 'task', label: 'From task', disabled: sourceNodes.length === 0 },
+                  ]}
+                  onChange={(source) => {
+                    if (source === 'user') {
+                      updateInput(index, { source, taskSource: undefined });
+                      return;
+                    }
+                    const nextSource = sourceNode || sourceNodes[0];
+                    updateInput(index, {
+                      source,
+                      taskSource: nextSource ? {
+                        taskId: nextSource.id,
+                        outputKey: nextSource.data.outputs[0]?.name || '',
+                      } : undefined,
+                    });
+                  }}
+                />
+                {input.source === 'user' ? (
+                  <Input
+                    size="small"
+                    value={input.value || ''}
+                    disabled={readOnly}
+                    placeholder="Value"
+                    onChange={(event) => updateInput(index, { value: event.target.value })}
+                  />
+                ) : (
+                  <Space.Compact block>
+                    <Select
+                      size="small"
+                      value={input.taskSource?.taskId}
+                      disabled={readOnly}
+                      placeholder="Source task"
+                      options={sourceNodes.map((node) => ({ value: node.id, label: node.data.label }))}
+                      onChange={(taskId) => {
+                        const nextSource = nodes.find((node) => node.id === taskId);
+                        updateInput(index, {
+                          taskSource: {
+                            taskId,
+                            outputKey: nextSource?.data.outputs[0]?.name || '',
+                          },
+                        });
+                      }}
+                    />
+                    <Select
+                      size="small"
+                      value={input.taskSource?.outputKey}
+                      disabled={readOnly || !sourceNode}
+                      placeholder="Output"
+                      options={(sourceNode?.data.outputs || []).map((output) => ({
+                        value: output.name,
+                        label: output.name,
+                      }))}
+                      onChange={(outputKey) => updateInput(index, {
+                        taskSource: input.taskSource
+                          ? { ...input.taskSource, outputKey }
+                          : undefined,
+                      })}
+                    />
+                  </Space.Compact>
+                )}
+              </Space>
+            </div>
+          );
+        })}
         <FieldRow label="Outputs">
           <InlineChips labels={unknownItems(taskNode.data.outputs)} empty="No outputs" />
         </FieldRow>
@@ -1215,14 +1303,11 @@ function WorkflowSummaryPanel({
   );
 }
 
-interface TaskInspectorProps {
-  onOpenNodePanel?: () => void;
-}
-
-export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
+export default function TaskInspector() {
   const [activeTab, setActiveTab] = useState<InspectorTab>('overview');
   const [localModels, setLocalModels] = useState<LocalModel[]>([]);
   const [taskArtifacts, setTaskArtifacts] = useState<RunArtifact[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
   const {
     selectedNode,
     nodes,
@@ -1235,6 +1320,8 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
     staticRuns,
     isRunning,
     updateNode,
+    deleteNode,
+    setEdges,
   } = useWorkflowStore();
 
   const currentSelectedNode = selectedNode
@@ -1254,6 +1341,10 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
   const task = currentSelectedNode ? buildTask(currentSelectedNode, runtime, taskArtifacts, edges, nodes) : null;
   const isRunMode = Boolean(visibleRunId || isRunning);
   const isSpecReadOnly = isRunMode;
+  const canEditCode = Boolean(
+    currentSelectedNode
+    && ['custom', 'workspace'].includes(currentSelectedNode.data.category),
+  );
 
   const dynamicCount = useMemo(
     () => nodes.filter((node) => Boolean((node.data as any).dynamic || (node.data as any).runtimeAppended)).length,
@@ -1303,6 +1394,14 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
 
   function updateTaskData(updates: Record<string, unknown>) {
     if (!task || isSpecReadOnly) return;
+    if (Array.isArray(updates.inputs)) {
+      setEdges(syncWorkflowInputEdges(
+        nodes,
+        edges,
+        task.id,
+        updates.inputs as WorkflowNode['data']['inputs'],
+      ));
+    }
     updateNode(task.id, updates as Partial<WorkflowNode['data']>);
   }
 
@@ -1317,7 +1416,8 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
   }
 
   return (
-    <div className="workbench-inspector">
+    <>
+      <div className="workbench-inspector">
       <header className="workbench-inspector-header">
         <div className="workbench-inspector-title-block">
           <div className="workbench-inspector-title-row">
@@ -1338,6 +1438,20 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
               aria-label="Copy object id"
               onClick={() => navigator.clipboard?.writeText(task?.id || 'workflow')}
             />
+            {task && !isSpecReadOnly && (
+              <Popconfirm
+                title="Delete task"
+                description="Delete this task and its connections?"
+                okText="Delete"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => {
+                  setEditorOpen(false);
+                  deleteNode(task.id);
+                }}
+              >
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label="Delete task" />
+              </Popconfirm>
+            )}
           </Space>
         </div>
       </header>
@@ -1352,8 +1466,9 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
               <DefinitionPanel
                 task={task}
                 taskNode={currentSelectedNode}
+                nodes={nodes}
                 readOnly={isSpecReadOnly}
-                onOpenNodePanel={onOpenNodePanel}
+                onEditCode={canEditCode ? () => setEditorOpen(true) : undefined}
                 onUpdate={updateTaskData}
               />
             )}
@@ -1382,7 +1497,15 @@ export default function TaskInspector({ onOpenNodePanel }: TaskInspectorProps) {
             latestRun={latestRun}
           />
         )}
+        </div>
       </div>
-    </div>
+      {currentSelectedNode && canEditCode && (
+        <CustomTaskEditor
+          node={currentSelectedNode}
+          open={editorOpen}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
+    </>
   );
 }

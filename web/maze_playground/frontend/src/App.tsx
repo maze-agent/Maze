@@ -5,7 +5,6 @@ import { message } from 'antd';
 import Toolbar from './components/Toolbar';
 import BuiltinTasksSidebar from './components/BuiltinTasksSidebar';
 import WorkflowCanvas from './components/WorkflowCanvas';
-import NodePanel from './components/NodePanel';
 import RunsInspector from './components/RunsInspector';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import WorkbenchShell from './components/WorkbenchShell';
@@ -32,7 +31,6 @@ function App() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
-  const [nodePanelOpen, setNodePanelOpen] = useState(false);
   const {
     workflowId,
     workflowName,
@@ -413,7 +411,6 @@ function App() {
           />
         )}
         canvas={<WorkflowCanvas />}
-        nodePanel={<NodePanel open={nodePanelOpen} onClose={() => setNodePanelOpen(false)} />}
         runsInspector={(
           <RunsInspector
             open={runsOpen}
@@ -427,7 +424,6 @@ function App() {
             onClose={() => setClusterResourcesOpen(false)}
           />
         )}
-        onOpenNodePanel={() => setNodePanelOpen(true)}
       />
     </ConfigProvider>
   );
