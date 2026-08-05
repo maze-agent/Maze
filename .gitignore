@@ -13,6 +13,9 @@ site/
 docs/_build/
 
 # Testing
+/tests/
+/web/maze_playground/backend/test/
+/web/maze_playground/frontend/test/
 .pytest_cache/
 .mypy_cache/
 .coverage

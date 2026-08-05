@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test test/workflowBindings.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

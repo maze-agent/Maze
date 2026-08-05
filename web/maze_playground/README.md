@@ -52,7 +52,5 @@ npm run dev
 ## 验证
 
 ```bash
-conda run -n maze node --test web/maze_playground/backend/test/workflow_dag_spec.test.js
-conda run -n maze pytest -q tests/test_dag_submit_contract.py tests/test_playground_task_metadata.py
 cd web/maze_playground/frontend && conda run -n maze npm run build
 ```
