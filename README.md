@@ -10,15 +10,16 @@
 </p>
 
 
-## 📰 News
+Maze turns agent programs into distributed, observable workflows. It schedules task-level work across heterogeneous resources while keeping execution, recovery, and artifacts behind one runtime API.
 
-- **2026-08**: Maze consolidated workflow execution around a Core-owned Run model. Playground now compiles workspace DAGs to `maze.workflow/v1` and submits them through the same `/workflows/submit` API used by external clients; Core owns run IDs, events, logs, and artifacts.
-- **2026-08**: The public task source is now `system_catalog/tasks`, the LangGraph adapter uses the unified submission path, and legacy duplicate execution and run-mirroring paths have been removed.
-- **2026-07**: Maze hardened distributed run reliability with automatic worker-agent recovery after head/Ray restarts, current-cluster registration validation, run-level deadlines, explicit scheduler-failure states, and restart-safe run discovery. The recovery path was verified with two-node PDF, timeout, scheduler-death, and restart cases.
-- **2026-07**: Maze Core added paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS`/`HACS` task scheduling, observed-runtime EMA estimates, richer queue diagnostics, and an optional zero-VRAM standby worker execution path.
-- **2026-07**: Our Maze research paper has been accepted to SC26. We are aligning the open-source implementation with the paper version in small, reviewable updates.
-- **2026-06**: Maze added unified run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
-- **2026-05**: Maze added persisted DynamicRuns, workspace file execution, and the Playground `Runs` and `Cluster` views.
+## 🌟 Highlights
+
+- **Visual workflow development.** Maze Workbench provides a DAG editor, reusable task catalog, workspace files, validation, live execution, Run inspection, and cluster operations in one interface.
+- **Heterogeneous scheduling.** Independent `gpu`, `cpu`, and `io` queues prevent one resource class from blocking the others. Maze supports `FCFS` and the paper-aligned `HACS` scheduling algorithm, with node placement configured separately.
+- **Static and dynamic workflows.** Define DAGs with `@workflow`, submit the portable `maze.workflow/v1` format, or append tasks at runtime with persisted `DynamicRun` state.
+- **Distributed model execution.** Maze discovers local models across nodes, routes LLM tasks to reusable inference instances, and manages GPU reservations and model scale-out/scale-in through the scheduler.
+- **Durable operations.** Runs retain task state, structured errors, events, logs, retries, timeouts, cancellation, placement, and content-addressed artifacts across process restarts.
+- **Framework integration.** The Python SDK, LangGraph adapter, visual Workbench, and application specs use the same Core execution and observability surface.
 
 ## Current Architecture
 
@@ -45,29 +46,12 @@ Python SDK / LangGraph / Workbench
 
 The implementation is built on Ray for distributed processes and task execution. Maze adds the workflow contract, task/resource semantics, durable Run state, scheduling policy, model lifecycle, artifacts, and operational APIs above Ray.
 
-<br>
+## 📰 News
 
-
-## 🌟 Why Maze?
-- **Task-level**
-
-  Maze enables fine-grained, task-level management, enhancing system flexibility and composability while supporting task parallelism to significantly improve the end-to-end performance of agent workflows.
-
-- **Resource Management**
-
-  Maze supports resource allocation for workflow tasks, effectively preventing resource contention both among parallel tasks within a single workflow and across multiple concurrently executing workflows.
-
-- **Application Operations**
-
-  Maze records durable run/task snapshots, lifecycle events, structured task errors, logs, artifacts, retries, timeouts, cancellation, and queue state so applications can query and recover runs without depending on a single live WebSocket stream.
-
-- **Distributed Deployment**
-
-  Maze supports not only standalone but also distributed deployment, allowing you to build highly available and scalable Maze clusters to meet the demands of large-scale concurrency and high-performance computing.
-
-- **Multi-Agent Support**
-
-  Maze can serve as a runtime backend for other agent frameworks. The included `LanggraphClient` adapter wraps LangGraph node calls as ordinary Maze workflow submissions, preserving the same resource and Run contracts without maintaining a separate scheduler.
+- **2026-08**: Maze unified SDK, LangGraph, and Workbench DAG execution around Core-owned Runs and the `/workflows/submit` contract.
+- **2026-07**: Maze added paper-aligned heterogeneous scheduling, distributed recovery, run deadlines, and restart-safe discovery. The Maze research paper was accepted to SC26.
+- **2026-06**: Maze added unified run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
+- **2026-05**: Maze added persisted DynamicRuns, workspace file execution, and the Workbench `Runs` and `Cluster` views.
 
 <br>
 
@@ -304,12 +288,6 @@ maze runs logs <run_id> --tail 200 --server-url http://HEAD_IP:HEAD_PORT
 maze runs retry <run_id> --server-url http://HEAD_IP:HEAD_PORT
 maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
 ```
-
-### GPU Model Lifecycle
-
-Local LLM instances are reused across tasks and Runs. When the last routed request finishes, Maze keeps the model warm for 300 seconds by default and checks for idle instances every 5 seconds. During that window, `GPU Memory Reserved` in the Cluster view remains non-zero even though the Run is complete; after idle scale-in, Maze stops the model process and releases its scheduler lease.
-
-`GPU Memory Reserved` is Maze's scheduling reservation, not an instantaneous `nvidia-smi` reading. Keeping the model warm avoids paying model load time on every Run. A reservation that remains after the idle window with no active requests indicates a cleanup problem rather than normal caching.
 
 <br>
 
