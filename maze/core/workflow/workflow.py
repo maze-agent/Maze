@@ -28,12 +28,6 @@ class Workflow:
         self.graph.add_node(task_id)
         self.remaining_task_num += 1
 
-    def get_task(self, task_id: str) -> CodeTask:
-        """
-        Get a task from workflow
-        """
-        return self.tasks.get(task_id)
-
     def add_edge(self, source_task_id: str, target_task_id: str) -> None:
         """
         Add a edge to workflow (dependency: source -> target)

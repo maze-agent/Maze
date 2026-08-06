@@ -48,7 +48,7 @@ The implementation is built on Ray for distributed processes and task execution.
 
 ## 📰 News
 
-- **2026-08**: Maze unified SDK, LangGraph, and Workbench DAG execution around Core-owned Runs and the `/workflows/submit` contract.
+- **2026-08**: Maze simplified the runtime and Workbench around Core-owned Runs and `/workflows/submit`, removing legacy `maze dev`, duplicate execution paths, and redundant UI state. Service lifecycle now uses `maze start --detach`, `maze stop`, and `maze doctor`, while standby actors provide the default warm execution path. The Workbench now supports concurrent submissions and immutable cross-workspace Run history, with task definition, runtime, placement, and artifacts consolidated in the right-side inspector.
 - **2026-07**: Maze introduced paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS` and `HACS` scheduling, observed-runtime estimates, richer queue diagnostics, and an optional standby worker path. Distributed execution was hardened with worker re-registration after head or Ray restarts, current-cluster validation, run-level deadlines, explicit scheduler-failure states, and restart-safe run discovery. The Maze research paper was accepted to SC26.
 - **2026-06**: Maze added unified run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
 - **2026-05**: Maze added persisted DynamicRuns, workspace file execution, and the Workbench `Runs` and `Cluster` views.
@@ -79,6 +79,18 @@ The implementation is built on Ray for distributed processes and task execution.
    ```bash
    maze start --head --port HEAD_PORT
    ```
+   Add `--detach` to run the same head parent in the background. Both foreground
+   and detached heads record one validated runtime identity, so another terminal
+   can inspect or stop the local head safely:
+
+   ```bash
+   maze start --head --port HEAD_PORT --detach
+   maze status
+   maze doctor
+   maze stop
+   ```
+
+   Detached output is written to the log path printed by `maze start`.
    The head uses the `least-loaded` node placement policy by default, so ready tasks prefer the registered node with the fewest running Maze tasks. To force the older registration-order placement behavior, pass `--strategy default`.
 
    Task scheduling is selected separately. `FCFS` is the default task scheduling algorithm; pass `--scheduling-algorithm HACS` to enable the paper-aligned HACS queue ordering:
@@ -87,10 +99,12 @@ The implementation is built on Ray for distributed processes and task execution.
    maze start --head --port HEAD_PORT --scheduling-algorithm HACS
    ```
 
-   To enable the optional warm standby execution path for scheduled tasks:
+   Warm standby workers are enabled by default. Scheduled tasks use an idle
+   standby actor first and fall back to a normal Ray task when the pool is busy.
+   To disable standby creation and execution together:
 
    ```bash
-   MAZE_STANDBY_EXECUTION_ENABLED=1 maze start --head --port HEAD_PORT
+   MAZE_STANDBY_WORKERS_ENABLED=0 maze start --head --port HEAD_PORT
    ```
 
    If there are multiple machines, you can connect other machines as maze workers to the maze head.
@@ -101,6 +115,8 @@ The implementation is built on Ray for distributed processes and task execution.
    ```bash
    maze start --worker --addr HEAD_IP:HEAD_PORT --agent --heartbeat-interval 20
    ```
+   Stop a local worker explicitly with `maze stop --worker`; plain `maze stop`
+   owns the local head lifecycle.
    You can inspect the scheduler-visible cluster state with:
    ```bash
    curl http://HEAD_IP:HEAD_PORT/cluster/resources

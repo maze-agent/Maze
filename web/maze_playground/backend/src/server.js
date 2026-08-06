@@ -31,6 +31,7 @@ const MAZE_CORE_REQUEST_TIMEOUT_MS = Math.min(
   Math.max(100, Number(process.env.MAZE_CORE_REQUEST_TIMEOUT_MS) || 30 * 1000),
 );
 const systemWorkflowLoadQueues = new Map();
+const workspaceTaskSaveQueues = new Map();
 const workspaceTasksCache = new Map();
 const activeWorkerProfileSecrets = new Map();
 
@@ -233,12 +234,10 @@ async function ensureWorkspaceManifest(workspaceDir, options = {}) {
     created_at: now,
     updated_at: now,
     mode: String(options.mode || 'session'),
-    default_sandbox: 'workspace_sandbox',
     files_dir: 'files',
     workflows_dir: 'workflows',
     tasks_dir: 'tasks',
     runs_dir: 'runs',
-    policy_path: 'policies/sandbox_policy.json',
     imports: [],
     local_mounts: [],
   };
@@ -271,39 +270,6 @@ async function touchWorkspace(workspaceDir) {
   return updateWorkspaceManifest(workspaceDir, (manifest) => manifest);
 }
 
-async function ensureWorkspacePolicy(workspaceDir) {
-  const policyPath = path.join(workspaceDir, 'policies', 'sandbox_policy.json');
-  if (!await fileExists(policyPath)) {
-    await writeJsonAtomic(policyPath, {
-      schema: 'maze_sandbox_policy',
-      schema_version: 1,
-      permission: {
-        read: {
-          '*': 'allow',
-          '.env': 'deny',
-          '.env.*': 'deny',
-          '*secret*': 'deny',
-          '*credential*': 'deny',
-          '*token*': 'deny',
-          'api_key*': 'deny',
-          'mcp_profiles/*': 'deny',
-        },
-        write: {
-          '*': 'ask',
-          '.env': 'deny',
-          '.env.*': 'deny',
-          '*secret*': 'deny',
-          '*credential*': 'deny',
-          '*token*': 'deny',
-          'api_key*': 'deny',
-          'mcp_profiles/*': 'deny',
-        },
-        exec_code: { '*': 'ask', 'python *': 'allow', 'rm *': 'deny' },
-      },
-    });
-  }
-}
-
 async function ensureWorkspaceDirs(workspaceDir) {
   const resolved = resolveWorkspaceDirInput(workspaceDir);
   await fs.mkdir(resolved, { recursive: true });
@@ -311,8 +277,6 @@ async function ensureWorkspaceDirs(workspaceDir) {
   await fs.mkdir(path.join(resolved, 'workflows'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'files'), { recursive: true });
   await fs.mkdir(path.join(resolved, 'cluster_workers'), { recursive: true });
-  await fs.mkdir(path.join(resolved, 'policies'), { recursive: true });
-  await ensureWorkspacePolicy(resolved);
   await ensureWorkspaceManifest(resolved);
   return resolved;
 }
@@ -531,6 +495,60 @@ function resolveTaskDefinitionFile(workspaceDir, relativePath) {
   }
 
   return { relativePath: normalized, fullPath };
+}
+
+function resolveWritableTaskDefinitionFile(workspaceDir, relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) {
+    throw badRequestError('relativePath must be a non-empty string');
+  }
+  const rawPath = relativePath.trim();
+  if (
+    rawPath.includes('\0')
+    || rawPath.includes('\\')
+    || path.posix.isAbsolute(rawPath)
+    || isWindowsDrivePath(rawPath)
+    || rawPath.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
+    throw badRequestError('Task path must be a POSIX relative path inside workspace/tasks');
+  }
+  return resolveTaskDefinitionFile(workspaceDir, rawPath);
+}
+
+async function requireSafeTaskWriteTarget(workspaceDir, fullPath) {
+  const tasksDir = path.resolve(workspaceDir, 'tasks');
+  const tasksStat = await fs.lstat(tasksDir);
+  if (!tasksStat.isDirectory() || tasksStat.isSymbolicLink()) {
+    throw badRequestError('Workspace tasks directory must not be a symbolic link');
+  }
+
+  const relativeParent = path.relative(tasksDir, path.dirname(fullPath));
+  let currentDir = tasksDir;
+  for (const part of relativeParent ? relativeParent.split(path.sep) : []) {
+    currentDir = path.join(currentDir, part);
+    let stat;
+    try {
+      stat = await fs.lstat(currentDir);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      try {
+        await fs.mkdir(currentDir);
+      } catch (mkdirError) {
+        if (mkdirError?.code !== 'EEXIST') throw mkdirError;
+      }
+      stat = await fs.lstat(currentDir);
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw badRequestError('Task path parent directories must not be symbolic links');
+    }
+  }
+
+  const targetStat = await fs.lstat(fullPath).catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (targetStat && (!targetStat.isFile() || targetStat.isSymbolicLink())) {
+    throw badRequestError('Task path must target a regular file, not a symbolic link');
+  }
 }
 
 function normalizeWorkspaceFileRelativePath(relativePath = '') {
@@ -973,11 +991,43 @@ async function writeJsonAtomic(filePath, payload, options = {}) {
   await fs.rename(tmpPath, filePath);
 }
 
-async function writeTextAtomic(filePath, content) {
+async function writeTextAtomic(filePath, content, options = {}) {
+  if (typeof content !== 'string') {
+    throw badRequestError('code must be a string');
+  }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  await fs.writeFile(tmpPath, content, 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  const existing = await fs.lstat(filePath).catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (existing && (!existing.isFile() || existing.isSymbolicLink())) {
+    throw badRequestError('Atomic text writes require a regular file target');
+  }
+
+  try {
+    await fs.writeFile(tmpPath, content, {
+      encoding: 'utf-8',
+      flag: 'wx',
+      ...(existing ? { mode: existing.mode & 0o777 } : {}),
+    });
+    if (existing) {
+      await fs.chmod(tmpPath, existing.mode & 0o777);
+    }
+    if (options.rootDir) {
+      const [rootDir, parentDir] = await Promise.all([
+        fs.realpath(options.rootDir),
+        fs.realpath(path.dirname(filePath)),
+      ]);
+      if (parentDir !== rootDir && !parentDir.startsWith(rootDir + path.sep)) {
+        throw badRequestError('Task path parent escaped the workspace tasks directory');
+      }
+    }
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function workerProfilesDir(workspaceDir) {
@@ -1431,9 +1481,8 @@ async function promoteArtifactIntoWorkspace(context, input = {}, options = {}) {
   };
 }
 
-function withSystemWorkflowLoadQueue(workspaceDir, operation) {
-  const key = path.resolve(workspaceDir);
-  const previous = systemWorkflowLoadQueues.get(key) || Promise.resolve();
+function withKeyedQueue(queues, key, operation) {
+  const previous = queues.get(key) || Promise.resolve();
   const current = previous
     .catch(() => {})
     .then(operation);
@@ -1442,14 +1491,18 @@ function withSystemWorkflowLoadQueue(workspaceDir, operation) {
     () => undefined,
   );
 
-  systemWorkflowLoadQueues.set(key, tail);
+  queues.set(key, tail);
   tail.finally(() => {
-    if (systemWorkflowLoadQueues.get(key) === tail) {
-      systemWorkflowLoadQueues.delete(key);
+    if (queues.get(key) === tail) {
+      queues.delete(key);
     }
   });
 
   return current;
+}
+
+function withSystemWorkflowLoadQueue(workspaceDir, operation) {
+  return withKeyedQueue(systemWorkflowLoadQueues, path.resolve(workspaceDir), operation);
 }
 
 function stripNodeTaskCode(node, workspaceDir = null) {
@@ -1538,17 +1591,31 @@ async function nextImportedTaskPath(workspaceDir, workflowName, relativePath, co
   }
 }
 
-async function saveImportedTaskDefinition(workspaceDir, relativePath, definition, { parse = true } = {}) {
-  if (!parse) {
-    const { relativePath: targetRelativePath, fullPath } = resolveTaskDefinitionFile(workspaceDir, relativePath);
-    await writeTextAtomic(fullPath, definition.code);
-    clearWorkspaceTasksCache(workspaceDir);
+async function saveWorkspaceTaskSource(workspaceDir, relativePath, code) {
+  if (typeof code !== 'string') {
+    throw badRequestError('code must be a string');
+  }
+  const target = resolveWritableTaskDefinitionFile(workspaceDir, relativePath);
+  // ponytail: One backend owns workspace authoring; serialize only the target file.
+  return withKeyedQueue(workspaceTaskSaveQueues, target.fullPath, async () => {
+    await requireSafeTaskWriteTarget(workspaceDir, target.fullPath);
+    await writeTextAtomic(target.fullPath, code, {
+      rootDir: path.resolve(workspaceDir, 'tasks'),
+    });
     return {
       success: true,
       workspaceDir,
       tasksDir: path.join(workspaceDir, 'tasks'),
-      relativePath: targetRelativePath,
+      relativePath: target.relativePath,
     };
+  });
+}
+
+async function saveImportedTaskDefinition(workspaceDir, relativePath, definition, { parse = true } = {}) {
+  if (!parse) {
+    const result = await saveWorkspaceTaskSource(workspaceDir, relativePath, definition.code);
+    clearWorkspaceTasksCache(workspaceDir);
+    return result;
   }
 
   const result = await callPython('save_workspace_task', {
@@ -1832,6 +1899,50 @@ function redactGaiaRunIdentifiers(value, runIds) {
     );
   }
   return value;
+}
+
+function collectCurrentQueueWorkflowIds(value, workflowIds = new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectCurrentQueueWorkflowIds(item, workflowIds));
+    return workflowIds;
+  }
+  if (!value || typeof value !== 'object') {
+    return workflowIds;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'stopped_workflow_ids') continue;
+    if (key === 'workflow_id' && typeof item === 'string' && item) {
+      workflowIds.add(item);
+      continue;
+    }
+    collectCurrentQueueWorkflowIds(item, workflowIds);
+  }
+  return workflowIds;
+}
+
+async function publicClusterQueues(coreResponse, loadRun = loadCoreRun) {
+  const queues = coreResponse?.queues;
+  if (!queues || typeof queues !== 'object' || Array.isArray(queues)) {
+    const error = new Error('Maze Core returned a malformed queue response');
+    error.status = 502;
+    throw error;
+  }
+
+  const result = { ...coreResponse, queues: { ...queues } };
+  delete result.queues.stopped_workflow_ids;
+  const privateRunIds = new Set();
+  // ponytail: Active IDs only; caching privacy metadata creates a disclosure window.
+  await Promise.all([...collectCurrentQueueWorkflowIds(result)].map(async (runId) => {
+    try {
+      const run = await loadRun(runId);
+      if (run?.metadata?.benchmark === 'gaia') {
+        privateRunIds.add(runId);
+      }
+    } catch {
+      privateRunIds.add(runId);
+    }
+  }));
+  return redactGaiaRunIdentifiers(result, privateRunIds);
 }
 
 async function requirePublicCoreRunId(runId) {
@@ -2344,22 +2455,33 @@ app.post('/api/workspace-tasks', async (req, res) => {
       relativePath = 'tasks/custom_task.py',
       code,
       parse = true,
-    } = req.body;
+    } = req.body || {};
+    if (typeof parse !== 'boolean') {
+      throw badRequestError('parse must be a boolean');
+    }
+    if (typeof code !== 'string') {
+      throw badRequestError('code must be a string');
+    }
+    if (parse && !code.trim()) {
+      throw badRequestError('Code cannot be empty');
+    }
     const context = await resolveWorkspaceContext({ workspaceId, workspaceDir: requestedWorkspaceDir });
     const workspaceDir = context.workspaceDir;
 
     console.log(`💾 保存工作区任务: ${workspaceDir}/${relativePath}`);
 
-    if ((!code || !code.trim()) && parse) {
-      return res.status(400).json({ error: 'Code cannot be empty' });
-    }
-
-    const result = await callPython('save_workspace_task', {
-      workspaceDir,
-      relativePath,
-      code,
-      parse,
-    });
+    const result = parse
+      ? await withKeyedQueue(
+          workspaceTaskSaveQueues,
+          resolveTaskDefinitionFile(workspaceDir, relativePath).fullPath,
+          () => callPython('save_workspace_task', {
+            workspaceDir,
+            relativePath,
+            code,
+            parse: true,
+          }),
+        )
+      : await saveWorkspaceTaskSource(workspaceDir, relativePath, code);
 
     if (result.error || result.success === false) {
       console.error('❌ 保存工作区任务失败:', result.error);
@@ -2378,7 +2500,7 @@ app.post('/api/workspace-tasks', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ 保存工作区任务失败:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -2973,42 +3095,6 @@ app.post('/api/cluster/worker-profiles/bulk', async (req, res) => {
   }
 });
 
-app.post('/api/cluster/console/run', async (req, res) => {
-  try {
-    const context = await resolveWorkspaceContext(req.body || {});
-    const target = String(req.body?.target || 'head');
-    const command = String(req.body?.command || '').trim();
-    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 30000), 1000), 120000);
-    const password = req.body?.password;
-    if (!command) {
-      return res.status(400).json({ error: 'command is required' });
-    }
-    if (command.length > 4000) {
-      return res.status(400).json({ error: 'command is too long' });
-    }
-    if (target !== 'head') {
-      return res.status(400).json({ error: 'console commands run on the head node only' });
-    }
-    let result = await runLocalCommand(command, { timeoutMs, cwd: PROJECT_ROOT });
-    result = limitCommandResult(result);
-
-    res.json({
-      success: true,
-      workspaceId: context.workspaceId,
-      workspaceDir: context.workspaceDir,
-      target: 'head',
-      targetLabel: 'head',
-      command,
-      timeoutMs,
-      result,
-      ranAt: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error('Failed to run cluster console command:', error);
-    res.status(500).json({ error: error.message, result: error.result || null });
-  }
-});
-
 app.get('/api/cluster/resources', async (req, res) => {
   try {
     const result = await callMazeCore('/cluster/resources');
@@ -3021,17 +3107,8 @@ app.get('/api/cluster/resources', async (req, res) => {
 
 app.get('/api/cluster/queues', async (req, res) => {
   try {
-    const [result, coreRuns] = await Promise.all([
-      callMazeCore('/cluster/queues'),
-      listCoreStaticRuns({ detail: false }),
-    ]);
-    const gaiaRunIds = new Set(
-      coreRuns
-        .filter((run) => run?.metadata?.benchmark === 'gaia')
-        .map((run) => String(run.run_id || ''))
-        .filter(Boolean),
-    );
-    res.json(redactGaiaRunIdentifiers(result, gaiaRunIds));
+    const result = await callMazeCore('/cluster/queues');
+    res.json(await publicClusterQueues(result));
   } catch (error) {
     console.error('Failed to get cluster queues:', error);
     res.status(error.status || 500).json({ error: error.message || 'Failed to get cluster queues' });
@@ -3318,6 +3395,14 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+
+export {
+  collectCurrentQueueWorkflowIds,
+  publicClusterQueues,
+  saveWorkspaceTaskSource,
+  server,
+  writeTextAtomic,
+};
 
 // ========== 启动服务器 ==========
 

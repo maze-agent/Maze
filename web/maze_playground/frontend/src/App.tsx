@@ -13,13 +13,6 @@ import { createLocalWorkflowId, useWorkflowStore } from './stores/workflowStore'
 
 const WORKFLOW_DRAFT_PATH = 'workflows/.drafts/current.workflow.json';
 const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
-const TERMINAL_RUN_STATUSES = new Set([
-  'succeeded',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'interrupted',
-]);
 
 function workflowDraftFingerprint(name: string, nodes: any[], edges: any[]) {
   return JSON.stringify({ name, nodes, edges });
@@ -39,7 +32,6 @@ function App() {
     currentWorkspaceWorkflowPath,
     nodes,
     edges,
-    isRunning,
     activeRunId,
     selectedRunId,
     workflowSaveState,
@@ -55,15 +47,20 @@ function App() {
     setWorkflowSaveState,
     acquireWorkflowOperation,
     releaseWorkflowOperation,
-    setIsRunning,
     upsertStaticRun,
-    setStaticRunEvents,
     removeStaticRun,
   } = useWorkflowStore();
 
   const workflowFingerprint = useMemo(
     () => workflowDraftFingerprint(workflowName, nodes, edges),
     [edges, nodes, workflowName],
+  );
+  const trackedRunIds = useMemo(
+    () => Array.from(new Set([
+      activeRunId,
+      runsOpen ? null : selectedRunId,
+    ].filter((id): id is string => Boolean(id)))),
+    [activeRunId, runsOpen, selectedRunId],
   );
 
   useEffect(() => {
@@ -241,11 +238,10 @@ function App() {
   ]);
 
   const saveWorkflowToWorkspace = useCallback(async () => {
-    if (isRunning) {
-      message.warning('Workflow is running, please save after it finishes');
+    if (selectedRunId) {
+      message.info('Switch to Design mode to save the workflow draft');
       return;
     }
-
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before saving');
       return;
@@ -299,7 +295,6 @@ function App() {
     acquireWorkflowOperation,
     currentWorkspaceWorkflowPath,
     edges,
-    isRunning,
     nodes,
     releaseWorkflowOperation,
     setCurrentWorkspaceWorkflowPath,
@@ -310,6 +305,7 @@ function App() {
     setWorkspaceContext,
     setWorkspaceDir,
     setWorkspaceWorkflows,
+    selectedRunId,
     workflowId,
     workflowName,
     workspaceDir,
@@ -332,69 +328,53 @@ function App() {
   }, [saveWorkflowToWorkspace]);
 
   useEffect(() => {
-    if (activeRunId) {
-      setRunsOpen(true);
-    }
-  }, [activeRunId]);
-
-  useEffect(() => {
-    if (!activeRunId) {
-      return undefined;
-    }
-    const runId = activeRunId;
-
-    const activeRun = useWorkflowStore.getState().staticRuns.find(
-      (run) => run.run_id === runId,
-    );
-    if (activeRun && TERMINAL_RUN_STATUSES.has(activeRun.status)) {
-      setIsRunning(false);
+    if (trackedRunIds.length === 0) {
       return undefined;
     }
 
     let canceled = false;
-    let timer: number | undefined;
+    const timers = new Set<number>();
 
-    function scheduleNextPoll() {
-      if (!canceled) {
-        timer = window.setTimeout(poll, 1500);
-      }
+    function scheduleNextPoll(runId: string) {
+      if (canceled) return;
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        void poll(runId);
+      }, 1500);
+      timers.add(timer);
     }
 
-    async function poll() {
+    async function poll(runId: string) {
       try {
-        const [runResult, eventsResult] = await Promise.all([
-          api.getRun(runId),
-          api.getRunEvents(runId),
-        ]);
+        const runResult = await api.getRun(runId);
         if (canceled) return;
         upsertStaticRun(runResult.run);
-        setStaticRunEvents(runId, eventsResult.events || []);
         if (ACTIVE_RUN_STATUSES.has(runResult.run.status)) {
-          setIsRunning(true);
-          scheduleNextPoll();
-        } else if (TERMINAL_RUN_STATUSES.has(runResult.run.status)) {
-          setIsRunning(false);
-        } else {
-          setIsRunning(false);
+          scheduleNextPoll(runId);
         }
       } catch (error) {
+        if (canceled) return;
         if ((error as any)?.response?.status === 404) {
           removeStaticRun(runId);
           return;
         }
         console.error('Failed to refresh active workflow run:', error);
-        scheduleNextPoll();
+        scheduleNextPoll(runId);
       }
     }
 
-    poll();
+    trackedRunIds.forEach((runId) => {
+      const cached = useWorkflowStore.getState().staticRuns.find((run) => run.run_id === runId);
+      if (!cached || ACTIVE_RUN_STATUSES.has(cached.status)) {
+        void poll(runId);
+      }
+    });
     return () => {
       canceled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
     };
-  }, [activeRunId, removeStaticRun, setIsRunning, setStaticRunEvents, upsertStaticRun]);
+  }, [removeStaticRun, trackedRunIds, upsertStaticRun]);
 
   return (
     <ConfigProvider locale={enUS}>

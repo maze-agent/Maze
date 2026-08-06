@@ -13,6 +13,7 @@ import {
 import { createLocalWorkflowId, useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
 import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
+import { runWorkflowName } from '@/utils/runSnapshot';
 
 const { Text } = Typography;
 
@@ -31,11 +32,12 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     currentWorkspaceWorkflowPath,
     nodes, 
     edges, 
-    isRunning,
     workflowSaveState,
     workflowDraftError,
     workflowSavedAt,
     workflowOperation,
+    selectedRunId,
+    staticRuns,
     setWorkflowId,
     setWorkflowName,
     setNodes,
@@ -47,7 +49,6 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     setCurrentWorkspaceWorkflowPath,
     setWorkspaceWorkflows,
     setSelectedRunId,
-    setIsRunning,
     setActiveRun,
     acquireWorkflowOperation,
     releaseWorkflowOperation,
@@ -57,12 +58,23 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   const [validatingWorkflow, setValidatingWorkflow] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
+  const selectedRun = selectedRunId
+    ? staticRuns.find((run) => run.run_id === selectedRunId) || null
+    : null;
+  const isRunMode = Boolean(selectedRunId);
+  const displayWorkflowName = isRunMode ? runWorkflowName(selectedRun) : workflowName;
 
   useEffect(() => {
     if (!editingWorkflowName) {
       setWorkflowNameDraft(workflowName);
     }
   }, [workflowName, editingWorkflowName]);
+
+  useEffect(() => {
+    if (isRunMode) {
+      setEditingWorkflowName(false);
+    }
+  }, [isRunMode]);
 
   const refreshWorkspaceWorkflows = async () => {
     if (!workspaceDir) {
@@ -78,6 +90,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   };
 
   const commitWorkflowName = async () => {
+    if (isRunMode) return;
     const nextName = workflowNameDraft.trim() || 'Untitled Workflow';
 
     if (nextName === workflowName) {
@@ -213,6 +226,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   };
 
   const handleExportWorkflow = () => {
+    if (isRunMode) return;
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before exporting');
       return;
@@ -257,6 +271,10 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     event.target.value = '';
 
     if (!file) {
+      return;
+    }
+    if (isRunMode) {
+      message.info('Switch to Design mode to import a workflow');
       return;
     }
 
@@ -307,6 +325,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   };
 
   const handleSaveWorkflow = async () => {
+    if (isRunMode) return;
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before saving');
       return;
@@ -350,6 +369,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   };
 
   const handleValidateWorkflow = async () => {
+    if (isRunMode) return;
     setValidatingWorkflow(true);
     try {
       if (nodes.length === 0) {
@@ -377,6 +397,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   };
 
   const handleRunWorkflow = async () => {
+    if (isRunMode) return;
     if (nodes.length === 0) {
       message.warning('Please add at least one task node before running');
       return;
@@ -430,11 +451,9 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
         workspaceDir: receipt.workspaceDir || saved.workspaceDir,
       });
       setActiveRun(runResult.run);
-      setIsRunning(['created', 'queued', 'running'].includes(runResult.run.status));
       message.success(`Workflow run started: ${receipt.runId}`);
     } catch (error: any) {
       console.error('Failed to run workflow:', error);
-      setIsRunning(false);
       message.error(error.response?.data?.error || error.message || 'Failed to run workflow');
     } finally {
       setRunningWorkflow(false);
@@ -473,25 +492,18 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
     );
   };
 
-  const workflowStatusTag = () => {
-    if (isRunning) {
-      return <Tag color="processing">Running</Tag>;
-    }
-    return saveStateTag();
-  };
-
   const moreMenuItems = [
     {
       key: 'import',
       icon: <UploadOutlined />,
       label: 'Import workflow',
-      disabled: isRunning || Boolean(workflowOperation),
+      disabled: isRunMode || Boolean(workflowOperation),
     },
     {
       key: 'export',
       icon: <DownloadOutlined />,
       label: 'Export workflow',
-      disabled: isRunning || Boolean(workflowOperation) || nodes.length === 0,
+      disabled: isRunMode || Boolean(workflowOperation) || nodes.length === 0,
     },
   ];
 
@@ -507,7 +519,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           </Text>
         </div>
 
-        {editingWorkflowName ? (
+        {editingWorkflowName && !isRunMode ? (
           <Input
             autoFocus
             size="small"
@@ -518,6 +530,10 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
             className="workbench-workflow-name-input"
             disabled={Boolean(workflowOperation)}
           />
+        ) : isRunMode ? (
+          <div className="workbench-workflow-name" title={displayWorkflowName}>
+            <span>{displayWorkflowName}</span>
+          </div>
         ) : (
           <button
             type="button"
@@ -534,11 +550,16 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
 
       <Segmented
         className="workbench-topbar-modes"
-        value="Design"
+        value={isRunMode ? 'Run' : 'Design'}
         options={[
           {
             value: 'Design',
             label: <span className="workbench-topbar-mode-option">Design</span>,
+          },
+          {
+            value: 'Run',
+            label: <span className="workbench-topbar-mode-option">Run</span>,
+            disabled: !isRunMode,
           },
           {
             value: 'Cluster',
@@ -546,6 +567,9 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           },
         ]}
         onChange={(value) => {
+          if (value === 'Design') {
+            setSelectedRunId(null);
+          }
           if (value === 'Cluster') {
             onOpenClusterResources?.();
           }
@@ -553,7 +577,16 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       />
 
       <div className="workbench-toolbar-right">
-        {workflowStatusTag()}
+        {isRunMode ? (
+          <>
+            <Tag color={selectedRun?.status === 'succeeded' ? 'green' : 'blue'}>
+              {selectedRun?.status || 'Loading Run'}
+            </Tag>
+            {(selectedRun?.metadata?.workspace_id || selectedRun?.workspace_id) && (
+              <Tag>{selectedRun?.metadata?.workspace_id || selectedRun?.workspace_id}</Tag>
+            )}
+          </>
+        ) : saveStateTag()}
 
         <input
           ref={importInputRef}
@@ -567,7 +600,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<SaveOutlined />}
           onClick={handleSaveWorkflow}
           loading={savingWorkflow}
-          disabled={isRunning || Boolean(workflowOperation) || nodes.length === 0}
+          disabled={isRunMode || Boolean(workflowOperation) || nodes.length === 0}
         >
           Save
         </Button>
@@ -576,7 +609,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<CheckOutlined />}
           onClick={handleValidateWorkflow}
           loading={validatingWorkflow}
-          disabled={isRunning || Boolean(workflowOperation) || runningWorkflow || nodes.length === 0}
+          disabled={isRunMode || Boolean(workflowOperation) || nodes.length === 0}
         >
           Validate
         </Button>
@@ -586,7 +619,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           icon={<PlayCircleOutlined />}
           onClick={handleRunWorkflow}
           loading={runningWorkflow}
-          disabled={isRunning || Boolean(workflowOperation) || nodes.length === 0}
+          disabled={isRunMode || Boolean(workflowOperation) || nodes.length === 0}
           className="workbench-run-button"
         >
           Run
@@ -610,7 +643,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           <Button
             icon={<MoreOutlined />}
             aria-label="More workflow actions"
-            disabled={isRunning || Boolean(workflowOperation)}
+            disabled={isRunMode || Boolean(workflowOperation)}
           />
         </Dropdown>
       </div>

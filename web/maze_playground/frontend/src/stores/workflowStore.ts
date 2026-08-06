@@ -5,12 +5,10 @@ import type {
   WorkspaceTaskMeta,
   WorkspaceWorkflowMeta,
   WorkspaceManifest,
-  UnifiedRunEvent,
   UnifiedRunSnapshot,
 } from '@/types/workflow';
 import { clearWorkflowSource } from '@/utils/workflowBindings';
-
-const ACTIVE_RUN_STATUSES = new Set(['created', 'queued', 'running']);
+import { mergeStaticRunSnapshots } from '@/utils/runSnapshot';
 
 export function createLocalWorkflowId() {
   return `workflow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -54,11 +52,10 @@ interface WorkflowStore {
   currentWorkspaceWorkflowPath: string | null;
   
   // Run state
-  isRunning: boolean;
   activeRunId: string | null;
   selectedRunId: string | null;
+  selectedRunTaskId: string | null;
   staticRuns: UnifiedRunSnapshot[];
-  staticRunEvents: Record<string, UnifiedRunEvent[]>;
   
   // Actions
   setWorkflowId: (id: string) => void;
@@ -87,12 +84,11 @@ interface WorkflowStore {
   }) => void;
   acquireWorkflowOperation: (label: string) => WorkflowOperationToken | null;
   releaseWorkflowOperation: (token: WorkflowOperationToken) => void;
-  setIsRunning: (isRunning: boolean) => void;
   setSelectedRunId: (runId: string | null) => void;
+  setSelectedRunTaskId: (taskId: string | null) => void;
   setActiveRun: (run: UnifiedRunSnapshot | null) => void;
   upsertStaticRun: (run: UnifiedRunSnapshot) => void;
   setStaticRuns: (runs: UnifiedRunSnapshot[]) => void;
-  setStaticRunEvents: (runId: string, events: UnifiedRunEvent[]) => void;
   removeStaticRun: (runId: string) => void;
   reset: () => void;
 }
@@ -116,11 +112,10 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
   workspaceTasks: [],
   workspaceWorkflows: [],
   currentWorkspaceWorkflowPath: null,
-  isRunning: false,
   activeRunId: null,
   selectedRunId: null,
+  selectedRunTaskId: null,
   staticRuns: [],
-  staticRunEvents: {},
 
   // Actions
   setWorkflowId: (id) => set({ workflowId: id }),
@@ -219,53 +214,40 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
       : state
   )),
 
-  setIsRunning: (isRunning) => set({ isRunning }),
+  setSelectedRunId: (runId) => set((state) => ({
+    selectedRunId: runId,
+    selectedRunTaskId: state.selectedRunId === runId ? state.selectedRunTaskId : null,
+  })),
 
-  setSelectedRunId: (runId) => set({ selectedRunId: runId }),
+  setSelectedRunTaskId: (taskId) => set({ selectedRunTaskId: taskId }),
 
   setActiveRun: (run) => set((state) => {
     if (!run) {
       return { activeRunId: null };
     }
-    const existing = state.staticRuns.filter((item) => item.run_id !== run.run_id);
     return {
       activeRunId: run.run_id,
-      selectedRunId: run.run_id,
-      staticRuns: [run, ...existing],
+      staticRuns: mergeStaticRunSnapshots(state.staticRuns, [run]),
     };
   }),
 
   upsertStaticRun: (run) => set((state) => ({
-    staticRuns: [
-      run,
-      ...state.staticRuns.filter((item) => item.run_id !== run.run_id),
-    ],
-    isRunning: run.run_id === state.activeRunId
-      ? ACTIVE_RUN_STATUSES.has(run.status)
-      : state.isRunning,
+    staticRuns: mergeStaticRunSnapshots(state.staticRuns, [run]),
   })),
 
-  setStaticRuns: (runs) => set({ staticRuns: runs }),
-
-  setStaticRunEvents: (runId, events) => set((state) => ({
-    staticRunEvents: {
-      ...state.staticRunEvents,
-      [runId]: events,
-    },
+  setStaticRuns: (runs) => set((state) => ({
+    staticRuns: mergeStaticRunSnapshots(state.staticRuns, runs),
   })),
 
   removeStaticRun: (runId) => set((state) => {
-    const remainingEvents = { ...state.staticRunEvents };
-    delete remainingEvents[runId];
     const removingActiveRun = state.activeRunId === runId;
     const removingSelectedRun = state.selectedRunId === runId;
 
     return {
       staticRuns: state.staticRuns.filter((run) => run.run_id !== runId),
-      staticRunEvents: remainingEvents,
       activeRunId: removingActiveRun ? null : state.activeRunId,
       selectedRunId: removingSelectedRun ? null : state.selectedRunId,
-      isRunning: removingActiveRun ? false : state.isRunning,
+      selectedRunTaskId: removingSelectedRun ? null : state.selectedRunTaskId,
     };
   }),
 
@@ -280,8 +262,8 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
     workflowSavedAt: null,
     workflowDraftError: null,
     currentWorkspaceWorkflowPath: null,
-    isRunning: false,
     activeRunId: null,
     selectedRunId: null,
+    selectedRunTaskId: null,
   }),
 }));

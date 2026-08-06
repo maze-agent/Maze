@@ -226,14 +226,17 @@ class WorkflowRuntimeManager():
 
         return self.workflows[self.ref_to_workflow_id[ref]]
 
-    def _release_task_standby_worker(self, task:TaskRuntime):
+    def _release_task_standby_worker(self, task: TaskRuntime, *, discard: bool = False):
         lease = getattr(task, "standby_worker_lease", None)
         if lease is None:
             return
         pool = getattr(self, "standby_worker_pool", None)
         if pool is not None:
-            pool.release(lease)
+            pool.release(lease, discard=discard)
         task.standby_worker_lease = None
+
+    def discard_task_standby_worker(self, task: TaskRuntime):
+        self._release_task_standby_worker(task, discard=True)
 
     def _cuda_visible_devices(self, node:SelectedNode):
         if getattr(node, "gpu_id", None) is None:
@@ -276,7 +279,7 @@ class WorkflowRuntimeManager():
                 model_route=task.model_route,
             )
         except Exception:
-            pool.release(lease)
+            pool.release(lease, discard=True)
             return None
 
         task.standby_worker_lease = lease
@@ -291,7 +294,7 @@ class WorkflowRuntimeManager():
             return
 
         for task in self.workflows[workflow_id].tasks.values():
-            self._release_task_standby_worker(task)
+            self._release_task_standby_worker(task, discard=True)
 
         refs_to_del = []
         for ref,id in self.ref_to_workflow_id.items():
@@ -311,8 +314,12 @@ class WorkflowRuntimeManager():
    
         running_tasks = self.workflows[workflow_id].get_running_tasks()
         for task in running_tasks:
-            ray.cancel(task.object_ref,force=True)
-            self._release_task_standby_worker(task)
+            try:
+                ray.cancel(task.object_ref, force=True)
+            except Exception:
+                pass
+            finally:
+                self._release_task_standby_worker(task, discard=True)
  
         self.clear_workflow(workflow_id)
         return running_tasks

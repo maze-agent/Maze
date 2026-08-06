@@ -1,8 +1,11 @@
 import subprocess
 import argparse
+import ctypes
 import sys
 import uvicorn
 import os
+import select
+import shutil
 import time
 import logging
 import signal
@@ -10,16 +13,243 @@ import json
 import requests
 import socket
 from pathlib import Path
+from urllib.parse import urlparse
+from contextlib import contextmanager
 from maze.core.worker.worker import Worker
 from maze.core.application.spec import app_spec_from_payload, load_app_spec_file
 from maze.core.scheduler.strategy import SchedulingAlgorithm
-from maze.cli.dev import add_dev_parser, handle_dev_command
 import asyncio
 from maze.config.logging_config import setup_logging
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - head lifecycle is Linux-only
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 HEAD_CLEANUP_MAX_ATTEMPTS = 3
 PLAYGROUND_STOP_TIMEOUT_SECONDS = 10.0
+HEAD_START_TIMEOUT_SECONDS = 90.0
+HEAD_STOP_TIMEOUT_SECONDS = 90.0
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_xdg_state_home = os.environ.get("XDG_STATE_HOME")
+MAZE_RUNTIME_DIR = Path(
+    os.environ.get("MAZE_RUNTIME_DIR")
+    or ((_xdg_state_home and Path(_xdg_state_home) / "maze") or Path.home() / ".local" / "state" / "maze")
+).expanduser()
+HEAD_STATE_PATH = MAZE_RUNTIME_DIR / "head.json"
+HEAD_LOG_DIR = MAZE_RUNTIME_DIR / "logs"
+
+
+@contextmanager
+def _head_state_lock():
+    if fcntl is None:
+        raise RuntimeError("Maze head lifecycle requires Linux file locking")
+    HEAD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = HEAD_STATE_PATH.with_suffix(".lock")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _process_identity(pid: int) -> dict | None:
+    """Return the Linux process identity used to guard against PID reuse."""
+    if pid <= 1:
+        return None
+    proc_dir = Path("/proc") / str(pid)
+    try:
+        stat_text = (proc_dir / "stat").read_text(encoding="utf-8")
+        stat_fields = stat_text.rsplit(")", 1)[1].split()
+        process_state = stat_fields[0]
+        start_time = stat_fields[19]
+        command = [
+            part.decode(errors="replace")
+            for part in (proc_dir / "cmdline").read_bytes().split(b"\0")
+            if part
+        ]
+    except (FileNotFoundError, IndexError, OSError):
+        return None
+    return {
+        "pid": pid,
+        "start_time": start_time,
+        "process_state": process_state,
+        "command": command,
+    }
+
+
+def _open_pidfd(pid: int) -> int:
+    opener = getattr(os, "pidfd_open", None)
+    if opener is not None:
+        return opener(pid, 0)
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    opener = getattr(libc, "pidfd_open", None)
+    if opener is None:
+        raise RuntimeError("This Linux system does not provide pidfd_open")
+    opener.argtypes = (ctypes.c_int, ctypes.c_uint)
+    opener.restype = ctypes.c_int
+    descriptor = opener(pid, 0)
+    if descriptor < 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), pid)
+    return descriptor
+
+
+def _pidfd_send_signal(pidfd: int, signum: int) -> None:
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if sender is not None:
+        sender(pidfd, signum)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    sender = getattr(libc, "pidfd_send_signal", None)
+    if sender is None:
+        raise RuntimeError("This Linux system does not provide pidfd_send_signal")
+    sender.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint)
+    sender.restype = ctypes.c_int
+    if sender(pidfd, signum, None, 0) < 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), pidfd)
+
+
+def _wait_for_pidfd(pidfd: int, timeout: float) -> bool:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    timeout_ms = min(int(max(0.0, timeout) * 1000), 2_147_483_647)
+    return bool(poller.poll(timeout_ms))
+
+
+def _check_pidfd_support() -> None:
+    pidfd = _open_pidfd(os.getpid())
+    try:
+        _pidfd_send_signal(pidfd, 0)
+    finally:
+        os.close(pidfd)
+
+
+def _read_head_state() -> dict | None:
+    try:
+        state = json.loads(HEAD_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(state, dict):
+        raise ValueError("head state is not a JSON object")
+    return state
+
+
+def _head_process_matches(state: dict) -> tuple[bool, str]:
+    try:
+        pid = int(state["pid"])
+        recorded_start_time = str(state["start_time"])
+    except (KeyError, TypeError, ValueError):
+        return False, "runtime state has no valid process identity"
+
+    identity = _process_identity(pid)
+    if identity is None or identity["process_state"] == "Z":
+        return False, f"process {pid} is not running"
+    if identity["start_time"] != recorded_start_time:
+        return False, f"PID {pid} has been reused by another process"
+    command = identity["command"]
+    if "start" not in command or "--head" not in command:
+        return False, f"PID {pid} is not a Maze head parent"
+    return True, "running"
+
+
+def _head_runtime_status() -> dict:
+    try:
+        state = _read_head_state()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "invalid", "reason": str(exc), "state_path": str(HEAD_STATE_PATH)}
+    if state is None:
+        return {"status": "stopped", "reason": "no runtime state", "state_path": str(HEAD_STATE_PATH)}
+    matches, reason = _head_process_matches(state)
+    return {
+        **state,
+        "status": "running" if matches else "stale",
+        "reason": reason,
+        "state_path": str(HEAD_STATE_PATH),
+    }
+
+
+def _remove_head_state_if_owned(pid: int, start_time: str) -> None:
+    with _head_state_lock():
+        try:
+            state = _read_head_state()
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        if state is None:
+            return
+        if state.get("pid") == pid and str(state.get("start_time")) == start_time:
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+
+
+def _ensure_no_running_head_unlocked() -> None:
+    try:
+        state = _read_head_state()
+    except (OSError, ValueError, json.JSONDecodeError):
+        HEAD_STATE_PATH.unlink(missing_ok=True)
+        return
+    if state is None:
+        return
+    matches, _reason = _head_process_matches(state)
+    if matches:
+        raise RuntimeError(
+            f"Maze head is already running (pid={state['pid']}). Run `maze stop` first."
+        )
+    HEAD_STATE_PATH.unlink(missing_ok=True)
+
+
+def _ensure_no_running_head() -> None:
+    with _head_state_lock():
+        _ensure_no_running_head_unlocked()
+
+
+def _register_head_runtime(
+    *,
+    port: int,
+    ray_head_port: int,
+    playground: bool,
+    playground_port: int,
+    playground_backend_port: int | None,
+    runtime_log: str | None,
+) -> dict:
+    try:
+        _check_pidfd_support()
+    except OSError as exc:
+        raise RuntimeError(f"Maze head lifecycle requires pidfd support: {exc}") from exc
+    identity = _process_identity(os.getpid())
+    if identity is None:
+        raise RuntimeError("Maze head lifecycle requires readable Linux /proc process metadata")
+
+    state = {
+        "version": 1,
+        "pid": identity["pid"],
+        "start_time": identity["start_time"],
+        "started_at": time.time(),
+        "port": port,
+        "ray_head_port": ray_head_port,
+        "playground": playground,
+        "playground_port": playground_port,
+        "playground_backend_port": (
+            playground_backend_port or _default_playground_backend_port(playground_port)
+        ),
+        "detached": os.environ.get("MAZE_HEAD_DETACHED") == "1",
+        "log": runtime_log,
+    }
+    with _head_state_lock():
+        _ensure_no_running_head_unlocked()
+        temporary_path = HEAD_STATE_PATH.with_name(f".{HEAD_STATE_PATH.name}.{os.getpid()}.tmp")
+        temporary_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        temporary_path.chmod(0o600)
+        temporary_path.replace(HEAD_STATE_PATH)
+    return state
 
 
 async def _cleanup_mapath_with_retries(
@@ -71,6 +301,30 @@ def _ensure_unique_ports(service_ports: list[tuple[str, int]]):
         seen[port] = service_name
 
 
+def _validate_head_ports(
+    port: int,
+    ray_head_port: int,
+    playground: bool,
+    playground_port: int,
+    playground_backend_port: int | None,
+) -> None:
+    service_ports = [
+        ("Maze core", port),
+        ("Ray head", ray_head_port),
+    ]
+    if playground:
+        service_ports.extend([
+            (
+                "Playground backend",
+                playground_backend_port or _default_playground_backend_port(playground_port),
+            ),
+            ("Playground frontend", playground_port),
+        ])
+    _ensure_unique_ports(service_ports)
+    for service_name, service_port in service_ports:
+        _ensure_port_available(service_port, service_name)
+
+
 async def _async_start_head(
     port: int,
     ray_head_port: int,
@@ -80,25 +334,15 @@ async def _async_start_head(
     playground_port: int = 5173,
     playground_backend_port: int | None = None,
 ):
-  
     from maze.core.server import app as server_app, mapath
 
-    service_ports = [
-        ("Maze core", port),
-        ("Ray head", ray_head_port),
-    ]
-    if playground:
-        resolved_playground_backend_port = (
-            playground_backend_port
-            or _default_playground_backend_port(playground_port)
-        )
-        service_ports.extend([
-            ("Playground backend", resolved_playground_backend_port),
-            ("Playground frontend", playground_port),
-        ])
-    _ensure_unique_ports(service_ports)
-    for service_name, service_port in service_ports:
-        _ensure_port_available(service_port, service_name)
+    _validate_head_ports(
+        port,
+        ray_head_port,
+        playground,
+        playground_port,
+        playground_backend_port,
+    )
 
     monitor_coroutine = None
     maintenance_coroutine = None
@@ -174,9 +418,12 @@ async def _async_start_head(
             raise cleanup_error
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex((host, port)) == 0
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex((host, port)) == 0
+    except (OSError, OverflowError):
+        return False
 
 
 def _ensure_port_available(port: int, service_name: str):
@@ -214,15 +461,15 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
 
     _ensure_port_available(backend_port, "Playground backend")
     _ensure_port_available(frontend_port, "Playground frontend")
-    
+
     project_root = Path(__file__).parent.parent.parent
     backend_dir = project_root / "web" / "maze_playground" / "backend"
     frontend_dir = project_root / "web" / "maze_playground" / "frontend"
-    
+
     print("\n" + "="*60)
     print("🎮 Starting Maze Playground...")
     print("="*60)
-    
+
     try:
         if backend_dir.exists():
             print(f"🔧 starting playground backend ({backend_url})...")
@@ -258,7 +505,7 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
     except Exception:
         stop_playground(processes)
         raise
-    
+
     if processes:
         print("\n" + "="*60)
         print("🎉 Playground successfully started!")
@@ -268,7 +515,7 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
         print(f"🧠 core address: {core_url}")
         print(f"🎮 open browser to http://localhost:{frontend_port} to start using")
         print("="*60 + "\n")
-    
+
     return processes
 
 def stop_playground(processes):
@@ -279,7 +526,7 @@ def stop_playground(processes):
                 print(f"✅ {name} already stopped")
                 continue
             if sys.platform == 'win32':
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], 
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)],
                              capture_output=True)
             else:
                 process_group_id = os.getpgid(process.pid)
@@ -310,18 +557,233 @@ def start_head(
     playground: bool = False,
     playground_port: int = 5173,
     playground_backend_port: int | None = None,
+    runtime_log: str | None = None,
 ):
-    asyncio.run(
-        _async_start_head(
-            port,
-            ray_head_port,
-            strategy,
-            scheduling_algorithm,
-            playground,
-            playground_port,
-            playground_backend_port,
-        )
+    runtime_log = os.environ.get("MAZE_HEAD_RUNTIME_LOG") or runtime_log
+    state = _register_head_runtime(
+        port=port,
+        ray_head_port=ray_head_port,
+        playground=playground,
+        playground_port=playground_port,
+        playground_backend_port=playground_backend_port,
+        runtime_log=runtime_log,
     )
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def interrupt_head(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt_head)
+    try:
+        asyncio.run(
+            _async_start_head(
+                port,
+                ray_head_port,
+                strategy,
+                scheduling_algorithm,
+                playground,
+                playground_port,
+                playground_backend_port,
+            )
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        _remove_head_state_if_owned(state["pid"], state["start_time"])
+
+
+def _detached_head_command(args) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "maze.cli.cli",
+        "start",
+        "--head",
+        "--port",
+        str(args.port),
+        "--ray-head-port",
+        str(args.ray_head_port),
+        "--strategy",
+        args.strategy,
+        "--scheduling-algorithm",
+        args.scheduling_algorithm,
+        "--log-level",
+        args.log_level,
+    ]
+    if args.log_file:
+        command.extend(["--log-file", args.log_file])
+    if args.playground:
+        command.extend(["--playground", "--playground-port", str(args.playground_port)])
+        if args.playground_backend_port is not None:
+            command.extend(["--playground-backend-port", str(args.playground_backend_port)])
+    return command
+
+
+def _tail_log(path: Path, line_count: int = 30) -> str:
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-line_count:])
+    except OSError:
+        return ""
+
+
+def _wait_for_detached_head(process, port: int, log_path: Path) -> dict:
+    deadline = time.monotonic() + HEAD_START_TIMEOUT_SECONDS
+    last_error = "waiting for runtime registration"
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            tail = _tail_log(log_path)
+            detail = f"\n{tail}" if tail else ""
+            raise RuntimeError(
+                f"Maze head exited during startup with status {return_code}. Log: {log_path}{detail}"
+            )
+
+        try:
+            state = _read_head_state()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+            state = None
+        if state is not None and state.get("pid") == process.pid:
+            matches, reason = _head_process_matches(state)
+            if matches:
+                try:
+                    response = requests.get(
+                        f"http://127.0.0.1:{port}/cluster/resources",
+                        timeout=1,
+                    )
+                    if response.status_code < 400:
+                        return state
+                    last_error = f"HTTP {response.status_code}"
+                except requests.RequestException as exc:
+                    last_error = str(exc)
+            else:
+                last_error = reason
+        time.sleep(0.2)
+
+    raise RuntimeError(
+        f"Maze head did not become ready within {HEAD_START_TIMEOUT_SECONDS:g}s: "
+        f"{last_error}. Log: {log_path}"
+    )
+
+
+def start_head_detached(args) -> None:
+    _ensure_no_running_head()
+    _validate_head_ports(
+        args.port,
+        args.ray_head_port,
+        args.playground,
+        args.playground_port,
+        args.playground_backend_port,
+    )
+    HEAD_LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log_path = HEAD_LOG_DIR / f"head_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+    environment = os.environ.copy()
+    environment["MAZE_HEAD_DETACHED"] = "1"
+    environment["MAZE_HEAD_RUNTIME_LOG"] = str(log_path)
+    environment["PYTHONUNBUFFERED"] = "1"
+    with log_path.open("ab") as log_handle:
+        process = subprocess.Popen(
+            _detached_head_command(args),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    child_identity = _process_identity(process.pid)
+    try:
+        state = _wait_for_detached_head(process, args.port, log_path)
+    except BaseException:
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=PLAYGROUND_STOP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        finally:
+            if child_identity is not None:
+                _remove_head_state_if_owned(process.pid, child_identity["start_time"])
+        raise
+    print(f"Maze head started (pid={state['pid']}, log={log_path})")
+
+
+def stop_head(*, timeout: float = HEAD_STOP_TIMEOUT_SECONDS, force: bool = False) -> None:
+    pidfd = None
+    with _head_state_lock():
+        try:
+            state = _read_head_state()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+            print(f"Removed invalid Maze head runtime state: {exc}")
+            return
+        if state is None:
+            print("Maze head is not running (no runtime state).")
+            return
+        try:
+            pid = int(state["pid"])
+            start_time = str(state["start_time"])
+        except (KeyError, TypeError, ValueError):
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+            print("Removed invalid Maze head runtime state: missing process identity")
+            return
+
+        try:
+            pidfd = _open_pidfd(pid)
+        except ProcessLookupError:
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+            print(f"Removed stale Maze head runtime state: process {pid} is not running.")
+            return
+        except OSError as exc:
+            raise RuntimeError(f"Unable to verify Maze head {pid} with pidfd: {exc}") from exc
+        matches, reason = _head_process_matches(state)
+        if not matches:
+            os.close(pidfd)
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+            print(f"Removed stale Maze head runtime state: {reason}.")
+            return
+
+        try:
+            _pidfd_send_signal(pidfd, signal.SIGTERM)
+        except ProcessLookupError:
+            os.close(pidfd)
+            HEAD_STATE_PATH.unlink(missing_ok=True)
+            print(f"Maze head already stopped (pid={pid}).")
+            return
+        except OSError as exc:
+            os.close(pidfd)
+            raise RuntimeError(f"Unable to signal Maze head {pid}: {exc}") from exc
+        except RuntimeError:
+            os.close(pidfd)
+            raise
+
+    try:
+        if _wait_for_pidfd(pidfd, timeout):
+            _remove_head_state_if_owned(pid, start_time)
+            print(f"Maze head stopped (pid={pid}).")
+            return
+
+        if not force:
+            raise RuntimeError(
+                f"Maze head {pid} did not stop within {timeout:g}s. "
+                "Run `maze stop --force` to terminate the same verified process."
+            )
+
+        try:
+            _pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            _remove_head_state_if_owned(pid, start_time)
+            print(f"Maze head stopped (pid={pid}).")
+            return
+        except OSError as exc:
+            raise RuntimeError(f"Unable to force-stop Maze head {pid}: {exc}") from exc
+        if not _wait_for_pidfd(pidfd, PLAYGROUND_STOP_TIMEOUT_SECONDS):
+            raise RuntimeError(f"Maze head {pid} remained alive after SIGKILL")
+        _remove_head_state_if_owned(pid, start_time)
+        print(f"Maze head force-stopped (pid={pid}).")
+    finally:
+        os.close(pidfd)
+
 
 def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10):
     try:
@@ -345,6 +807,190 @@ def start_worker(addr: str, agent: bool = False, heartbeat_interval: float = 10)
 
 def stop_worker():
     Worker.stop_worker()
+
+
+def _directory_writable(path: Path) -> tuple[bool, str]:
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    if not candidate.exists():
+        return False, f"no existing parent for {path}"
+    if path.exists() and not path.is_dir():
+        return False, f"{path} is not a directory"
+    writable = os.access(candidate, os.R_OK | os.W_OK | os.X_OK)
+    return writable, f"{path} ({'writable' if writable else 'not writable'})"
+
+
+def _http_health(url: str) -> tuple[bool, str]:
+    try:
+        response = requests.get(url, timeout=3)
+    except requests.RequestException as exc:
+        return False, str(exc)
+    if response.status_code >= 400:
+        return False, f"HTTP {response.status_code}: {response.text[:200]}"
+    return True, f"HTTP {response.status_code}"
+
+
+def _find_binary(name: str) -> str | None:
+    adjacent = Path(sys.executable).parent / name
+    if name == "ray":
+        return str(adjacent) if adjacent.is_file() and os.access(adjacent, os.X_OK) else None
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    return str(adjacent) if adjacent.is_file() and os.access(adjacent, os.X_OK) else None
+
+
+def _doctor_results(args) -> list[dict]:
+    results = []
+
+    def add(name: str, ok: bool, detail: str, *, required: bool = True) -> None:
+        results.append({"name": name, "ok": bool(ok), "required": required, "detail": detail})
+
+    supported_python = (3, 10) <= sys.version_info[:2] < (3, 14)
+    add(
+        "python",
+        supported_python and Path(sys.executable).is_file(),
+        f"{sys.executable} ({sys.version.split()[0]})",
+    )
+    try:
+        _check_pidfd_support()
+    except (OSError, RuntimeError) as exc:
+        add("lifecycle:pidfd", False, str(exc))
+    else:
+        add(
+            "lifecycle:pidfd",
+            True,
+            "pidfd process validation and signaling available",
+        )
+    for binary, required in (("ray", True), ("node", False), ("npm", False)):
+        resolved = _find_binary(binary)
+        add(f"binary:{binary}", resolved is not None, resolved or "not found on PATH", required=required)
+
+    add("directory:package", (PROJECT_ROOT / "maze").is_dir(), str(PROJECT_ROOT / "maze"))
+    runtime_writable, runtime_detail = _directory_writable(MAZE_RUNTIME_DIR)
+    add("directory:runtime", runtime_writable, runtime_detail)
+    for name, path in (
+        ("playground-backend", PROJECT_ROOT / "web" / "maze_playground" / "backend"),
+        ("playground-frontend", PROJECT_ROOT / "web" / "maze_playground" / "frontend"),
+    ):
+        add(f"directory:{name}", path.is_dir(), str(path), required=False)
+
+    runtime = _head_runtime_status()
+    add(
+        "runtime:head",
+        runtime["status"] in {"running", "stopped"},
+        f"{runtime['status']}: {runtime['reason']}",
+    )
+
+    head_running = runtime["status"] == "running"
+
+    def select_port(name: str, explicit, state_key: str, default: int) -> int:
+        value = explicit
+        if value is None:
+            value = runtime.get(state_key, default) if head_running else default
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            add(f"config:{name}-port", False, f"invalid port: {value!r}")
+            return default
+        if not 1 <= port <= 65535:
+            add(f"config:{name}-port", False, f"port out of range: {port}")
+            return default
+        return port
+
+    recorded_core_port = select_port("core", None, "port", 8000)
+    ray_head_port = select_port("ray", args.ray_head_port, "ray_head_port", 6379)
+    playground_port = select_port(
+        "playground-frontend",
+        args.playground_port,
+        "playground_port",
+        5173,
+    )
+    playground_backend_port = select_port(
+        "playground-backend",
+        args.playground_backend_port,
+        "playground_backend_port",
+        _default_playground_backend_port(playground_port),
+    )
+
+    configured_server_url = args.server_url or os.environ.get("MAZE_CORE_URL")
+    server_url = configured_server_url or f"http://127.0.0.1:{recorded_core_port}"
+    server_url = server_url if "://" in server_url else f"http://{server_url}"
+    try:
+        parsed = urlparse(server_url)
+        core_host = parsed.hostname or "127.0.0.1"
+        core_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        add("config:server-url", False, f"invalid server URL {server_url!r}: {exc}")
+        parsed = urlparse(f"http://127.0.0.1:{recorded_core_port}")
+        core_host = "127.0.0.1"
+        core_port = recorded_core_port
+    if parsed.scheme not in {"http", "https"}:
+        add("config:server-url", False, f"unsupported URL scheme: {parsed.scheme or 'missing'}")
+    port_specs = (
+        ("core", core_host, core_port, True),
+        ("ray", "127.0.0.1", ray_head_port, True),
+        ("playground-backend", "127.0.0.1", playground_backend_port, False),
+        ("playground-frontend", "127.0.0.1", playground_port, False),
+    )
+    for name, host, port, required in port_specs:
+        is_open = _port_in_use(port, host)
+        if name == "core" and configured_server_url is not None:
+            ok = is_open
+        elif name in {"core", "ray"}:
+            ok = is_open if head_running else not is_open
+        else:
+            ok = True
+        add(
+            f"port:{name}",
+            ok,
+            f"{host}:{port} is {'listening' if is_open else 'free'}",
+            required=required,
+        )
+
+    core_health_url = f"{server_url.rstrip('/')}/cluster/resources"
+    core_ok, core_detail = _http_health(core_health_url)
+    add(
+        "http:core",
+        core_ok,
+        f"{core_health_url}: {core_detail}",
+        required=head_running or configured_server_url is not None,
+    )
+
+    backend_health_url = f"http://127.0.0.1:{playground_backend_port}/health"
+    backend_ok, backend_detail = _http_health(backend_health_url)
+    add(
+        "http:playground-backend",
+        backend_ok,
+        f"{backend_health_url}: {backend_detail}",
+        required=False,
+    )
+    frontend_url = f"http://127.0.0.1:{playground_port}/"
+    frontend_ok, frontend_detail = _http_health(frontend_url)
+    add("http:playground-frontend", frontend_ok, f"{frontend_url}: {frontend_detail}", required=False)
+    return results
+
+
+def cmd_doctor(args) -> None:
+    results = _doctor_results(args)
+    failed_required = [item for item in results if item["required"] and not item["ok"]]
+    failed_any = [item for item in results if not item["ok"]]
+    ok = not failed_required and not (args.strict and failed_any)
+    if args.json:
+        print(json.dumps({"checks": results, "ok": ok}, indent=2))
+    else:
+        print("Maze doctor")
+        for item in results:
+            if item["ok"]:
+                label = "ok"
+            elif item["required"]:
+                label = "error"
+            else:
+                label = "warn"
+            print(f"[{label}] {item['name']}: {item['detail']}")
+    if not ok:
+        raise SystemExit(1)
 
 def _server_url(args) -> str:
     return getattr(args, "server_url", None) or os.environ.get("MAZE_CORE_URL") or "http://localhost:8000"
@@ -783,7 +1429,15 @@ def _format_status(metrics: dict, runs: list) -> str:
     sr = metrics.get("static_runs") or {}
     by = sr.get("by_status") or {}
     lines.append(f"Static Runs: {sr.get('total', 0)} total | {sr.get('in_memory', 0)} in-memory")
-    for status in ("submitted", "running", "succeeded", "failed", "canceled", "interrupted"):
+    for status in (
+        "submitted",
+        "running",
+        "succeeded",
+        "failed",
+        "canceled",
+        "interrupted",
+        "timed_out",
+    ):
         if by.get(status, 0):
             lines.append(f"  - {status}: {by.get(status, 0)}")
     lines.append("")
@@ -856,6 +1510,8 @@ def cmd_status(addr: str, watch: bool, status_filter: str | None, run_id: str | 
             print("\n" * 2)
         except Exception as e:
             print(f"Failed to fetch status from {addr}: {e}")
+            runtime = _head_runtime_status()
+            print(f"Local Maze head: {runtime['status']} ({runtime['reason']})")
             if not watch:
                 sys.exit(1)
             time.sleep(2)
@@ -871,7 +1527,7 @@ def main():
     start_group.add_argument("--head", action="store_true", help="Start as head node")
     start_group.add_argument("--worker", action="store_true", help="Start as worker node")
 
-    start_parser.add_argument("--port", type=int, metavar="PORT", help="Port for head node (required if --head)",default=8000)
+    start_parser.add_argument("--port", type=int, metavar="PORT", help="Head HTTP port (default: 8000)",default=8000)
     start_parser.add_argument("--strategy", metavar="STRATEGY", help="Node placement strategy",default="least-loaded")
     start_parser.add_argument(
         "--scheduling-algorithm",
@@ -879,21 +1535,45 @@ def main():
         default=SchedulingAlgorithm.FCFS.value,
         help="Task queue scheduling algorithm",
     )
-    start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Port for ray head (required if --head)",default=6379)
+    start_parser.add_argument("--ray-head-port", type=int, metavar="RAY HEAD PORT", help="Ray head port (default: 6379)",default=6379)
     start_parser.add_argument("--addr", metavar="ADDR", help="Address of head node (required if --worker)")
     start_parser.add_argument("--playground", action="store_true", help="Start Maze Playground visual interface (only applicable to --head)")
     start_parser.add_argument("--playground-port", type=int, default=5173, help="Port for the Playground web UI")
     start_parser.add_argument("--playground-backend-port", type=int, default=None, help="Port for the Playground backend API (default: 3001, or --playground-port + 1 when the UI port is changed)")
     start_parser.add_argument("--agent", action="store_true", help="Keep worker alive and periodically re-register with Maze core")
     start_parser.add_argument("--heartbeat-interval", type=float, default=10, help="Worker agent registration interval in seconds")
+    start_parser.add_argument("--detach", action="store_true", help="Run the head in the background")
     start_parser.add_argument("--log-level", metavar="LOG LEVEL", help="Set log level",default="INFO",choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     start_parser.add_argument("--log-file", metavar="LOG FILE", help="Set log file",default=None)
-    
 
     # === stop subcommand ===
-    stop_parser = subparsers.add_parser("stop", help="Stop Maze worker")
+    stop_parser = subparsers.add_parser("stop", help="Stop the recorded local Maze head")
+    stop_parser.add_argument("--worker", action="store_true", help="Stop the local Ray worker instead")
+    stop_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=HEAD_STOP_TIMEOUT_SECONDS,
+        help="Seconds to wait for graceful head shutdown",
+    )
+    stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Send SIGKILL if the verified head does not stop before the timeout",
+    )
     stop_parser.add_argument("--log-level", metavar="LOG LEVEL", help="Set log level",default="INFO",choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     stop_parser.add_argument("--log-file", metavar="LOG FILE", help="Set log file",default=None)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check the local Maze environment and services")
+    doctor_parser.add_argument(
+        "--server-url",
+        default=None,
+        help="Maze head HTTP address (default: active local head or MAZE_CORE_URL)",
+    )
+    doctor_parser.add_argument("--ray-head-port", type=int, default=None)
+    doctor_parser.add_argument("--playground-port", type=int, default=None)
+    doctor_parser.add_argument("--playground-backend-port", type=int, default=None)
+    doctor_parser.add_argument("--json", action="store_true", help="Print structured results")
+    doctor_parser.add_argument("--strict", action="store_true", help="Treat optional check failures as errors")
 
     cluster_parser = subparsers.add_parser("cluster", help="Inspect and operate the Maze cluster")
     cluster_subparsers = cluster_parser.add_subparsers(dest="cluster_command", required=True)
@@ -994,7 +1674,7 @@ def main():
         "--status",
         dest="status_filter",
         metavar="STATUS",
-        choices=["submitted", "running", "succeeded", "failed", "canceled", "interrupted"],
+        choices=["submitted", "running", "succeeded", "failed", "canceled", "interrupted", "timed_out"],
         help="Filter runs by status",
     )
     status_parser.add_argument("--run-id", metavar="RUN_ID", help="Show details of a specific run")
@@ -1005,56 +1685,51 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     )
     status_parser.add_argument("--log-file", metavar="LOG FILE", default=None)
-    add_dev_parser(subparsers)
 
     # Parse args
     args = parser.parse_args()
-    
+
     setup_logging(getattr(args, "log_level", "INFO"), getattr(args, "log_file", None))
-    if handle_dev_command(args):
-        return
     if args.command == "start":
         if args.head:
-            if args.port is None:
-                parser.error("--port is required when using --head")
-            if args.ray_head_port is None:
-                parser.error("--ray-head-port is required when using --head")
-            
-           
-            if hasattr(args, 'playground') and args.playground:
-                try:
+            try:
+                if args.detach:
+                    start_head_detached(args)
+                else:
                     start_head(
                         args.port,
                         args.ray_head_port,
                         args.strategy,
                         args.scheduling_algorithm,
-                        playground=True,
+                        playground=args.playground,
                         playground_port=args.playground_port,
                         playground_backend_port=args.playground_backend_port,
+                        runtime_log=args.log_file,
                     )
-                except RuntimeError as exc:
-                    print(f"❌ {exc}", file=sys.stderr)
-                    sys.exit(1)
-            else:
-                try:
-                    start_head(
-                        args.port,
-                        args.ray_head_port,
-                        args.strategy,
-                        args.scheduling_algorithm,
-                        playground=False,
-                    )
-                except RuntimeError as exc:
-                    print(f"❌ {exc}", file=sys.stderr)
-                    sys.exit(1)
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
         elif args.worker:
             if args.addr is None:
                 parser.error("--addr is required when using --worker")
+            if args.detach:
+                parser.error("--detach is only supported with --head")
             if hasattr(args, 'playground') and args.playground:
                 print("⚠️  Warning: --playground parameter is only applicable to head node, will be ignored")
             start_worker(args.addr, agent=args.agent, heartbeat_interval=args.heartbeat_interval)
     elif args.command == "stop":
-        stop_worker()
+        if args.worker:
+            if args.force:
+                parser.error("--force only applies when stopping a Maze head")
+            stop_worker()
+        else:
+            try:
+                stop_head(timeout=args.timeout, force=args.force)
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     elif args.command == "cluster":
         if args.cluster_command == "resources":
             _print_cluster_resources(args)

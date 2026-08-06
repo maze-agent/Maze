@@ -1,162 +1,208 @@
-"""Process-wide cluster-level metrics aggregator (in-memory).
-
-Tracks counts of static runs by status, cumulative tasks, and tokens.
-Mutating methods are thread-safe.
-"""
+"""Restart-safe cluster metrics derived from persisted static runs."""
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable
+
+
+RUN_STATUS_TEMPLATE = {
+    "submitted": 0,
+    "running": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "canceled": 0,
+    "interrupted": 0,
+    "timed_out": 0,
+}
+TASK_STATUS_TEMPLATE = {
+    "running": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "canceled": 0,
+    "timed_out": 0,
+}
+TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled", "timed_out"}
+
+
+def _run_status(value: Any) -> str:
+    status = str(value or "submitted")
+    if status in {"created", "submitted"}:
+        return "submitted"
+    return "canceled" if status == "cancelled" else status
+
+
+def _task_status(value: Any) -> str:
+    status = str(value or "")
+    return "canceled" if status == "cancelled" else status
+
+
+def _add_number(target: Dict[str, Any], key: str, value: Any) -> None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        target[key] = target.get(key, 0) + value
+
+
+def _task_metrics_contribution(metrics: Any) -> Dict[str, Any]:
+    contribution = {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "by_model": {},
+    }
+    if not isinstance(metrics, dict):
+        return contribution
+
+    _add_number(contribution, "tokens_in", metrics.get("tokens_in"))
+    _add_number(contribution, "tokens_out", metrics.get("tokens_out"))
+    _add_number(contribution, "cost_usd", metrics.get("cost_usd"))
+
+    nested = metrics.get("by_model")
+    if isinstance(nested, dict) and nested:
+        for model_name, values in nested.items():
+            if isinstance(values, dict):
+                contribution["by_model"][str(model_name)] = dict(values)
+        return contribution
+
+    model_name = metrics.get("model")
+    if isinstance(model_name, str) and model_name:
+        contribution["by_model"][model_name] = {
+            "tokens_in": contribution["tokens_in"],
+            "tokens_out": contribution["tokens_out"],
+            "cost_usd": contribution["cost_usd"],
+            "calls": 1,
+        }
+    return contribution
+
+
+def _run_contribution(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    task_statuses = dict(TASK_STATUS_TEMPLATE)
+    total_finished = 0
+    tokens_in = 0
+    tokens_out = 0
+    cost_usd = 0.0
+    by_model: Dict[str, Dict[str, Any]] = {}
+
+    for task in (snapshot.get("task_nodes") or {}).values():
+        if not isinstance(task, dict):
+            continue
+        status = _task_status(task.get("status"))
+        if status in task_statuses:
+            task_statuses[status] += 1
+        if status in TERMINAL_TASK_STATUSES:
+            total_finished += 1
+
+        metrics = _task_metrics_contribution(task.get("metrics"))
+        tokens_in += metrics["tokens_in"]
+        tokens_out += metrics["tokens_out"]
+        cost_usd += metrics["cost_usd"]
+        for model_name, values in metrics["by_model"].items():
+            bucket = by_model.setdefault(model_name, {})
+            for key, value in values.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    bucket[key] = bucket.get(key, 0) + value
+                else:
+                    bucket[key] = value
+
+    return {
+        "workflow_id": snapshot.get("workflow_id"),
+        "status": _run_status(snapshot.get("status")),
+        "tasks_total_finished": total_finished,
+        "tasks_by_status": task_statuses,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost_usd,
+        "tokens_by_model": by_model,
+    }
 
 
 class GlobalMetrics:
     def __init__(self):
         self._lock = threading.Lock()
         self._started_at = time.time()
-
-        # Workflow templates ever seen (created, possibly never submitted).
-        self.workflows_created: int = 0
-
-        # Static runs (= submitted workflows).
-        self.static_runs_total: int = 0
-        self.static_runs_by_status: Dict[str, int] = {
-            "submitted": 0,
-            "running": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "canceled": 0,
-            "interrupted": 0,
-        }
-
-        # Tasks (across all static runs).
-        self.tasks_total: int = 0
-        self.tasks_by_status: Dict[str, int] = {
-            "running": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "canceled": 0,
-        }
-
-        # Tokens.
-        self.tokens_in_total: int = 0
-        self.tokens_out_total: int = 0
-        self.tokens_by_model: Dict[str, Dict[str, Any]] = {}
-        self.cost_usd_total: float = 0.0
-
-    # --- workflow / run lifecycle ------------------------------------
+        self._workflow_ids: set[str] = set()
+        self._runs: Dict[str, Dict[str, Any]] = {}
 
     def on_workflow_created(self, workflow_id: str) -> None:
+        if workflow_id:
+            with self._lock:
+                self._workflow_ids.add(str(workflow_id))
+
+    def rebuild(self, snapshots: Iterable[Dict[str, Any]]) -> None:
+        contributions = {}
+        workflow_ids = set()
+        for snapshot in snapshots:
+            run_id = snapshot.get("run_id") if isinstance(snapshot, dict) else None
+            if not run_id:
+                continue
+            contribution = _run_contribution(snapshot)
+            contributions[str(run_id)] = contribution
+            if contribution.get("workflow_id"):
+                workflow_ids.add(str(contribution["workflow_id"]))
         with self._lock:
-            self.workflows_created += 1
+            self._runs = contributions
+            self._workflow_ids.update(workflow_ids)
 
-    def on_run_submitted(self, run_id: str) -> None:
+    def sync_run(self, snapshot: Dict[str, Any]) -> None:
+        run_id = snapshot.get("run_id") if isinstance(snapshot, dict) else None
+        if not run_id:
+            raise ValueError("Static run snapshot is missing run_id")
+        contribution = _run_contribution(snapshot)
         with self._lock:
-            self.static_runs_total += 1
-            self.static_runs_by_status["submitted"] = self.static_runs_by_status.get("submitted", 0) + 1
-
-    def on_run_status_change(self, run_id: str, old: str, new: str) -> None:
-        if old == new:
-            return
-        with self._lock:
-            if old in self.static_runs_by_status:
-                self.static_runs_by_status[old] = max(0, self.static_runs_by_status[old] - 1)
-            self.static_runs_by_status[new] = self.static_runs_by_status.get(new, 0) + 1
-
-    # --- task lifecycle ----------------------------------------------
-
-    def on_task_started(self, run_id: str, task_id: str) -> None:
-        with self._lock:
-            self.tasks_by_status["running"] = self.tasks_by_status.get("running", 0) + 1
-
-    def on_task_finished(
-        self,
-        run_id: str,
-        task_id: str,
-        status: str = "succeeded",
-        metrics: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        with self._lock:
-            self.tasks_total += 1
-            self.tasks_by_status["running"] = max(0, self.tasks_by_status.get("running", 0) - 1)
-            if status not in self.tasks_by_status:
-                self.tasks_by_status[status] = 0
-            self.tasks_by_status[status] += 1
-
-            if metrics:
-                if isinstance(metrics.get("tokens_in"), (int, float)):
-                    self.tokens_in_total += int(metrics["tokens_in"])
-                if isinstance(metrics.get("tokens_out"), (int, float)):
-                    self.tokens_out_total += int(metrics["tokens_out"])
-                if isinstance(metrics.get("cost_usd"), (int, float)):
-                    self.cost_usd_total += float(metrics["cost_usd"])
-
-                # Bucket by model: prefer the nested ``by_model`` dict if
-                # present (filled by the collector). Fall back to top-level
-                # ``model`` only when no nested bucket is provided.
-                nested = metrics.get("by_model")
-                if isinstance(nested, dict) and nested:
-                    for model_name, m in nested.items():
-                        if not isinstance(m, dict):
-                            continue
-                        bucket = self.tokens_by_model.setdefault(
-                            model_name, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "calls": 0}
-                        )
-                        for k, v in m.items():
-                            if isinstance(v, (int, float)):
-                                bucket[k] = bucket.get(k, 0) + v
-                            else:
-                                bucket[k] = v
-                else:
-                    model = metrics.get("model")
-                    if isinstance(model, str) and model:
-                        bucket = self.tokens_by_model.setdefault(
-                            model, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "calls": 0}
-                        )
-                        if isinstance(metrics.get("tokens_in"), (int, float)):
-                            bucket["tokens_in"] += int(metrics["tokens_in"])
-                        if isinstance(metrics.get("tokens_out"), (int, float)):
-                            bucket["tokens_out"] += int(metrics["tokens_out"])
-                        if isinstance(metrics.get("cost_usd"), (int, float)):
-                            bucket["cost_usd"] = bucket.get("cost_usd", 0.0) + float(metrics["cost_usd"])
-                        bucket["calls"] = bucket.get("calls", 0) + 1
-
-    # --- snapshot -----------------------------------------------------
+            self._runs[str(run_id)] = contribution
+            if contribution.get("workflow_id"):
+                self._workflow_ids.add(str(contribution["workflow_id"]))
 
     def snapshot(self, *, workflows_in_memory: int = 0, runs_in_memory: int = 0) -> Dict[str, Any]:
-        """Return a JSON-serializable view of all metrics.
-
-        Parameters
-        ----------
-        workflows_in_memory:
-            Number of workflow templates currently held by MaPath but not yet submitted.
-            Computed by the caller from MaPath.workflows.
-        runs_in_memory:
-            Number of in-memory submit_workflows entries.
-        """
         with self._lock:
-            data = {
-                "uptime_sec": int(time.time() - self._started_at),
-                "started_at": self._started_at,
-                "workflows": {
-                    "created_total": self.workflows_created,
-                    "in_memory_not_submitted": workflows_in_memory,
-                },
-                "static_runs": {
-                    "total": self.static_runs_total,
-                    "in_memory": runs_in_memory,
-                    "by_status": dict(self.static_runs_by_status),
-                },
-                "tasks": {
-                    "total_finished": self.tasks_total,
-                    "by_status": dict(self.tasks_by_status),
-                },
-                "tokens": {
-                    "in": self.tokens_in_total,
-                    "out": self.tokens_out_total,
-                    "cost_usd": round(self.cost_usd_total, 6),
-                    "by_model": {k: dict(v) for k, v in self.tokens_by_model.items()},
-                },
-            }
-            return data
+            run_contributions = list(self._runs.values())
+            workflows_created = len(self._workflow_ids)
+
+        run_statuses = dict(RUN_STATUS_TEMPLATE)
+        task_statuses = dict(TASK_STATUS_TEMPLATE)
+        tasks_total = 0
+        tokens_in = 0
+        tokens_out = 0
+        cost_usd = 0.0
+        tokens_by_model: Dict[str, Dict[str, Any]] = {}
+
+        for contribution in run_contributions:
+            status = contribution["status"]
+            run_statuses[status] = run_statuses.get(status, 0) + 1
+            tasks_total += contribution["tasks_total_finished"]
+            for task_status, count in contribution["tasks_by_status"].items():
+                task_statuses[task_status] = task_statuses.get(task_status, 0) + count
+            tokens_in += contribution["tokens_in"]
+            tokens_out += contribution["tokens_out"]
+            cost_usd += contribution["cost_usd"]
+            for model_name, values in contribution["tokens_by_model"].items():
+                bucket = tokens_by_model.setdefault(model_name, {})
+                for key, value in values.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        bucket[key] = bucket.get(key, 0) + value
+                    else:
+                        bucket[key] = value
+
+        return {
+            "uptime_sec": int(time.time() - self._started_at),
+            "started_at": self._started_at,
+            "workflows": {
+                "created_total": workflows_created,
+                "in_memory_not_submitted": workflows_in_memory,
+            },
+            "static_runs": {
+                "total": len(run_contributions),
+                "in_memory": runs_in_memory,
+                "by_status": run_statuses,
+            },
+            "tasks": {
+                "total_finished": tasks_total,
+                "by_status": task_statuses,
+            },
+            "tokens": {
+                "in": tokens_in,
+                "out": tokens_out,
+                "cost_usd": round(cost_usd, 6),
+                "by_model": tokens_by_model,
+            },
+        }

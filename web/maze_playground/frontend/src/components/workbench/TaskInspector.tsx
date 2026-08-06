@@ -13,6 +13,11 @@ import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import CustomTaskEditor from '@/components/CustomTaskEditor';
 import { syncWorkflowInputEdges } from '@/utils/workflowBindings';
+import {
+  latestRunForWorkflow,
+  runWorkflowGraph,
+  runWorkflowName,
+} from '@/utils/runSnapshot';
 import type {
   FaultToleranceTrace,
   LocalModel,
@@ -25,8 +30,7 @@ import type {
 const { Text } = Typography;
 
 type InspectorTab = 'overview' | 'definition' | 'resources' | 'runtime' | 'artifacts';
-type TaskState = 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'draft' | 'validated';
-type ImplementationType = 'Python function' | 'command' | 'container image' | 'local LLM inference';
+type TaskState = 'created' | 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'draft' | 'validated';
 
 type ArtifactItem = {
   id: string;
@@ -55,26 +59,11 @@ export type WorkbenchTask = {
   isDynamic?: boolean;
   description?: string;
   config: {
-    implementationType: ImplementationType;
-    image?: string;
-    command?: string;
     functionName?: string;
-    entryPoint?: string;
-    arguments?: unknown;
-    environment?: unknown;
-    inputBindings?: unknown;
-    outputBindings?: unknown;
-    artifactOutputs?: unknown;
-    priority?: 'Low' | 'Normal' | 'High' | 'Critical';
     timeoutSeconds?: number;
-    maxAttempts?: number;
+    maxRetries?: number;
     retryBackoffSeconds?: number;
-    maxConcurrency?: number;
-    placementConstraints?: unknown;
-    requiredCapabilities?: unknown;
-    localityHints?: unknown;
     localModel?: string;
-    modelAnchor?: WorkflowNode['data']['modelAnchor'];
   };
   resources: {
     cpuNum?: number;
@@ -138,22 +127,15 @@ const tabs: Array<{ key: InspectorTab; label: string }> = [
   { key: 'artifacts', label: 'Artifacts' },
 ];
 
-const implementationOptions: Array<{ value: ImplementationType; label: string }> = [
-  { value: 'Python function', label: 'Python function' },
-  { value: 'command', label: 'Command' },
-  { value: 'container image', label: 'Container image' },
-  { value: 'local LLM inference', label: 'Local LLM inference' },
-];
-
 function normalizeState(status?: string | null): TaskState {
-  if (!status) return 'pending';
+  if (!status) return 'draft';
   if (status === 'completed') return 'succeeded';
   if (status === 'canceled') return 'cancelled';
   if (status === 'timed_out' || status === 'interrupted') return 'failed';
-  if (['pending', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'draft', 'validated'].includes(status)) {
+  if (['created', 'pending', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'draft', 'validated'].includes(status)) {
     return status as TaskState;
   }
-  return 'pending';
+  return 'draft';
 }
 
 function statusColor(status?: string | null) {
@@ -188,19 +170,6 @@ function taskTypeLabel(kind: WorkbenchTask['kind']) {
   if (kind === 'gpu') return 'GPU';
   if (kind === 'io') return 'I/O';
   return 'CPU';
-}
-
-function inferImplementationType(node: WorkflowNode): ImplementationType {
-  const data = node.data as any;
-  if (implementationOptions.some((option) => option.value === data.implementationType)) {
-    return data.implementationType;
-  }
-  if (node.data.execBackend === 'docker' || data.image) return 'container image';
-  if (data.prompt || String(node.data.taskRef || node.data.functionName || '').toLowerCase().includes('llm')) {
-    return 'local LLM inference';
-  }
-  if (data.command) return 'command';
-  return 'Python function';
 }
 
 function toEpochMilliseconds(value?: number | string | null) {
@@ -313,15 +282,6 @@ function renderable(value: ReactNode) {
   return value !== undefined && value !== null && value !== '';
 }
 
-function jsonText(value: unknown, fallback: unknown = {}) {
-  const source = value === undefined || value === null ? fallback : value;
-  try {
-    return JSON.stringify(source, null, 2);
-  } catch {
-    return String(source);
-  }
-}
-
 function errorMessage(value: any) {
   if (!value) return undefined;
   if (typeof value === 'string') return value;
@@ -408,12 +368,12 @@ function resourceParts(task: WorkbenchTask) {
 }
 
 function retryPolicyLabel(task: WorkbenchTask) {
-  const attempts = task.config.maxAttempts || task.runtime.maxAttempts;
+  const maxRetries = task.config.maxRetries;
   const backoff = task.config.retryBackoffSeconds;
-  if (!attempts && !backoff) return undefined;
+  if (maxRetries === undefined && backoff === undefined) return undefined;
   return [
-    attempts ? `${attempts} attempts` : null,
-    backoff ? `${backoff}s backoff` : null,
+    maxRetries === undefined ? null : `${maxRetries} retries`,
+    backoff === undefined ? null : `${backoff}s backoff`,
   ].filter(Boolean).join(', ');
 }
 
@@ -435,7 +395,9 @@ function buildTask(
 ): WorkbenchTask {
   const data = node.data as any;
   const kind = runtime?.task_kind || taskKind(node);
-  const state = normalizeState(runtime?.status);
+  const state = runtime?.status
+    ? normalizeState(runtime.status)
+    : node.data.configured ? 'validated' : 'draft';
   const resources = runtime?.resources || node.data.resources || {};
   const cpuNum = Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1);
   const gpuMem = Number((resources as any).gpu_mem || 0);
@@ -444,6 +406,7 @@ function buildTask(
   const queueReason = runtime?.pending_reason || runtime?.schedule_decision?.reason || undefined;
   const startedTime = taskStartedTime(runtime);
   const finishedTime = taskFinishedTime(runtime);
+  const maxRetries = data.maxRetries;
   const seenArtifacts = new Set<string>();
   const realArtifacts = artifactRecords.flatMap((artifact, index) => {
     const pathValue = artifactPath(artifact);
@@ -477,26 +440,11 @@ function buildTask(
     isDynamic: Boolean(data.dynamic || data.runtimeAppended),
     description: data.description || data.summary || data.prompt,
     config: {
-      implementationType: inferImplementationType(node),
-      image: data.image || (node.data.execBackend === 'docker' ? 'docker sandbox' : undefined),
-      command: data.command || node.data.taskRef || node.data.taskPath || node.data.functionName,
       functionName: node.data.functionName,
-      entryPoint: data.entryPoint || node.data.functionName || node.data.taskRef,
-      arguments: data.arguments || data.args || node.data.inputs,
-      environment: data.environment || data.env,
-      inputBindings: node.data.inputs,
-      outputBindings: node.data.outputs,
-      artifactOutputs: data.artifacts || data.artifactOutputs,
-      priority: data.priority || 'Normal',
       timeoutSeconds: node.data.taskTimeout || runtime?.timeout_seconds || undefined,
-      maxAttempts: data.maxAttempts || (runtime as any)?.max_attempts || undefined,
-      retryBackoffSeconds: data.retryBackoffSeconds || runtime?.retry_wait_seconds || undefined,
-      maxConcurrency: data.maxConcurrency,
-      placementConstraints: data.placementConstraints,
-      requiredCapabilities: data.requiredCapabilities,
-      localityHints: data.localityHints,
+      maxRetries,
+      retryBackoffSeconds: data.retryBackoffSeconds,
       localModel: data.localModel,
-      modelAnchor: data.modelAnchor,
     },
     resources: {
       cpuNum: cpuNum || undefined,
@@ -504,8 +452,12 @@ function buildTask(
       ioNum: ioNum || undefined,
     },
     dependencies: {
-      upstream: dependencyLabels(node.id, edges, nodes, 'upstream'),
-      downstream: dependencyLabels(node.id, edges, nodes, 'downstream'),
+      upstream: runtime?.parents
+        ? runtime.parents.map((id) => nodes.find((item) => item.id === id)?.data.label || id)
+        : dependencyLabels(node.id, edges, nodes, 'upstream'),
+      downstream: runtime?.children
+        ? runtime.children.map((id) => nodes.find((item) => item.id === id)?.data.label || id)
+        : dependencyLabels(node.id, edges, nodes, 'downstream'),
     },
     runtime: {
       createdAt: formatTimestamp(runtime?.created_time),
@@ -514,9 +466,9 @@ function buildTask(
       duration: formatDuration(runtime?.duration_seconds) || durationBetween(startedTime, finishedTime),
       queueTime: durationBetween(runtime?.created_time, startedTime) || formatDuration((runtime as any)?.queue_time_seconds),
       queueTimeRecorded: Boolean(runtime?.created_time || (runtime as any)?.queue_time_seconds),
-      attempt: (runtime as any)?.attempt || undefined,
-      maxAttempts: data.maxAttempts || (runtime as any)?.max_attempts || undefined,
-      retries: (runtime as any)?.attempt ? Math.max(0, Number((runtime as any).attempt) - 1) : undefined,
+      attempt: runtime?.attempt || undefined,
+      maxAttempts: maxRetries === undefined ? undefined : Number(maxRetries) + 1,
+      retries: runtime?.attempt ? Math.max(0, Number(runtime.attempt) - 1) : undefined,
       exitCode: (runtime as any)?.exit_code,
       failureReason: errorMessage(runtime?.error) || errorMessage(runtime?.last_error),
       queueReason,
@@ -625,40 +577,6 @@ function FieldRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function JsonEditor({
-  label,
-  value,
-  fallback,
-  disabled,
-  onCommit,
-}: {
-  label: string;
-  value: unknown;
-  fallback?: unknown;
-  disabled: boolean;
-  onCommit: (value: unknown) => void;
-}) {
-  return (
-    <FieldRow label={label}>
-      <Input.TextArea
-        key={`${label}-${disabled}-${jsonText(value, fallback)}`}
-        size="small"
-        autoSize={{ minRows: 2, maxRows: 5 }}
-        defaultValue={jsonText(value, fallback)}
-        disabled={disabled}
-        onBlur={(event) => {
-          try {
-            const text = event.target.value.trim();
-            onCommit(text ? JSON.parse(text) : undefined);
-          } catch {
-            window.alert(`${label} must be valid JSON.`);
-          }
-        }}
-      />
-    </FieldRow>
-  );
-}
-
 function InspectorTabs({ activeTab, onChange }: { activeTab: InspectorTab; onChange: (tab: InspectorTab) => void }) {
   return (
     <nav className="workbench-inspector-tabs">
@@ -703,7 +621,7 @@ function OverviewPanel({ task }: { task: WorkbenchTask }) {
 
       <section className="workbench-inspector-section">
         <div className="workbench-inspector-section-title">DESCRIPTION</div>
-        <Text type="secondary">{task.description || task.config.command || 'No description provided.'}</Text>
+        <Text type="secondary">{task.description || 'No description provided.'}</Text>
       </section>
 
       <KeyValueSection
@@ -777,11 +695,6 @@ function DefinitionPanel({
   onEditCode?: () => void;
   onUpdate: (updates: Record<string, unknown>) => void;
 }) {
-  const executionMode = task.config.implementationType;
-  const isPythonTask = executionMode === 'Python function';
-  const isCommandTask = executionMode === 'command';
-  const isContainerTask = executionMode === 'container image';
-  const isLlmTask = executionMode === 'local LLM inference';
   const sourceRef = taskNode.data.taskPath || taskNode.data.taskRef;
   const functionName = task.config.functionName
     || taskNode.data.functionName
@@ -824,56 +737,14 @@ function DefinitionPanel({
             onChange={(value) => onUpdate({ task_kind: value })}
           />
         </FieldRow>
-        <FieldRow label="Execution mode">
-          <Select
-            size="small"
-            value={executionMode}
-            disabled={readOnly}
-            options={implementationOptions}
-            onChange={(value) => onUpdate({ implementationType: value })}
-          />
+        <FieldRow label="Function name">
+          <Input size="small" value={functionName} disabled={readOnly} onChange={(event) => onUpdate({ functionName: event.target.value || undefined })} />
         </FieldRow>
-        {(isPythonTask || isLlmTask) && (
-          <FieldRow label={isLlmTask ? 'Inference function' : 'Function name'}>
-            <Input size="small" value={functionName} disabled={readOnly} onChange={(event) => onUpdate({ functionName: event.target.value || undefined })} />
-          </FieldRow>
-        )}
         {sourceRef && (
           <FieldRow label="Task source">
             <Input size="small" value={sourceRef} disabled />
           </FieldRow>
         )}
-        {isCommandTask && (
-          <FieldRow label="Command">
-            <Input size="small" value={task.config.command || ''} disabled={readOnly} onChange={(event) => onUpdate({ command: event.target.value || undefined })} />
-          </FieldRow>
-        )}
-        {isContainerTask && (
-          <>
-            <FieldRow label="Image">
-              <Input size="small" value={task.config.image || ''} disabled={readOnly} onChange={(event) => onUpdate({ image: event.target.value || undefined })} />
-            </FieldRow>
-            <FieldRow label="Entry point">
-              <Input size="small" value={task.config.entryPoint || ''} disabled={readOnly} onChange={(event) => onUpdate({ entryPoint: event.target.value || undefined })} />
-            </FieldRow>
-          </>
-        )}
-        <FieldRow label="Arguments">
-          <Input.TextArea
-            size="small"
-            autoSize={{ minRows: 2, maxRows: 4 }}
-            value={typeof task.config.arguments === 'string' ? task.config.arguments : jsonText(task.config.arguments, [])}
-            disabled={readOnly}
-            onChange={(event) => {
-              const text = event.target.value;
-              try {
-                onUpdate({ arguments: text.trim() ? JSON.parse(text) : undefined });
-              } catch {
-                onUpdate({ arguments: text });
-              }
-            }}
-          />
-        </FieldRow>
       </section>
 
       <section className="workbench-inspector-section">
@@ -958,16 +829,6 @@ function DefinitionPanel({
         <FieldRow label="Outputs">
           <InlineChips labels={unknownItems(taskNode.data.outputs)} empty="No outputs" />
         </FieldRow>
-        <FieldRow label="Artifacts">
-          <InlineChips labels={unknownItems(task.config.artifactOutputs)} empty="No artifact outputs" />
-        </FieldRow>
-        <details className="workbench-inspector-advanced">
-          <summary>Advanced raw spec</summary>
-          <JsonEditor label="Environment" value={task.config.environment} fallback={{}} disabled={readOnly} onCommit={(value) => onUpdate({ environment: value, env: value })} />
-          <JsonEditor label="Input bindings" value={taskNode.data.inputs} fallback={[]} disabled={readOnly} onCommit={(value) => onUpdate({ inputs: Array.isArray(value) ? value : [] })} />
-          <JsonEditor label="Output bindings" value={taskNode.data.outputs} fallback={[]} disabled={readOnly} onCommit={(value) => onUpdate({ outputs: Array.isArray(value) ? value : [] })} />
-          <JsonEditor label="Artifact outputs" value={task.config.artifactOutputs} fallback={[]} disabled={readOnly} onCommit={(value) => onUpdate({ artifactOutputs: value, artifacts: value })} />
-        </details>
       </section>
 
       <section className="workbench-inspector-section">
@@ -1033,7 +894,7 @@ function ResourcesPanel({
               onUpdate({
                 localModel: value || undefined,
                 modelAnchor: model ? modelAnchor(model) : undefined,
-                ...(model ? { task_kind: 'gpu', implementationType: 'local LLM inference' } : {}),
+                ...(model ? { task_kind: 'gpu' } : {}),
               });
               if (model) {
                 onUpdateResources({
@@ -1050,30 +911,30 @@ function ResourcesPanel({
         <FieldRow label="Timeout sec">
           <Input size="small" type="number" min={0} value={task.config.timeoutSeconds ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ taskTimeout: Number(event.target.value) || undefined })} />
         </FieldRow>
-        <FieldRow label="Max attempts">
-          <Input size="small" type="number" min={0} value={task.config.maxAttempts ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ maxAttempts: Number(event.target.value) || undefined })} />
-        </FieldRow>
-        <FieldRow label="Priority">
-          <Select
+        <FieldRow label="Max retries">
+          <Input
             size="small"
-            value={task.config.priority || 'Normal'}
+            type="number"
+            min={0} step={1} placeholder="Inherited"
+            value={task.config.maxRetries ?? ''}
             disabled={readOnly}
-            options={['Low', 'Normal', 'High', 'Critical'].map((value) => ({ value, label: value }))}
-            onChange={(value) => onUpdate({ priority: value })}
+            onChange={(event) => onUpdate({
+              maxRetries: event.target.value === '' ? undefined : Math.max(0, Math.trunc(Number(event.target.value))),
+            })}
           />
         </FieldRow>
-        <details className="workbench-inspector-advanced">
-          <summary>Advanced scheduling</summary>
-          <JsonEditor label="Placement constraints" value={task.config.placementConstraints} fallback={{}} disabled={readOnly} onCommit={(value) => onUpdate({ placementConstraints: value })} />
-          <JsonEditor label="Required capabilities" value={task.config.requiredCapabilities} fallback={[]} disabled={readOnly} onCommit={(value) => onUpdate({ requiredCapabilities: value })} />
-          <JsonEditor label="Locality hints" value={task.config.localityHints} fallback={{}} disabled={readOnly} onCommit={(value) => onUpdate({ localityHints: value })} />
-          <FieldRow label="Retry backoff sec">
-            <Input size="small" type="number" min={0} value={task.config.retryBackoffSeconds ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ retryBackoffSeconds: Number(event.target.value) || undefined })} />
-          </FieldRow>
-          <FieldRow label="Max concurrency">
-            <Input size="small" type="number" min={0} value={task.config.maxConcurrency ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ maxConcurrency: Number(event.target.value) || undefined })} />
-          </FieldRow>
-        </details>
+        <FieldRow label="Retry backoff sec">
+          <Input
+            size="small"
+            type="number"
+            min={0} placeholder="Inherited"
+            value={task.config.retryBackoffSeconds ?? ''}
+            disabled={readOnly}
+            onChange={(event) => onUpdate({
+              retryBackoffSeconds: event.target.value === '' ? undefined : Math.max(0, Number(event.target.value)),
+            })}
+          />
+        </FieldRow>
       </section>
       {!readOnly && (
         <InspectorNote>
@@ -1315,20 +1176,45 @@ export default function TaskInspector() {
     workflowName,
     workflowSaveState,
     workflowDraftError,
-    activeRunId,
+    workflowId,
+    workspaceId,
+    workspaceDir,
+    currentWorkspaceWorkflowPath,
     selectedRunId,
+    selectedRunTaskId,
     staticRuns,
-    isRunning,
     updateNode,
     deleteNode,
     setEdges,
   } = useWorkflowStore();
 
-  const currentSelectedNode = selectedNode
-    ? nodes.find((node) => node.id === selectedNode.id) || selectedNode
+  const identity = useMemo(() => ({
+    workflowId,
+    workflowPath: currentWorkspaceWorkflowPath,
+    workspaceId,
+    workspaceDir,
+  }), [currentWorkspaceWorkflowPath, workflowId, workspaceDir, workspaceId]);
+  const historicalRun = selectedRunId
+    ? staticRuns.find((run) => run.run_id === selectedRunId) || null
     : null;
-  const visibleRunId = selectedRunId || activeRunId;
-  const visibleRun = visibleRunId ? staticRuns.find((run) => run.run_id === visibleRunId) : null;
+  const designRun = useMemo(
+    () => latestRunForWorkflow(staticRuns, identity),
+    [identity, staticRuns],
+  );
+  const isRunMode = Boolean(selectedRunId);
+  const visibleRun = isRunMode ? historicalRun : designRun;
+  const visibleRunId = visibleRun?.run_id || null;
+  const runGraph = useMemo(
+    () => historicalRun ? runWorkflowGraph(historicalRun) : { nodes: [], edges: [] },
+    [historicalRun],
+  );
+  const inspectorNodes = isRunMode ? runGraph.nodes : nodes;
+  const inspectorEdges = isRunMode ? runGraph.edges : edges;
+  const currentSelectedNode = isRunMode
+    ? inspectorNodes.find((node) => node.id === selectedRunTaskId) || null
+    : selectedNode
+      ? nodes.find((node) => node.id === selectedNode.id) || selectedNode
+      : null;
   const runtime = currentSelectedNode && visibleRun?.task_nodes?.[currentSelectedNode.id]
     ? visibleRun.task_nodes[currentSelectedNode.id]
     : null;
@@ -1338,30 +1224,39 @@ export default function TaskInspector() {
     submittedAt: formatTimestamp(visibleRun?.submitted_time ?? visibleRun?.created_time),
     startedAt: formatTimestamp(visibleRun?.started_time ?? firstTaskStartedTime(visibleRun?.task_nodes)),
   };
-  const task = currentSelectedNode ? buildTask(currentSelectedNode, runtime, taskArtifacts, edges, nodes) : null;
-  const isRunMode = Boolean(visibleRunId || isRunning);
+  const task = currentSelectedNode
+    ? buildTask(currentSelectedNode, runtime, taskArtifacts, inspectorEdges, inspectorNodes)
+    : null;
   const isSpecReadOnly = isRunMode;
   const canEditCode = Boolean(
+    !isRunMode
+    &&
     currentSelectedNode
     && ['custom', 'workspace'].includes(currentSelectedNode.data.category),
   );
 
   const dynamicCount = useMemo(
-    () => nodes.filter((node) => Boolean((node.data as any).dynamic || (node.data as any).runtimeAppended)).length,
-    [nodes],
+    () => inspectorNodes.filter((node) => Boolean((node.data as any).dynamic || (node.data as any).runtimeAppended)).length,
+    [inspectorNodes],
   );
   const resourceEstimate = useMemo(() => ({
-    cpu: nodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.cpu_num ?? (node.data.resources as any)?.cpu ?? 0), 0),
-    gpuMemoryGiB: nodes.reduce((sum, node) => sum + Number(node.data.resources?.gpu_mem || 0) / 1024, 0),
-    io: nodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.io_num || 0), 0),
-  }), [nodes]);
-  const latestRun = visibleRun || staticRuns[0];
+    cpu: inspectorNodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.cpu_num ?? (node.data.resources as any)?.cpu ?? 0), 0),
+    gpuMemoryGiB: inspectorNodes.reduce((sum, node) => sum + Number(node.data.resources?.gpu_mem || 0) / 1024, 0),
+    io: inspectorNodes.reduce((sum, node) => sum + Number((node.data.resources as any)?.io_num || 0), 0),
+  }), [inspectorNodes]);
+  const latestRun = visibleRun;
 
   useEffect(() => {
     api.getModels()
       .then((result) => setLocalModels(result.models || []))
       .catch(() => setLocalModels([]));
   }, []);
+
+  useEffect(() => {
+    if (isRunMode) {
+      setEditorOpen(false);
+    }
+  }, [isRunMode]);
 
   useEffect(() => {
     if (!visibleRunId || !runtimeTaskId) {
@@ -1387,8 +1282,11 @@ export default function TaskInspector() {
     };
   }, [runtime?.status, runtimeTaskId, visibleRunId]);
 
-  const headerTitle = task?.name || workflowName;
-  const headerState = task?.state || (workflowSaveState === 'saved_workflow' ? 'validated' : 'draft');
+  const visibleWorkflowName = isRunMode ? runWorkflowName(historicalRun) : workflowName;
+  const headerTitle = task?.name || visibleWorkflowName;
+  const headerState = task?.state || (isRunMode
+    ? visibleRun?.status || 'draft'
+    : workflowSaveState === 'saved_workflow' ? 'validated' : 'draft');
   const headerKind = task ? 'Task' : 'Workflow';
   const modeLabel = isRunMode ? 'Run mode' : 'Design mode';
 
@@ -1466,7 +1364,7 @@ export default function TaskInspector() {
               <DefinitionPanel
                 task={task}
                 taskNode={currentSelectedNode}
-                nodes={nodes}
+                nodes={inspectorNodes}
                 readOnly={isSpecReadOnly}
                 onEditCode={canEditCode ? () => setEditorOpen(true) : undefined}
                 onUpdate={updateTaskData}
@@ -1488,18 +1386,18 @@ export default function TaskInspector() {
           </>
         ) : (
           <WorkflowSummaryPanel
-            nodes={nodes}
-            edges={edges}
+            nodes={inspectorNodes}
+            edges={inspectorEdges}
             dynamicCount={dynamicCount}
             resourceEstimate={resourceEstimate}
-            workflowSaveState={workflowSaveState}
-            workflowDraftError={workflowDraftError}
+            workflowSaveState={isRunMode ? 'run_snapshot' : workflowSaveState}
+            workflowDraftError={isRunMode ? null : workflowDraftError}
             latestRun={latestRun}
           />
         )}
         </div>
       </div>
-      {currentSelectedNode && canEditCode && (
+      {!isRunMode && currentSelectedNode && canEditCode && (
         <CustomTaskEditor
           node={currentSelectedNode}
           open={editorOpen}

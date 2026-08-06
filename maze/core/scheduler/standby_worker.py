@@ -100,7 +100,6 @@ class StandbyWorkerPoolManager:
         self,
         pool_sizes: Dict[str, int] | None = None,
         enabled: bool = True,
-        execution_enabled: bool = False,
         actor_factory: Callable[[str, str], Any] | None = None,
         actor_killer: Callable[[Any], None] | None = None,
     ):
@@ -109,7 +108,6 @@ class StandbyWorkerPoolManager:
             for worker_type, count in (pool_sizes or DEFAULT_STANDBY_POOL_SIZES).items()
         }
         self.enabled = enabled
-        self.execution_enabled = execution_enabled
         self.actor_factory = actor_factory or self._start_actor
         self.actor_killer = actor_killer or ray.kill
         self.node_workers: Dict[str, Dict[str, list[Any]]] = {}
@@ -118,13 +116,12 @@ class StandbyWorkerPoolManager:
     @classmethod
     def from_env(cls):
         enabled = _env_flag("MAZE_STANDBY_WORKERS_ENABLED", True)
-        execution_enabled = _env_flag("MAZE_STANDBY_EXECUTION_ENABLED", False)
         sizes = dict(DEFAULT_STANDBY_POOL_SIZES)
         for worker_type in list(sizes):
             value = os.environ.get(f"MAZE_STANDBY_{worker_type.upper()}_WORKERS")
             if value is not None:
                 sizes[worker_type] = max(0, int(value))
-        return cls(pool_sizes=sizes, enabled=enabled, execution_enabled=execution_enabled)
+        return cls(pool_sizes=sizes, enabled=enabled)
 
     def _start_actor(self, node_id: str, worker_type: str):
         return StandbyWorker.options(
@@ -172,7 +169,7 @@ class StandbyWorkerPoolManager:
                     pass
 
     def acquire(self, node_id: str, task_kind: str) -> StandbyWorkerLease | None:
-        if not self.enabled or not self.execution_enabled:
+        if not self.enabled:
             return None
 
         worker_type = (task_kind or "cpu").strip().lower()
@@ -185,11 +182,34 @@ class StandbyWorkerPoolManager:
             return StandbyWorkerLease(node_id=node_id, worker_type=worker_type, actor=actor)
         return None
 
-    def release(self, lease: StandbyWorkerLease | Any | None):
+    def release(self, lease: StandbyWorkerLease | None, *, discard: bool = False):
         if lease is None:
             return
-        actor = getattr(lease, "actor", lease)
+        actor = lease.actor
         self.busy_worker_ids.discard(id(actor))
+
+        if not discard and lease.worker_type != "gpu":
+            return
+
+        workers = self.node_workers.get(lease.node_id, {}).get(lease.worker_type)
+        if workers is None:
+            return
+        try:
+            workers.remove(actor)
+        except ValueError:
+            return
+
+        try:
+            self.actor_killer(actor)
+        except Exception:
+            pass
+
+        target_count = self.pool_sizes.get(lease.worker_type, 0)
+        while self.enabled and len(workers) < target_count:
+            try:
+                workers.append(self.actor_factory(lease.node_id, lease.worker_type))
+            except Exception:
+                break
 
     def _execution_snapshot(self):
         nodes = {}
@@ -204,7 +224,7 @@ class StandbyWorkerPoolManager:
                     "idle": max(0, total - busy),
                 }
         return {
-            "enabled": self.execution_enabled,
+            "enabled": self.enabled,
             "nodes": nodes,
         }
 

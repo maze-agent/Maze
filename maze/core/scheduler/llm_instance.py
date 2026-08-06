@@ -931,9 +931,6 @@ class LLMServerActor:
         self.ready = False
         self.stop_requested = False
 
-    def get_port(self):
-        return self.port
-
     def _get_free_port(self):
         self.port, self._port_reservation_fd = _reserve_llm_port()
         return self.port

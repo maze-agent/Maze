@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Divider, Empty, Input, List, message, Modal, Radio, Select, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Empty, Input, List, message, Modal, Radio, Select, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   DownloadOutlined,
   FolderOpenOutlined,
@@ -36,17 +36,6 @@ function normalizeResources(resources: any = {}) {
     io_num: Math.max(0, Number(resources.io_num ?? 0) || 0),
   };
 }
-
-type SidebarClusterSummary = {
-  totalNodes: number;
-  onlineNodes: number;
-  totalGpus: number;
-  availableGpus: number | null;
-  queuedTasks: number;
-  runningTasks: number;
-  cpuUsagePercent: number | null;
-  memoryUsagePercent: number | null;
-};
 
 type WorkflowNavItem = {
   id: string;
@@ -88,17 +77,6 @@ function formatFileSize(size?: number | null) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function percentUsed(total: number, available: number | null) {
-  if (!Number.isFinite(total) || !total || available === null || !Number.isFinite(available)) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, Math.round(((total - available) / total) * 100)));
-}
-
-function formatPercent(value: number | null | undefined) {
-  return value === null || value === undefined ? '-' : `${value}%`;
 }
 
 function formatGiBFromBytes(value?: number | null) {
@@ -163,9 +141,9 @@ export default function BuiltinTasksSidebar({
     setWorkflowSaveState,
     addNode,
     selectNode,
+    selectedRunId,
     setSelectedRunId,
     reset,
-    isRunning,
     acquireWorkflowOperation,
     releaseWorkflowOperation,
   } = useWorkflowStore();
@@ -180,7 +158,6 @@ export default function BuiltinTasksSidebar({
   });
   const [importingCatalogKey, setImportingCatalogKey] = useState<string | null>(null);
   const [catalogImportType, setCatalogImportType] = useState<'workflows' | 'tasks' | null>(null);
-  const [workspaceWorkflowModalOpen, setWorkspaceWorkflowModalOpen] = useState(false);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [llmSettingsDraft, setLlmSettingsDraft] = useState(DEFAULT_LLM_SETTINGS);
   const [testingLlm, setTestingLlm] = useState(false);
@@ -207,7 +184,6 @@ export default function BuiltinTasksSidebar({
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileMeta[]>([]);
   const [workspaceFilesPath, setWorkspaceFilesPath] = useState('');
   const [workflowSearch, setWorkflowSearch] = useState('');
-  const [clusterSummary, setClusterSummary] = useState<SidebarClusterSummary | null>(null);
   const [selectedWorkflowPath, setSelectedWorkflowPath] = useState<string | null>(null);
   const initializedWorkspaceDirRef = useRef('');
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -220,7 +196,15 @@ export default function BuiltinTasksSidebar({
     && initializedWorkspaceDir === normalizedWorkspaceDir,
   );
   const workflowOperationBusy = Boolean(workflowOperation);
-  const workflowInteractionBlocked = workflowOperationBusy || isRunning;
+  const isRunView = Boolean(selectedRunId);
+
+  const requireDesignInteraction = () => {
+    if (!isRunView) {
+      return true;
+    }
+    message.info('Return to Design to edit workflows');
+    return false;
+  };
 
   const requireWorkspaceInteraction = () => {
     if (workspaceInteractionReady) {
@@ -277,110 +261,13 @@ export default function BuiltinTasksSidebar({
     };
   }, [workspaceDir]);
 
-  useEffect(() => {
-    let canceled = false;
-
-    const loadClusterSummary = async () => {
-      try {
-        const [resources, queues] = await Promise.all([
-          api.getClusterResources(),
-          api.getClusterQueues(),
-        ]);
-        if (canceled) return;
-
-        const clusterNodes = resources.cluster?.nodes || [];
-        const onlineNodes = clusterNodes.filter((node) => node.registered && node.alive);
-        const gpuTotals = clusterNodes.reduce((acc, node) => {
-          const total = Number(node.resources?.gpu?.total_count ?? node.ray_resources?.GPU ?? 0);
-          const available = node.resources?.gpu?.available_count;
-          return {
-            total: acc.total + total,
-            available: available === undefined ? acc.available : acc.available + Number(available || 0),
-            hasAvailable: acc.hasAvailable || available !== undefined,
-          };
-        }, { total: 0, available: 0, hasAvailable: false });
-        const cpuTotals = clusterNodes.reduce((acc, node) => {
-          const total = Number(node.resources?.cpu?.total ?? node.ray_resources?.CPU ?? 0);
-          const available = node.resources?.cpu?.available;
-          return {
-            total: acc.total + total,
-            available: available === undefined ? acc.available : acc.available + Number(available || 0),
-            hasAvailable: acc.hasAvailable || available !== undefined,
-          };
-        }, { total: 0, available: 0, hasAvailable: false });
-        const memoryTotals = clusterNodes.reduce((acc, node) => {
-          const total = Number(node.resources?.cpu_mem?.total ?? node.ray_resources?.memory ?? 0);
-          const available = node.resources?.cpu_mem?.available;
-          return {
-            total: acc.total + total,
-            available: available === undefined ? acc.available : acc.available + Number(available || 0),
-            hasAvailable: acc.hasAvailable || available !== undefined,
-          };
-        }, { total: 0, available: 0, hasAvailable: false });
-
-        setClusterSummary({
-          totalNodes: clusterNodes.length,
-          onlineNodes: onlineNodes.length,
-          totalGpus: gpuTotals.total,
-          availableGpus: gpuTotals.hasAvailable ? gpuTotals.available : null,
-          queuedTasks: Number(queues.queues?.counts?.total_queued || 0),
-          runningTasks: Number(queues.queues?.counts?.running || 0),
-          cpuUsagePercent: percentUsed(cpuTotals.total, cpuTotals.hasAvailable ? cpuTotals.available : null),
-          memoryUsagePercent: percentUsed(memoryTotals.total, memoryTotals.hasAvailable ? memoryTotals.available : null),
-        });
-      } catch (error) {
-        if (!canceled) {
-          console.debug('Failed to refresh sidebar cluster summary:', error);
-          setClusterSummary(null);
-        }
-      }
-    };
-
-    loadClusterSummary();
-    const timer = window.setInterval(loadClusterSummary, 5000);
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
   const inputFiles = workspaceFiles.filter((file) => file.type === 'file').slice(0, 5);
-  const clusterStatus = clusterSummary
-    ? clusterSummary.runningTasks > 0
-      ? 'Running'
-      : clusterSummary.onlineNodes > 0
-        ? 'Ready'
-        : 'Offline'
-    : 'Unknown';
-  const taskLibrary = useMemo(() => {
-    const counts = workspaceTasks.reduce((acc, task) => {
-      const label = `${task.displayName || task.name} ${task.description || ''} ${task.relativePath}`.toLowerCase();
-      const resources = task.resources;
-      if (resources?.gpu_mem || label.includes('gpu') || label.includes('cuda') || label.includes('llm') || label.includes('model') || label.includes('inference')) {
-        acc.gpu += 1;
-      } else if (label.includes('file') || label.includes('io') || label.includes('input') || label.includes('artifact')) {
-        acc.io += 1;
-      } else if (label.includes('util') || label.includes('health') || label.includes('smoke')) {
-        acc.utility += 1;
-      } else {
-        acc.cpu += 1;
-      }
-      return acc;
-    }, { cpu: 0, gpu: 0, io: 0, utility: 0 });
-
-    return [
-      { id: 'cpu', name: 'CPU Operators', count: counts.cpu },
-      { id: 'gpu', name: 'GPU Operators', count: counts.gpu },
-      { id: 'io', name: 'I/O Operators', count: counts.io },
-    ];
-  }, [workspaceTasks]);
 
   const handleNewWorkflow = () => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning) {
-      message.warning('Workflow is running, please create a new workflow after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation('Creating new workflow');
@@ -422,11 +309,10 @@ export default function BuiltinTasksSidebar({
   };
 
   const importCatalogItem = async (item: SystemCatalogItem) => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning && item.type === 'workflows') {
-      message.warning('Workflow is running, please import after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation(`Importing ${item.type === 'workflows' ? 'workflow' : 'task'}`);
@@ -586,8 +472,7 @@ export default function BuiltinTasksSidebar({
   };
 
   const handleChangeWorkspace = async (dir: string) => {
-    if (isRunning) {
-      message.warning('Workflow is running, please change workspace after it finishes');
+    if (!requireDesignInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation('Changing workspace');
@@ -804,11 +689,10 @@ export default function BuiltinTasksSidebar({
   });
 
   const handleSaveWorkspaceWorkflow = async () => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning) {
-      message.warning('Workflow is running, please save after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     if (nodes.length === 0) {
@@ -862,11 +746,10 @@ export default function BuiltinTasksSidebar({
   };
 
   const handleLoadWorkspaceWorkflow = async (item: WorkspaceWorkflowMeta) => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning) {
-      message.warning('Workflow is running, please load another workflow after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation('Loading workspace workflow');
@@ -907,7 +790,6 @@ export default function BuiltinTasksSidebar({
       const taskImportText = importedCount > 0 || reusedCount > 0 || remappedCount > 0
         ? ` Tasks added: ${importedCount}, reused: ${reusedCount}, remapped: ${remappedCount}.`
         : '';
-      setWorkspaceWorkflowModalOpen(false);
       message.success(`Workflow loaded: ${loaded.workflow.name}.${taskImportText}`);
     } catch (error: any) {
       console.error('Failed to load workspace workflow:', error);
@@ -918,11 +800,10 @@ export default function BuiltinTasksSidebar({
   };
 
   const handleLoadSystemWorkflow = async (item: SystemCatalogItem) => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning) {
-      message.warning('Workflow is running, please load another workflow after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation('Loading system workflow');
@@ -956,8 +837,6 @@ export default function BuiltinTasksSidebar({
         savedAt: new Date().toISOString(),
         error: null,
       });
-      setWorkspaceWorkflowModalOpen(false);
-
       const importedCount = loaded.importedTaskDefinitions?.imported.length || 0;
       const reusedCount = loaded.importedTaskDefinitions?.skipped.filter((entry) => entry.reason === 'exists-same').length || 0;
       const remappedCount = loaded.importedTaskDefinitions?.remapped?.length || 0;
@@ -980,6 +859,9 @@ export default function BuiltinTasksSidebar({
   };
 
   const openNewWorkspaceTaskModal = () => {
+    if (!requireDesignInteraction()) {
+      return;
+    }
     const stamp = Date.now();
     const functionName = `workspace_task_${stamp}`;
     setNewTaskMode('manual');
@@ -1008,11 +890,10 @@ export default function BuiltinTasksSidebar({
   };
 
   const saveNewWorkspaceTask = async (code: string, relativePath: string) => {
-    if (!requireWorkspaceInteraction()) {
+    if (!requireDesignInteraction()) {
       return;
     }
-    if (isRunning) {
-      message.warning('Workflow is running, please create a task after it finishes');
+    if (!requireWorkspaceInteraction()) {
       return;
     }
     const operationToken = beginWorkflowOperation('Creating workspace task');
@@ -1175,13 +1056,13 @@ export default function BuiltinTasksSidebar({
 
   const visibleWorkflowItems = useMemo(() => {
     const query = workflowSearch.trim().toLowerCase();
-    if (!query) return workflowItems.slice(0, 4);
+    if (!query) return workflowItems;
     return workflowItems.filter((item) => (
       item.name.toLowerCase().includes(query)
       || item.meta.toLowerCase().includes(query)
       || item.status.toLowerCase().includes(query)
       || item.note?.toLowerCase().includes(query)
-    )).slice(0, 4);
+    ));
   }, [workflowItems, workflowSearch]);
 
   const visibleSystemWorkflowItems = useMemo(() => {
@@ -1193,8 +1074,7 @@ export default function BuiltinTasksSidebar({
         return [item.name, item.description, ...(item.tags || [])]
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(query));
-      })
-      .slice(0, 4);
+      });
   }, [catalogItems.workflows, workflowSearch]);
 
   const visibleInputs = inputFiles.length > 0
@@ -1246,7 +1126,7 @@ export default function BuiltinTasksSidebar({
                           size="small"
                           icon={<DownloadOutlined />}
                           loading={importingCatalogKey === key}
-                          disabled={!workspaceInteractionReady || workflowOperationBusy || (isRunning && item.type === 'workflows')}
+                          disabled={isRunView || !workspaceInteractionReady || workflowOperationBusy}
                           onClick={() => importCatalogItem(item)}
                         />
                       </Tooltip>,
@@ -1291,125 +1171,6 @@ export default function BuiltinTasksSidebar({
     );
   };
 
-  const renderWorkspaceWorkflowList = () => {
-    const systemWorkflows = importableCatalogItems.workflows || [];
-
-    return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <div>
-        <Space align="center" size={6} style={{ marginBottom: 8 }}>
-          <Text strong>System Workflows</Text>
-          <Tag color="geekblue" style={{ margin: 0 }}>template</Tag>
-        </Space>
-        {systemWorkflows.length === 0 ? (
-          <Empty description="No system workflows" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        ) : (
-          <List
-            size="small"
-            loading={catalogLoading}
-            dataSource={systemWorkflows}
-            renderItem={(item) => {
-              const key = `${item.type}:${item.id}`;
-
-              return (
-                <List.Item
-                  className="workspace-file-row"
-                  actions={[
-                    <Button
-                      key="open"
-                      type="primary"
-                      size="small"
-                      loading={importingCatalogKey === key}
-                      disabled={!workspaceInteractionReady || workflowLoading || workflowInteractionBlocked}
-                      onClick={() => void handleLoadSystemWorkflow(item)}
-                    >
-                      Open
-                    </Button>,
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={<AppstoreAddOutlined style={{ color: '#722ed1' }} />}
-                    title={<Text strong>{item.name.replace(/\.json$/i, '')}</Text>}
-                    description={(
-                      <Space direction="vertical" size={4}>
-                        {item.description && (
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            {item.description}
-                          </Text>
-                        )}
-                        <Space size={6} wrap>
-                          <Tag color="geekblue" style={{ margin: 0 }}>system</Tag>
-                          {(item.tags || []).map((tag) => (
-                            <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
-                          ))}
-                          {item.updatedAt && (
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              {formatUpdatedAt(item.updatedAt)}
-                            </Text>
-                          )}
-                        </Space>
-                      </Space>
-                    )}
-                  />
-                </List.Item>
-              );
-            }}
-          />
-        )}
-      </div>
-      <Divider style={{ margin: '4px 0' }} />
-      <div>
-        <Space align="center" size={6} style={{ marginBottom: 8 }}>
-          <Text strong>Workspace Workflows</Text>
-          <Tag color="blue" style={{ margin: 0 }}>saved</Tag>
-        </Space>
-        {workspaceWorkflows.length === 0 ? (
-          <Empty description="No saved workflows in this workspace" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        ) : (
-          <List
-            size="small"
-            loading={workflowLoading}
-            dataSource={workspaceWorkflows}
-            renderItem={(item) => (
-              <List.Item
-                className="workspace-file-row"
-                actions={[
-                  <Button
-                    key="open"
-                    type="primary"
-                    size="small"
-                    disabled={!workspaceInteractionReady || workflowLoading || workflowInteractionBlocked}
-                    onClick={() => void handleLoadWorkspaceWorkflow(item)}
-                  >
-                    Open
-                  </Button>,
-                ]}
-              >
-                <List.Item.Meta
-                  avatar={<AppstoreAddOutlined style={{ color: '#1677ff' }} />}
-                  title={<Text strong>{item.name}</Text>}
-                  description={(
-                    <Space size={6} wrap>
-                      <Tag style={{ margin: 0 }}>{item.nodeCount} tasks</Tag>
-                      <Tag style={{ margin: 0 }}>{item.edgeCount} edges</Tag>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {item.relativePath}
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {formatUpdatedAt(item.updatedAt)}
-                      </Text>
-                    </Space>
-                  )}
-                />
-              </List.Item>
-            )}
-          />
-        )}
-      </div>
-    </Space>
-    );
-  };
-
   const openCatalogImport = (type: 'workflows' | 'tasks') => {
     setCatalogImportType(type);
     void loadSystemCatalog(false);
@@ -1420,23 +1181,6 @@ export default function BuiltinTasksSidebar({
       return;
     }
     void loadWorkspaceWorkflows(workspaceInput || workspaceDir, showSuccess).catch(() => undefined);
-  };
-
-  const openWorkflowLibrary = () => {
-    if (!requireWorkspaceInteraction()) {
-      return;
-    }
-    setWorkspaceWorkflowModalOpen(true);
-    void loadWorkspaceWorkflows(workspaceInput || workspaceDir).catch(() => undefined);
-    void loadSystemCatalog(false);
-  };
-
-  const refreshWorkflowLibrary = () => {
-    if (!requireWorkspaceInteraction()) {
-      return;
-    }
-    void loadWorkspaceWorkflows(workspaceInput || workspaceDir, true).catch(() => undefined);
-    void loadSystemCatalog(true);
   };
 
   const catalogImportTitle = catalogImportType
@@ -1496,7 +1240,7 @@ export default function BuiltinTasksSidebar({
               type="primary"
               icon={<PlusOutlined />}
               onClick={handleNewWorkflow}
-              disabled={!workspaceInteractionReady || workflowInteractionBlocked}
+              disabled={isRunView || !workspaceInteractionReady || workflowOperationBusy}
               className="workbench-sidebar-new-workflow"
             >
               New Workflow
@@ -1508,7 +1252,7 @@ export default function BuiltinTasksSidebar({
                 icon={<SettingOutlined />}
                 aria-label="Advanced workspace settings"
                 onClick={openAdvancedSettings}
-                disabled={workflowInteractionBlocked}
+                disabled={workflowOperationBusy}
               />
             </Tooltip>
             {toggleButton}
@@ -1559,7 +1303,7 @@ export default function BuiltinTasksSidebar({
                   ? 'loading'
                   : !workspaceInteractionReady
                     ? 'waiting'
-                    : workflowLoading || workflowInteractionBlocked
+                    : workflowLoading || workflowOperationBusy
                       ? 'busy'
                       : 'template';
                 return (
@@ -1567,7 +1311,7 @@ export default function BuiltinTasksSidebar({
                     key={key}
                     type="button"
                     className="workbench-nav-row"
-                    disabled={!workspaceInteractionReady || workflowLoading || workflowInteractionBlocked}
+                    disabled={isRunView || !workspaceInteractionReady || workflowLoading || workflowOperationBusy}
                     aria-busy={loading}
                     title={!workspaceInteractionReady ? 'Workspace is still loading' : undefined}
                     onClick={() => void handleLoadSystemWorkflow(item)}
@@ -1620,7 +1364,7 @@ export default function BuiltinTasksSidebar({
                     aria-label="Save current workflow"
                     onClick={handleSaveWorkspaceWorkflow}
                     loading={savingWorkflow}
-                    disabled={!workspaceInteractionReady || nodes.length === 0 || workflowInteractionBlocked}
+                    disabled={isRunView || !workspaceInteractionReady || nodes.length === 0 || workflowOperationBusy}
                   />
                 </Tooltip>
               </div>
@@ -1631,7 +1375,7 @@ export default function BuiltinTasksSidebar({
                   key={item.id}
                   type="button"
                   className={`workbench-nav-row${item.selected ? ' is-selected' : ''}${item.isCurrentDraft ? ' is-current-draft' : ''}`}
-                  disabled={!item.source || !workspaceInteractionReady || workflowLoading || workflowInteractionBlocked}
+                  disabled={isRunView || !item.source || !workspaceInteractionReady || workflowLoading || workflowOperationBusy}
                   onClick={() => {
                     if (item.source) {
                       void handleLoadWorkspaceWorkflow(item.source);
@@ -1654,14 +1398,6 @@ export default function BuiltinTasksSidebar({
 	                </div>
 	              )}
 	            </div>
-            <button
-              type="button"
-              className="workbench-nav-link"
-              disabled={!workspaceInteractionReady || workflowLoading}
-              onClick={openWorkflowLibrary}
-            >
-              Open workflow library
-            </button>
           </section>
 
           <section className="workbench-nav-section">
@@ -1688,23 +1424,21 @@ export default function BuiltinTasksSidebar({
                     aria-label="New workspace task"
                     onClick={openNewWorkspaceTaskModal}
                     loading={creatingTask}
+                    disabled={isRunView || !workspaceInteractionReady || workflowOperationBusy}
                   />
                 </Tooltip>
               </div>
             </div>
             <div className="workbench-nav-list">
-              {taskLibrary.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`workbench-nav-row workbench-task-kind-${item.id}`}
-                  onClick={() => openCatalogImport('tasks')}
-                >
-                  <span className="workbench-task-kind-icon" />
-                  <span className="workbench-nav-row-label">{item.name}</span>
-                  <span className="workbench-nav-row-meta">{item.count}</span>
-                </button>
-              ))}
+              <button
+                type="button"
+                className="workbench-nav-row"
+                disabled={isRunView || !workspaceInteractionReady || workflowOperationBusy}
+                onClick={() => openCatalogImport('tasks')}
+              >
+                <AppstoreAddOutlined />
+                <span className="workbench-nav-row-label">Import tasks</span>
+              </button>
             </div>
           </section>
 
@@ -1760,34 +1494,6 @@ export default function BuiltinTasksSidebar({
               Open run history
             </button>
           </section>
-
-          <section className="workbench-nav-section">
-            <div className="workbench-nav-section-header">
-              <span>CLUSTER SUMMARY</span>
-              <span className={`workbench-run-status ${statusClassName(clusterStatus)}`}>{clusterStatus}</span>
-	            </div>
-	            <div className="workbench-cluster-summary">
-	              <span>Status</span>
-	              <strong>{clusterSummary ? `${clusterSummary.onlineNodes}/${clusterSummary.totalNodes} online` : '-'}</strong>
-	              <span>Queued</span>
-	              <strong>{clusterSummary ? clusterSummary.queuedTasks : '-'}</strong>
-	              <span>Running</span>
-	              <strong>{clusterSummary ? clusterSummary.runningTasks : '-'}</strong>
-	              <span>GPUs</span>
-	              <strong>
-	                {clusterSummary
-	                  ? clusterSummary.availableGpus === null
-	                    ? `${clusterSummary.totalGpus} total`
-	                    : `${clusterSummary.availableGpus}/${clusterSummary.totalGpus} available`
-	                  : '-'}
-	              </strong>
-	              <span>CPU Usage</span>
-	              <strong>{formatPercent(clusterSummary?.cpuUsagePercent)}</strong>
-	              <span>Memory Usage</span>
-	              <strong>{formatPercent(clusterSummary?.memoryUsagePercent)}</strong>
-	            </div>
-	          </section>
-
         </div>
       )}
       </div>
@@ -1826,7 +1532,7 @@ export default function BuiltinTasksSidebar({
               onSearch={handleChangeWorkspace}
               enterButton="Change"
               loading={workspaceLoading || workflowLoading}
-              disabled={workflowInteractionBlocked}
+              disabled={isRunView || workflowOperationBusy}
               placeholder="/root/data/Maze/workspaces/default"
             />
             <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
@@ -1971,7 +1677,7 @@ export default function BuiltinTasksSidebar({
             type="primary"
             icon={<PlusOutlined />}
             loading={creatingTask}
-            disabled={workflowInteractionBlocked}
+            disabled={isRunView || workflowOperationBusy}
             onClick={handleCreateManualWorkspaceTask}
           >
             Create
@@ -1980,7 +1686,13 @@ export default function BuiltinTasksSidebar({
           <Button key="cancel" onClick={closeNewWorkspaceTaskModal} disabled={creatingTask || generatingTask}>
             Cancel
           </Button>,
-          <Button key="generate" icon={<ThunderboltOutlined />} loading={generatingTask} onClick={handleGenerateWorkspaceTask}>
+          <Button
+            key="generate"
+            icon={<ThunderboltOutlined />}
+            loading={generatingTask}
+            disabled={isRunView}
+            onClick={handleGenerateWorkspaceTask}
+          >
             Generate
           </Button>,
           <Button
@@ -1988,7 +1700,7 @@ export default function BuiltinTasksSidebar({
             type="primary"
             icon={<SaveOutlined />}
             loading={creatingTask}
-            disabled={workflowInteractionBlocked}
+            disabled={isRunView || workflowOperationBusy}
             onClick={handleSaveGeneratedWorkspaceTask}
           >
             Save Task
@@ -2100,29 +1812,6 @@ export default function BuiltinTasksSidebar({
         ]}
       >
         {catalogImportType && renderCatalogList(catalogImportType)}
-      </Modal>
-
-      <Modal
-        title="Workflow Library"
-        open={workspaceWorkflowModalOpen}
-        onCancel={() => setWorkspaceWorkflowModalOpen(false)}
-        width={760}
-        footer={[
-          <Button key="close" onClick={() => setWorkspaceWorkflowModalOpen(false)}>
-            Close
-          </Button>,
-          <Button
-            key="refresh"
-            icon={<ReloadOutlined />}
-            onClick={refreshWorkflowLibrary}
-            loading={workflowLoading || catalogLoading}
-            disabled={!workspaceInteractionReady}
-          >
-            Refresh Workflows
-          </Button>,
-        ]}
-      >
-        {renderWorkspaceWorkflowList()}
       </Modal>
     </>
   );

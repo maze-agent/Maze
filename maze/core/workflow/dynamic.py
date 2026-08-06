@@ -320,48 +320,6 @@ class DynamicRun:
             self.task_fault_tolerance[task_id] = to_json_safe(fault_tolerance)
             self._touch()
 
-    def record_invocation_repair_observation(
-        self,
-        task_id: str,
-        *,
-        error_type: str,
-        message: str,
-        repair_action: Dict[str, Any] | None = None,
-        retry: Dict[str, Any] | None = None,
-        outcome: Dict[str, Any] | None = None,
-    ):
-        if not task_id:
-            return
-        trace = self.task_fault_tolerance.setdefault(task_id, _default_fault_tolerance())
-        reason = _invocation_fault_reason(error_type, message)
-        trace["status"] = "repairing"
-        trace.setdefault("attempts", []).append(to_json_safe({
-            "attempt": None,
-            "failure": {
-                "error_type": "invocation_error",
-                "message": message,
-                "details": {"agent_error_type": error_type},
-            },
-            "diagnosis": {
-                "category": "invocation",
-                "reason": reason,
-                "recoverable": True,
-            },
-            "repair_action": repair_action or {
-                "type": "invocation_correction",
-                "applied": True,
-                "strategy": "feedback_observation",
-            },
-            "retry": retry or {
-                "scheduled": True,
-                "kind": "next_llm_decision",
-            },
-            "outcome": outcome or {
-                "status": "feedback_recorded",
-            },
-        }))
-        self._touch()
-
     def mark_retrying(
         self,
         task_id: str,
@@ -629,19 +587,6 @@ def _default_fault_tolerance() -> Dict[str, Any]:
         "status": "idle",
         "attempts": [],
     }
-
-
-def _invocation_fault_reason(error_type: str | None, message: str | None) -> str:
-    text = f"{error_type or ''} {message or ''}".lower()
-    if "missing" in text and ("arg" in text or "tool" in text):
-        return "tool_invocation_args_missing"
-    if "schema" in text or "validation" in text:
-        return "schema_mismatch"
-    if "json" in text or "malformed" in text or "parse" in text:
-        return "json_parse_failed"
-    if "token" in text or "length" in text:
-        return "max_tokens_insufficient"
-    return "invocation_error"
 
 
 def _resource_number(value: Any, default: Any = 0) -> int | float:

@@ -32,10 +32,6 @@ def _int_value(value: Any, default: int = 0) -> int:
         return default
 
 
-def _positive_int(value: Any, default: int = 0) -> int:
-    return max(0, _int_value(value, default))
-
-
 def normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:
     """Normalize public Maze resources to cpu_num/gpu_mem/io_num."""
     raw = dict(resources or {})
@@ -159,15 +155,6 @@ def require_schedulable_resources(
         raise ResourceSpecError(
             "gpu tasks must declare resources.gpu_mem or use a model/resource-history estimate before scheduling"
         )
-
-
-def infer_task_kind(
-    task_kind: Any = None,
-    *,
-    resources: Dict[str, Any] | None = None,
-    model_anchor: Dict[str, Any] | None = None,
-) -> str:
-    return normalize_task_kind(task_kind, resources=resources, model_anchor=model_anchor)
 
 
 def to_internal_scheduler_resources(

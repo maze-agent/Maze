@@ -14,7 +14,6 @@ import ReactFlow, {
 import { message } from 'antd';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type {
-  UnifiedRunSnapshot,
   UnifiedRunTaskSnapshot,
   WorkspaceTaskMeta,
   WorkflowEdge,
@@ -22,6 +21,11 @@ import type {
 } from '@/types/workflow';
 import CustomNode from './CustomNode';
 import { bindWorkflowConnection, unbindWorkflowEdges } from '@/utils/workflowBindings';
+import {
+  latestRunForWorkflow,
+  runMatchesWorkflow,
+  runWorkflowGraph,
+} from '@/utils/runSnapshot';
 
 const nodeTypes = {
   taskNode: CustomNode,
@@ -107,89 +111,69 @@ function duplicateNode(node: WorkflowNode, existingNodes: WorkflowNode[], pasteI
   };
 }
 
-function runTaskResources(task: UnifiedRunTaskSnapshot) {
-  const resources = task.resources || {};
-  return {
-    cpu_num: Number((resources as any).cpu_num ?? (resources as any).cpu ?? 1),
-    gpu_mem: Number((resources as any).gpu_mem || 0),
-    io_num: Number((resources as any).io_num || 0),
-  };
+function hasSameNodePositions(current: WorkflowNode[], next: WorkflowNode[]) {
+  if (current.length !== next.length) return false;
+  const currentById = new Map(current.map((node) => [node.id, node]));
+  return next.every((node) => {
+    const existing = currentById.get(node.id);
+    return existing
+      && existing.position.x === node.position.x
+      && existing.position.y === node.position.y;
+  });
 }
 
-function nodeFromRunTask(
-  taskId: string,
-  task: UnifiedRunTaskSnapshot,
-  index: number,
-  currentNodes: WorkflowNode[],
-): WorkflowNode {
-  const existing = currentNodes.find((node) => node.id === taskId);
-  return {
-    id: taskId,
-    type: 'taskNode',
-    position: existing?.position || {
-      x: 160 + (index % 3) * 280,
-      y: 120 + Math.floor(index / 3) * 180,
-    },
-    data: {
-      category: (existing?.data.category || 'builtin') as WorkflowNode['data']['category'],
-      nodeType: 'task',
-      label: task.task_name || existing?.data.label || taskId,
-      taskRef: existing?.data.taskRef,
-      customCode: existing?.data.customCode,
-      workspaceDir: existing?.data.workspaceDir,
-      taskPath: existing?.data.taskPath,
-      functionName: existing?.data.functionName,
-      inputs: existing?.data.inputs || [],
-      outputs: existing?.data.outputs || [],
-      task_kind: (task.task_kind || existing?.data.task_kind || 'cpu') as any,
-      resources: existing?.data.resources || runTaskResources(task),
-      configured: true,
-      runState: task,
-      runStatus: task.status,
-    } as RuntimeNodeData,
-  };
-}
-
-function runViewNodes(run: UnifiedRunSnapshot, currentNodes: WorkflowNode[]) {
-  const taskNodes = run.task_nodes || {};
-  const graphNodeIds = run.graph?.nodes || [];
-  const ids = graphNodeIds.length > 0 ? graphNodeIds : Object.keys(taskNodes);
-  return ids.map((taskId, index) => (
-    nodeFromRunTask(taskId, taskNodes[taskId] || {
-      task_id: taskId,
-      status: 'pending',
-    }, index, currentNodes)
-  ));
-}
-
-function runViewEdges(run: UnifiedRunSnapshot): WorkflowEdge[] {
-  return (run.graph?.edges || []).map((edge, index) => ({
-    id: `run-edge-${edge.source}-${edge.target}-${index}`,
-    source: edge.source,
-    target: edge.target,
-  }));
+function hasSameEdges(current: WorkflowEdge[], next: WorkflowEdge[]) {
+  if (current.length !== next.length) return false;
+  const currentById = new Map(current.map((edge) => [edge.id, edge]));
+  return next.every((edge) => {
+    const existing = currentById.get(edge.id);
+    return existing
+      && existing.source === edge.source
+      && existing.target === edge.target
+      && existing.sourceHandle === edge.sourceHandle
+      && existing.targetHandle === edge.targetHandle;
+  });
 }
 
 export default function WorkflowCanvas() {
-  const {
-    nodes,
-    edges,
-    setNodes,
-    setEdges,
-    addNode,
-    deleteNode,
-    selectNode,
-    activeRunId,
-    selectedRunId,
-    staticRuns,
-  } = useWorkflowStore();
-  
-  const visibleRunId = selectedRunId || activeRunId;
-  const visibleRun = visibleRunId ? staticRuns.find((run) => run.run_id === visibleRunId) : null;
-  const isRunView = Boolean(selectedRunId && visibleRun);
+  const workflowId = useWorkflowStore((state) => state.workflowId);
+  const workspaceId = useWorkflowStore((state) => state.workspaceId);
+  const workspaceDir = useWorkflowStore((state) => state.workspaceDir);
+  const workflowPath = useWorkflowStore((state) => state.currentWorkspaceWorkflowPath);
+  const nodes = useWorkflowStore((state) => state.nodes);
+  const edges = useWorkflowStore((state) => state.edges);
+  const setNodes = useWorkflowStore((state) => state.setNodes);
+  const setEdges = useWorkflowStore((state) => state.setEdges);
+  const addNode = useWorkflowStore((state) => state.addNode);
+  const deleteNode = useWorkflowStore((state) => state.deleteNode);
+  const selectNode = useWorkflowStore((state) => state.selectNode);
+  const selectedRunId = useWorkflowStore((state) => state.selectedRunId);
+  const setSelectedRunTaskId = useWorkflowStore((state) => state.setSelectedRunTaskId);
+  const staticRuns = useWorkflowStore((state) => state.staticRuns);
+
+  const identity = React.useMemo(() => ({
+    workflowId,
+    workflowPath,
+    workspaceId,
+    workspaceDir,
+  }), [workflowId, workflowPath, workspaceDir, workspaceId]);
+  const selectedRun = selectedRunId
+    ? staticRuns.find((run) => run.run_id === selectedRunId) || null
+    : null;
+  const designRun = React.useMemo(
+    () => latestRunForWorkflow(staticRuns, identity),
+    [identity, staticRuns],
+  );
+  const isRunView = Boolean(selectedRunId);
+  const visibleRun = isRunView ? selectedRun : designRun;
+  const historicalGraph = React.useMemo(() => {
+    if (!selectedRun) return { nodes: [], edges: [] };
+    const positionNodes = runMatchesWorkflow(selectedRun, identity) ? nodes : [];
+    return runWorkflowGraph(selectedRun, positionNodes);
+  }, [identity, nodes, selectedRun]);
   const nodesWithRunState = React.useMemo(() => (
-    isRunView && visibleRun
-      ? runViewNodes(visibleRun, nodes)
+    isRunView
+      ? historicalGraph.nodes
       : nodes.map((node) => ({
         ...node,
         data: {
@@ -198,88 +182,91 @@ export default function WorkflowCanvas() {
           runStatus: visibleRun?.task_nodes?.[node.id]?.status || null,
         },
       }))
-  ), [isRunView, nodes, visibleRun]);
+  ), [historicalGraph.nodes, isRunView, nodes, visibleRun]);
   const visibleEdges = React.useMemo(() => (
-    isRunView && visibleRun ? runViewEdges(visibleRun) : edges
-  ), [edges, isRunView, visibleRun]);
+    isRunView ? historicalGraph.edges : edges
+  ), [edges, historicalGraph.edges, isRunView]);
 
-  const [reactFlowNodes, setReactFlowNodes, onNodesChange] = useNodesState(nodesWithRunState);
-  const [reactFlowEdges, setReactFlowEdges, onEdgesChange] = useEdgesState(visibleEdges);
+  const [reactFlowNodes, setReactFlowNodes, applyNodesChange] = useNodesState(nodesWithRunState);
+  const [reactFlowEdges, setReactFlowEdges, applyEdgesChange] = useEdgesState(visibleEdges);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = React.useState<ReactFlowInstance | null>(null);
   const copiedNodeRef = useRef<WorkflowNode | null>(null);
   const pasteIndexRef = useRef(1);
-
-  const lastRenderedNodesRef = useRef<string>('');
-  const lastRenderedEdgesRef = useRef<string>('');
   
   useEffect(() => {
-    const nodesStr = JSON.stringify(nodesWithRunState);
-    if (nodesStr !== lastRenderedNodesRef.current) {
-      setReactFlowNodes(nodesWithRunState);
-      lastRenderedNodesRef.current = nodesStr;
-    }
+    setReactFlowNodes(nodesWithRunState);
   }, [nodesWithRunState, setReactFlowNodes]);
 
   useEffect(() => {
-    const edgesStr = JSON.stringify(visibleEdges);
-    if (edgesStr !== lastRenderedEdgesRef.current) {
-      setReactFlowEdges(visibleEdges);
-      lastRenderedEdgesRef.current = edgesStr;
-    }
+    setReactFlowEdges(visibleEdges);
   }, [setReactFlowEdges, visibleEdges]);
+
+  const onNodesChange = useCallback((changes: Parameters<typeof applyNodesChange>[0]) => {
+    const allowedChanges = isRunView
+      ? changes.filter((change) => change.type === 'select' || change.type === 'dimensions')
+      : changes;
+    if (allowedChanges.length > 0) {
+      applyNodesChange(allowedChanges);
+    }
+  }, [applyNodesChange, isRunView]);
+
+  const onEdgesChange = useCallback((changes: Parameters<typeof applyEdgesChange>[0]) => {
+    const allowedChanges = isRunView
+      ? changes.filter((change) => change.type === 'select')
+      : changes;
+    if (allowedChanges.length > 0) {
+      applyEdgesChange(allowedChanges);
+    }
+  }, [applyEdgesChange, isRunView]);
 
   useEffect(() => {
     if (!reactFlowInstance || nodesWithRunState.length === 0) return;
     window.setTimeout(() => {
       reactFlowInstance.fitView({ padding: 0.25, duration: 200 });
     }, 0);
-  }, [nodesWithRunState.length, reactFlowInstance, visibleRunId]);
+  }, [nodesWithRunState.length, reactFlowInstance, selectedRunId]);
 
   useEffect(() => {
     if (isRunView) return;
-    const normalizedNodes = reactFlowNodes.map(rfNode => {
-      const storeNode = nodes.find(n => n.id === rfNode.id);
-      if (storeNode) {
+    const timer = window.setTimeout(() => {
+      const current = useWorkflowStore.getState();
+      const currentNodesById = new Map(current.nodes.map((node) => [node.id, node]));
+      const normalizedNodes = reactFlowNodes.map((rfNode) => {
+        const storeNode = currentNodesById.get(rfNode.id);
+        if (storeNode) {
+          return {
+            ...storeNode,
+            position: rfNode.position,
+          };
+        }
+
+        const { runState, runStatus, ...data } = (rfNode.data || {}) as RuntimeNodeData;
         return {
-          ...storeNode,
-          position: rfNode.position
-        };
-      }
+          id: rfNode.id,
+          type: 'taskNode',
+          position: rfNode.position,
+          data,
+        } as WorkflowNode;
+      });
+      const normalizedEdges = reactFlowEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle || undefined,
+        targetHandle: edge.targetHandle || undefined,
+      })) as WorkflowEdge[];
 
-      const { runState, runStatus, ...data } = (rfNode.data || {}) as RuntimeNodeData;
-      return {
-        ...rfNode,
-        data,
-      } as WorkflowNode;
-    }) as WorkflowNode[];
-    const normalizedEdges = reactFlowEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      sourceHandle: edge.sourceHandle || undefined,
-      targetHandle: edge.targetHandle || undefined,
-    })) as WorkflowEdge[];
-    const normalizedNodesStr = JSON.stringify(normalizedNodes);
-    const normalizedEdgesStr = JSON.stringify(normalizedEdges);
-
-    if (normalizedNodesStr === JSON.stringify(nodes) && normalizedEdgesStr === JSON.stringify(edges)) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      if (normalizedNodesStr !== JSON.stringify(nodes)) {
+      if (!hasSameNodePositions(current.nodes, normalizedNodes)) {
         setNodes(normalizedNodes);
-        lastRenderedNodesRef.current = normalizedNodesStr;
       }
-      if (normalizedEdgesStr !== JSON.stringify(edges)) {
+      if (!hasSameEdges(current.edges, normalizedEdges)) {
         setEdges(normalizedEdges);
-        lastRenderedEdgesRef.current = normalizedEdgesStr;
       }
     }, 500);
 
-    return () => clearTimeout(timer);
-  }, [isRunView, reactFlowNodes, reactFlowEdges, setNodes, setEdges, nodes, edges]);
+    return () => window.clearTimeout(timer);
+  }, [isRunView, reactFlowNodes, reactFlowEdges, setNodes, setEdges]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => {
@@ -310,10 +297,14 @@ export default function WorkflowCanvas() {
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, clickedNode: any) => {
-      const latestNode = nodes.find(n => n.id === clickedNode.id) || clickedNode;
+      if (isRunView) {
+        setSelectedRunTaskId(clickedNode.id);
+        return;
+      }
+      const latestNode = nodes.find((node) => node.id === clickedNode.id) || clickedNode;
       selectNode(latestNode);
     },
-    [selectNode, nodes]
+    [isRunView, nodes, selectNode, setSelectedRunTaskId]
   );
 
   const onNodesDelete = useCallback(
@@ -467,7 +458,7 @@ export default function WorkflowCanvas() {
         onInit={setReactFlowInstance}
         onDrop={onDrop}
         onDragOver={onDragOver}
-        deleteKeyCode={['Backspace', 'Delete']}
+        deleteKeyCode={isRunView ? null : ['Backspace', 'Delete']}
         nodesDraggable={!isRunView}
         nodesConnectable={!isRunView}
         elementsSelectable

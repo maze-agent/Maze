@@ -7,12 +7,12 @@ from typing import Any,List,Dict
 from maze.core.scheduler.dag_context import DAGContextManager
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
-from maze.core.scheduler.runtime import SelectedNode
 from maze.core.local_models import scan_local_model_refs
-from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 from maze.utils.utils import collect_gpu_info
 
 logger = logging.getLogger(__name__)
+
+DEAD_NODE_CHECK_INTERVAL_SECONDS = 0.5
 
 SUPPORTED_SCHEDULING_POLICIES = {
     "default": {
@@ -74,7 +74,7 @@ class Node():
         self.node_ip = node_ip
         self.available_resources = copy.deepcopy(available_resources)
         self.total_resources = copy.deepcopy(total_resources)
-        self.capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True, "docker_sandbox": False})
+        self.capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True})
         now = time.time()
         self.registered_time = now
         self.last_seen_time = now
@@ -121,35 +121,6 @@ class Node():
         self.last_resource_update_time = time.time()
         return "updated"
   
-    def release_resource(self,resources:dict,gpu_id:int = None):
-        cpu = resources["cpu"]
-        cpu_mem = resources["cpu_mem"]
-        gpu = resources["gpu"]
-        gpu_mem = resources["gpu_mem"]
-
-        self.available_resources['cpu'] = min(
-            self.total_resources.get('cpu', 0),
-            self.available_resources.get('cpu', 0) + cpu,
-        )
-        self.available_resources['cpu_mem'] = min(
-            self.total_resources.get('cpu_mem', 0),
-            self.available_resources.get('cpu_mem', 0) + cpu_mem,
-        )
-        
-        if gpu_id is not None:
-            total_gpu = self.total_resources.get('gpu_resource', {}).get(gpu_id)
-            available_gpu = self.available_resources.get('gpu_resource', {}).get(gpu_id)
-            if total_gpu is not None and available_gpu is not None:
-                available_gpu['gpu_mem'] = min(
-                    total_gpu.get('gpu_mem', 0),
-                    available_gpu.get('gpu_mem', 0) + gpu_mem,
-                )
-                available_gpu['gpu_num'] = min(
-                    total_gpu.get('gpu_num', 0),
-                    available_gpu.get('gpu_num', 0) + gpu,
-                )
-        self.last_resource_update_time = time.time()
-            
 class ResourceManager():
     def __init__(self):
         self.head_node_id = None
@@ -161,6 +132,7 @@ class ResourceManager():
         self.dag_context_manager = DAGContextManager()
         self.scheduling_policy = "default"
         self.worker_stale_after_seconds = 30
+        self._last_dead_node_check_monotonic = float("-inf")
         
         self.last_time = time.time()
         self.interval = 3
@@ -224,7 +196,7 @@ class ResourceManager():
                         head_node_resource,
                         head_node_resource,
                         {
-                            **detect_agent_sandbox_capabilities(),
+                            "workspace_sandbox": True,
                             "local_models": scan_local_model_refs(),
                         },
                     )
@@ -232,6 +204,13 @@ class ResourceManager():
                     return
                     
     def check_dead_node(self):
+        now = time.monotonic()
+        if (
+            now - self._last_dead_node_check_monotonic
+            < DEAD_NODE_CHECK_INTERVAL_SECONDS
+        ):
+            return None
+        self._last_dead_node_check_monotonic = now
         try:
             nodes = self._ray_node_index()
         except RayNodeQueryError:
@@ -372,7 +351,7 @@ class ResourceManager():
                 "role": "worker",
                 "registered": False,
                 "alive": True,
-                "capabilities": {"workspace_sandbox": True, "docker_sandbox": False},
+                "capabilities": {"workspace_sandbox": True},
                 "local_models": [],
                 "ray_resources": ray_node.get("Resources", {}),
             })
@@ -814,7 +793,7 @@ class ResourceManager():
         resources = copy.deepcopy(resources)
         gpu_resource = {int(k): v for k, v in resources['gpu_resource'].items()}
         resources["gpu_resource"] = gpu_resource
-        capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True, "docker_sandbox": False})
+        capabilities = copy.deepcopy(capabilities or {"workspace_sandbox": True})
 
         removed_node_ids = []
         for existing_node_id, existing_node in list(self.nodes.items()):

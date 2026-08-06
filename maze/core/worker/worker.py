@@ -9,7 +9,6 @@ import logging
 import requests
 import socket
 from maze.utils.utils import collect_gpu_info
-from maze.client.maze.agent_sandbox import detect_agent_sandbox_capabilities
 from maze.core.local_models import scan_local_model_refs
 
 logger = logging.getLogger(__name__)
@@ -294,7 +293,7 @@ class Worker():
                     "gpu_resource": gpu_resource,
                 },
                 "capabilities": {
-                    **detect_agent_sandbox_capabilities(),
+                    "workspace_sandbox": True,
                     "local_models": scan_local_model_refs(),
                 },
             }
@@ -396,8 +395,7 @@ class Worker():
                 "===Success to register worker=== "
                 f"{Worker._registration_summary(response)} "
                 f"cpu={resources['cpu']} gpu={len(resources['gpu_resource'])} "
-                f"workspace_sandbox={capabilities.get('workspace_sandbox')} "
-                f"docker_sandbox={capabilities.get('docker_sandbox')}"
+                f"workspace_sandbox={capabilities.get('workspace_sandbox')}"
             )
         return response
 

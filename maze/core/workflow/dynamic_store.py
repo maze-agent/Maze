@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -21,6 +22,14 @@ TERMINAL_DYNAMIC_EVENT_STATUSES = {
     "timeout_dynamic_run": "timed_out",
     "interrupt_dynamic_run": "interrupted",
 }
+
+
+# ponytail: MaPath's core lease makes event logs single-writer; failures discard this cache.
+@dataclass
+class _EventLogState:
+    events: Dict[int, Dict[str, Any]]
+    last_sequence: int
+    needs_separator: bool
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -47,6 +56,31 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _event_log_needs_separator(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return False
+    if size == 0:
+        return False
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) != b"\n"
+
+
+def _event_payload_json(
+    event: Dict[str, Any],
+    *,
+    ignore_timestamp: bool = False,
+) -> str:
+    payload = (
+        {key: value for key, value in event.items() if key != "timestamp"}
+        if ignore_timestamp
+        else event
+    )
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
 def default_workspace_dir() -> Path:
     project_root = Path(__file__).resolve().parents[3]
     return Path(os.environ.get("MAZE_WORKSPACE_DIR", project_root / "workspaces" / "default")).expanduser().resolve()
@@ -58,6 +92,7 @@ class DynamicRunStore:
         self.runs_dir = self.workspace_dir / "workflow_runs" / "dynamic"
         _ensure_private_directory(self.runs_dir)
         self.workspaces_dir = self.workspace_dir / "workspaces"
+        self._event_log_states: Dict[Path, _EventLogState] = {}
 
     def run_dir(self, run_id: str) -> Path:
         if not run_id or "/" in run_id or "\\" in run_id:
@@ -155,6 +190,14 @@ class DynamicRunStore:
             finally:
                 tmp_path.unlink(missing_ok=True)
 
+        if snapshot.get("status") in TERMINAL_DYNAMIC_RUN_STATUSES:
+            self._event_log_states.pop(self.events_path(run_id), None)
+            if workspace_run_dir is not None:
+                self._event_log_states.pop(
+                    self.dynamic_events_path(workspace_run_dir),
+                    None,
+                )
+
     @staticmethod
     def _event_sequence(event: Dict[str, Any]) -> int:
         sequence = event.get("seq")
@@ -198,29 +241,129 @@ class DynamicRunStore:
                 events.append(event)
         return events
 
-    @classmethod
-    def _event_is_persisted(
-        cls,
+    def _event_log_state(self, events_path: Path) -> _EventLogState:
+        try:
+            cached = self._event_log_states.get(events_path)
+            if cached is not None:
+                return cached
+
+            events = self._load_events_path(events_path)
+            state = _EventLogState(
+                events={self._event_sequence(event): event for event in events},
+                last_sequence=(self._event_sequence(events[-1]) if events else 0),
+                needs_separator=_event_log_needs_separator(events_path),
+            )
+            self._event_log_states[events_path] = state
+            return state
+        except BaseException:
+            self._event_log_states.pop(events_path, None)
+            raise
+
+    @staticmethod
+    def _events_match(
+        persisted: Dict[str, Any],
+        event: Dict[str, Any],
+        *,
+        ignore_timestamp: bool,
+    ) -> bool:
+        return _event_payload_json(
+            persisted,
+            ignore_timestamp=ignore_timestamp,
+        ) == _event_payload_json(
+            event,
+            ignore_timestamp=ignore_timestamp,
+        )
+
+    def _event_for_append(
+        self,
         events_path: Path,
         event: Dict[str, Any],
-    ) -> bool:
-        events = cls._load_events_path(events_path)
-        expected_seq = cls._event_sequence(event)
-        for candidate in events:
-            if cls._event_sequence(candidate) != expected_seq:
-                continue
-            if candidate != event:
+        *,
+        ignore_timestamp: bool = False,
+        run_id: str | None = None,
+    ) -> tuple[_EventLogState, Dict[str, Any] | None]:
+        state = self._event_log_state(events_path)
+        expected_seq = self._event_sequence(event)
+        candidate = state.events.get(expected_seq)
+        if candidate is not None:
+            if not self._events_match(
+                candidate,
+                event,
+                ignore_timestamp=ignore_timestamp,
+            ):
+                if ignore_timestamp and run_id is not None:
+                    raise RuntimeError(
+                        "Persisted event sequence conflict for run "
+                        f"{run_id}: {expected_seq}"
+                    )
                 raise ValueError(
                     "Conflicting dynamic event sequence "
                     f"{expected_seq} in {events_path}"
                 )
-            return True
-        if events and expected_seq <= max(cls._event_sequence(item) for item in events):
+            return state, candidate
+        if expected_seq <= state.last_sequence:
             raise ValueError(
                 "Non-monotonic dynamic event sequence "
                 f"{expected_seq} in {events_path}"
             )
-        return False
+        return state, None
+
+    def _append_event_path(
+        self,
+        events_path: Path,
+        payload: Dict[str, Any],
+        *,
+        deduplicate: bool,
+        ignore_timestamp: bool = False,
+        run_id: str | None = None,
+    ) -> Dict[str, Any]:
+        try:
+            state, persisted = self._event_for_append(
+                events_path,
+                payload,
+                ignore_timestamp=ignore_timestamp,
+                run_id=run_id,
+            )
+            if persisted is not None:
+                if deduplicate:
+                    return persisted
+                raise ValueError(
+                    "Duplicate dynamic event sequence "
+                    f"{self._event_sequence(payload)} in {events_path}"
+                )
+
+            parent_existed = events_path.parent.exists()
+            _ensure_private_directory(events_path.parent)
+            if not parent_existed and events_path.parent.parent.exists():
+                _fsync_directory(events_path.parent.parent)
+            events_existed = events_path.exists()
+            descriptor = os.open(
+                str(events_path),
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                PRIVATE_FILE_MODE,
+            )
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                _set_private_file_descriptor_mode(handle.fileno())
+                serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                if state.needs_separator:
+                    handle.write("\n")
+                handle.write(serialized)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(events_path, PRIVATE_FILE_MODE)
+            if not events_existed:
+                _fsync_directory(events_path.parent)
+
+            stored_event = json.loads(serialized)
+            sequence = self._event_sequence(stored_event)
+            state.events[sequence] = stored_event
+            state.last_sequence = sequence
+            state.needs_separator = False
+            return stored_event
+        except BaseException:
+            self._event_log_states.pop(events_path, None)
+            raise
 
     def append_event(
         self,
@@ -240,33 +383,46 @@ class DynamicRunStore:
             target_paths.append(self.dynamic_events_path(workspace_run_dir))
 
         for events_path in dict.fromkeys(target_paths):
-            persisted = self._event_is_persisted(events_path, payload)
-            if persisted:
-                if deduplicate:
-                    continue
-                raise ValueError(
-                    "Duplicate dynamic event sequence "
-                    f"{self._event_sequence(payload)} in {events_path}"
-                )
-            parent_existed = events_path.parent.exists()
-            _ensure_private_directory(events_path.parent)
-            if not parent_existed and events_path.parent.parent.exists():
-                _fsync_directory(events_path.parent.parent)
-            events_existed = events_path.exists()
-            descriptor = os.open(
-                str(events_path),
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                PRIVATE_FILE_MODE,
+            self._append_event_path(
+                events_path,
+                payload,
+                deduplicate=deduplicate,
             )
-            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-                _set_private_file_descriptor_mode(handle.fileno())
-                handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(events_path, PRIVATE_FILE_MODE)
-            if not events_existed:
-                _fsync_directory(events_path.parent)
+
+    def append_event_once(
+        self,
+        run_id: str,
+        event: Dict[str, Any],
+        snapshot: Dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            **to_json_safe(event),
+        }
+        canonical_path = self.events_path(run_id)
+        sequence = self._event_sequence(payload)
+        canonical_replay = sequence in self._event_log_state(canonical_path).events
+        canonical_event = self._append_event_path(
+            canonical_path,
+            payload,
+            deduplicate=True,
+            ignore_timestamp=True,
+            run_id=run_id,
+        )
+        workspace_run_dir = self.workspace_run_dir_from_snapshot(snapshot or {})
+        if workspace_run_dir is None:
+            return
+        mirror_path = self.dynamic_events_path(workspace_run_dir)
+        if mirror_path == canonical_path:
+            return
+        if canonical_replay:
+            # A replay commonly follows a partial mirror write; verify it from disk.
+            self._event_log_states.pop(mirror_path, None)
+        self._append_event_path(
+            mirror_path,
+            canonical_event,
+            deduplicate=True,
+        )
 
     def load_run(self, run_id: str) -> Dict[str, Any]:
         canonical_path = self.run_json_path(run_id)
@@ -494,6 +650,12 @@ class DynamicRunStore:
         workspace_run_dir = self.workspace_run_dir_from_snapshot(snapshot)
         if workspace_run_dir is not None:
             run_dirs.add(workspace_run_dir)
+        self._event_log_states.pop(self.events_path(run_id), None)
+        if workspace_run_dir is not None:
+            self._event_log_states.pop(
+                self.dynamic_events_path(workspace_run_dir),
+                None,
+            )
         for run_dir in run_dirs:
             if run_dir.exists():
                 shutil.rmtree(run_dir)

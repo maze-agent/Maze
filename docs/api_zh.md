@@ -8,7 +8,7 @@
 
 1. [Python SDK](#一python-sdk-api)：开发者最常用，定义任务 / 构建工作流 / 启动 Agent。
 2. [Head HTTP & WebSocket API](#二head-服务-http--websocket-api)：FastAPI 提供的底层接口。
-3. [CLI 命令](#三cli-命令)：`maze start`、`maze stop`，以及已退役的 `maze-sandbox` 兼容命令。
+3. [CLI 命令](#三cli-命令)：`maze start`、`maze stop`、`maze status`、`maze doctor`，以及已退役的 `maze-sandbox` 兼容命令。
 4. [Playground 后端 REST API](#四maze-playground-后端-rest-api)：可视化界面专用接口。
 
 文末附 [事件协议](#五事件协议event-protocol)、[资源配置说明](#六资源配置resources)、[错误码与异常](#七错误处理) 与 [完整示例](#八完整示例)。
@@ -539,42 +539,6 @@ Artifact store 按 sha256 存储二进制 blob：
 
 ---
 
-#### `POST /dynamic_runs/{run_id}/permission_requests`
-创建一个动态 run 权限请求，通常由工具执行前发起。
-
-```json
-{
-  "tool_name": "write_file",
-  "action": "write",
-  "payload": {"path": "outputs/report.txt"},
-  "reason": "需要写入分析结果"
-}
-```
-
----
-
-#### `GET /dynamic_runs/{run_id}/permission_requests/{request_id}`
-查询单个权限请求。
-
----
-
-#### `POST /dynamic_runs/{run_id}/permission_requests/{request_id}/decision`
-对权限请求做决策。
-
-```json
-{
-  "decision": {
-    "action": "allow",
-    "reason": "用户确认",
-    "decided_by": "playground"
-  }
-}
-```
-
-`action` 取值：`allow` 或 `deny`。
-
----
-
 #### `WS /dynamic_runs/{run_id}/events`
 实时事件流（含 `register_task_spec`、`append_task`、`task_ready`、`start_task`、`finish_task`、`task_exception`、`finish_workflow`、`cancel_dynamic_run`、`timeout_dynamic_run`、`interrupt_dynamic_run` 等，参见 [事件协议](#五事件协议event-protocol)）。
 
@@ -638,6 +602,7 @@ maze start --head \
            [--playground] \
            [--playground-port 5173] \
            [--playground-backend-port 3001] \
+           [--detach] \
            [--log-level INFO] [--log-file /path/to/log]
 ```
 
@@ -649,6 +614,7 @@ maze start --head \
 | `--playground` |  | 随 Head 一起拉起 Workbench 前端和 Node.js 后端 |
 | `--playground-port` | 5173 | Workbench 页面入口端口 |
 | `--playground-backend-port` | 3001 | Workbench 后端 API 端口；如果未设置且修改了 `--playground-port`，默认使用 `--playground-port + 1` |
+| `--detach` | 关闭 | 在后台运行同一个 Maze Head 父进程，并输出 PID 和日志路径 |
 | `--log-level` | `INFO` | `DEBUG/INFO/WARNING/ERROR/CRITICAL` |
 | `--log-file` |  | 写入文件 |
 
@@ -657,6 +623,9 @@ maze start --head \
 ```bash
 # 默认一行启动。
 maze start --head --port 8000 --ray-head-port 6379 --playground
+
+# 后台启动。前台 Head 也使用同一份运行状态，可从另一个终端执行 maze stop。
+maze start --head --port 8000 --detach
 
 # 自定义端口。CLI 会自动把 Workbench 后端连到所选 Maze Head，
 # 也会自动把前端代理连到所选 Workbench 后端。
@@ -679,12 +648,25 @@ maze start --worker --addr <HEAD_IP>:<HEAD_PORT>
 ### 3.2 `maze stop`
 
 ```bash
-maze stop [--log-level INFO] [--log-file ...]
+maze stop [--timeout 90] [--force]
+maze stop --worker
 ```
 
-停止本机的 Worker。
+默认只停止已记录的本机 Maze Head 父进程。Maze 会先校验 PID 启动标识和命令，
+再发送 `SIGTERM`；只有同一进程超过优雅退出时限且指定 `--force` 时，才升级为
+`SIGKILL`。原有的本机 Ray Worker 停止能力保留为 `maze stop --worker`。
 
-### 3.3 `maze-sandbox`（已退役）
+### 3.3 `maze doctor`
+
+```bash
+maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
+```
+
+检查当前运行状态、Python 和必要二进制、包与 Workbench 目录、配置端口，
+以及 Core/Workbench HTTP 健康状态；不依赖旧开发命令的 PID 文件，也不再检查
+旧 workspace 嵌套或 `PYTHONPATH`。
+
+### 3.4 `maze-sandbox`（已退役）
 
 旧的远程 Sandbox 服务已经删除。该命令仅作为兼容提示保留，执行后会给出迁移说明并退出。
 请改用 `maze start --head --playground` 启动维护中的工作流编辑器。
@@ -730,8 +712,6 @@ maze stop [--log-level INFO] [--log-file ...]
 | GET | `/api/system-catalog?type=workflows|tasks` | 列出系统目录中的 workflow/task 模板 |
 | POST | `/api/system-catalog/import` | 把系统 task 或 workflow JSON 复制到 workspace |
 | POST | `/api/system-catalog/workflows/load` | 加载系统 workflow 模板到画布，同时把随附 task definitions 导入 workspace tasks |
-| GET | `/api/workspace-policy` | 读取 workspace sandbox policy |
-| PUT | `/api/workspace-policy` | 更新 workspace sandbox policy |
 
 `/api/system-catalog/workflows/load` 请求体：
 
@@ -832,7 +812,6 @@ maze stop [--log-level INFO] [--log-file ...]
 | GET | `/api/dynamic-runs/:runId` | 单个 run 详情 |
 | GET | `/api/dynamic-runs/:runId/events` | 事件列表（HTTP） |
 | POST | `/api/dynamic-runs/:runId/events` | 写入事件（透传给 Maze Head） |
-| POST | `/api/dynamic-runs/:runId/permission-requests/:requestId/decision` | Workbench 对动态 run 权限请求做 allow/deny 决策 |
 | DELETE | `/api/dynamic-runs/:runId` | 删除 |
 | POST | `/api/dynamic-runs/cleanup` | 批量清理 |
 ---

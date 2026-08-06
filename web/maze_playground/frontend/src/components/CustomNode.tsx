@@ -149,7 +149,8 @@ function outputText(runState: any, artifactCount: number) {
 }
 
 export default function CustomNode({ id, data, selected }: any) {
-  const { updateNode } = useWorkflowStore();
+  const updateNode = useWorkflowStore((state) => state.updateNode);
+  const isRunView = useWorkflowStore((state) => Boolean(state.selectedRunId));
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(data.label || '');
   const isConfigured = data.configured;
@@ -161,9 +162,10 @@ export default function CustomNode({ id, data, selected }: any) {
     : runState?.status;
   const status = normalizedStatus(runStatus, isConfigured);
   const artifactCount = runState?.artifacts?.length || 0;
-  const runtimeNodeIp = runState?.node_ip || runState?.nodeIp;
-  const runtimeNodeId = runState?.node_id_runtime || runState?.node_id || runState?.nodeId;
-  const runtimeGpuId = runState?.gpu_id ?? runState?.gpuId;
+  const selectedNode = runState?.selected_node || runState?.schedule_decision?.selected_node;
+  const runtimeNodeIp = selectedNode?.node_ip || runState?.node_ip || runState?.nodeIp;
+  const runtimeNodeId = selectedNode?.node_id || runState?.node_id_runtime || runState?.node_id || runState?.nodeId;
+  const runtimeGpuId = selectedNode?.gpu_id ?? runState?.gpu_id ?? runState?.gpuId;
   const hasPlacement = Boolean(runtimeNodeIp || runtimeNodeId);
   const hasOutput = hasVisibleResult(runState?.result_summary) || artifactCount > 0;
 
@@ -173,7 +175,14 @@ export default function CustomNode({ id, data, selected }: any) {
     }
   }, [data.label, editingLabel]);
 
+  useEffect(() => {
+    if (isRunView) {
+      setEditingLabel(false);
+    }
+  }, [isRunView]);
+
   const commitLabel = () => {
+    if (isRunView) return;
     const nextLabel = labelDraft.trim() || data.label;
     setEditingLabel(false);
     setLabelDraft(nextLabel);
@@ -244,7 +253,7 @@ export default function CustomNode({ id, data, selected }: any) {
           <span style={{ color: kindStyle.iconColor, lineHeight: '20px', paddingTop: 1 }}>
             {taskKindIcon(kind)}
           </span>
-          {editingLabel ? (
+          {editingLabel && !isRunView ? (
             <Input
               autoFocus
               size="small"
@@ -258,17 +267,17 @@ export default function CustomNode({ id, data, selected }: any) {
             />
           ) : (
             <strong
-              title="Click to rename task"
-              onClick={(event) => {
+              title={isRunView ? data.label : 'Click to rename task'}
+              onClick={isRunView ? undefined : (event) => {
                 event.stopPropagation();
                 setEditingLabel(true);
               }}
-              onMouseDown={(event) => event.stopPropagation()}
+              onMouseDown={isRunView ? undefined : (event) => event.stopPropagation()}
               style={{
                 flex: 1,
                 fontSize: 15,
                 lineHeight: '20px',
-                cursor: 'text',
+                cursor: isRunView ? 'default' : 'text',
                 maxWidth: 165,
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',

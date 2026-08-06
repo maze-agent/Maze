@@ -52,7 +52,6 @@ dependencies = [
     "requests>=2.31.0",
     "PyYAML>=6.0",
     "PyPDF2>=3.0.0",
-    "docker>=7.1.0",
     "openai>=2.15.0",
     "transformers>=5.12.1",
     "accelerate>=1.14.0",

@@ -1,16 +1,19 @@
 import copy
-import contextlib
 import json
 import os
-import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
 
 from maze.core.scheduler.result_summary import to_json_safe
-from maze.core.workflow.dynamic_store import default_workspace_dir
+from maze.core.workflow.dynamic_store import (
+    _EventLogState,
+    _event_log_needs_separator,
+    _event_payload_json,
+    default_workspace_dir,
+)
 
 
 if os.name == "nt":
@@ -606,11 +609,6 @@ class StaticRun:
             return list(self.event_log)
         return [event for event in self.event_log if int(event.get("seq", 0)) > after]
 
-    def task_snapshot(self, task_id: str) -> Dict[str, Any]:
-        if task_id not in self.task_nodes:
-            raise ValueError(f"Task not found in static run: {task_id}")
-        return to_json_safe(self.task_nodes[task_id])
-
     def snapshot(self) -> Dict[str, Any]:
         task_counts = self._task_counts()
         total = task_counts["total"] or 1
@@ -688,6 +686,7 @@ class StaticRunStore:
         self.workspace_dir = Path(workspace_dir).expanduser().resolve() if workspace_dir else default_workspace_dir()
         self.runs_dir = self.workspace_dir / "workflow_runs" / "static_runs"
         _ensure_private_directory(self.runs_dir)
+        self._event_log_states: Dict[Path, _EventLogState] = {}
 
     def run_dir(self, run_id: str) -> Path:
         if not run_id or "/" in run_id or "\\" in run_id:
@@ -710,17 +709,6 @@ class StaticRunStore:
             raise RuntimeError(
                 f"Another Maze Core process owns workflow store {self.runs_dir}"
             ) from exc
-
-    @contextlib.contextmanager
-    def claim_guard(self):
-        lease = StaticRunStoreLease(
-            self.runs_dir / ".run_workflow_idempotency.lock",
-            blocking=True,
-        )
-        try:
-            yield
-        finally:
-            lease.release()
 
     def save_run(self, snapshot: Dict[str, Any]):
         run_id = snapshot["run_id"]
@@ -760,17 +748,54 @@ class StaticRunStore:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
 
-    def append_event(self, run_id: str, event: Dict[str, Any]):
-        _event_sequence(event)
+        if snapshot.get("status") in TERMINAL_STATIC_RUN_STATUSES:
+            self._event_log_states.pop(self.events_path(run_id), None)
+
+    def _event_log_state(self, run_id: str) -> _EventLogState:
+        events_path = self.events_path(run_id)
+        try:
+            cached = self._event_log_states.get(events_path)
+            if cached is not None:
+                return cached
+
+            events = self.load_events(run_id)
+            state = _EventLogState(
+                events={_event_sequence(event): event for event in events},
+                last_sequence=(_event_sequence(events[-1]) if events else 0),
+                needs_separator=_event_log_needs_separator(events_path),
+            )
+            self._event_log_states[events_path] = state
+            return state
+        except BaseException:
+            self._event_log_states.pop(events_path, None)
+            raise
+
+    @staticmethod
+    def _events_match(
+        persisted: Dict[str, Any],
+        event: Dict[str, Any],
+    ) -> bool:
+        return _event_payload_json(
+            persisted,
+            ignore_timestamp=True,
+        ) == _event_payload_json(
+            event,
+            ignore_timestamp=True,
+        )
+
+    def _write_event(
+        self,
+        run_id: str,
+        payload: Dict[str, Any],
+        *,
+        state: _EventLogState | None,
+        needs_separator: bool,
+    ) -> Dict[str, Any]:
         run_dir = self.run_dir(run_id)
         run_dir_existed = run_dir.exists()
         _ensure_private_directory(run_dir)
         if not run_dir_existed:
             _fsync_directory(self.runs_dir)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            **to_json_safe(event),
-        }
         events_path = self.events_path(run_id)
         events_existed = events_path.exists()
         descriptor = os.open(
@@ -780,13 +805,76 @@ class StaticRunStore:
         )
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             _set_private_file_descriptor_mode(handle.fileno())
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if needs_separator:
+                handle.write("\n")
+            handle.write(serialized)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(events_path, PRIVATE_FILE_MODE)
         if not events_existed:
             _fsync_directory(run_dir)
+
+        stored_event = json.loads(serialized)
+        if state is None or self._event_log_states.get(events_path) is not state:
+            self._event_log_states.pop(events_path, None)
+            return stored_event
+        sequence = _event_sequence(stored_event)
+        state.events[sequence] = stored_event
+        state.last_sequence = sequence
+        state.needs_separator = False
+        return stored_event
+
+    def append_event(self, run_id: str, event: Dict[str, Any]):
+        _event_sequence(event)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            **to_json_safe(event),
+        }
+        events_path = self.events_path(run_id)
+        try:
+            self._write_event(
+                run_id,
+                payload,
+                state=None,
+                needs_separator=_event_log_needs_separator(events_path),
+            )
+        except BaseException:
+            self._event_log_states.pop(events_path, None)
+            raise
+
+    def append_event_once(self, run_id: str, event: Dict[str, Any]) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            **to_json_safe(event),
+        }
+        sequence = _event_sequence(payload)
+        events_path = self.events_path(run_id)
+        try:
+            state = self._event_log_state(run_id)
+            persisted = state.events.get(sequence)
+            if persisted is not None:
+                if not self._events_match(persisted, payload):
+                    raise RuntimeError(
+                        "Persisted event sequence conflict for run "
+                        f"{run_id}: {sequence}"
+                    )
+                return
+            if sequence <= state.last_sequence:
+                raise ValueError(
+                    "Non-monotonic static event sequence "
+                    f"{sequence} for run {run_id}"
+                )
+            self._write_event(
+                run_id,
+                payload,
+                state=state,
+                needs_separator=state.needs_separator,
+            )
+        except BaseException:
+            self._event_log_states.pop(events_path, None)
+            raise
 
     def load_run(self, run_id: str) -> Dict[str, Any]:
         path = self.run_json_path(run_id)
@@ -838,10 +926,6 @@ class StaticRunStore:
                 continue
         snapshots.sort(key=lambda item: item.get("created_time") or 0, reverse=True)
         return snapshots
-
-    def delete_run(self, run_id: str):
-        shutil.rmtree(self.run_dir(run_id))
-        _fsync_directory(self.runs_dir)
 
     def recover_interrupted_runs(self) -> List[Dict[str, Any]]:
         recovered = []
@@ -983,44 +1067,6 @@ class StaticRunStore:
             self.save_run(snapshot)
             recovered.append(snapshot)
         return recovered
-
-    def cleanup(
-        self,
-        statuses: Iterable[str] | None = None,
-        older_than_days: int | float | None = None,
-        dry_run: bool = True,
-    ) -> Dict[str, Any]:
-        status_filter = set(statuses or TERMINAL_STATIC_RUN_STATUSES)
-        cutoff = None
-        if older_than_days is not None:
-            cutoff = time.time() - (float(older_than_days) * 86400)
-
-        candidates = []
-        for snapshot in self.list_runs():
-            status = snapshot.get("status")
-            if status not in status_filter or status not in TERMINAL_STATIC_RUN_STATUSES:
-                continue
-            if cutoff is not None:
-                finished_time = snapshot.get("finished_time") or snapshot.get("updated_time")
-                if not finished_time or float(finished_time) > cutoff:
-                    continue
-            candidates.append(snapshot)
-
-        deleted_run_ids = []
-        if not dry_run:
-            for snapshot in candidates:
-                run_id = snapshot["run_id"]
-                self.delete_run(run_id)
-                deleted_run_ids.append(run_id)
-
-        return {
-            "dry_run": dry_run,
-            "matched_count": len(candidates),
-            "deleted_count": len(deleted_run_ids),
-            "runs": [static_run_summary(snapshot) for snapshot in candidates],
-            "deleted_run_ids": deleted_run_ids,
-        }
-
 
 def static_run_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return to_json_safe({

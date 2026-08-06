@@ -131,17 +131,6 @@ const WORKER_ACTION_LABELS: Record<WorkerAction, string> = {
   logs: 'Logs',
 };
 
-const CONSOLE_PRESETS = [
-  { label: 'pwd', command: 'pwd' },
-  { label: 'nvidia-smi', command: 'nvidia-smi' },
-  { label: 'ray status', command: 'ray status --address auto' },
-  { label: 'conda envs', command: 'conda info --envs' },
-  { label: 'maze status', command: 'PYTHONPATH=/root/data/Maze /root/miniconda3/envs/maze/bin/python -m maze.cli.cli dev status' },
-  { label: 'disk', command: 'df -h' },
-  { label: 'memory', command: 'free -h' },
-  { label: 'worker log', command: 'LOG="$(ls -t /root/data/Maze/logs/maze_worker_remote_*.log 2>/dev/null | head -1)"; if [ -n "$LOG" ]; then echo "LOG=$LOG"; tail -80 "$LOG"; else echo "no worker log"; fi' },
-];
-
 function queueStatusColor(status?: string): string {
   if (status === 'running') return 'processing';
   if (status === 'retrying') return 'orange';
@@ -203,10 +192,6 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
   const [selectedWorkerIds, setSelectedWorkerIds] = useState<string[]>([]);
   const [logModal, setLogModal] = useState<{ title: string; output: string } | null>(null);
   const [activeTab, setActiveTab] = useState('resources');
-  const [consoleCommand, setConsoleCommand] = useState('pwd');
-  const [consoleRunning, setConsoleRunning] = useState(false);
-  const [consoleOutput, setConsoleOutput] = useState('');
-  const [consoleHistory, setConsoleHistory] = useState<Array<{ command: string; ok: boolean; ranAt: string }>>([]);
   const [queueRefreshIntervalMs, setQueueRefreshIntervalMs] = useState(QUEUE_REFRESH_INTERVAL_MS);
   const resourceRequestRef = useRef<Promise<void> | null>(null);
   const queueRequestRef = useRef<Promise<void> | null>(null);
@@ -289,21 +274,27 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     }
   }, []);
 
-  const refreshAll = useCallback(async () => {
+  const refreshActiveTab = useCallback(async () => {
     setManualRefreshLoading(true);
     try {
-      await Promise.all([
-        loadResources(true),
-        loadQueues(true),
-        loadWorkerProfiles(true),
-      ]);
+      if (activeTab === 'workers') {
+        await Promise.all([loadResources(), loadWorkerProfiles(true)]);
+      } else {
+        await Promise.all([loadResources(true), loadQueues(true)]);
+      }
     } finally {
       setManualRefreshLoading(false);
     }
-  }, [loadQueues, loadResources, loadWorkerProfiles]);
+  }, [activeTab, loadQueues, loadResources, loadWorkerProfiles]);
 
   useEffect(() => {
     if (!open) {
+      return;
+    }
+
+    if (activeTab === 'workers') {
+      void loadResources();
+      void loadWorkerProfiles(true);
       return;
     }
 
@@ -330,7 +321,6 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     } else {
       void loadQueues(true);
     }
-    loadWorkerProfiles(true);
     return () => {
       cancelled = true;
       if (resourceTimer !== undefined) {
@@ -340,7 +330,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
         window.clearTimeout(queueTimer);
       }
     };
-  }, [loadQueues, loadResources, loadWorkerProfiles, open, queueRefreshIntervalMs]);
+  }, [activeTab, loadQueues, loadResources, loadWorkerProfiles, open, queueRefreshIntervalMs]);
 
   const nodes = useMemo(() => {
     const registered = data?.cluster?.nodes || [];
@@ -702,45 +692,6 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     executeBulkWorkerAction(action);
   };
 
-  const runConsoleCommand = async () => {
-    const command = consoleCommand.trim();
-    if (!command) {
-      message.warning('Enter a command to run');
-      return;
-    }
-    setConsoleRunning(true);
-    try {
-      const result = await api.runClusterConsoleCommand({
-        target: 'head',
-        command,
-        timeoutMs: 60000,
-      });
-      const output = [
-        `$ ${result.command}`,
-        result.result?.stdout || '',
-        result.result?.stderr || '',
-        `exit ${result.result?.code ?? 0}`,
-      ].filter(Boolean).join('\n');
-      setConsoleOutput(output);
-      setConsoleHistory((items) => [
-        { command: result.command, ok: Boolean(result.result?.ok), ranAt: result.ranAt },
-        ...items,
-      ].slice(0, 8));
-    } catch (reason: any) {
-      const result = reason?.response?.data?.result;
-      const output = [
-        `$ ${command}`,
-        result?.stdout || '',
-        result?.stderr || '',
-        reason?.response?.data?.error || reason?.message || 'Command failed',
-      ].filter(Boolean).join('\n');
-      setConsoleOutput(output);
-      message.error(reason?.response?.data?.error || reason?.message || 'Command failed');
-    } finally {
-      setConsoleRunning(false);
-    }
-  };
-
   const columns: ColumnsType<ClusterResourceNode> = [
     {
       title: 'Node',
@@ -852,17 +803,9 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     {
       title: 'Sandbox',
       key: 'sandbox',
-      width: 220,
+      width: 120,
       render: (_, node) => (
-        <Space size={4} wrap>
-          <Tag color={node.capabilities?.workspace_sandbox ? 'green' : 'default'}>workspace</Tag>
-          <Tag
-            color={node.capabilities?.docker_sandbox ? 'green' : 'orange'}
-            title={node.capabilities?.docker_reason || undefined}
-          >
-            docker {node.capabilities?.docker_sandbox ? 'ready' : 'off'}
-          </Tag>
-        </Space>
+        <Tag color={node.capabilities?.workspace_sandbox ? 'green' : 'default'}>workspace</Tag>
       ),
     },
     {
@@ -1266,70 +1209,6 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     </Space>
   );
 
-  const consoleContent = (
-    <Space direction="vertical" size={14} style={{ width: '100%' }}>
-      <Space style={{ justifyContent: 'space-between', width: '100%' }} align="center" wrap>
-        <Space direction="vertical" size={2}>
-          <Text strong>Head Console</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Commands run on the Maze head at {defaultHeadUrl}
-          </Text>
-        </Space>
-        <Tag color="geekblue">cwd /root/data/Maze</Tag>
-      </Space>
-      <Space.Compact style={{ width: '100%' }}>
-        <Input
-          value={consoleCommand}
-          onChange={(event) => setConsoleCommand(event.target.value)}
-          onPressEnter={runConsoleCommand}
-          placeholder="pwd, nvidia-smi, ray status..."
-        />
-        <Button type="primary" loading={consoleRunning} onClick={runConsoleCommand}>Run</Button>
-      </Space.Compact>
-      <Space size={8} wrap>
-        {CONSOLE_PRESETS.map((preset) => (
-          <Button key={preset.label} size="small" onClick={() => setConsoleCommand(preset.command)}>
-            {preset.label}
-          </Button>
-        ))}
-      </Space>
-      <pre
-        style={{
-          minHeight: 360,
-          maxHeight: 560,
-          overflow: 'auto',
-          background: '#111827',
-          color: '#f9fafb',
-          borderRadius: 6,
-          border: '1px solid #1f2937',
-          padding: 16,
-          whiteSpace: 'pre-wrap',
-          fontSize: 13,
-          lineHeight: 1.55,
-        }}
-      >
-        {consoleOutput || '$ Ready'}
-      </pre>
-      {consoleHistory.length > 0 && (
-        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-          <Text strong>History</Text>
-          <Space wrap>
-            {consoleHistory.map((item, index) => (
-              <Button
-                key={`${item.ranAt}-${index}`}
-                size="small"
-                onClick={() => setConsoleCommand(item.command)}
-              >
-                <Tag color={item.ok ? 'green' : 'red'}>{item.ok ? 'ok' : 'failed'}</Tag>
-                {item.command}
-              </Button>
-            ))}
-          </Space>
-        </Space>
-      )}
-    </Space>
-  );
-
   return (
     <Drawer
       title="Cluster"
@@ -1337,7 +1216,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
       onClose={onClose}
       width="min(960px, 100vw)"
       extra={(
-        <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={manualRefreshLoading}>
+        <Button icon={<ReloadOutlined />} onClick={refreshActiveTab} loading={manualRefreshLoading}>
           Refresh
         </Button>
       )}
@@ -1348,7 +1227,6 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
         items={[
           { key: 'resources', label: 'Resources', children: resourcesContent },
           { key: 'workers', label: 'Workers', children: workersContent },
-          { key: 'console', label: 'Console', children: consoleContent },
         ]}
       />
       <Modal

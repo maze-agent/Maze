@@ -51,6 +51,14 @@ export function compileWorkflowToDagSpec(workflow, context = {}, resolvedDefinit
       throw new Error(`node ${id} has invalid task_kind: ${String(taskKind)}`);
     }
 
+    const [sourcePath, sourceFunction] = text(data.sourceKey)?.split('::') ?? [];
+    const taskPath = data.category === 'builtin'
+      ? BUILTIN_TASK_ALIASES[data.taskRef]
+      : text(data.taskPath) ?? sourcePath;
+    const functionName = text(data.functionName)
+      ?? sourceFunction
+      ?? (data.category === 'builtin' ? text(data.taskRef)?.split('.').at(-1) : undefined);
+
     const compiled = {
       id,
       type: 'code',
@@ -65,7 +73,14 @@ export function compileWorkflowToDagSpec(workflow, context = {}, resolvedDefinit
       retry_backoff_seconds: data.retryBackoffSeconds ?? definition.retryBackoffSeconds ?? 0,
       retry_on: data.retryOn ?? definition.retryOn ?? null,
       timeout_seconds: data.taskTimeout ?? definition.timeoutSeconds ?? null,
-      metadata: { ...(definition.metadata ?? {}), ...(data.metadata ?? {}) },
+      metadata: {
+        ...(definition.metadata ?? {}),
+        ...(data.metadata ?? {}),
+        playground_category: data.category,
+        ...(text(data.taskRef) ? { playground_task_ref: text(data.taskRef) } : {}),
+        ...(taskPath ? { playground_task_path: taskPath } : {}),
+        ...(functionName ? { playground_function_name: functionName } : {}),
+      },
     };
     if (codeStr) compiled.code_str = codeStr;
     if (codeSer) compiled.code_ser = codeSer;

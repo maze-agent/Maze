@@ -6,7 +6,6 @@ import type {
   WorkspaceWorkflowsResponse,
   SystemCatalogResponse,
   ClusterQueuesResponse,
-  ClusterConsoleRunResponse,
   ClusterResourcesResponse,
   ModelTestResponse,
   ModelsResponse,
@@ -487,18 +486,6 @@ export const api = {
     timeoutMs?: number;
   }): Promise<WorkerProfileActionResponse> {
     const response = await axios.post(`${API_BASE}/cluster/worker-profiles/bulk`, data);
-    return response.data;
-  },
-
-  async runClusterConsoleCommand(data: {
-    workspaceId?: string;
-    workspaceDir?: string;
-    target: string;
-    command: string;
-    password?: string;
-    timeoutMs?: number;
-  }): Promise<ClusterConsoleRunResponse> {
-    const response = await axios.post(`${API_BASE}/cluster/console/run`, data);
     return response.data;
   },
 

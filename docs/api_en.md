@@ -8,7 +8,7 @@ This document summarizes the public Maze APIs across four layers:
 
 1. [Python SDK](#1-python-sdk-api): define tasks, build workflows, and run agents.
 2. [Head HTTP and WebSocket API](#2-head-http-and-websocket-api): FastAPI endpoints exposed by the Maze Head service.
-3. [CLI Commands](#3-cli-commands): `maze start`, `maze stop`, and the retired `maze-sandbox` compatibility command.
+3. [CLI Commands](#3-cli-commands): `maze start`, `maze stop`, `maze status`, `maze doctor`, and the retired `maze-sandbox` compatibility command.
 4. [Maze Workbench Backend REST API](#4-maze-workbench-backend-rest-api): APIs used by the visual Workbench.
 
 Additional sections cover the [event protocol](#5-event-protocol), [resource configuration](#6-resource-configuration), [error handling](#7-error-handling), [examples](#8-complete-examples), and [observability APIs](#9-run-status-metrics-and-observability).
@@ -545,39 +545,6 @@ Merge-update dynamic run metadata.
 {"metadata": {"key": "value"}}
 ```
 
-#### `POST /dynamic_runs/{run_id}/permission_requests`
-
-Create a permission request before a dynamic run performs a sensitive action.
-
-```json
-{
-  "tool_name": "write_file",
-  "action": "write",
-  "payload": {"path": "outputs/report.txt"},
-  "reason": "Need to write the analysis result"
-}
-```
-
-#### `GET /dynamic_runs/{run_id}/permission_requests/{request_id}`
-
-Get one permission request.
-
-#### `POST /dynamic_runs/{run_id}/permission_requests/{request_id}/decision`
-
-Approve or deny a permission request.
-
-```json
-{
-  "decision": {
-    "action": "allow",
-    "reason": "Approved by user",
-    "decided_by": "playground"
-  }
-}
-```
-
-`action` must be `allow` or `deny`.
-
 #### `WS /dynamic_runs/{run_id}/events`
 
 Real-time dynamic run event stream. Common event types include:
@@ -679,6 +646,7 @@ maze start --head \
            [--playground] \
            [--playground-port 5173] \
            [--playground-backend-port 3001] \
+           [--detach] \
            [--log-level INFO] [--log-file /path/to/log]
 ```
 
@@ -690,6 +658,7 @@ maze start --head \
 | `--playground` | off | Start the Workbench UI and its Node.js backend together with the head node. |
 | `--playground-port` | `5173` | Workbench web UI port. |
 | `--playground-backend-port` | `3001` | Workbench backend API port. If omitted and `--playground-port` is changed, defaults to `--playground-port + 1`. |
+| `--detach` | off | Run the same Maze Head parent in the background and print its PID and log path. |
 | `--log-level` | `INFO` | Logging level. |
 | `--log-file` | unset | Write logs to a file. |
 
@@ -698,6 +667,10 @@ Examples:
 ```bash
 # Default one-line startup.
 maze start --head --port 8000 --ray-head-port 6379 --playground
+
+# Background startup. Foreground heads use the same runtime state and can also
+# be stopped from another terminal with `maze stop`.
+maze start --head --port 8000 --detach
 
 # Custom ports. The CLI wires the Workbench backend to the selected Maze Head
 # and wires the frontend proxy to the selected Workbench backend.
@@ -722,12 +695,27 @@ maze start --worker --addr <HEAD_IP>:<HEAD_PORT>
 ### 3.2 `maze stop`
 
 ```bash
-maze stop [--log-level INFO] [--log-file ...]
+maze stop [--timeout 90] [--force]
+maze stop --worker
 ```
 
-Stops the local worker process.
+By default, stops only the recorded local Maze Head parent. Maze validates the
+PID start identity and command before sending `SIGTERM`; `--force` escalates to
+`SIGKILL` only if that same verified process exceeds the graceful timeout. Use
+`maze stop --worker` for the previous local Ray worker shutdown behavior.
 
-### 3.3 `maze-sandbox` (retired)
+### 3.3 `maze doctor`
+
+```bash
+maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
+```
+
+Checks the active runtime record, Python and required binaries, package and
+Workbench directories, configured ports, and Core/Workbench HTTP health. It
+does not depend on legacy development PID files, workspace nesting, or
+`PYTHONPATH` checks.
+
+### 3.4 `maze-sandbox` (retired)
 
 The legacy remote sandbox service has been removed. The command remains as a
 compatibility tombstone and exits with migration guidance. Use
@@ -788,8 +776,6 @@ Environment variables:
 | GET | `/api/system-catalog?type=workflows|tasks` | List system workflow/task templates. |
 | POST | `/api/system-catalog/import` | Copy a system task or workflow JSON into a workspace. |
 | POST | `/api/system-catalog/workflows/load` | Load a system workflow template onto the canvas and import bundled task definitions. |
-| GET | `/api/workspace-policy` | Read workspace sandbox policy. |
-| PUT | `/api/workspace-policy` | Update workspace sandbox policy. |
 
 `/api/system-catalog/workflows/load` request:
 
@@ -891,7 +877,6 @@ Example:
 | GET | `/api/dynamic-runs/:runId` | Dynamic run detail. |
 | GET | `/api/dynamic-runs/:runId/events` | Dynamic run events over HTTP. |
 | POST | `/api/dynamic-runs/:runId/events` | Write an event through Maze Head. |
-| POST | `/api/dynamic-runs/:runId/permission-requests/:requestId/decision` | Allow or deny a dynamic run permission request. |
 | DELETE | `/api/dynamic-runs/:runId` | Delete a dynamic run. |
 | POST | `/api/dynamic-runs/cleanup` | Bulk cleanup dynamic runs. |
 ---
@@ -1325,7 +1310,7 @@ Expected result:
 ### 9.8 Compatibility and boundaries
 
 - Dynamic runs can be inspected through unified `/runs/*`.
-- Use `DynamicRun` SDK and `/dynamic_runs/*` for task appending, permission requests, and detailed events.
+- Use `DynamicRun` SDK and `/dynamic_runs/*` for task appending and detailed events.
 - Token metrics depend on user reporting. Maze does not intercept LLM traffic.
 - If the Head process crashes or restarts, running static runs are marked `interrupted` on the next startup and written to `events.jsonl`.
 

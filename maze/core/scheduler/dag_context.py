@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Iterable
+from typing import Dict
 
 
 @dataclass
@@ -46,12 +46,6 @@ class DAGContextManager:
 
     def node_context_load(self, node_id: str) -> int:
         return int(self.node_load_counter.get(node_id, 0))
-
-    def get_least_loaded_node(self, node_ids: Iterable[str]) -> str | None:
-        node_ids = list(node_ids)
-        if not node_ids:
-            return None
-        return min(node_ids, key=lambda node_id: (self.node_context_load(node_id), node_id))
 
     def record_selection(self, workflow_id: str | None, node_id: str, node_ip: str) -> tuple[DAGContext | None, bool]:
         if not workflow_id:

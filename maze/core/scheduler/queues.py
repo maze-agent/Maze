@@ -68,27 +68,12 @@ class HeterogeneousTaskQueues:
                 raise ValueError("cannot pop a non-head task from a resource queue")
             return queue.pop(0).task
 
-    def has_tasks(self) -> bool:
-        with self._lock:
-            return any(self._queues[name] for name in QUEUE_NAMES)
-
     def wait_for_task(self, timeout: float | None = None) -> bool:
         with self._not_empty:
             return self._not_empty.wait_for(
                 lambda: any(self._queues[name] for name in QUEUE_NAMES),
                 timeout=timeout,
             )
-
-    def snapshot(self, now: float | None = None) -> List[Any]:
-        with self._lock:
-            out = []
-            for name in QUEUE_NAMES:
-                for queued in self._queues[name]:
-                    task = queued.task
-                    self.strategy.refresh_task_metadata(task, now)
-                    setattr(task, "queue_name", name)
-                    out.append(task)
-            return out
 
     def queue_snapshot(self, now: float | None = None) -> Dict[str, List[Any]]:
         with self._lock:
@@ -102,10 +87,6 @@ class HeterogeneousTaskQueues:
                     tasks.append(task)
                 out[name] = tasks
             return out
-
-    def counts(self) -> Dict[str, int]:
-        with self._lock:
-            return {name: len(self._queues[name]) for name in QUEUE_NAMES}
 
     def queue_names(self) -> Iterable[str]:
         return QUEUE_NAMES

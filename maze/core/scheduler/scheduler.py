@@ -808,30 +808,6 @@ class Scheduler():
         )
         return False
 
-    def _handle_llm_instance_stop(self, socket_to_main, message_data: dict) -> None:
-        instance_id = message_data["instance_id"]
-        try:
-            resource_detail = self._stop_and_finalize_llm_instance(instance_id)
-            message = {
-                "type": "finish_llm_instance_stop",
-                "data": {
-                    "instance_id": instance_id,
-                    "backend": resource_detail["backend"],
-                    "request_id": message_data.get("request_id"),
-                },
-            }
-        except Exception as exc:
-            message = {
-                "type": "fail_llm_instance_stop",
-                "data": {
-                    "instance_id": instance_id,
-                    "request_id": message_data.get("request_id"),
-                    "error": str(exc),
-                },
-            }
-            logger.exception("Failed to stop LLM instance %s", instance_id)
-        self._send_scheduler_event(socket_to_main, message)
-
     def _record_llm_owner_node(self, node_id: str, node_ip: str) -> None:
         is_new_placement = self.llm_instance_manager.record_owner_node(
             node_id,
@@ -1757,6 +1733,16 @@ class Scheduler():
         self._release_model_route(task)
         self._stopped_workflows().add(task.workflow_id)
         self._clear_model_workflow_state(task.workflow_id)
+        if (
+            getattr(task, "standby_worker_lease", None) is not None
+            and error.get("error_type") in {
+                "cancelled",
+                "node_lost",
+                "resource_unavailable",
+                "timeout",
+            }
+        ):
+            self.workflow_manager.discard_task_standby_worker(task)
         self.workflow_manager.clear_task_ref(task)
 
         diagnosis = diagnose_failure(error, task)
@@ -2573,7 +2559,12 @@ class Scheduler():
                             error,
                             outbound_messages=outbound_messages,
                         )
-                    except (ray.exceptions.NodeDiedError, ray.exceptions.ObjectLostError, ray.exceptions.TaskUnschedulableError) as e:
+                    except (
+                        ray.exceptions.RayActorError,
+                        ray.exceptions.NodeDiedError,
+                        ray.exceptions.ObjectLostError,
+                        ray.exceptions.TaskUnschedulableError,
+                    ) as e:
                         logger.info(f"Task {finished_task.task_id} failed with exception: {e}")
                         error_type = "resource_unavailable" if isinstance(e, ray.exceptions.TaskUnschedulableError) else "node_lost"
                         error = exception_to_error_envelope(

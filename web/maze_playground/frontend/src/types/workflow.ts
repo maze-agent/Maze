@@ -168,12 +168,10 @@ export interface WorkspaceManifest {
   created_at?: string;
   updated_at?: string;
   mode?: string;
-  default_sandbox?: 'workspace_sandbox' | 'docker' | string;
   files_dir?: string;
   workflows_dir?: string;
   tasks_dir?: string;
   runs_dir?: string;
-  policy_path?: string;
   imports?: Array<Record<string, any>>;
   local_mounts?: Array<Record<string, any>>;
   last_change?: Record<string, any>;
@@ -231,9 +229,10 @@ export interface WorkflowNode {
     functionName?: string;
     prompt?: string;
     taskTimeout?: number;
+    maxRetries?: number;
+    retryBackoffSeconds?: number;
     localModel?: string;
     modelAnchor?: ModelAnchor;
-    execBackend?: 'workspace_sandbox' | 'docker';
     inputs: TaskInputConfig[];
     outputs: TaskOutputConfig[];
     resources?: Resources;
@@ -297,8 +296,6 @@ export interface ClusterResourceNode {
   };
   capabilities?: {
     workspace_sandbox?: boolean;
-    docker_sandbox?: boolean;
-    docker_reason?: string;
     [key: string]: any;
   };
   local_models?: LocalModel[];
@@ -448,7 +445,6 @@ export interface ClusterQueuesResponse {
       }>;
     };
     queues?: Record<string, ClusterQueueBucket>;
-    stopped_workflow_ids?: string[];
     ready_tasks: ClusterQueueTask[];
     pending_tasks: ClusterQueueTask[];
     retrying_tasks: ClusterQueueTask[];
@@ -541,24 +537,6 @@ export interface WorkerProfileDraftTestResponse {
   };
 }
 
-export interface ClusterConsoleRunResponse {
-  success: boolean;
-  workspaceId?: string;
-  workspaceDir?: string;
-  target: string;
-  targetLabel?: string;
-  command: string;
-  timeoutMs: number;
-  ranAt: string;
-  result?: {
-    ok: boolean;
-    code: number;
-    stdout: string;
-    stderr: string;
-  };
-  error?: string;
-}
-
 export type UnifiedRunStatus =
   | 'created'
   | 'queued'
@@ -603,6 +581,7 @@ export interface UnifiedRunTaskSnapshot {
   retry_wait_seconds?: number | null;
   next_eligible_time?: number | null;
   timeout_seconds?: number | null;
+  attempt?: number;
   maze_task_id?: string;
   node_ip?: string | null;
   node_id_runtime?: string | null;

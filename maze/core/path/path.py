@@ -66,14 +66,6 @@ RUN_WORKFLOW_CLEANUP_RETRY_SECONDS = 0.25
 RUN_WORKFLOW_CLEANUP_MAX_ATTEMPTS = 5
 
 
-def _global_metrics_static_status(status: Any) -> str:
-    if status in {"created", "submitted"}:
-        return "submitted"
-    if status == "cancelled":
-        return "canceled"
-    return str(status or "submitted")
-
-
 class SchedulerUnavailableError(RuntimeError):
     error_code = "scheduler_unavailable"
 
@@ -406,18 +398,9 @@ class MaPath:
         self._scheduler_failure_handled: tuple[int | None, int | None] | None = None
 
         self.global_metrics = GlobalMetrics()
+        self.global_metrics.rebuild(self.static_run_store.list_runs())
         self.resource_history = ResourceHistoryStore()
         self.runtime_estimator = RuntimeEstimator()
-        for snapshot in self.static_run_store.list_runs():
-            run_id = snapshot.get("run_id")
-            self.global_metrics.on_run_submitted(run_id)
-            metrics_status = _global_metrics_static_status(snapshot.get("status"))
-            if metrics_status != "submitted":
-                self.global_metrics.on_run_status_change(
-                    run_id,
-                    "submitted",
-                    metrics_status,
-                )
          
     def cleanup(self):
         '''
@@ -1034,6 +1017,7 @@ class MaPath:
         '''
         workflow_id = str(uuid.uuid4())
         self.workflows[workflow_id] = build_app_workflow(workflow_id, spec)
+        self.global_metrics.on_workflow_created(workflow_id)
         return workflow_id
 
     def create_dag_workflow(self, spec:Dict[str,Any]) -> str:
@@ -1428,9 +1412,6 @@ class MaPath:
             )
             self._persist_static_run(run_id)
 
-            static_run._metrics_started = True
-            self.global_metrics.on_run_submitted(run_id)
-
             self._record_static_event(run_id, {
                 "type": "start_workflow",
                 "data": {
@@ -1611,7 +1592,7 @@ class MaPath:
             (int(event.get("seq", 0)) for event in events),
             default=0,
         )
-        self.static_run_store.save_run(snapshot)
+        self._save_static_run_snapshot(snapshot)
 
     def _finish_workflow_dispatch_failure(
         self,
@@ -1623,7 +1604,6 @@ class MaPath:
             dispatch = self._validate_dispatch(static_run._dispatch)
             if dispatch.get("status") == "terminal":
                 return
-            previous_status = static_run.status
             self._revoke_dispatch_artifacts(run_id, dispatch)
             self._mark_static_dispatch_failed(static_run, error)
             event = self._record_static_event(run_id, {
@@ -1633,12 +1613,6 @@ class MaPath:
             queue_for_run = self.async_que.get(run_id)
             if queue_for_run is not None:
                 queue_for_run.put_nowait(copy.deepcopy(event))
-            if getattr(static_run, "_metrics_started", False):
-                self.global_metrics.on_run_status_change(
-                    run_id,
-                    _global_metrics_static_status(previous_status),
-                    "failed",
-                )
             return
 
         snapshot = self.static_run_store.load_run(run_id)
@@ -1647,17 +1621,9 @@ class MaPath:
         )
         if dispatch.get("status") == "terminal":
             return
-        previous_status = snapshot.get("status")
         self._revoke_dispatch_artifacts(run_id, dispatch)
         self._mark_snapshot_dispatch_failed(snapshot, dispatch, error)
         self._record_snapshot_dispatch_failure(snapshot, error)
-        on_status_change = getattr(self.global_metrics, "on_run_status_change", None)
-        if on_status_change is not None:
-            on_status_change(
-                run_id,
-                _global_metrics_static_status(previous_status),
-                "failed",
-            )
 
     def _fail_workflow_dispatch(
         self,
@@ -1917,7 +1883,7 @@ class MaPath:
                     dispatch,
                     error,
                     lambda snapshot=snapshot, dispatch=dispatch: (
-                        self.static_run_store.save_run({
+                        self._save_static_run_snapshot({
                             **snapshot,
                             RUN_WORKFLOW_DISPATCH_FIELD: dispatch,
                         })
@@ -2148,84 +2114,6 @@ class MaPath:
         self._persist_dynamic_run(run_id)
         return updated
 
-    async def upsert_dynamic_permission_request(self, run_id:str, request:Dict[str,Any]):
-        await self._refresh_dynamic_timeout(run_id)
-        dynamic_run = self.get_dynamic_run(run_id)
-        if not isinstance(request, dict):
-            raise ValueError("permission request must be a JSON object")
-        request_id = str(request.get("request_id") or request.get("id") or "").strip()
-        if not request_id:
-            raise ValueError("permission request_id is required")
-        requests_map = dict(dynamic_run.metadata.get("permission_requests") or {})
-        existing = requests_map.get(request_id) if isinstance(requests_map.get(request_id), dict) else {}
-        now = time.time()
-        normalized = {
-            **existing,
-            **request,
-            "request_id": request_id,
-            "status": str(request.get("status") or existing.get("status") or "pending"),
-            "created_time": existing.get("created_time") or now,
-            "updated_time": now,
-        }
-        requests_map[request_id] = normalized
-        pending = [
-            item
-            for item in requests_map.values()
-            if isinstance(item, dict) and item.get("status") == "pending"
-        ]
-        dynamic_run.update_metadata({
-            "permission_requests": requests_map,
-            "pending_permission_request_count": len(pending),
-        })
-        await self._emit_dynamic_event(run_id, {
-            "type": "agent_permission_request_created",
-            "data": normalized,
-        })
-        return normalized
-
-    async def decide_dynamic_permission_request(self, run_id:str, request_id:str, decision:Dict[str,Any]):
-        await self._refresh_dynamic_timeout(run_id)
-        dynamic_run = self.get_dynamic_run(run_id)
-        request_key = str(request_id or "").strip()
-        if not request_key:
-            raise ValueError("permission request_id is required")
-        requests_map = dict(dynamic_run.metadata.get("permission_requests") or {})
-        request_payload = requests_map.get(request_key)
-        if not isinstance(request_payload, dict):
-            raise ValueError(f"Permission request not found: {request_key}")
-        if request_payload.get("status") != "pending":
-            return request_payload
-        action = str((decision or {}).get("action") or "").strip().lower()
-        if action not in {"allow", "deny"}:
-            raise ValueError("permission decision action must be allow or deny")
-        now = time.time()
-        decided = {
-            **request_payload,
-            "status": "allowed" if action == "allow" else "denied",
-            "decision": {
-                "action": action,
-                "reason": str((decision or {}).get("reason") or "").strip(),
-                "decided_by": str((decision or {}).get("decided_by") or "user").strip() or "user",
-                "decided_time": now,
-            },
-            "updated_time": now,
-        }
-        requests_map[request_key] = decided
-        pending = [
-            item
-            for item in requests_map.values()
-            if isinstance(item, dict) and item.get("status") == "pending"
-        ]
-        dynamic_run.update_metadata({
-            "permission_requests": requests_map,
-            "pending_permission_request_count": len(pending),
-        })
-        await self._emit_dynamic_event(run_id, {
-            "type": "agent_permission_request_decided",
-            "data": decided,
-        })
-        return decided
-
     async def delete_dynamic_run(self, run_id:str):
         snapshot = await self.get_dynamic_run_snapshot(run_id)
         if snapshot.get("status") not in TERMINAL_DYNAMIC_RUN_STATUSES:
@@ -2282,7 +2170,6 @@ class MaPath:
 
     async def _sweep_run_deadlines(self):
         for run_id, static_run in list(self.static_runs.items()):
-            previous_status = static_run.status
             deadline = static_run.deadline_time()
             if self._dispatch_requires_cleanup(static_run):
                 if deadline is not None and time.time() > deadline:
@@ -2319,7 +2206,6 @@ class MaPath:
                     "deadline_time": deadline,
                 },
             })
-            self.global_metrics.on_run_status_change(run_id, previous_status, "timed_out")
             queue = self.async_que.get(run_id)
             if queue is not None:
                 queue.put_nowait(event)
@@ -2338,29 +2224,19 @@ class MaPath:
             })
             self._stop_workflow_best_effort(run_id)
 
-    def _scheduler_event_is_persisted(
+    def _append_scheduler_event_once(
         self,
         store,
         run_id: str,
         event: Dict[str, Any],
-    ) -> bool:
-        load_events = getattr(store, "load_events", None)
-        sequence = event.get("seq")
-        if load_events is None or sequence is None:
-            return False
-        for stored_event in load_events(run_id, after=int(sequence) - 1):
-            if int(stored_event.get("seq", 0)) != int(sequence):
-                continue
-            stored_payload = copy.deepcopy(stored_event)
-            event_payload = copy.deepcopy(event)
-            stored_payload.pop("timestamp", None)
-            event_payload.pop("timestamp", None)
-            if stored_payload != event_payload:
-                raise RuntimeError(
-                    f"Persisted event sequence conflict for run {run_id}: {sequence}"
-                )
-            return True
-        return False
+        *,
+        snapshot: Dict[str, Any] | None = None,
+    ) -> None:
+        append_event = getattr(store, "append_event_once", None) or store.append_event
+        if snapshot is None:
+            append_event(run_id, event)
+        else:
+            append_event(run_id, event, snapshot=snapshot)
 
     def _persist_scheduler_exit_entry(
         self,
@@ -2373,20 +2249,18 @@ class MaPath:
         event = entry["event"]
         snapshot = entry["snapshot"]
         if not entry["event_persisted"]:
-            append_event_once = getattr(store, "append_event_once", None)
-            if append_event_once is not None:
-                if dynamic:
-                    append_event_once(run_id, event, snapshot=snapshot)
-                else:
-                    append_event_once(run_id, event)
-            elif not self._scheduler_event_is_persisted(store, run_id, event):
-                if dynamic:
-                    store.append_event(run_id, event, snapshot=snapshot)
-                else:
-                    store.append_event(run_id, event)
+            self._append_scheduler_event_once(
+                store,
+                run_id,
+                event,
+                snapshot=snapshot if dynamic else None,
+            )
             entry["event_persisted"] = True
         if not entry["snapshot_persisted"]:
-            store.save_run(snapshot)
+            if dynamic:
+                store.save_run(snapshot)
+            else:
+                self._save_static_run_snapshot(snapshot)
             entry["snapshot_persisted"] = True
 
     def _scheduler_exit_progress_for(
@@ -2409,13 +2283,11 @@ class MaPath:
         for run_id, static_run in list(self.static_runs.items()):
             progress["static"][run_id] = {
                 "run": static_run,
-                "previous_status": static_run.status,
                 "interrupted": None,
                 "event": None,
                 "snapshot": None,
                 "event_persisted": False,
                 "snapshot_persisted": False,
-                "metrics_recorded": False,
                 "queue_notified": False,
                 "complete": False,
             }
@@ -2708,14 +2580,6 @@ class MaPath:
                         entry,
                         dynamic=False,
                     )
-                    if not entry["metrics_recorded"]:
-                        previous_status = entry["previous_status"]
-                        self.global_metrics.on_run_status_change(
-                            run_id,
-                            _global_metrics_static_status(previous_status),
-                            "interrupted",
-                        )
-                        entry["metrics_recorded"] = True
                     if not entry["queue_notified"]:
                         queue = self.async_que.get(run_id)
                         if queue is not None:
@@ -2948,16 +2812,12 @@ class MaPath:
         if stored_event is None:
             stored_event = dynamic_run.append_event(event)
         snapshot = self._dynamic_run_snapshot(run_id)
-        if not self._scheduler_event_is_persisted(
+        self._append_scheduler_event_once(
             self.dynamic_run_store,
             run_id,
             stored_event,
-        ):
-            self.dynamic_run_store.append_event(
-                run_id,
-                stored_event,
-                snapshot=snapshot,
-            )
+            snapshot=snapshot,
+        )
         self.dynamic_run_store.save_run(snapshot)
         que = self.async_que.get(run_id)
         if que is not None:
@@ -2972,16 +2832,12 @@ class MaPath:
         dynamic_run = self.get_dynamic_run(run_id)
         stored_event = dynamic_run.append_event(event)
         snapshot = self._dynamic_run_snapshot(run_id)
-        if not self._scheduler_event_is_persisted(
+        self._append_scheduler_event_once(
             self.dynamic_run_store,
             run_id,
             stored_event,
-        ):
-            self.dynamic_run_store.append_event(
-                run_id,
-                stored_event,
-                snapshot=snapshot,
-            )
+            snapshot=snapshot,
+        )
         self.dynamic_run_store.save_run(snapshot)
         return stored_event
 
@@ -3021,7 +2877,13 @@ class MaPath:
     def _persist_static_run(self, run_id:str):
         static_run = self.static_runs.get(run_id)
         if static_run is not None:
-            self.static_run_store.save_run(self._static_run_snapshot(static_run))
+            self._save_static_run_snapshot(self._static_run_snapshot(static_run))
+
+    def _save_static_run_snapshot(self, snapshot: Dict[str, Any]):
+        self.static_run_store.save_run(snapshot)
+        sync_run = getattr(self.global_metrics, "sync_run", None)
+        if sync_run is not None:
+            sync_run(snapshot)
 
     @staticmethod
     def _static_run_snapshot(static_run: StaticRun) -> Dict[str, Any]:
@@ -3045,12 +2907,11 @@ class MaPath:
         if static_run is None:
             return event
         stored_event = static_run.append_event(event)
-        if not self._scheduler_event_is_persisted(
+        self._append_scheduler_event_once(
             self.static_run_store,
             run_id,
             stored_event,
-        ):
-            self.static_run_store.append_event(run_id, stored_event)
+        )
         if persist_run:
             self._persist_static_run(run_id)
         return stored_event
@@ -3656,15 +3517,6 @@ class MaPath:
             self._persist_static_run(run_id)
 
         if static_run.status == "succeeded":
-            if continuation.get("run_metrics") != "sent":
-                self.global_metrics.on_run_status_change(
-                    run_id,
-                    "running",
-                    "succeeded",
-                )
-                continuation["run_metrics"] = "sent"
-                self._persist_static_run(run_id)
-
             workflow_event = continuation.get("workflow_event")
             if workflow_event is None:
                 workflow_event = static_run.append_event({
@@ -3675,12 +3527,11 @@ class MaPath:
                     },
                 })
                 continuation["workflow_event"] = copy.deepcopy(workflow_event)
-            if not self._scheduler_event_is_persisted(
+            self._append_scheduler_event_once(
                 self.static_run_store,
                 run_id,
                 workflow_event,
-            ):
-                self.static_run_store.append_event(run_id, workflow_event)
+            )
             self._persist_static_run(run_id)
 
             if continuation.get("workflow_notification") != "sent":
@@ -3925,7 +3776,6 @@ class MaPath:
                 "workflow_advanced": False,
                 "ready_task_ids": [],
                 "dispatch": {},
-                "run_metrics": "pending",
                 "workflow_event": None,
                 "workflow_notification": "pending",
                 "workflow_cleared": "pending",
@@ -3943,19 +3793,6 @@ class MaPath:
 
         task = self.submit_workflows[submit_id].tasks.get(task_id)
         self._observe_task_runtime(task, message_data, success=success)
-        self.global_metrics.on_task_finished(
-            submit_id,
-            task_id,
-            "succeeded" if success else "failed",
-            task_metrics if success else None,
-        )
-        if not success and static_run is not None:
-            self.global_metrics.on_run_status_change(
-                submit_id,
-                "running",
-                "failed",
-            )
-
         que: Queue[Any] = self.async_que[submit_id]
         if not success:
             await que.put(message)
@@ -4081,7 +3918,7 @@ class MaPath:
                 "node_ip":node_ip,
                 "node_id":node_id,
                 "resources":resources,
-                "capabilities":capabilities or {"workspace_sandbox": True, "docker_sandbox": False},
+                "capabilities":capabilities or {"workspace_sandbox": True},
             }
         }
         try:
@@ -4333,18 +4170,8 @@ class MaPath:
                         if message_type == "start_task":
                             self.submit_workflows[submit_id].mark_task_started(message_data["task_id"])
                             if static_run is not None:
-                                if static_run.status == "created":
-                                    self.global_metrics.on_run_status_change(
-                                        submit_id,
-                                        "submitted",
-                                        "running",
-                                    )
                                 static_run.mark_task_started(message_data["task_id"], message_data)
                                 message = self._record_static_event(submit_id, message)
-                            self.global_metrics.on_task_started(
-                                submit_id,
-                                message_data["task_id"],
-                            )
                         elif message_type == "task_pending":
                             if static_run is not None:
                                 static_run.mark_task_pending(
@@ -4390,18 +4217,6 @@ class MaPath:
                                     lease_id=message_data.get("lease_id"),
                                 )
                                 message = self._record_static_event(submit_id, message)
-                                if static_run.status == "failed":
-                                    self.global_metrics.on_run_status_change(
-                                        submit_id,
-                                        "running",
-                                        "failed",
-                                    )
-                            self.global_metrics.on_task_finished(
-                                submit_id,
-                                message_data["task_id"],
-                                "failed",
-                                None,
-                            )
 
                         self._commit_task_attempt_event_transaction(
                             attempt_transaction
@@ -4486,7 +4301,6 @@ class MaPath:
             self.async_que.pop(submit_id, None)
             if static_run is not None:
                 static_run.mark_cancelled("Workflow stopped")
-                self.global_metrics.on_run_status_change(submit_id, "running", "canceled")
                 self._record_static_event(submit_id, {
                     "type": "cancel_workflow",
                     "data": {
