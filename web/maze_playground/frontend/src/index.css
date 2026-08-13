@@ -238,6 +238,19 @@ body {
   margin-bottom: 8px;
 }
 
+.workbench-workspace-select {
+  width: 100%;
+}
+
+.workbench-workspace-id {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .workbench-nav-list {
   display: grid;
   gap: 2px;
@@ -331,6 +344,33 @@ button.workbench-nav-row:disabled:hover:not(.is-selected) {
   font-size: 11px;
   line-height: 18px;
   white-space: nowrap;
+}
+
+.workbench-workflow-row {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-left: 10px;
+}
+
+.workbench-workflow-row.is-selected::before {
+  content: '';
+  position: absolute;
+  inset: 5px auto 5px 0;
+  width: 2px;
+  background: #155eef;
+}
+
+.workbench-workflow-row .workbench-nav-row-meta {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: #98a2b3;
+  line-height: 18px;
+}
+
+.workbench-workflow-row.is-selected .workbench-nav-row-meta {
+  color: #475467;
 }
 
 .workbench-status-dot {

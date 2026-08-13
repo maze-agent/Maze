@@ -40,6 +40,22 @@ def diagnose_failure(error: Dict[str, Any], task: Any) -> Dict[str, Any]:
         "details": {},
     }
 
+    if error_type == "missing_model":
+        diagnosis.update({
+            "category": "model",
+            "reason": "checkpoint_missing",
+            "recoverable": False,
+        })
+        return diagnosis
+
+    if error_type == "model_deployment_failed":
+        diagnosis.update({
+            "category": "model",
+            "reason": "deployment_failed",
+            "recoverable": False,
+        })
+        return diagnosis
+
     if error_type == "resource_insufficient":
         diagnosis.update({
             "category": "resource",
@@ -89,7 +105,12 @@ def apply_repair_action(task: Any, error: Dict[str, Any], diagnosis: Dict[str, A
 
     category = diagnosis.get("category")
     if category == "resource":
-        return _apply_resource_reanchor(task)
+        return {
+            "type": "retry_without_resource_change",
+            "applied": True,
+            "reason": "resource_request_unchanged",
+            "requested_resources": copy.deepcopy(getattr(task, "resources", None)),
+        }
     if category == "worker":
         return _apply_node_recovery(task, error, diagnosis)
     if category == "invocation":
@@ -186,27 +207,6 @@ def _close_open_attempt(trace: Dict[str, Any], outcome: Dict[str, Any]) -> None:
         if entry.get("outcome") is None:
             entry["outcome"] = to_json_safe(outcome)
             return
-
-
-def _apply_resource_reanchor(task: Any) -> Dict[str, Any]:
-    resources = getattr(task, "resources", None)
-    if not isinstance(resources, dict):
-        return {"type": "resource_reanchor", "applied": False, "reason": "missing_resources"}
-
-    current = _int_resource(resources.get("gpu_mem"))
-    if current <= 0:
-        return {"type": "resource_reanchor", "applied": False, "reason": "missing_gpu_mem_anchor"}
-
-    updated = int(current * 1.25)
-    resources["gpu_mem"] = updated
-    return {
-        "type": "resource_reanchor",
-        "applied": True,
-        "adjusted_resources": copy.deepcopy(resources),
-        "changes": {
-            "gpu_mem": {"from": current, "to": updated},
-        },
-    }
 
 
 def _apply_node_recovery(task: Any, error: Dict[str, Any], diagnosis: Dict[str, Any]) -> Dict[str, Any]:

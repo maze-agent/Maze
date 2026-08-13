@@ -567,7 +567,8 @@ export default function RunsInspector({
   const [runActionLoading, setRunActionLoading] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreviewState | null>(null);
   const [promotingArtifactKey, setPromotingArtifactKey] = useState<string | null>(null);
-  const runsRequestRef = useRef<Promise<void> | null>(null);
+  const runsRequestRef = useRef<{ workspaceId: string; promise: Promise<void> } | null>(null);
+  const runsRequestVersionRef = useRef(0);
   const detailRequestRef = useRef<{
     key: string;
     version: number;
@@ -653,34 +654,61 @@ export default function RunsInspector({
   const selectedDynamicEdges = selectedDynamicRun?.graph?.edges || [];
 
   const loadRuns = useCallback((silent = false) => {
-    if (runsRequestRef.current) {
-      return runsRequestRef.current;
+    if (runsRequestRef.current?.workspaceId === workspaceId) {
+      return runsRequestRef.current.promise;
     }
+    const version = ++runsRequestVersionRef.current;
     if (!silent) {
       setLoading(true);
     }
 
     const request = (async () => {
       try {
-        const result = await api.getRuns({ limit: 100, detail: false });
+        const result = await api.getRuns({
+          limit: 100,
+          detail: false,
+          workspaceId: workspaceId || undefined,
+        });
+        if (version !== runsRequestVersionRef.current) return;
         const fetchedRuns = result.runs || [];
         setRuns(fetchedRuns);
         setStaticRuns(fetchedRuns.filter((run) => run.kind === 'static'));
       } catch (error: any) {
+        if (version !== runsRequestVersionRef.current) return;
         console.error('Failed to load runs:', error);
         if (!silent) {
           message.error(error.response?.data?.error || 'Failed to load runs');
         }
       } finally {
-        runsRequestRef.current = null;
-        if (!silent) {
+        if (runsRequestRef.current?.workspaceId === workspaceId) {
+          runsRequestRef.current = null;
+        }
+        if (!silent && version === runsRequestVersionRef.current) {
           setLoading(false);
         }
       }
     })();
-    runsRequestRef.current = request;
+    runsRequestRef.current = { workspaceId, promise: request };
     return request;
-  }, [setStaticRuns]);
+  }, [setStaticRuns, workspaceId]);
+
+  useEffect(() => {
+    runsRequestVersionRef.current += 1;
+    runsRequestRef.current = null;
+    detailRequestVersionRef.current += 1;
+    detailRequestRef.current = null;
+    eventStateRef.current = null;
+    resourceRefreshRef.current = null;
+    setRuns([]);
+    setSelectedRunKey(null);
+    setSelectedStaticRun(null);
+    setSelectedDynamicRun(null);
+    setSelectedRunArtifacts([]);
+    setSelectedRunLogs([]);
+    setStaticEvents([]);
+    setDynamicEvents([]);
+    setArtifactPreview(null);
+  }, [workspaceId]);
 
   const loadRunDetails = useCallback((
     runId: string,

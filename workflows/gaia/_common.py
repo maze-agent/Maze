@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import mimetypes
+import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 
 
@@ -19,6 +23,64 @@ GAIA_FINAL_ANSWER_RULES = (
     "If you are asked for a comma separated list, apply the above rules depending "
     "on whether the element to be put in the list is a number or a string."
 )
+
+
+def read_input_file(
+    supplementary_path: str,
+    *,
+    allowed_extensions: frozenset[str],
+    kind: str,
+) -> dict[str, object]:
+    input_dir_value = os.environ.get("MAZE_INPUT_DIR")
+    if not input_dir_value:
+        raise RuntimeError("MAZE_INPUT_DIR is not set")
+    if not isinstance(supplementary_path, str) or not supplementary_path.strip():
+        raise ValueError("supplementary_path must be a non-empty relative path")
+
+    normalized = supplementary_path.replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(supplementary_path)
+    if (
+        relative.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or ".." in relative.parts
+    ):
+        raise ValueError("supplementary_path must stay within MAZE_INPUT_DIR")
+
+    input_dir = Path(input_dir_value).resolve()
+    try:
+        candidate = (input_dir / Path(*relative.parts)).resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f'Input file "{relative.as_posix()}" was not found in Workspace Files'
+        ) from exc
+    try:
+        candidate.relative_to(input_dir)
+    except ValueError as exc:
+        raise ValueError(
+            "supplementary_path must stay within MAZE_INPUT_DIR"
+        ) from exc
+    if not candidate.is_file():
+        raise ValueError("supplementary_path must reference a file")
+
+    extension = candidate.suffix.lower()
+    if extension not in allowed_extensions:
+        supported = ", ".join(sorted(allowed_extensions))
+        raise ValueError(
+            f"Unsupported {kind} file type {extension or '<none>'}; "
+            f"supported types are {supported}"
+        )
+    content = candidate.read_bytes()
+    return {
+        "file_name": candidate.name,
+        "file_extension": extension,
+        "mime_type": mimetypes.guess_type(candidate.name)[0]
+        or "application/octet-stream",
+        "content": content,
+        "content_sha256": sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
 
 
 def estimate_tokens(text: str) -> int:

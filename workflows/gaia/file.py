@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 from io import BytesIO
-import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import time
 
 from maze import MaClient, task, workflow
@@ -15,40 +12,10 @@ from workflows.gaia._common import (
     gaia_deepseek_prompt,
     gaia_fusion_prompt,
     gaia_question_prompt,
+    read_input_file,
     text_feature_for_answer,
     text_features,
 )
-
-
-def _resolve_input_file(supplementary_path: str) -> Path:
-    input_dir_value = os.environ.get("MAZE_INPUT_DIR")
-    if not input_dir_value:
-        raise RuntimeError("MAZE_INPUT_DIR is not set")
-    if not isinstance(supplementary_path, str) or not supplementary_path.strip():
-        raise ValueError("supplementary_path must be a non-empty relative path")
-
-    normalized = supplementary_path.replace("\\", "/")
-    relative = PurePosixPath(normalized)
-    windows_path = PureWindowsPath(supplementary_path)
-    if (
-        relative.is_absolute()
-        or windows_path.is_absolute()
-        or windows_path.drive
-        or ".." in relative.parts
-    ):
-        raise ValueError("supplementary_path must stay within MAZE_INPUT_DIR")
-
-    input_dir = Path(input_dir_value).resolve()
-    candidate = (input_dir / Path(*relative.parts)).resolve(strict=True)
-    try:
-        candidate.relative_to(input_dir)
-    except ValueError as exc:
-        raise ValueError(
-            "supplementary_path must stay within MAZE_INPUT_DIR"
-        ) from exc
-    if not candidate.is_file():
-        raise ValueError("supplementary_path must reference a file")
-    return candidate
 
 
 def _decode_text(content: bytes) -> str:
@@ -59,9 +26,13 @@ def _decode_text(content: bytes) -> str:
 
 
 def _process_document_file(supplementary_path: str) -> dict[str, object]:
-    path = _resolve_input_file(supplementary_path)
-    content = path.read_bytes()
-    extension = path.suffix.lower()
+    file_info = read_input_file(
+        supplementary_path,
+        allowed_extensions=frozenset({".txt", ".md", ".pdf"}),
+        kind="supplementary",
+    )
+    content = bytes(file_info["content"])
+    extension = str(file_info["file_extension"])
 
     if extension in {".txt", ".md"}:
         processed_content = _decode_text(content)
@@ -75,18 +46,15 @@ def _process_document_file(supplementary_path: str) -> dict[str, object]:
                 pages.append(f"--- Page {index} ---\n{page_text}")
         processed_content = "\n\n".join(pages)
         if not processed_content:
-            raise ValueError(f"PDF contains no extractable text: {path.name}")
-    else:
-        raise ValueError(
-            f"Unsupported supplementary file type {extension or '<none>'}; "
-            "supported types are .txt, .md, and .pdf"
-        )
+            raise ValueError(
+                f"PDF contains no extractable text: {file_info['file_name']}"
+            )
 
     return {
-        "file_name": path.name,
+        "file_name": file_info["file_name"],
         "file_extension": extension,
-        "content_sha256": sha256(content).hexdigest(),
-        "size_bytes": len(content),
+        "content_sha256": file_info["content_sha256"],
+        "size_bytes": file_info["size_bytes"],
         "processed_content": processed_content,
     }
 

@@ -9,134 +9,141 @@
     </a>
 </p>
 
+Maze turns agent programs into distributed, observable workflows. It schedules task-level work across heterogeneous resources while keeping execution, recovery, model serving, and artifacts behind one runtime API.
 
-Maze turns agent programs into distributed, observable workflows. It schedules task-level work across heterogeneous resources while keeping execution, recovery, and artifacts behind one runtime API.
+## Highlights
 
-## 🌟 Highlights
-
-- **Visual workflow development.** Maze Workbench provides a DAG editor, reusable task catalog, workspace files, validation, live execution, Run inspection, and cluster operations in one interface.
-- **Heterogeneous scheduling.** Independent `gpu`, `cpu`, and `io` queues prevent one resource class from blocking the others. Maze supports `FCFS` and the paper-aligned `HACS` scheduling algorithm, with node placement configured separately.
-- **Static and dynamic workflows.** Define DAGs with `@workflow`, submit the portable `maze.workflow/v1` format, or append tasks at runtime with persisted `DynamicRun` state.
-- **Distributed model execution.** Maze discovers local models across nodes, routes LLM tasks to reusable inference instances, and manages GPU reservations and model scale-out/scale-in through the scheduler.
+- **Visual workflow development.** Maze Workbench combines a DAG editor, reusable task and workflow catalogs, server-side workspaces, files, validation, execution, Run inspection, and cluster operations.
+- **Heterogeneous scheduling.** Independent `gpu`, `cpu`, and `io` queues prevent one resource class from blocking another. Maze supports `FCFS` and the paper-aligned `HACS` scheduling algorithm.
+- **Static and dynamic workflows.** Define DAGs with `@workflow`, submit portable `maze.workflow/v1` specifications, or append tasks at runtime with persisted `DynamicRun` state.
+- **Distributed model execution.** Maze discovers local checkpoints, deploys reusable vLLM or Transformers instances on demand, routes model tasks, and manages GPU reservations and scale-in/out.
 - **Durable operations.** Runs retain task state, structured errors, events, logs, retries, timeouts, cancellation, placement, and content-addressed artifacts across process restarts.
-- **Framework integration.** The Python SDK, LangGraph adapter, visual Workbench, and application specs use the same Core execution and observability surface.
+- **One execution surface.** The Python SDK, LangGraph adapter, Workbench, and application specifications use the same Maze Core Run and observability APIs.
 
-## Current Architecture
-
-Maze has one execution path and one owner for runtime state:
+## Architecture
 
 ```text
-Python SDK / LangGraph / Workbench
-                  |
-          POST /workflows/submit
-                  |
-             Maze Core
-       Run, events, logs, artifacts
-                  |
-       Scheduler + Ray workers
-        gpu / cpu / io queues
+Python SDK / LangGraph / Workbench / App Spec
+                     |
+             maze.workflow/v1
+             POST /workflows/submit
+                     |
+                 Maze Core
+          Runs, events, logs, artifacts
+                     |
+              Scheduler + Ray
+       gpu / cpu / io queues + model wait
+                     |
+             Head and worker nodes
 ```
 
-- **Core owns Runs.** A Core `run_id` is the only public run identity. Static workflows, DynamicRuns, and application specs share the same persisted snapshots, events, logs, artifacts, cancel, and retry APIs.
-- **Clients submit DAGs.** The Python SDK, LangGraph adapter, and Workbench all submit `maze.workflow/v1` specs through `/workflows/submit`. The Workbench backend manages workspace files and proxies Core APIs; it does not execute or mirror a second workflow.
-- **Catalog and workspace are explicit.** `system_catalog/tasks` and `system_catalog/workflows` contain built-in templates. User-edited workflow and task files remain in their workspace.
-- **Scheduling is heterogeneous.** Ready work enters separate `gpu`, `cpu`, and `io` queues. `FCFS` is the default scheduling algorithm; `HACS` adds topology- and runtime-aware ordering. Node placement is configured independently.
-- **Runs survive failures.** Run-level deadlines, structured failures, worker re-registration, scheduler interruption handling, durable artifacts, and restart-safe discovery keep execution state inspectable after process failure.
-- **Dynamic workflows remain first-class.** Runtime task append, lifecycle events, cancellation, timeout, and persisted recovery use Core `DynamicRun` rather than a second agent loop.
+- **Core owns Runs.** A Core `run_id` is the public run identity. Static workflows, DynamicRuns, and application specs share persisted snapshots, events, logs, artifacts, cancel, and retry APIs.
+- **Clients submit DAGs.** SDK, LangGraph, and Workbench workflows converge on the same `maze.workflow/v1` contract instead of maintaining separate execution paths.
+- **Workspaces own editable inputs.** A server-side workspace contains user workflows, task definitions, and files. Runs remain Core-owned and retain their workspace context.
+- **Scheduling and placement are separate.** `FCFS` or `HACS` orders ready tasks; the node placement strategy selects a registered node with suitable resources.
+- **Model wait is explicit.** A task waiting for a local model instance is not counted as a dispatchable GPU, CPU, or I/O queue item. It returns to its resource queue after routing becomes available.
+- **Ray provides distributed execution.** Maze adds workflow contracts, resource semantics, durable state, scheduling, model lifecycle, artifacts, and operational APIs above Ray.
 
-The implementation is built on Ray for distributed processes and task execution. Maze adds the workflow contract, task/resource semantics, durable Run state, scheduling policy, model lifecycle, artifacts, and operational APIs above Ray.
+## News
 
-## 📰 News
-
-- **2026-08**: Maze simplified the runtime and Workbench around Core-owned Runs and `/workflows/submit`, removing legacy `maze dev`, duplicate execution paths, and redundant UI state. Service lifecycle now uses `maze start --detach`, `maze stop`, and `maze doctor`, while standby actors provide the default warm execution path. The Workbench now supports concurrent submissions and immutable cross-workspace Run history, with task definition, runtime, placement, and artifacts consolidated in the right-side inspector.
-- **2026-07**: Maze introduced paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS` and `HACS` scheduling, observed-runtime estimates, richer queue diagnostics, and an optional standby worker path. Distributed execution was hardened with worker re-registration after head or Ray restarts, current-cluster validation, run-level deadlines, explicit scheduler-failure states, and restart-safe run discovery. The Maze research paper was accepted to SC26.
-- **2026-06**: Maze added unified run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
+- **2026-08**: Maze consolidated SDK, LangGraph, and Workbench DAG execution around Core-owned Runs and the `maze.workflow/v1` contract. Workbench added switchable server-side workspaces, workflow and file management, concurrent submission and cross-workspace Run inspection, and four GAIA workflow templates. Scheduler-managed local model execution was validated with both vLLM and Transformers, including automatic deployment, explicit model-wait state, cancellation, and deterministic GPU cleanup.
+- **2026-07**: Maze introduced paper-aligned heterogeneous `gpu/cpu/io` queues, pluggable `FCFS` and `HACS` scheduling, observed-runtime estimates, richer queue diagnostics, and warm standby workers. Distributed execution was hardened with worker re-registration, run-level deadlines, explicit scheduler-failure states, and restart-safe Run discovery. The Maze research paper was accepted to SC26.
+- **2026-06**: Maze added unified Run operations, content-addressed artifacts, local model routing, cluster management, and runtime fault-tolerance traces.
 - **2026-05**: Maze added persisted DynamicRuns, workspace file execution, and the Workbench `Runs` and `Cluster` views.
 
-<br>
+## Quick Start
 
+### Install
 
-## 🚀 Quick Start
+From PyPI:
 
-### 1. Install
+```bash
+pip install maze-agent
+```
 
-**From PyPI (Recommended)**
+From source:
 
-   ```bash
-   pip install maze-agent
-   ```
+```bash
+git clone https://github.com/maze-agent/Maze.git
+cd Maze
+pip install -e .
+```
 
-**From source**
+### Start Maze and Workbench
 
-   ```bash
-   git clone https://github.com/maze-agent/Maze.git
-   cd Maze
-   pip install -e .
-   ```
-### 2. Launch Maze
-   Launch Maze Head as maze server. The maze server can receive the workflow of the agent.
+```bash
+maze start --head --port 8000 --playground --detach
+```
 
-   ```bash
-   maze start --head --port HEAD_PORT
-   ```
-   Add `--detach` to run the same head parent in the background. Both foreground
-   and detached heads record one validated runtime identity, so another terminal
-   can inspect or stop the local head safely:
+- Workbench: `http://localhost:5173`
+- Core API: `http://localhost:8000`
 
-   ```bash
-   maze start --head --port HEAD_PORT --detach
-   maze status
-   maze doctor
-   maze stop
-   ```
+Manage the detached service with:
 
-   Detached output is written to the log path printed by `maze start`.
-   The head uses the `least-loaded` node placement policy by default, so ready tasks prefer the registered node with the fewest running Maze tasks. To force the older registration-order placement behavior, pass `--strategy default`.
+```bash
+maze status
+maze doctor
+maze stop
+```
 
-   Task scheduling is selected separately. `FCFS` is the default task scheduling algorithm; pass `--scheduling-algorithm HACS` to enable the paper-aligned HACS queue ordering:
+Maze validates its configured ports before startup and prints the detached log path. Use `--playground-port` to change the UI port. The Workbench backend uses port `3001` by default, or `--playground-port + 1` when the UI port changes; `--playground-backend-port` overrides it explicitly.
 
-   ```bash
-   maze start --head --port HEAD_PORT --scheduling-algorithm HACS
-   ```
+### Add Workers
 
-   Warm standby workers are enabled by default. Scheduled tasks use an idle
-   standby actor first and fall back to a normal Ray task when the pool is busy.
-   To disable standby creation and execution together:
+Start a worker that periodically re-registers after Head or Ray restarts:
 
-   ```bash
-   MAZE_STANDBY_WORKERS_ENABLED=0 maze start --head --port HEAD_PORT
-   ```
+```bash
+maze start --worker \
+  --addr HEAD_IP:8000 \
+  --agent \
+  --heartbeat-interval 20
+```
 
-   If there are multiple machines, you can connect other machines as maze workers to the maze head.
-   ```bash
-   maze start --worker --addr HEAD_IP:HEAD_PORT
-   ```
-   For long-running worker processes that should re-register after a head/core restart, run the worker agent:
-   ```bash
-   maze start --worker --addr HEAD_IP:HEAD_PORT --agent --heartbeat-interval 20
-   ```
-   Stop a local worker explicitly with `maze stop --worker`; plain `maze stop`
-   owns the local head lifecycle.
-   You can inspect the scheduler-visible cluster state with:
-   ```bash
-   curl http://HEAD_IP:HEAD_PORT/cluster/resources
-   ```
-   A Ray worker that has joined Ray but has not registered with Maze will appear under `unregistered_ray_nodes`; it must still be started as a Maze worker before Maze can schedule tasks to it.
-   Common cluster operations are also available from the CLI:
-   ```bash
-   maze cluster resources --server-url http://HEAD_IP:HEAD_PORT
-   maze cluster queues --server-url http://HEAD_IP:HEAD_PORT
-   maze cluster join-command --server-url http://HEAD_IP:HEAD_PORT
-   maze cluster reconcile-workers --server-url http://HEAD_IP:HEAD_PORT
-   ```
+Stop a local worker with `maze stop --worker`. A Ray node must also register as a Maze worker before Maze can schedule tasks to it.
 
-   Queue snapshots include the active scheduling algorithm, per-resource queue counts, pending and retry reasons, prediction metadata, and HACS score details when available. Cluster resources also report standby worker pool targets and busy/idle execution state.
-### 3. Example
+Inspect the cluster with:
+
+```bash
+maze cluster resources --server-url http://HEAD_IP:8000
+maze cluster queues --server-url http://HEAD_IP:8000
+maze cluster join-command --server-url http://HEAD_IP:8000
+maze cluster reconcile-workers --server-url http://HEAD_IP:8000
+```
+
+### Scheduling Options
+
+`FCFS` is the default task ordering. Enable HACS independently of node placement:
+
+```bash
+maze start --head \
+  --port 8000 \
+  --strategy least-loaded \
+  --scheduling-algorithm HACS
+```
+
+HACS refreshes ready-task priorities at dispatch time and uses completed workflow durations to maintain its DCT EMA.
+
+| Environment variable | Default | Constraint |
+| --- | ---: | --- |
+| `MAZE_HACS_ALPHA` | `2` | greater than 0 |
+| `MAZE_HACS_BETA` | `5` | greater than 1 |
+| `MAZE_HACS_INITIAL_DCT_SECONDS` | `60` | greater than 0 |
+| `MAZE_HACS_DCT_EMA_ALPHA` | `0.2` | greater than 0 and at most 1 |
+| `MAZE_HACS_STARVATION_SECONDS` | `600` | greater than 0 |
+
+Warm standby workers are enabled by default. Disable standby creation and execution together with:
+
+```bash
+MAZE_STANDBY_WORKERS_ENABLED=0 maze start --head --port 8000
+```
+
+## Workflows
 
 ### Static Workflow
 
 ```python
 from maze import MaClient, task, workflow
+
 
 @task(resources={"cpu_num": 1, "gpu_mem": 0, "io_num": 0})
 def greet(text: str):
@@ -161,7 +168,7 @@ run = client.wait_run(run_id)
 print(run["result_summary"])
 ```
 
-`@workflow` builds the DAG without executing task functions locally. For visual and external DAG builders, `MaClient.submit_workflow(spec)` submits the same `maze.workflow/v1` contract directly to `/workflows/submit`.
+`@workflow` builds a DAG without executing task functions locally. Visual and external DAG builders can submit the same contract with `MaClient.submit_workflow(spec)`.
 
 ### Dynamic Workflow
 
@@ -175,44 +182,16 @@ def summarize(topic: str = ""):
 
 
 client = MaClient("http://localhost:8000")
-
 run = client.create_dynamic_run(max_tasks=10)
-summary = run.append_task(
-    summarize,
-    inputs={"topic": "agent runtime"}
-)
+summary = run.append_task(summarize, inputs={"topic": "agent runtime"})
 run.wait_for_task(summary)
 run.finalize({"status": "done"})
 print(run.status())
 ```
 
-In Maze Playground, files uploaded under `workspace/files` are staged into each task sandbox. Task code should read and write files with relative paths such as `Path("input.csv")`, `Path("folder/data.json")`, or `Path(".")`; it should not hard-code `workspace/files/...`.
-
-For distributed runs without shared storage, Maze can register workspace inputs and task outputs in a content-addressed artifact store. Workers download required files before task execution and upload changed files after execution; manifests use stable artifact references such as `maze://artifacts/sha256/<hash>` instead of machine-local paths. A workflow can enable the head HTTP artifact store with:
-
-```python
-run_id = workflow.run(
-    workspace_dir="/tmp/my_workspace",
-    artifact_mode=True,
-)
-```
-
-For lower-level control, pass an explicit file context:
-
-```python
-workflow.run(file_context={
-    "enabled": True,
-    "workspace_dir": "/tmp/my_workspace",
-    "artifact_store": {
-        "type": "head_http",
-        "base_url": "http://HEAD_IP:HEAD_PORT",
-    },
-})
-```
-
 ### Application Spec
 
-For application-style jobs, you can submit a `maze.yaml` directly:
+Application-style jobs can be submitted from `maze.yaml`:
 
 ```yaml
 name: gpu-demo
@@ -235,8 +214,6 @@ retries:
   on: [node_lost, resource_unavailable]
 ```
 
-Run and inspect it with:
-
 ```bash
 maze app validate maze.yaml
 maze run maze.yaml --wait
@@ -244,13 +221,56 @@ maze runs logs <run_id>
 maze runs retry <run_id>
 ```
 
-Each app run is recorded in the unified run history with lifecycle events, placement, logs, and artifacts.
+Each app execution is recorded in the unified Run history with lifecycle events, placement, logs, and artifacts.
 
-### Run Observability and Operations
+## Files and Artifacts
 
-Static workflows, DynamicRuns, and application spec runs share the same operational surface. A run snapshot includes lifecycle state, timing, progress, result/error summaries, task state, placement, and artifacts. Task failures use a structured error envelope with fields such as `error_type`, `message`, `retryable`, `origin`, `node_id`, `node_ip`, `attempt`, and `traceback`.
+Workbench files live under the active server-side workspace. During execution, Maze stages them into each task sandbox, so task code should use relative paths such as `Path("input.csv")` or `Path("folder/data.json")`, not hard-coded `workspace/files/...` paths.
 
-You can configure task-level reliability directly on the decorator:
+For distributed runs without shared storage, enable the Head content-addressed artifact store:
+
+```python
+run_id = workflow_run.run(
+    workspace_dir="/tmp/my_workspace",
+    artifact_mode=True,
+)
+```
+
+Workers download required inputs and upload changed outputs. Run manifests use stable references such as `maze://artifacts/sha256/<hash>` instead of worker-local paths.
+
+## Model Execution
+
+Model-routed tasks declare a `modelAnchor` in a Workbench node or `model_anchor` in a `maze.workflow/v1` task:
+
+Maze discovers checkpoints in `<repository>/model_cache` by default; configure another existing directory in Workbench settings or with `MAZE_MODEL_DIR`.
+
+```json
+{
+  "task_kind": "gpu",
+  "resources": {"cpu_num": 1, "gpu_mem": 8192, "io_num": 0},
+  "model_anchor": {
+    "local_model": "Qwen2.5-3B-Instruct",
+    "model_scope": "head",
+    "backend": "transformers",
+    "estimated_gpu_mem_mb": 8192
+  }
+}
+```
+
+- Nodes report their locally available checkpoints and supported `vllm` or `transformers` runtimes.
+- If a matching checkpoint exists but no instance is ready, Maze deploys one through the scheduler and keeps the task in `Model Wait`.
+- Model-waiting tasks do not occupy a GPU dispatch queue. They return to the resource queue after a route becomes available.
+- `missing_model` means no eligible node reported the requested local checkpoint. It is distinct from a checkpoint that exists but has not yet been deployed.
+- Workflows consume the injected OpenAI-compatible endpoint and model route; they do not start or stop model processes themselves.
+- Scheduler-managed instances reuse GPU leases, support progressive scale-out, and release idle instances through LRU scale-in.
+
+The system catalog includes GAIA `reason`, `file`, `speech`, and `vision` as ordinary workflows. Text and vision paths use standard chat interfaces; speech uses a standard transcription interface and requires an available transcription checkpoint. These templates exercise Maze workflow integration and are not a claim of reproduced GAIA benchmark accuracy.
+
+## Run Operations
+
+Static workflows, DynamicRuns, and app runs share the same operational surface. Run snapshots include lifecycle state, timing, progress, result or error summaries, task state, placement, and artifacts. Task failures use structured fields such as `error_type`, `message`, `retryable`, `origin`, `node_id`, `node_ip`, `attempt`, and `traceback`.
+
+Configure task reliability on the decorator:
 
 ```python
 @task(
@@ -264,7 +284,7 @@ def train_one_shard(shard: str):
     return {"status": f"finished {shard}"}
 ```
 
-Python clients can query and operate on runs after submission:
+Query and operate on Runs after submission:
 
 ```python
 client = MaClient("http://localhost:8000")
@@ -280,76 +300,44 @@ client.cancel_run(run_id, reason="no longer needed")
 client.retry_run(run_id, workspace_dir="/tmp/my_workspace")
 ```
 
-The same controls are available through HTTP and CLI:
-
-```text
-GET  /runs
-GET  /runs/{run_id}
-GET  /runs/{run_id}/tasks
-GET  /runs/{run_id}/tasks/{task_id}
-GET  /runs/{run_id}/events?after=<seq>
-GET  /runs/{run_id}/logs
-GET  /runs/{run_id}/artifacts
-POST /runs/{run_id}/cancel
-POST /runs/{run_id}/retry
-GET  /cluster/resources
-GET  /cluster/queues
-```
+The same controls are available from the CLI:
 
 ```bash
-maze runs list --server-url http://HEAD_IP:HEAD_PORT
-maze runs show <run_id> --server-url http://HEAD_IP:HEAD_PORT
-maze runs events <run_id> --server-url http://HEAD_IP:HEAD_PORT
-maze runs logs <run_id> --tail 200 --server-url http://HEAD_IP:HEAD_PORT
-maze runs retry <run_id> --server-url http://HEAD_IP:HEAD_PORT
-maze artifacts list <run_id> --server-url http://HEAD_IP:HEAD_PORT
+maze runs list --server-url http://HEAD_IP:8000
+maze runs show <run_id> --server-url http://HEAD_IP:8000
+maze runs events <run_id> --server-url http://HEAD_IP:8000
+maze runs logs <run_id> --tail 200 --server-url http://HEAD_IP:8000
+maze runs retry <run_id> --server-url http://HEAD_IP:8000
+maze artifacts list <run_id> --server-url http://HEAD_IP:8000
 ```
 
-<br>
+Core exposes the corresponding `/runs`, `/runs/{run_id}`, `/runs/{run_id}/tasks`, `/runs/{run_id}/events`, `/runs/{run_id}/logs`, `/runs/{run_id}/artifacts`, cancel, and retry endpoints.
 
+## Maze Workbench
 
-
-## 🖥️ Maze Playground
-Maze Playground supports building workflows through a drag-and-drop interface, managing workspace files, generating workspace tasks from prompts, and inspecting static, dynamic, and app runs in one `Runs` console. You can start the playground with the following command option.
-```
-maze start --head --port HEAD_PORT --ray-head-port RAY_HEAD_PORT --playground
-```
-
-The default Playground entry is `http://localhost:5173`. The CLI starts and wires the Maze Head, Workbench backend, and Workbench frontend together. To use a custom Playground UI port:
+Start Workbench together with the Head:
 
 ```bash
-maze start --head \
-  --port 9000 \
-  --ray-head-port 6380 \
-  --playground \
-  --playground-port 5174
+maze start --head --port 8000 --playground
 ```
 
-When the UI port is changed, the Workbench backend defaults to `--playground-port + 1`; use `--playground-backend-port` only when the backend API port must be fixed. Maze checks configured ports before startup and prints a clear error if a port is already in use or two services are configured to share one port.
+A server-side workspace provides editable workflows, reusable Python task definitions, uploaded inputs, and downloadable outputs. Workspaces can be created and switched from the left sidebar. Loading a system workflow imports only its referenced task definitions and sample files into the active workspace; system templates remain separate from user-owned files.
 
-The sidebar separates system workflow templates from workspace workflows and loads reusable task definitions from `system_catalog/tasks` and the active workspace. The GAIA demo is an ordinary system workflow and uses the same Core submission and Run path as user workflows.
-
-The Workbench backend manages workspace and catalog files, compiles visual DAGs, and proxies Core APIs. Core remains the only owner of Run state. The `Runs` console shows history, task state, structured errors, placement, logs, cancel/retry actions, and artifacts for static, dynamic, and app runs. Artifact download and promotion use Core content-addressed storage.
-
-The top toolbar also includes a `Cluster` view for checking head/worker registration, Ray-only unregistered nodes, CPU availability, GPU availability, per-node GPU memory, queue snapshots, pending reasons, retry waits, timeouts, and scheduler reject reasons. For detailed usage instructions, please refer to the [**Maze Playground**](https://maze-doc-new.readthedocs.io/en/latest/playground.html).
+The `Runs` console keeps active and completed Runs inspectable after submission, including task state, structured errors, placement, events, logs, cancellation, retry, and artifacts. The `Cluster` view shows registered Head and worker nodes, CPU and GPU availability, per-device memory, model wait, resource queues, retry delays, and placement rejection reasons.
 
 ### Workflow Design
-
-Maze Workbench gives workflow authors a DAG-first editor with task libraries, input management, validation, run submission, and live workflow summaries in one workspace.
 
 ![Maze Workbench workflow design](./docs/imgs/workbench/maze_resource_mix_demo.png)
 
 ### Run Inspection
 
-The unified `Runs` console keeps completed and active runs inspectable after submission, including run evidence, placement, events, logs, and produced artifacts.
-
 ![Maze Workbench run inspection](./docs/imgs/workbench/maze_runs.png)
 
 ### Cluster Resources
 
-The `Cluster` view shows registered workers, scheduler-visible CPU/GPU capacity, sandbox capabilities, queue state, and placement readiness.
-
 ![Maze Workbench cluster resources](./docs/imgs/workbench/maze_cluster_resources.png)
+
+For detailed usage, see the [Maze documentation](https://maze-doc-new.readthedocs.io/en/latest/).
 
 ## Citation
 
@@ -365,4 +353,5 @@ Please cite our work if you find the project useful:
 ```
 
 ## Acknowledgement
+
 We thank contributors from Huazhong University of Science and Technology, Huawei, and other institutions for their support and contributions to this project.

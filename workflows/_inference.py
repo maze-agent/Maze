@@ -6,6 +6,8 @@ import json
 import os
 from urllib.request import Request, urlopen
 
+import requests
+
 
 def chat(
     messages: list[dict[str, object]],
@@ -53,6 +55,43 @@ def chat(
     if not isinstance(content, str):
         raise ValueError("chat response content must be a string")
     return content
+
+
+def transcribe(
+    content: bytes,
+    *,
+    file_name: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout: float = 120.0,
+) -> str:
+    """Call an OpenAI-compatible ``audio/transcriptions`` endpoint."""
+
+    if not content:
+        raise ValueError("audio file is empty")
+    if not base_url.strip():
+        raise ValueError("base_url is required")
+    if not model.strip():
+        raise ValueError("model is required")
+
+    resolved_api_key = _resolve_api_key(api_key)
+    headers = {}
+    if resolved_api_key:
+        headers["Authorization"] = f"Bearer {resolved_api_key}"
+    response = requests.post(
+        f"{base_url.rstrip('/')}/audio/transcriptions",
+        headers=headers,
+        data={"model": model},
+        files={"file": (file_name, content)},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("transcription response is missing text")
+    return text
 
 
 def _resolve_api_key(api_key: str) -> str:

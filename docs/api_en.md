@@ -1,14 +1,13 @@
 # Maze API Reference
 
 > Version: `maze-agent` 1.0.2, Python >= 3.10
-> Scope: task-level distributed Agent / Workflow development and integration.
-> Last updated: 2026-06-20. This version includes AppSpec, unified Run/Artifact APIs, Workbench System Catalog, and artifact open/download routes.
+> Last updated: 2026-08-13
 
-This document summarizes the public Maze APIs across four layers:
+This document covers the current Maze interfaces across four layers:
 
 1. [Python SDK](#1-python-sdk-api): define tasks, build workflows, and run agents.
 2. [Head HTTP and WebSocket API](#2-head-http-and-websocket-api): FastAPI endpoints exposed by the Maze Head service.
-3. [CLI Commands](#3-cli-commands): `maze start`, `maze stop`, `maze status`, `maze doctor`, and the retired `maze-sandbox` compatibility command.
+3. [CLI Commands](#3-cli-commands): service, Run, artifact, cluster, application, and model operations.
 4. [Maze Workbench Backend REST API](#4-maze-workbench-backend-rest-api): APIs used by the visual Workbench.
 
 Additional sections cover the [event protocol](#5-event-protocol), [resource configuration](#6-resource-configuration), [error handling](#7-error-handling), [examples](#8-complete-examples), and [observability APIs](#9-run-status-metrics-and-observability).
@@ -24,7 +23,7 @@ from maze import (
     MaClient, MaWorkflow, MaTask, TaskOutput, TaskOutputs,
     DynamicRun, DynamicTaskSpec, DynamicTaskInvocation,
     LanggraphClient,
-    task, get_task_metadata,
+    task, workflow, get_task_metadata,
 )
 ```
 
@@ -37,13 +36,14 @@ from maze import task
 #### Signature
 
 ```python
-task(func: Callable = None, *,
-     resources: Dict[str, Any] | None = None,
-     data_types: Dict[str, str] | None = None,
-     max_retries: int | None = None,
-     retry_backoff_seconds: float = 0,
-     retry_on: list[str] | None = None,
-     timeout_seconds: float | None = None) -> Callable
+def task(func: Callable = None, *,
+         resources: Dict[str, Any] | None = None,
+         task_kind: str | None = None,
+         data_types: Dict[str, str] | None = None,
+         max_retries: int | None = None,
+         retry_backoff_seconds: float = 0,
+         retry_on: list[str] | None = None,
+         timeout_seconds: float | None = None) -> Callable: ...
 ```
 
 #### Behavior
@@ -52,15 +52,17 @@ task(func: Callable = None, *,
 - Inputs are inferred from the function signature.
 - Outputs are inferred from string keys in `return {...}` dict literals.
 - The task must return a dict at runtime, otherwise Maze raises `TypeError`.
-- Default resources are `{"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}`.
+- Default resources are `{"cpu_num": 1, "gpu_mem": 0, "io_num": 0}`.
 - If GPU fields are not explicitly declared, Maze may infer GPU usage from imports and function body.
+- `task_kind` is `cpu`, `gpu`, or `io`; when omitted it becomes `gpu` if `gpu_mem > 0`, otherwise `cpu`.
 - `*args`, `**kwargs`, and positional-only parameters are not supported. Use explicit named parameters.
 
 #### Parameters
 
 | Parameter | Type | Description |
 |---|---|---|
-| `resources` | `dict` | Resource requirements. Keys: `cpu`, `cpu_mem`, `gpu`, `gpu_mem`. |
+| `resources` | `dict` | Resource requirements. Canonical keys: `cpu_num`, `gpu_mem`, `io_num`; `cpu` remains a compatibility alias. Placement constraints are listed in [Resource Configuration](#6-resource-configuration). |
+| `task_kind` | `str \| None` | Queue class: `cpu`, `gpu`, or `io`. |
 | `data_types` | `dict[str, str]` | Overrides inferred input/output type strings. |
 | `max_retries` | `int | None` | Maximum retries for this task. `None` means server default behavior. |
 | `retry_backoff_seconds` | `float` | Delay before retrying a failed task. |
@@ -70,7 +72,7 @@ task(func: Callable = None, *,
 #### Example
 
 ```python
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(task_kind="cpu", resources={"cpu_num": 1})
 def greet(text: str = ""):
     return {"result": f"Hello {text}"}
 ```
@@ -78,13 +80,13 @@ def greet(text: str = ""):
 #### Helper
 
 ```python
-get_task_metadata(func) -> TaskMetadata
+def get_task_metadata(func) -> TaskMetadata: ...
 ```
 
 Main metadata fields:
 
 ```text
-func_name / code_str / code_ser / inputs / outputs / resources / data_types /
+func_name / code_str / code_ser / inputs / outputs / resources / task_kind / data_types /
 max_retries / retry_backoff_seconds / retry_on / timeout_seconds
 ```
 
@@ -92,11 +94,42 @@ max_retries / retry_backoff_seconds / retry_on / timeout_seconds
 
 ---
 
-### 1.2 `MaClient`
+### 1.2 `@workflow` decorator
+
+`@workflow` defines a reusable static DAG with normal Python call syntax. Task
+functions do not execute while the graph is built; their calls create nodes and
+output references.
+
+```python
+from maze import task, workflow
+
+@task
+def greet(name: str):
+    return {"message": f"Hello {name}"}
+
+@task
+def upper(message: str):
+    return {"result": message.upper()}
+
+@workflow
+def hello(name: str):
+    greeting = greet(name)
+    return upper(greeting.message)
+```
+
+Build it with `MaClient.create_workflow_from()`. Values supplied to
+`create_workflow_from(..., inputs={...})` are fixed in the graph; omitted
+workflow arguments become per-Run inputs supplied to `MaWorkflow.run(inputs=...)`.
+
+### 1.3 `MaClient`
 
 ```python
 class MaClient:
-    def __init__(self, server_url: str = "http://localhost:8000")
+    def __init__(
+        self,
+        server_url: str = "http://localhost:8000",
+        request_timeout: float | None = None,
+    ): ...
 ```
 
 | Method | Returns | Description |
@@ -130,7 +163,7 @@ class MaClient:
 
 ---
 
-### 1.3 `MaWorkflow`
+### 1.4 `MaWorkflow`
 
 `MaWorkflow` is a local DAG draft. Adding tasks does not contact Core.
 `run()` submits the complete graph and run configuration once through
@@ -145,12 +178,13 @@ class MaClient:
 Use `MaClient.get_run()`, `wait_run()`, `stream_run()`, and `cancel_run()`
 for run state, events, results, and cancellation.
 
-### 1.4 `MaTask`, `TaskOutput`, and `TaskOutputs`
+### 1.5 `MaTask`, `TaskOutput`, and `TaskOutputs`
 
 `MaTask` is a local node handle. `task.outputs["name"]` returns a
 `TaskOutput` that can be passed directly to a downstream task input. Tasks,
 deletions, and edges are no longer persisted through separate HTTP calls.
-### 1.5 `DynamicRun`
+
+### 1.6 `DynamicRun`
 
 Dynamic runs allow the graph to grow at runtime. Create them through `MaClient.create_dynamic_run()` or attach through `MaClient.get_dynamic_run()`.
 
@@ -158,10 +192,9 @@ Dynamic runs allow the graph to grow at runtime. Create them through `MaClient.c
 
 | Method | Description |
 |---|---|
-| `register_task_spec(spec)` | Register a reusable task specification. |
-| `append_task(invocation)` | Append one task invocation at runtime. |
-| `append_task(task_func, inputs=None, parents=None, request_id=None)` | Inline-register and append a `@task` function. |
-| `wait_for_task(task_id, timeout=None)` | Wait until one dynamic task completes. |
+| `register_task_spec(task_func, task_spec_id=None, task_name=None)` | Register a reusable decorated task and return `DynamicTaskSpec`. |
+| `append_task(task, inputs=None, parents=None, request_id=None, task_name=None, resources=None, model_anchor=None)` | Append a registered spec, spec id, or decorated function and return `DynamicTaskInvocation`. |
+| `wait_for_task(task, timeout=None, poll_interval=0.2)` | Wait for one invocation or task id. |
 
 Inputs may contain normal JSON-like values or output references:
 
@@ -173,10 +206,11 @@ Inputs may contain normal JSON-like values or output references:
 
 | Method | Description |
 |---|---|
-| `get_snapshot()` | Return the current dynamic run snapshot. |
-| `events(after=None)` | Return events after a sequence number. |
-| `stream_events(after=None)` | Stream/poll events. |
-| `wait(timeout=None)` | Wait until the dynamic run reaches a terminal state. |
+| `get_status()` / `status()` | Return the current dynamic run snapshot. |
+| `get_events(after=None)` | Return events after a sequence number. |
+| `stream_events()` | Stream events over WebSocket. |
+| `emit_event(event_type, data=None)` | Append a custom event. |
+| `patch_metadata(metadata)` | Merge metadata into the dynamic Run. |
 
 #### Lifecycle
 
@@ -189,29 +223,14 @@ Inputs may contain normal JSON-like values or output references:
 Common statuses:
 
 ```text
-created / running / finalizing / succeeded / failed / canceled / timed_out / interrupted
+created / running / finalized / failed / canceled / timed_out / interrupted
 ```
 
 #### Data classes
 
 ```python
-DynamicTaskSpec(
-    task_spec_id: str | None = None,
-    task_name: str | None = None,
-    code_str: str | None = None,
-    code_ser: str | None = None,
-    inputs: list[dict] = ...,
-    outputs: list[dict] = ...,
-    resources: dict = ...
-)
-
-DynamicTaskInvocation(
-    task_spec_id: str | None = None,
-    task_spec: DynamicTaskSpec | None = None,
-    inputs: dict = ...,
-    parents: list[str] = ...,
-    request_id: str | None = None
-)
+DynamicTaskSpec: task_spec_id / task_name / output_keys
+DynamicTaskInvocation: task_id / task_name / outputs / idempotent
 ```
 
 #### Example
@@ -219,7 +238,7 @@ DynamicTaskInvocation(
 ```python
 from maze import MaClient, task
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def double(x: int = 1):
     return {"y": x * 2}
 
@@ -228,12 +247,12 @@ run = client.create_dynamic_run(max_tasks=10)
 task_id = run.append_task(double, inputs={"x": 21})
 print(run.wait_for_task(task_id))
 run.finalize({"done": True})
-print(run.wait())
+print(run.status())
 ```
 
 ---
 
-### 1.6 `LanggraphClient`
+### 1.7 `LanggraphClient`
 
 Maze can run LangGraph node functions through the standard static Run API.
 Decorating a function creates a local one-node DAG template. Calling it submits
@@ -244,10 +263,10 @@ returns the decoded Python value.
 |---|---|
 | `LanggraphClient(...).task(...)` | Decorate a graph node as a Maze task. |
 
-Each invocation is an ordinary Core Run tagged `langgraph`, so the existing
-Run events, cancellation, retry, and inspection APIs apply without a separate
-LangGraph control plane. Supported resource keys are `cpu_num`, `gpu_mem`,
-`io_num`, and the legacy `cpu` alias.
+Each invocation is an ordinary Core Run tagged `langgraph`, so Run events,
+cancellation, and inspection apply without a separate LangGraph control plane.
+The `/runs/{run_id}/retry` endpoint remains AppSpec-only. Supported resource
+keys are `cpu_num`, `gpu_mem`, `io_num`, and the legacy `cpu` alias.
 
 ---
 
@@ -277,7 +296,7 @@ Errors usually return non-2xx with `detail`.
 
 ---
 
-### 2.1 Static Workflow
+### 2.1 Application Spec
 
 #### `POST /apps/validate`
 
@@ -328,7 +347,7 @@ Response:
 
 ---
 
-### 2.3 External DAG WorkflowSpec
+### 2.2 External DAG WorkflowSpec
 
 #### `POST /workflows/validate`
 
@@ -346,7 +365,8 @@ Validate a complete external DAG spec without running it.
         "code": "def greet(name='Maze'):\n    return {'message': f'Hello {name}'}",
         "inputs": {"name": "Maze"},
         "outputs": ["message"],
-        "resources": {"cpu": 1, "cpu_mem": 128}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       },
       {
         "id": "upper",
@@ -372,10 +392,12 @@ Response:
 
 Recommended stable endpoint for external visual DAG builders. Maze validates the spec, builds a static workflow, and submits a run.
 
-The body is the same as `/workflows/validate`. You may additionally pass `tags`, `metadata`, and `artifact_mode`.
-Python workflows include a stable `workflow_id`, `input_contract`, and
-`final_output_refs` in the spec. Per-run inputs, timeout, and idempotency fields
-live under `spec.run`.
+The body is the same as `/workflows/validate`. Request-level `tags`, `metadata`,
+`artifact_mode`, and `file_context` are also accepted. Python workflows include
+a stable `workflow_id`, `input_contract`, and `final_output_refs` in the spec.
+Per-Run inputs, timeout, tags, metadata, and the optional canonical UUID
+`run_id` live under `spec.run`. Reusing a `run_id` is accepted only for an
+identical submission; a conflicting replay returns HTTP 409.
 
 Response:
 
@@ -399,7 +421,7 @@ GET /runs/{run_id}/artifacts
 
 ---
 
-### 2.4 Unified Run, Artifact, and Cluster API
+### 2.3 Unified Run, Artifact, and Cluster API
 
 The unified Run API covers static workflows, AppSpec runs, and dynamic runs. Workbench uses these endpoints for the Runs panel.
 
@@ -431,12 +453,14 @@ Cluster diagnostics:
 |---|---|---|
 | GET | `/cluster/resources` | Scheduler view of nodes, resources, GPUs, and unregistered Ray nodes. |
 | GET | `/cluster/queues` | Waiting queues, running tasks, and scheduling diagnostics. |
+| POST | `/cluster/nodes/{node_id}/disable` | Drain a registered node from new placement. |
+| POST | `/cluster/nodes/{node_id}/enable` | Re-enable placement on a registered node. |
 | GET | `/cluster/join_command?host=` | Generate recommended `maze start --worker` commands. |
 | POST | `/cluster/reconcile_workers` | Return unregistered Ray nodes and recommended commands. Does not execute them. |
 
 ---
 
-### 2.5 Dynamic Run
+### 2.4 Dynamic Run
 
 #### `POST /dynamic_runs`
 
@@ -452,7 +476,7 @@ Response:
 {"status": "success", "run_id": "..."}
 ```
 
-#### `GET /dynamic_runs?status=&limit=`
+#### `GET /dynamic_runs?status=&limit=&detail=`
 
 List dynamic runs.
 
@@ -492,7 +516,13 @@ Register a task spec.
   "code_ser": "<base64-cloudpickle>",
   "inputs": [{"name": "x", "data_type": "str"}],
   "outputs": [{"name": "y", "data_type": "any"}],
-  "resources": {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
+  "task_kind": "cpu",
+  "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
+  "max_retries": 1,
+  "retry_backoff_seconds": 2,
+  "retry_on": ["node_lost"],
+  "timeout_seconds": 60,
+  "model_anchor": null
 }
 ```
 
@@ -509,7 +539,9 @@ Append a task at runtime.
     "y": {"__maze_output_ref__": true, "task_id": "<parent-task>", "output_key": "out"}
   },
   "parents": ["<extra-parent-task-id>"],
-  "request_id": "<optional idempotency key>"
+  "request_id": "<optional idempotency key>",
+  "resources": {"cpu_num": 1},
+  "model_anchor": null
 }
 ```
 
@@ -557,6 +589,62 @@ timeout_dynamic_run / interrupt_dynamic_run
 
 ---
 
+### 2.5 Models and Model Routing
+
+Maze discovers checkpoints under `<repository>/model_cache` by default. Set
+`MAZE_MODEL_DIR` before startup or call `/models/config` with an existing
+absolute directory on the Head server.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/models` | Return the configured model directory and discovered checkpoints. |
+| POST | `/models/config` | Set the Head model directory. Body: `{"model_dir": "/absolute/path"}`. |
+| POST | `/models/test` | Check one discovered model. Body: `{"model_id": "..."}`. |
+| GET | `/resource-history` | Return persisted observed resource history used by scheduling estimates. |
+| POST | `/start_llm_instance` | Explicitly start a vLLM or Transformers instance. |
+| POST | `/stop_llm_instance` | Stop an explicitly started instance. |
+
+Tasks should normally declare a model anchor and let the scheduler manage the
+instance lifecycle:
+
+```json
+{
+  "task_kind": "gpu",
+  "resources": {"cpu_num": 1, "gpu_mem": 8192, "io_num": 0},
+  "model_anchor": {
+    "local_model": "Qwen2.5-3B-Instruct",
+    "model_scope": "head",
+    "backend": "transformers",
+    "estimated_gpu_mem_mb": 8192
+  }
+}
+```
+
+While executing model-routed code, Maze sets `MAZE_MODEL_ROUTE`,
+`MAZE_MODEL_ENDPOINT`, `MAZE_MODEL_INSTANCE_ID`, and `MAZE_MODEL_NAME`.
+`missing_model` means no eligible node has the checkpoint; it is terminal and
+non-retryable. `model_instance_unavailable` means the checkpoint exists but a
+route is not ready yet; the task waits outside the GPU dispatch queue and is
+requeued when deployment succeeds.
+
+Explicit instance start body:
+
+```json
+{
+  "model": "Qwen2.5-3B-Instruct",
+  "backend": "vllm",
+  "cpu_nums": 5,
+  "memory_mib": 1024,
+  "gpu_nums": 1,
+  "gpu_mem": 8192,
+  "gpu_memory_utilization": 0.8,
+  "max_model_len": 4096
+}
+```
+
+`backend` is `vllm` or `transformers`; model instances currently require
+exactly one GPU.
+
 ### 2.6 LangGraph Adapter
 
 LangGraph has no dedicated Head endpoint. `LanggraphClient` serializes the
@@ -565,7 +653,7 @@ callable and invocation values into a standard one-node DAG, submits it with
 
 ---
 
-### 2.7 Worker and LLM Compatibility APIs
+### 2.7 Worker Compatibility APIs
 
 #### `POST /get_head_ray_port`
 
@@ -583,40 +671,9 @@ callable and invocation values into a standard one-node DAG, submits it with
 }
 ```
 
-#### `POST /start_llm_instance`
-
-```json
-{
-  "model": "Qwen2.5-7B",
-  "cpu_nums": 5,
-  "gpu_nums": 1,
-  "memory": 1024,
-  "gpu_mem": 16000
-}
-```
-
-Response:
-
-```json
-{
-  "status": "success",
-  "host": "...",
-  "port": 12345,
-  "instance_id": "<uuid>"
-}
-```
-
-The instance exposes an OpenAI-compatible endpoint at:
-
-```text
-http://<host>:<port>/v1
-```
-
-#### `POST /stop_llm_instance`
-
-```json
-{"instance_id": "..."}
-```
+`/start_worker` is the scheduler registration endpoint used after a Ray node
+joins. Users should normally run `maze start --worker --addr ... --agent`
+instead of calling it directly.
 
 ---
 
@@ -643,6 +700,7 @@ maze start --head \
            --port 8000 \
            --ray-head-port 6379 \
            --strategy least-loaded \
+           --scheduling-algorithm FCFS \
            [--playground] \
            [--playground-port 5173] \
            [--playground-backend-port 3001] \
@@ -654,7 +712,8 @@ maze start --head \
 |---|---|---|
 | `--port` | `8000` | Maze Head FastAPI port. |
 | `--ray-head-port` | `6379` | Ray Head GCS port. |
-| `--strategy` | `least-loaded` | Scheduling strategy. Common values: `least-loaded`, `Default`, `HACS`, `ATLAS`. |
+| `--strategy` | `least-loaded` | Node placement policy: `default`, `least-loaded`, `prefer-gpu-free`, or `spread`. |
+| `--scheduling-algorithm` | `FCFS` | Ready-task ordering: `FCFS` or `HACS`. |
 | `--playground` | off | Start the Workbench UI and its Node.js backend together with the head node. |
 | `--playground-port` | `5173` | Workbench web UI port. |
 | `--playground-backend-port` | `3001` | Workbench backend API port. If omitted and `--playground-port` is changed, defaults to `--playground-port + 1`. |
@@ -689,7 +748,7 @@ port is already in use or two services are configured to share the same port.
 #### Worker mode
 
 ```bash
-maze start --worker --addr <HEAD_IP>:<HEAD_PORT>
+maze start --worker --addr <HEAD_IP>:<HEAD_PORT> --agent --heartbeat-interval 20
 ```
 
 ### 3.2 `maze stop`
@@ -715,7 +774,49 @@ Workbench directories, configured ports, and Core/Workbench HTTP health. It
 does not depend on legacy development PID files, workspace nesting, or
 `PYTHONPATH` checks.
 
-### 3.4 `maze-sandbox` (retired)
+### 3.4 Run, artifact, and status commands
+
+```bash
+maze runs list [--status running] [--kind static] [--limit 20]
+maze runs show <run_id>
+maze runs events <run_id> [--after 10]
+maze runs logs <run_id> [--tail 200] [--task-id <task_id>]
+maze runs retry <run_id> [--workspace-dir PATH] [--no-artifacts]
+maze artifacts list <run_id>
+maze status [--watch] [--status running] [--run-id <run_id>]
+```
+
+All commands accept their documented remote address option and JSON output
+where applicable. `maze runs retry` supports AppSpec Runs only.
+
+### 3.5 Application and model commands
+
+```bash
+maze app validate maze.yaml [--workspace-dir PATH] [--json]
+maze run maze.yaml [--workspace-dir PATH] [--wait] [--wait-timeout 600]
+
+maze model serve Qwen2.5-3B-Instruct \
+  --backend transformers \
+  --gpu-memory 8192
+maze model stop <instance_id>
+```
+
+`maze model serve` also supports `--cpu`, `--memory`,
+`--gpu-memory-utilization`, `--max-model-len`, and `--timeout`.
+
+### 3.6 Cluster commands
+
+```bash
+maze cluster resources
+maze cluster queues
+maze cluster join-command [--host HEAD_IP]
+maze cluster reconcile-workers [--host HEAD_IP]
+```
+
+`reconcile-workers` reports unregistered Ray nodes and suggested commands; it
+does not execute remote commands.
+
+### 3.7 `maze-sandbox` (retired)
 
 The legacy remote sandbox service has been removed. The command remains as a
 compatibility tombstone and exits with migration guidance. Use
@@ -750,7 +851,9 @@ Implementation:
 web/maze_playground/backend/src/server.js
 ```
 
-The frontend calls this Node.js backend, which proxies or bridges to the Maze Head and Python bridge.
+The frontend calls this Node.js backend, which proxies Maze Core and performs
+workspace operations. These routes are Workbench-internal rather than a stable
+replacement for the Core API.
 
 Environment variables:
 
@@ -771,11 +874,11 @@ Environment variables:
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/workspaces` | Create a workspace. Body may include `workspaceId`, `name`, and `mode`. |
-| GET | `/api/workspaces/current?workspaceId=&workspaceDir=` | Get current workspace manifest and directory. |
+| GET | `/api/workspaces` | List server-side workspaces. |
 | GET | `/api/workspaces/:workspaceId` | Get workspace by id. |
 | GET | `/api/system-catalog?type=workflows|tasks` | List system workflow/task templates. |
 | POST | `/api/system-catalog/import` | Copy a system task or workflow JSON into a workspace. |
-| POST | `/api/system-catalog/workflows/load` | Load a system workflow template onto the canvas and import bundled task definitions. |
+| POST | `/api/system-catalog/workflows/load` | Load a system workflow and import its task definitions and sample files into the active workspace. |
 
 `/api/system-catalog/workflows/load` request:
 
@@ -787,7 +890,9 @@ Environment variables:
 }
 ```
 
-Response includes `workflow` and `importedTaskDefinitions`. The endpoint imports dependent task definitions into workspace tasks, but the workflow itself is loaded as an unsaved draft. It only becomes a workspace workflow after the user saves it.
+Response includes `workflow`, `importedTaskDefinitions`, and `importedFiles`.
+The workflow is loaded as an unsaved draft and becomes workspace-owned only
+after it is saved.
 
 ---
 
@@ -798,8 +903,6 @@ Response includes `workflow` and `importedTaskDefinitions`. The endpoint imports
 | GET | `/api/system-catalog?type=tasks` | List canonical built-in task sources. |
 | GET | `/api/workspace-tasks` | List Python tasks under `workspace/tasks/`. |
 | POST | `/api/workspace-tasks` | Create or overwrite one workspace task source file. |
-| DELETE | `/api/workspace-tasks` | Delete one workspace task. |
-| PATCH | `/api/workspace-tasks/rename` | Rename a workspace task. |
 
 Task paths in requests are relative to `workspace/tasks/`.
 
@@ -810,14 +913,8 @@ Task paths in requests are relative to `workspace/tasks/`.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/workspace-files?path=` | List directory contents. |
-| POST | `/api/workspace-files/upload` | Upload a file through multipart or base64 payload. |
-| POST | `/api/workspace-files/mkdir` | Create a directory. |
-| DELETE | `/api/workspace-files` | Delete a file or directory. |
-| GET | `/api/workspace-files/preview?path=` | Preview text, image, or table-like files. |
 | GET | `/api/workspace-files/download?path=` | Download binary content. |
-| PUT | `/api/local-workspaces/:workspaceId/manifest` | Write a local workspace manifest. |
-| GET | `/api/local-workspaces/:workspaceId/manifest` | Read a local workspace manifest. |
-| POST | `/api/workspace-files/missing` | Check whether paths are missing. |
+| POST | `/api/workspace-files/upload` | Upload `contentBase64` to `relativePath`; parent directories are created automatically. |
 | POST | `/api/artifacts/promote` | Copy a Core SHA-256 artifact into Workspace Files. |
 
 ---
@@ -833,10 +930,10 @@ Example:
 
 ```json
 {
-  "prompt": "Generate a task to count CSV rows",
-  "base_url": "https://api.openai.com/v1",
+  "description": "Generate a task to count CSV rows",
+  "baseUrl": "https://api.openai.com/v1",
   "model": "gpt-4o-mini",
-  "api_key": "<optional if server reads env>"
+  "apiKey": "<key>"
 }
 ```
 
@@ -847,8 +944,6 @@ Example:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/workspace-workflows` | List saved workflow blueprints. |
-| DELETE | `/api/workspace-workflows` | Delete a workflow blueprint. |
-| PATCH | `/api/workspace-workflows/rename` | Rename a workflow blueprint. |
 | POST | `/api/workspace-workflows/save` | Save frontend JSON blueprint. |
 | POST | `/api/workspace-workflows/load` | Load a saved blueprint onto the canvas. |
 | POST | `/api/workspace-workflows/import` | Import a workflow from an uploaded JSON file. |
@@ -859,36 +954,42 @@ Example:
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/runs?status=&kind=&limit=&detail=` | Proxy Head unified `/runs`. |
+| GET | `/api/runs?workspaceId=&status=&kind=&limit=&detail=` | List public Core Runs, optionally scoped to one workspace. |
 | GET | `/api/runs/:runId` | Unified run detail. |
-| GET | `/api/runs/:runId/tasks` | Run task list. |
-| GET | `/api/runs/:runId/tasks/:taskId` | Single task snapshot. |
 | GET | `/api/runs/:runId/events?after=` | Run events. |
 | GET | `/api/runs/:runId/logs?tail=&taskId=` | Run/task logs. |
 | GET | `/api/runs/:runId/artifacts` | Run artifact list. |
 | GET | `/api/runs/:runId/tasks/:taskId/artifacts` | Task artifact list. |
 | POST | `/api/runs/:runId/cancel` | Cancel a run. |
 | POST | `/api/runs/:runId/retry` | Retry an AppSpec run. |
-| GET | `/api/cluster/resources` | Proxy Head `/cluster/resources`. |
-| GET | `/api/cluster/queues` | Proxy Head `/cluster/queues`. |
-| GET | `/api/artifacts/sha256/:sha256/metadata` | Proxy Head artifact metadata. |
 | GET | `/api/artifacts/sha256/:sha256?disposition=inline|attachment` | Open inline or download a sha256 artifact. |
-| GET | `/api/dynamic-runs` | List dynamic runs. |
-| GET | `/api/dynamic-runs/:runId` | Dynamic run detail. |
-| GET | `/api/dynamic-runs/:runId/events` | Dynamic run events over HTTP. |
-| POST | `/api/dynamic-runs/:runId/events` | Write an event through Maze Head. |
 | DELETE | `/api/dynamic-runs/:runId` | Delete a dynamic run. |
-| POST | `/api/dynamic-runs/cleanup` | Bulk cleanup dynamic runs. |
----
 
-### 4.7 Editor APIs
+### 4.7 Cluster, Models, and Worker Profiles
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/cluster/resources` | Proxy Core cluster resources. |
+| GET | `/api/cluster/queues` | Proxy public queue and model-wait diagnostics. |
+| POST | `/api/cluster/nodes/:nodeId/:action` | `enable` or `disable` Core node placement. |
+| GET | `/api/models` | List Core model directory and checkpoints. |
+| POST | `/api/models/config` | Configure the Core model directory. |
+| POST | `/api/models/test` | Test one discovered checkpoint. |
+| GET | `/api/cluster/worker-profiles` | List workspace-owned remote worker profiles. |
+| POST | `/api/cluster/worker-profiles` | Create or update a worker profile. |
+| POST | `/api/cluster/worker-profiles/test-draft` | Test an unsaved SSH worker profile. |
+| DELETE | `/api/cluster/worker-profiles/:profileId` | Delete a worker profile. |
+| POST | `/api/cluster/worker-profiles/:profileId/:action` | Run `test`, `start`, `restart`, `stop`, or `logs`. |
+| POST | `/api/cluster/worker-profiles/bulk` | Apply one supported action to multiple profiles. |
+
+### 4.8 Editor APIs
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/parse-custom-function` | Parse uploaded/pasted Python source and extract `@task` metadata. |
 | POST | `/api/workflows/:id/run` | Compile the workflow supplied in the request and submit it to Maze Core. Returns the Core `run_id`. |
 
-### 4.8 Health
+### 4.9 Health
 
 ```text
 GET /health -> {"status": "ok"}
@@ -903,7 +1004,8 @@ Events are JSON objects with at least:
 ```json
 {
   "seq": 1,
-  "timestamp": "2026-06-20T00:00:00Z",
+  "timestamp": "2026-08-13T00:00:00Z",
+  "schema_version": 1,
   "type": "start_task",
   "data": {}
 }
@@ -924,7 +1026,7 @@ Common static/dynamic workflow events:
 | `run_interrupted` | `run_id`, `reason` |
 | `register_task_spec` | dynamic run task spec metadata |
 | `append_task` | dynamic run invocation metadata |
-| `finish_dynamic_run` | dynamic run result |
+| `cancel_dynamic_run` / `timeout_dynamic_run` / `interrupt_dynamic_run` | dynamic terminal reason |
 
 ## 6. Resource Configuration
 
@@ -932,18 +1034,20 @@ Common resource fields:
 
 | Field | Unit | Default | Description |
 |---|---|---|---|
-| `cpu` | cores | `1` | Minimum normalized value is 1. |
-| `cpu_mem` | MB | `0` | `0` means unspecified/unlimited. |
-| `gpu` | count | `0` | If `gpu_mem > 0`, Maze normalizes `gpu` to at least 1. |
+| `cpu_num` | cores | `1` | Values below 1 normalize to 1. `cpu` is a compatibility alias. |
 | `gpu_mem` | MB | `0` | If omitted, Maze may infer GPU memory needs from task source. |
+| `io_num` | slots | `0` | Capacity used by the independent I/O queue. |
+| `target_node_id` / `node_id` | node id | unset | Require one placement target. |
+| `avoid_node_ids` | list | unset | Exclude nodes from placement. |
+| `required_capability` | string | unset | Require a worker-reported capability. |
 
 Normalization rules:
 
-- Start from `{cpu: 1, cpu_mem: 0, gpu: 0, gpu_mem: 0}`.
-- User-provided fields override defaults.
-- If neither `gpu` nor `gpu_mem` is explicitly declared, Maze may infer GPU usage from imports and source code.
-- `cpu < 1` is clamped to 1.
-- `gpu_mem > 0` forces `gpu >= 1`.
+- Start from `{"cpu_num": 1, "gpu_mem": 0, "io_num": 0}`.
+- Resource values must be non-negative; `cpu_num <= 0` normalizes to 1.
+- A `cpu` or `io` task must not request `gpu_mem` or declare `model_anchor.local_model`.
+- A schedulable `gpu` task needs positive `gpu_mem`, either declared directly or obtained from a model/resource-history estimate.
+- `task_kind` selects the `cpu`, `gpu`, or `io` ready queue. `FCFS` or `HACS` orders ready tasks inside those queues; `--strategy` selects a node after a task is chosen.
 
 ---
 
@@ -962,6 +1066,21 @@ Normalization rules:
 | `TypeError("Task ... must return a dict")` | Task returned a non-dict value at runtime. |
 | `TypeError("@task no longer accepts ...")` | Deprecated decorator options were passed. |
 | `ValueError("...")` | Argument validation failed. |
+
+Common structured task errors include:
+
+| `error_type` | Retryable | Meaning |
+|---|---|---|
+| `missing_model` | no | No eligible registered node reports the requested checkpoint. |
+| `model_instance_unavailable` | wait state | The checkpoint exists, but deployment or routing is not ready. |
+| `resource_insufficient` | yes by default | Execution exhausted a requested resource, commonly GPU memory. |
+| `resource_unavailable` | yes by default | Placement resources are temporarily unavailable. |
+| `node_lost` | yes by default | The selected worker disappeared during execution. |
+| `user_code` | no by default | User task code raised an exception. |
+
+Task error envelopes may include `message`, `retryable`, `origin`, `node_id`,
+`node_ip`, `attempt`, and `traceback`. Retry behavior is limited by
+`max_retries`, `retry_backoff_seconds`, and `retry_on`.
 
 ### 7.2 Server conventions
 
@@ -992,11 +1111,11 @@ Workbench backend failures usually return:
 ```python
 from maze import MaClient, task
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def produce(name: str = "Maze"):
     return {"message": f"Hello {name}"}
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def consume(message: str = ""):
     return {"upper": message.upper()}
 
@@ -1005,7 +1124,7 @@ wf = client.create_workflow()
 a = wf.add_task(produce, inputs={"name": "Maze"})
 b = wf.add_task(consume, inputs={"message": a.outputs["message"]})
 run_id = wf.run(artifact_mode=True, tags=["example"])
-print(wf.wait(run_id))
+print(client.wait_run(run_id)["result_summary"])
 ```
 
 ### 8.2 Dynamic workflow
@@ -1020,9 +1139,7 @@ def add_one(x: int = 0):
 client = MaClient("http://localhost:8000")
 run = client.create_dynamic_run(max_tasks=5)
 t1 = run.append_task(add_one, inputs={"x": 1})
-t2 = run.append_task(add_one, inputs={
-    "x": {"__maze_output_ref__": True, "task_id": t1, "output_key": "y"}
-})
+t2 = run.append_task(add_one, inputs={"x": t1.outputs["y"]})
 print(run.wait_for_task(t2))
 run.finalize({"done": True})
 ```
@@ -1043,7 +1160,8 @@ curl -sS -X POST http://localhost:8000/workflows/submit \
           "code": "def produce(name=\"Maze\"):\n    return {\"message\": f\"Hello {name}\"}",
           "inputs": {"name": "Maze"},
           "outputs": ["message"],
-          "resources": {"cpu": 1, "cpu_mem": 128}
+          "task_kind": "cpu",
+          "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
         }
       ],
       "edges": [],
@@ -1259,7 +1377,8 @@ cat > /tmp/observability_dag.json <<'JSON'
         "code": "def produce(name='Maze'):\n    return {'message': f'Hello {name}', '__maze_metrics__': {'tokens_in': 11, 'tokens_out': 7, 'cost_usd': 0.123, 'model': 'test-model'}}",
         "inputs": {"name": "Maze"},
         "outputs": ["message"],
-        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       },
       {
         "id": "consume",
@@ -1267,7 +1386,8 @@ cat > /tmp/observability_dag.json <<'JSON'
         "code": "def consume(message):\n    return {'upper': message.upper(), '__maze_metrics__': {'tokens_in': 3, 'tokens_out': 2, 'cost_usd': 0.01, 'model': 'test-model'}}",
         "inputs": {"message": {"from": "produce.message"}},
         "outputs": ["upper"],
-        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       }
     ],
     "edges": [{"from": "produce.message", "to": "consume.message"}],
@@ -1318,7 +1438,7 @@ Expected result:
 
 ## 10. References
 
-- Main repository: <https://github.com/QinbinLi/Maze>
+- Main repository: <https://github.com/maze-agent/Maze>
 - Online docs: <https://maze-doc-new.readthedocs.io/>
 - Website: <https://mazeagent.net/>
 - Key source files:

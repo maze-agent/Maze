@@ -13,6 +13,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useWorkflowStore } from '@/stores/workflowStore';
+import { errorMessage } from '@/utils/errors';
 
 type TaskKind = 'cpu' | 'gpu' | 'io';
 
@@ -222,7 +223,9 @@ export default function CustomNode({ id, data, selected }: any) {
     return null;
   };
 
-  const statusTooltip = status === 'succeeded' ? 'Succeeded' : statusLabel(status);
+  const statusTooltip = status === 'failed'
+    ? errorMessage(runState?.error) || statusLabel(status)
+    : status === 'succeeded' ? 'Succeeded' : statusLabel(status);
   
   return (
     <Card
@@ -342,7 +345,7 @@ export default function CustomNode({ id, data, selected }: any) {
                 </Tooltip>
               )}
               {runState?.error && (
-                <Tooltip title={String(runState.error)}>
+                <Tooltip title={errorMessage(runState.error)}>
                   <CloseCircleFilled style={{ color: '#ef4444', fontSize: 15 }} />
                 </Tooltip>
               )}

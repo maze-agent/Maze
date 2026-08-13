@@ -29,7 +29,12 @@ from maze.core.files.artifact_store import LocalCASArtifactStore, sha256_bytes
 from maze.core.application.spec import AppSpecError, app_file_context, app_spec_from_payload
 from maze.core.workflow.dag_spec import DagSpecError, dag_file_context, dag_spec_from_payload
 from maze.core.workflow.resources import apply_model_anchor_estimate, model_anchor_gpu_mem_mb, normalize_resources
-from maze.core.local_models import DEFAULT_MODEL_DIR, RUNTIME_CONFIG_PATH, model_dir
+from maze.core.local_models import (
+    DEFAULT_MODEL_DIR,
+    RUNTIME_CONFIG_PATH,
+    available_model_backends,
+    model_dir,
+)
 from maze.core.scheduler.llm_instance import (
     validate_model_backend,
     validate_transformers_model,
@@ -469,6 +474,7 @@ def _redact_artifact_secrets(value: Any) -> Any:
 def _local_models() -> List[Dict[str, Any]]:
     model_dir = _model_dir()
     models = []
+    backends = available_model_backends()
     if not model_dir.exists():
         return models
     for path in sorted(item for item in model_dir.iterdir() if item.is_dir()):
@@ -486,8 +492,8 @@ def _local_models() -> List[Dict[str, Any]]:
             "path": str(path),
             "type": "local",
             "model_type": model_type,
-            "backend": "transformers",
-            "backends": ["transformers"],
+            "backend": backends[0] if backends else None,
+            "backends": backends,
             "model_scope": "head",
             **estimate,
         })

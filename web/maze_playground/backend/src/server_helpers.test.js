@@ -8,7 +8,11 @@ process.env.MAZE_PLAYGROUND_NO_LISTEN = '1';
 process.env.PYTHON_BIN = process.execPath;
 
 const {
+  importIncludedFiles,
+  listWorkspaceSummaries,
+  publicRunsForWorkspace,
   publicClusterQueues,
+  resolveWorkspaceDownload,
   saveWorkspaceTaskSource,
   server,
   writeTextAtomic,
@@ -19,6 +23,150 @@ async function temporaryDirectory(t) {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('workspace summaries include valid direct children ordered by update time', async (t) => {
+  const root = await temporaryDirectory(t);
+  await fs.mkdir(path.join(root, 'older'));
+  await fs.mkdir(path.join(root, 'newer'));
+  await fs.mkdir(path.join(root, 'broken'));
+  await fs.writeFile(path.join(root, 'older', 'workspace.json'), JSON.stringify({
+    schema: 'maze_workspace',
+    workspace_id: 'older',
+    name: 'Older workspace',
+    mode: 'session',
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-02T00:00:00.000Z',
+  }));
+  await fs.writeFile(path.join(root, 'newer', 'workspace.json'), JSON.stringify({
+    schema: 'maze_workspace',
+    workspace_id: 'newer',
+    name: 'Newer workspace',
+    updated_at: '2026-01-03T00:00:00.000Z',
+  }));
+  await fs.writeFile(path.join(root, 'broken', 'workspace.json'), '{');
+
+  assert.deepEqual(await listWorkspaceSummaries(root), [
+    {
+      workspaceId: 'newer',
+      name: 'Newer workspace',
+      mode: 'session',
+      createdAt: null,
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    },
+    {
+      workspaceId: 'older',
+      name: 'Older workspace',
+      mode: 'session',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    },
+  ]);
+});
+
+test('workspace download resolves regular files and rejects escapes and symlinks', async (t) => {
+  const workspaceDir = await temporaryDirectory(t);
+  const filesDir = path.join(workspaceDir, 'files');
+  await fs.mkdir(filesDir);
+  await fs.writeFile(path.join(filesDir, 'input.txt'), 'input');
+  await fs.writeFile(path.join(workspaceDir, 'secret.txt'), 'secret');
+  await fs.symlink(path.join(workspaceDir, 'secret.txt'), path.join(filesDir, 'link.txt'));
+
+  assert.deepEqual(await resolveWorkspaceDownload(workspaceDir, 'input.txt'), {
+    fullPath: path.join(filesDir, 'input.txt'),
+    relativePath: 'input.txt',
+  });
+  await assert.rejects(() => resolveWorkspaceDownload(workspaceDir, '../secret.txt'), /stay inside/);
+  await assert.rejects(() => resolveWorkspaceDownload(workspaceDir, 'link.txt'), /regular file/);
+  await assert.rejects(() => resolveWorkspaceDownload(workspaceDir, 'missing.txt'), /was not found/);
+});
+
+test('workspace download rejects a symbolic-link files directory', async (t) => {
+  const workspaceDir = await temporaryDirectory(t);
+  const outsideDir = await temporaryDirectory(t);
+  await fs.writeFile(path.join(outsideDir, 'outside.txt'), 'outside');
+  await fs.symlink(outsideDir, path.join(workspaceDir, 'files'));
+
+  await assert.rejects(
+    () => resolveWorkspaceDownload(workspaceDir, 'outside.txt'),
+    /regular directory/,
+  );
+});
+
+test('included files import once without overwriting workspace files', async (t) => {
+  const root = await temporaryDirectory(t);
+  const workspaceDir = path.join(root, 'workspace');
+  const catalogFilesDir = path.join(root, 'catalog-files');
+  await fs.mkdir(path.join(workspaceDir, 'files'), { recursive: true });
+  await fs.mkdir(path.join(catalogFilesDir, 'gaia'), { recursive: true });
+  await fs.writeFile(path.join(catalogFilesDir, 'gaia', 'example.txt'), 'system sample');
+
+  const definitions = [{
+    sourceId: 'gaia/example.txt',
+    targetPath: 'samples/gaia/example.txt',
+  }];
+  assert.deepEqual(await importIncludedFiles(workspaceDir, definitions, catalogFilesDir), {
+    imported: [{ sourceId: 'gaia/example.txt', relativePath: 'samples/gaia/example.txt' }],
+    skipped: [],
+  });
+  await fs.writeFile(path.join(workspaceDir, 'files', 'samples', 'gaia', 'example.txt'), 'user edit');
+  assert.deepEqual(await importIncludedFiles(workspaceDir, definitions, catalogFilesDir), {
+    imported: [],
+    skipped: [{
+      sourceId: 'gaia/example.txt',
+      relativePath: 'samples/gaia/example.txt',
+      reason: 'exists',
+    }],
+  });
+  assert.equal(
+    await fs.readFile(path.join(workspaceDir, 'files', 'samples', 'gaia', 'example.txt'), 'utf8'),
+    'user edit',
+  );
+});
+
+test('included files reject traversal and symbolic-link escapes', async (t) => {
+  const root = await temporaryDirectory(t);
+  const workspaceDir = path.join(root, 'workspace');
+  const catalogFilesDir = path.join(root, 'catalog-files');
+  const outsideDir = path.join(root, 'outside');
+  await fs.mkdir(path.join(workspaceDir, 'files'), { recursive: true });
+  await fs.mkdir(catalogFilesDir);
+  await fs.mkdir(outsideDir);
+  await fs.writeFile(path.join(outsideDir, 'outside.txt'), 'outside');
+
+  await assert.rejects(
+    importIncludedFiles(workspaceDir, [{ sourceId: '../outside/outside.txt' }], catalogFilesDir),
+    /POSIX relative file path/,
+  );
+  await fs.symlink(path.join(outsideDir, 'outside.txt'), path.join(catalogFilesDir, 'linked.txt'));
+  await assert.rejects(
+    importIncludedFiles(workspaceDir, [{ sourceId: 'linked.txt' }], catalogFilesDir),
+    /regular file/,
+  );
+  await fs.writeFile(path.join(catalogFilesDir, 'sample.txt'), 'sample');
+  await fs.symlink(outsideDir, path.join(workspaceDir, 'files', 'linked-dir'));
+  await assert.rejects(
+    importIncludedFiles(workspaceDir, [{
+      sourceId: 'sample.txt',
+      targetPath: 'linked-dir/sample.txt',
+    }], catalogFilesDir),
+    /parent directories must not be symbolic links/,
+  );
+  await assert.rejects(fs.access(path.join(outsideDir, 'sample.txt')), /ENOENT/);
+});
+
+test('workspace run filtering happens before the requested limit', () => {
+  const runs = [
+    { run_id: 'other-new', metadata: { workspace_id: 'other' } },
+    { run_id: 'gaia-private', metadata: { workspace_id: 'target', benchmark: 'gaia' } },
+    { run_id: 'target-new', metadata: { workspace_id: 'target' } },
+    { run_id: 'target-old', metadata: { workspace_id: 'target' } },
+  ];
+
+  assert.deepEqual(
+    publicRunsForWorkspace(runs, 'target', 1).map((run) => run.run_id),
+    ['target-new'],
+  );
+});
 
 test('cluster queues inspect only current runs and fail closed for private or unknown runs', async () => {
   const coreResponse = {

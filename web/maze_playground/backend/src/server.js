@@ -337,8 +337,46 @@ async function createWorkspace({ workspaceId, name, mode } = {}) {
   return { workspaceId: manifest.workspace_id, workspaceDir, manifest };
 }
 
+async function listWorkspaceSummaries(workspacesDir = WORKSPACES_DIR) {
+  const entries = await fs.readdir(workspacesDir, { withFileTypes: true }).catch((error) => {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  });
+  const summaries = await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map(async (entry) => {
+      const manifest = await readJsonFile(path.join(workspacesDir, entry.name, 'workspace.json'), null)
+        .catch(() => null);
+      if (!manifest || manifest.schema !== 'maze_workspace') return null;
+      return {
+        workspaceId: entry.name,
+        name: String(manifest.name || entry.name),
+        mode: String(manifest.mode || 'session'),
+        createdAt: manifest.created_at || null,
+        updatedAt: manifest.updated_at || manifest.created_at || null,
+      };
+    }));
+  return summaries
+    .filter(Boolean)
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+}
+
+function publicRunsForWorkspace(runs, workspaceId = '', limit = null) {
+  const normalizedWorkspaceId = String(workspaceId || '').trim();
+  const filtered = (runs || [])
+    .filter((run) => run?.metadata?.benchmark !== 'gaia')
+    .filter((run) => (
+      !normalizedWorkspaceId
+      || String(run?.metadata?.workspace_id || '') === normalizedWorkspaceId
+    ));
+  const normalizedLimit = limit === null || limit === undefined || limit === ''
+    ? null
+    : Math.max(0, Number(limit) || 0);
+  return normalizedLimit === null ? filtered : filtered.slice(0, normalizedLimit);
+}
+
 async function ensureSystemCatalogDirs() {
-  for (const name of ['workflows', 'tasks']) {
+  for (const name of ['workflows', 'tasks', 'files']) {
     await fs.mkdir(path.join(SYSTEM_CATALOG_DIR, name), { recursive: true });
   }
 }
@@ -424,6 +462,7 @@ function normalizeWorkflowPayload(payload) {
     workflow?.taskDefinitions ||
     payload?.taskDefinitions ||
     [];
+  const rawIncludedFiles = payload?.includedFiles || workflow?.includedFiles || [];
 
   if (!Array.isArray(nodes) || !Array.isArray(edges)) {
     throw new Error('Invalid workflow file: nodes and edges are required');
@@ -443,6 +482,7 @@ function normalizeWorkflowPayload(payload) {
       targetHandle: edge.targetHandle || undefined,
     })),
     includedTasks: Array.isArray(rawIncludedTasks) ? rawIncludedTasks : [],
+    includedFiles: Array.isArray(rawIncludedFiles) ? rawIncludedFiles : [],
   };
 }
 
@@ -575,6 +615,106 @@ function resolveWorkspaceFilePath(workspaceDir, relativePath = '') {
   return { relativePath: normalized, fullPath, filesDir };
 }
 
+function normalizeIncludedFilePath(value, fieldName) {
+  const raw = String(value || '').trim();
+  if (
+    !raw
+    || raw.includes('\0')
+    || raw.includes('\\')
+    || path.posix.isAbsolute(raw)
+    || isWindowsDrivePath(raw)
+    || raw.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
+    throw badRequestError(`${fieldName} must be a POSIX relative file path`);
+  }
+  return path.posix.normalize(raw);
+}
+
+async function requireRegularDirectory(directory, message) {
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw badRequestError(message);
+  }
+}
+
+async function ensureRegularParentDirectories(rootDir, relativePath) {
+  await requireRegularDirectory(rootDir, 'Workspace files directory must be a regular directory');
+  let currentDir = rootDir;
+  for (const part of path.dirname(relativePath).split('/').filter((item) => item !== '.')) {
+    currentDir = path.join(currentDir, part);
+    try {
+      await fs.mkdir(currentDir);
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    await requireRegularDirectory(
+      currentDir,
+      'Included file target parent directories must not be symbolic links',
+    );
+  }
+}
+
+async function importIncludedFiles(
+  workspaceDir,
+  definitions,
+  catalogFilesDir = path.join(SYSTEM_CATALOG_DIR, 'files'),
+) {
+  const imported = [];
+  const skipped = [];
+  await requireRegularDirectory(catalogFilesDir, 'System catalog files directory must be a regular directory');
+
+  for (const definition of definitions || []) {
+    if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
+      throw badRequestError('includedFiles entries must be objects');
+    }
+    const sourceId = normalizeIncludedFilePath(definition.sourceId, 'includedFiles sourceId');
+    const targetPath = normalizeIncludedFilePath(
+      definition.targetPath || definition.sourceId,
+      'includedFiles targetPath',
+    );
+    const sourcePath = path.resolve(catalogFilesDir, sourceId);
+    const sourceStat = await fs.lstat(sourcePath);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+      throw badRequestError(`Included file source must be a regular file: ${sourceId}`);
+    }
+    const [realCatalogDir, realSourcePath] = await Promise.all([
+      fs.realpath(catalogFilesDir),
+      fs.realpath(sourcePath),
+    ]);
+    if (!realSourcePath.startsWith(realCatalogDir + path.sep)) {
+      throw badRequestError(`Included file source must stay inside system_catalog/files: ${sourceId}`);
+    }
+
+    const { fullPath, filesDir } = resolveWorkspaceFilePath(workspaceDir, targetPath);
+    await ensureRegularParentDirectories(filesDir, targetPath);
+    const existing = await fs.lstat(fullPath).catch((error) => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (existing) {
+      if (!existing.isFile() || existing.isSymbolicLink()) {
+        throw badRequestError(`Included file target must be a regular file: ${targetPath}`);
+      }
+      skipped.push({ sourceId, relativePath: targetPath, reason: 'exists' });
+      continue;
+    }
+
+    try {
+      await fs.copyFile(sourcePath, fullPath, fsSync.constants.COPYFILE_EXCL);
+      imported.push({ sourceId, relativePath: targetPath });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      const concurrentTarget = await fs.lstat(fullPath);
+      if (!concurrentTarget.isFile() || concurrentTarget.isSymbolicLink()) {
+        throw badRequestError(`Included file target must be a regular file: ${targetPath}`);
+      }
+      skipped.push({ sourceId, relativePath: targetPath, reason: 'exists' });
+    }
+  }
+
+  return { imported, skipped };
+}
+
 async function describeWorkspaceFile(filesDir, fullPath) {
   const stat = await fs.stat(fullPath);
   const relativePath = toPosixPath(path.relative(filesDir, fullPath));
@@ -585,6 +725,42 @@ async function describeWorkspaceFile(filesDir, fullPath) {
     size: stat.isFile() ? stat.size : null,
     updatedAt: stat.mtime.toISOString(),
   };
+}
+
+async function resolveWorkspaceDownload(workspaceDir, relativePath) {
+  let resolved;
+  try {
+    resolved = resolveWorkspaceFilePath(workspaceDir, relativePath);
+  } catch (error) {
+    throw badRequestError(error);
+  }
+  const { fullPath, filesDir, relativePath: normalizedPath } = resolved;
+  if (!normalizedPath) {
+    throw badRequestError('Workspace file path is required');
+  }
+  const filesDirStat = await fs.lstat(filesDir);
+  if (!filesDirStat.isDirectory() || filesDirStat.isSymbolicLink()) {
+    throw badRequestError('Workspace files directory must be a regular directory');
+  }
+  const stat = await fs.lstat(fullPath).catch((error) => {
+    if (error?.code === 'ENOENT') {
+      const notFound = new Error(`Workspace file "${normalizedPath}" was not found`);
+      notFound.status = 404;
+      throw notFound;
+    }
+    throw error;
+  });
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw badRequestError('Workspace download must reference a regular file');
+  }
+  const [realFilesDir, realFile] = await Promise.all([
+    fs.realpath(filesDir),
+    fs.realpath(fullPath),
+  ]);
+  if (!realFile.startsWith(realFilesDir + path.sep)) {
+    throw badRequestError('Workspace file path must stay inside workspace/files');
+  }
+  return { fullPath: realFile, relativePath: normalizedPath };
 }
 
 async function readWorkspaceTaskCode(workspaceDir, relativePath) {
@@ -2230,7 +2406,28 @@ async function readSystemWorkflow(sourcePath) {
   }
 
   try {
-    return normalizeWorkflowPayload(payload);
+    const workflow = normalizeWorkflowPayload(payload);
+    workflow.includedTasks = await Promise.all(
+      workflow.includedTasks.map(async (definition) => {
+        if (String(definition?.code || '').trim()) {
+          return definition;
+        }
+        const sourceId = String(definition?.sourceId || '').trim();
+        if (!sourceId) {
+          return definition;
+        }
+        const source = resolveCatalogSource('tasks', sourceId);
+        const stat = await fs.stat(source.sourcePath);
+        if (!stat.isFile() || !source.sourceId.endsWith('.py')) {
+          throw new Error(`System workflow task source must be a Python file: ${sourceId}`);
+        }
+        return {
+          ...definition,
+          code: await fs.readFile(source.sourcePath, 'utf-8'),
+        };
+      }),
+    );
+    return workflow;
   } catch (error) {
     throw badRequestError(error);
   }
@@ -2291,6 +2488,15 @@ app.post('/api/workspaces', async (req, res) => {
     res.json({ success: true, ...workspace });
   } catch (error) {
     console.error('❌ 创建 workspace 失败:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspaces', async (_req, res) => {
+  try {
+    res.json({ success: true, workspaces: await listWorkspaceSummaries() });
+  } catch (error) {
+    console.error('Failed to list workspaces:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2376,6 +2582,10 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
         workflow.name,
         { parse: false },
       );
+      const fileImportResult = await importIncludedFiles(
+        workspaceDir,
+        workflow.includedFiles,
+      );
       workflow.nodes = await hydrateWorkspaceWorkflowNodes(
         workflow.nodes,
         workspaceDir,
@@ -2384,12 +2594,13 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
       );
 
       let manifest = lockedContext.manifest;
-      if (importResult.imported.length > 0) {
+      if (importResult.imported.length > 0 || fileImportResult.imported.length > 0) {
         manifest = await recordWorkspaceMutation(workspaceDir, 'system_workflow_template_loaded', {
           source_id: normalizedSourceId,
           workflow_name: workflow.name,
           imported_count: importResult.imported.length,
           remapped_count: importResult.remapped.length,
+          imported_file_count: fileImportResult.imported.length,
         });
       }
 
@@ -2405,6 +2616,7 @@ app.post('/api/system-catalog/workflows/load', async (req, res) => {
           skipped: importResult.skipped,
           remapped: importResult.remapped,
         },
+        importedFiles: fileImportResult,
       };
     });
     res.json(result);
@@ -2533,6 +2745,17 @@ app.get('/api/workspace-files', async (req, res) => {
   } catch (error) {
     console.error('❌ 获取 workspace files 失败:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspace-files/download', async (req, res) => {
+  try {
+    const context = await resolveWorkspaceContext(req.query);
+    const file = await resolveWorkspaceDownload(context.workspaceDir, req.query.path || '');
+    res.download(file.fullPath, path.basename(file.relativePath));
+  } catch (error) {
+    console.error('Failed to download workspace file:', error);
+    res.status(statusForFileError(error)).json({ error: error.message });
   }
 });
 
@@ -2889,15 +3112,16 @@ app.post('/api/workspace-workflows/import', async (req, res) => {
 app.get('/api/runs', async (req, res) => {
   try {
     const params = new URLSearchParams();
+    const workspaceId = String(req.query.workspaceId || '').trim();
     if (req.query.status) params.set('status', String(req.query.status));
     if (req.query.kind) params.set('kind', String(req.query.kind));
-    if (req.query.limit) params.set('limit', String(req.query.limit));
+    if (req.query.limit && !workspaceId) params.set('limit', String(req.query.limit));
     if (req.query.detail !== undefined) params.set('detail', String(req.query.detail));
     const query = params.toString();
     const result = await callMazeCore(`/runs${query ? `?${query}` : ''}`);
     res.json({
       success: true,
-      runs: (result.runs || []).filter((run) => run?.metadata?.benchmark !== 'gaia'),
+      runs: publicRunsForWorkspace(result.runs, workspaceId, req.query.limit),
     });
   } catch (error) {
     console.error('Failed to get runs:', error);
@@ -3398,7 +3622,11 @@ app.get('/health', (req, res) => {
 
 export {
   collectCurrentQueueWorkflowIds,
+  listWorkspaceSummaries,
+  importIncludedFiles,
+  publicRunsForWorkspace,
   publicClusterQueues,
+  resolveWorkspaceDownload,
   saveWorkspaceTaskSource,
   server,
   writeTextAtomic,

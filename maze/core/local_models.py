@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any, Dict, List
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / ".maze_runtime.json"
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "model_cache"
+MODEL_BACKEND_MODULES = {
+    "transformers": "transformers",
+    "vllm": "vllm",
+}
 
 
 def model_dir() -> Path:
@@ -19,12 +24,28 @@ def model_dir() -> Path:
     return Path(config.get("model_dir") or os.environ.get("MAZE_MODEL_DIR") or DEFAULT_MODEL_DIR).expanduser().resolve()
 
 
+def available_model_backends() -> List[str]:
+    return [
+        backend
+        for backend, module in MODEL_BACKEND_MODULES.items()
+        if importlib.util.find_spec(module) is not None
+    ]
+
+
+def local_model_supports_backend(model: Dict[str, Any], backend: str) -> bool:
+    backends = model.get("backends")
+    if isinstance(backends, list):
+        return backend in backends
+    return (model.get("backend") or "transformers") == backend
+
+
 def scan_local_model_refs(base_dir: str | os.PathLike[str] | None = None) -> List[Dict[str, Any]]:
     root = Path(base_dir).expanduser().resolve() if base_dir else model_dir()
     if not root.exists():
         return []
 
     models = []
+    backends = available_model_backends()
     for path in sorted(item for item in root.iterdir() if item.is_dir()):
         config_path = path / "config.json"
         if not config_path.is_file():
@@ -36,7 +57,8 @@ def scan_local_model_refs(base_dir: str | os.PathLike[str] | None = None) -> Lis
             "id": path.name,
             "name": path.name,
             "path": str(path),
-            "backend": "transformers",
+            "backend": backends[0] if backends else None,
+            "backends": backends,
             "model_type": model_type,
         })
     return models

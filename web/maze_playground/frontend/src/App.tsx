@@ -34,10 +34,10 @@ function App() {
     edges,
     activeRunId,
     selectedRunId,
+    staticRuns,
     workflowSaveState,
     workflowOperation,
     setWorkflowId,
-    setWorkflowName,
     setWorkspaceContext,
     setWorkspaceDir,
     setWorkspaceWorkflows,
@@ -45,6 +45,7 @@ function App() {
     setNodes,
     setEdges,
     setWorkflowSaveState,
+    activateWorkspace,
     acquireWorkflowOperation,
     releaseWorkflowOperation,
     upsertStaticRun,
@@ -55,12 +56,21 @@ function App() {
     () => workflowDraftFingerprint(workflowName, nodes, edges),
     [edges, nodes, workflowName],
   );
+  const activeStaticRunIds = staticRuns
+    .filter((run) => (
+      ACTIVE_RUN_STATUSES.has(run.status)
+      && (!run.workspace_id || run.workspace_id === workspaceId)
+    ))
+    .map((run) => run.run_id)
+    .sort()
+    .join('\n');
   const trackedRunIds = useMemo(
     () => Array.from(new Set([
       activeRunId,
       runsOpen ? null : selectedRunId,
+      ...activeStaticRunIds.split('\n').filter(Boolean),
     ].filter((id): id is string => Boolean(id)))),
-    [activeRunId, runsOpen, selectedRunId],
+    [activeRunId, activeStaticRunIds, runsOpen, selectedRunId],
   );
 
   useEffect(() => {
@@ -87,33 +97,25 @@ function App() {
     restoreOrCreateWorkspace()
       .then(async (workspace) => {
         if (canceled) return;
-        window.sessionStorage.setItem(storageKey, workspace.workspaceId);
-        setWorkspaceContext(workspace);
+        let draft = null;
         try {
-          const draft = await api.loadWorkspaceWorkflow({
+          const restored = await api.loadWorkspaceWorkflow({
             workspaceId: workspace.workspaceId,
             workspaceDir: workspace.workspaceDir,
             relativePath: WORKFLOW_DRAFT_PATH,
           });
           if (canceled) return;
           latestWorkflowFingerprintRef.current = workflowDraftFingerprint(
-            draft.workflow.name,
-            draft.workflow.nodes,
-            draft.workflow.edges,
+            restored.workflow.name,
+            restored.workflow.nodes,
+            restored.workflow.edges,
           );
-          setWorkflowId(createLocalWorkflowId());
-          setWorkflowName(draft.workflow.name);
-          setNodes(draft.workflow.nodes);
-          setEdges(draft.workflow.edges);
-          setWorkflowSaveState({
-            status: 'saved_draft',
-            draftPath: WORKFLOW_DRAFT_PATH,
-            savedAt: new Date().toISOString(),
-            error: null,
-          });
+          draft = restored.workflow;
         } catch (error) {
           console.debug('No restorable workflow draft found:', error);
         }
+        window.sessionStorage.setItem(storageKey, workspace.workspaceId);
+        activateWorkspace(workspace, draft);
         setWorkspaceReady(true);
       })
       .catch((error) => {
@@ -136,12 +138,69 @@ function App() {
   }, [
     acquireWorkflowOperation,
     releaseWorkflowOperation,
-    setEdges,
-    setNodes,
-    setWorkflowId,
-    setWorkflowName,
-    setWorkflowSaveState,
-    setWorkspaceContext,
+    activateWorkspace,
+  ]);
+
+  const switchWorkspace = useCallback(async (targetWorkspaceId: string) => {
+    if (!targetWorkspaceId || targetWorkspaceId === workspaceId) return true;
+    const operationToken = acquireWorkflowOperation('Switching workspace');
+    if (!operationToken) {
+      message.info(`Please wait for ${useWorkflowStore.getState().workflowOperation?.label || 'the current workflow operation'}`);
+      return false;
+    }
+
+    try {
+      if (workspaceDir) {
+        await api.saveWorkspaceWorkflow({
+          workspaceId: workspaceId || undefined,
+          workspaceDir,
+          relativePath: WORKFLOW_DRAFT_PATH,
+          name: workflowName,
+          workflowId: workflowId || createLocalWorkflowId(),
+          nodes,
+          edges,
+        });
+      }
+
+      const target = await api.getWorkspace(targetWorkspaceId);
+      let draft = null;
+      try {
+        const restored = await api.loadWorkspaceWorkflow({
+          workspaceId: target.workspaceId,
+          workspaceDir: target.workspaceDir,
+          relativePath: WORKFLOW_DRAFT_PATH,
+        });
+        draft = restored.workflow;
+      } catch (error: any) {
+        if (error?.response?.status !== 404) throw error;
+      }
+
+      latestWorkflowFingerprintRef.current = workflowDraftFingerprint(
+        draft?.name || 'Untitled Workflow',
+        draft?.nodes || [],
+        draft?.edges || [],
+      );
+      activateWorkspace(target, draft);
+      window.sessionStorage.setItem('maze.playground.workspaceId', target.workspaceId);
+      message.success(`Workspace loaded: ${target.manifest.name}`);
+      return true;
+    } catch (error: any) {
+      console.error('Failed to switch workspace:', error);
+      message.error(error.response?.data?.error || error.message || 'Failed to switch workspace');
+      return false;
+    } finally {
+      releaseWorkflowOperation(operationToken);
+    }
+  }, [
+    acquireWorkflowOperation,
+    activateWorkspace,
+    edges,
+    nodes,
+    releaseWorkflowOperation,
+    workflowId,
+    workflowName,
+    workspaceDir,
+    workspaceId,
   ]);
 
   useEffect(() => {
@@ -387,6 +446,7 @@ function App() {
         leftSidebar={(
           <BuiltinTasksSidebar
             onOpenRuns={() => setRunsOpen(true)}
+            onSwitchWorkspace={switchWorkspace}
             workspaceReady={workspaceReady}
           />
         )}

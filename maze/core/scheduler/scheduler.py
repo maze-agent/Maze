@@ -29,8 +29,9 @@ from maze.core.scheduler.llm_instance import (
     validate_model_backend,
     validate_transformers_model,
 )
+from maze.core.local_models import local_model_supports_backend
 from maze.core.scheduler.runtime import WorkflowRuntimeManager,TaskRuntime
-from maze.core.scheduler.queues import HeterogeneousTaskQueues
+from maze.core.scheduler.queues import HeterogeneousTaskQueues, QueuedTask
 from maze.core.scheduler.result_summary import summarize_task_result
 from maze.core.scheduler.standby_worker import StandbyWorkerPoolManager
 from maze.core.scheduler.strategy import create_scheduling_strategy
@@ -277,6 +278,8 @@ class Scheduler():
         self.scheduling_strategy = create_scheduling_strategy(strategy)
         self.strategy = self.scheduling_strategy.name
         self.task_queues = HeterogeneousTaskQueues(self.scheduling_strategy)
+        self._model_waiting: Dict[tuple[str, str], List[QueuedTask]] = {}
+        self._model_waiting_lock = threading.Lock()
         self.llm_instance_queue: Queue = queue.Queue()
         self.stopped_workflow_ids: set[str] = set()
         self.last_llm_scaling_check = 0.0
@@ -295,6 +298,8 @@ class Scheduler():
             )
         if not hasattr(self, "_llm_pending_starts"):
             self._llm_pending_starts = {}
+        if not hasattr(self, "_llm_deferred_starts"):
+            self._llm_deferred_starts = {}
         if not hasattr(self, "_llm_start_futures"):
             self._llm_start_futures = {}
         if not hasattr(self, "_llm_control_stop_futures"):
@@ -388,6 +393,126 @@ class Scheduler():
         if not hasattr(self, "stopped_workflow_ids"):
             self.stopped_workflow_ids = set()
         return self.stopped_workflow_ids
+
+    def _clear_workflow_request(self, message_data: Dict[str, Any]) -> None:
+        workflow_id = message_data["workflow_id"]
+        stopped_workflows = self._stopped_workflows()
+        first_clear = workflow_id not in stopped_workflows
+        stopped_workflows.add(workflow_id)
+        if first_clear:
+            duration = message_data.get("completion_duration_seconds")
+            if duration is not None:
+                strategy = getattr(self, "scheduling_strategy", None)
+                if strategy is not None:
+                    strategy.observe_workflow_completion(duration)
+        self._remove_model_waiters_for_workflow(workflow_id)
+        self._clear_model_workflow_state(workflow_id)
+        self.workflow_manager.clear_workflow(workflow_id=workflow_id)
+        self.resource_manager.release_dag_context(workflow_id)
+
+    def _task_model_key(self, task: TaskRuntime) -> tuple[str, str] | None:
+        anchor = getattr(task, "model_anchor", None) or {}
+        model = anchor.get("local_model") or anchor.get("model")
+        if not model:
+            return None
+        backend, _ = validate_model_backend(
+            anchor.get("backend") or anchor.get("engine") or "vllm"
+        )
+        return str(model), backend
+
+    def _ensure_model_waiting_state(self) -> None:
+        if not hasattr(self, "_model_waiting"):
+            self._model_waiting = {}
+        if not hasattr(self, "_model_waiting_lock"):
+            self._model_waiting_lock = threading.Lock()
+
+    def _wait_for_model(self, task: TaskRuntime, queue_name: str) -> None:
+        self._ensure_model_waiting_state()
+        key = self._task_model_key(task)
+        if key is None:
+            raise ValueError("model-routed task has no model key")
+        with self._model_waiting_lock:
+            queued = self.task_queues.take(queue_name, task)
+            self._model_waiting.setdefault(key, []).append(queued)
+            if self._assign_model_route(task, {}) is not None:
+                self._model_waiting[key].remove(queued)
+                if not self._model_waiting[key]:
+                    self._model_waiting.pop(key, None)
+                task.set_task_status("ready")
+                task.pending_reason = None
+                self.task_queues.restore(queued, queue_name)
+
+    def _wake_model_waiters(self, model: str, backend: str) -> None:
+        self._ensure_model_waiting_state()
+        key = (str(model), str(backend).strip().lower())
+        with self._model_waiting_lock:
+            waiting = self._model_waiting.pop(key, [])
+        for queued in waiting:
+            task = queued.task
+            if task.workflow_id in self._stopped_workflows():
+                continue
+            task.set_task_status("ready")
+            task.pending_reason = None
+            self.task_queues.restore(queued)
+
+    def _remove_model_waiters_for_workflow(self, workflow_id: str | None) -> None:
+        if not workflow_id:
+            return
+        self._ensure_model_waiting_state()
+        workflow_id = str(workflow_id)
+        with self._model_waiting_lock:
+            for key, waiting in list(self._model_waiting.items()):
+                remaining = [
+                    queued
+                    for queued in waiting
+                    if str(queued.task.workflow_id) != workflow_id
+                ]
+                if remaining:
+                    self._model_waiting[key] = remaining
+                else:
+                    self._model_waiting.pop(key, None)
+
+    def _model_waiting_snapshot(self) -> List[TaskRuntime]:
+        self._ensure_model_waiting_state()
+        with self._model_waiting_lock:
+            return [
+                queued.task
+                for waiting in self._model_waiting.values()
+                for queued in waiting
+            ]
+
+    def _fail_model_waiters(
+        self,
+        socket_to_main,
+        model: str,
+        backend: str,
+        error: BaseException | str,
+        *,
+        error_type: str = "model_deployment_failed",
+    ) -> None:
+        self._ensure_model_waiting_state()
+        key = (str(model), str(backend).strip().lower())
+        with self._model_waiting_lock:
+            waiting = self._model_waiting.pop(key, [])
+        outbound_messages = []
+        with self.lock:
+            for queued in waiting:
+                task = queued.task
+                if task.workflow_id in self._stopped_workflows():
+                    continue
+                self._retry_or_fail_task(
+                    socket_to_main,
+                    task,
+                    make_error_envelope(
+                        error_type,
+                        str(error),
+                        retryable=False,
+                        origin="scheduler",
+                        attempt=task.attempt,
+                    ),
+                    outbound_messages=outbound_messages,
+                )
+        self._flush_scheduler_events(socket_to_main, outbound_messages)
 
     def _scheduler_event_send_timeout(self) -> float:
         return max(
@@ -680,9 +805,11 @@ class Scheduler():
             "prediction_confidence": metadata.get("prediction_confidence"),
             "prediction_sample_count": metadata.get("prediction_sample_count"),
             "topological_weight": metadata.get("topological_weight"),
+            "queue_wait_time": metadata.get("queue_wait_time"),
             "workflow_wait_time": metadata.get("workflow_wait_time"),
             "remaining_value_tasks": metadata.get("remaining_value_tasks"),
             "hacs_score": metadata.get("hacs_score"),
+            "starved": metadata.get("starved"),
             "hacs_breakdown": metadata.get("hacs_breakdown"),
             "code_hash": metadata.get("code_hash"),
             "attempt": task.attempt,
@@ -734,9 +861,14 @@ class Scheduler():
         return decision
 
     def _assign_model_route(self, task: TaskRuntime, decision: Dict[str, Any]):
+        existing_route = getattr(task, "model_route", None)
+        if existing_route:
+            decision["model_route"] = copy.deepcopy(existing_route)
+            return existing_route
         route = self.llm_instance_manager.route_model_request(
             getattr(task, "workflow_id", None),
             getattr(task, "model_anchor", None),
+            task_id=getattr(task, "task_id", None),
         )
         task.model_route = route
         if route:
@@ -756,6 +888,10 @@ class Scheduler():
             return
         self.llm_instance_manager.release_model_route(route)
         task.model_route = None
+        model = route.get("model")
+        backend = route.get("backend")
+        if model and backend:
+            self._wake_model_waiters(model, backend)
 
     def _clear_model_workflow_state(self, workflow_id: str | None):
         clear = getattr(
@@ -764,7 +900,14 @@ class Scheduler():
             None,
         )
         if clear is not None:
-            clear(workflow_id)
+            for instance_id in clear(workflow_id) or []:
+                self.llm_instance_queue.put(LlmInstanceMessage(
+                    "stop_llm_instance",
+                    {
+                        "instance_id": instance_id,
+                        "cancel_auto_deployment": True,
+                    },
+                ))
 
     def _finalize_stopped_llm_instance(
         self,
@@ -828,12 +971,38 @@ class Scheduler():
         message_data: dict,
         backend: str | None,
         error: BaseException | str,
+        *,
+        error_type: str = "model_deployment_failed",
     ) -> None:
         if message_data.get("auto_started"):
+            normalized_backend = backend or message_data.get("backend") or "vllm"
             logger.warning(
                 "Automatic LLM instance %s launch failed: %s",
                 message_data["instance_id"],
                 error,
+            )
+            has_recovery = getattr(
+                self.llm_instance_manager,
+                "has_ready_or_deploying_model",
+                lambda _model, _backend, **_kwargs: False,
+            )
+            if error_type != "missing_model" and has_recovery(
+                message_data["model"],
+                normalized_backend,
+                exclude_instance_id=message_data.get("instance_id"),
+            ):
+                logger.info(
+                    "Keeping model waiters after instance %s failed because another "
+                    "instance is ready or deploying",
+                    message_data["instance_id"],
+                )
+                return
+            self._fail_model_waiters(
+                socket_to_main,
+                message_data["model"],
+                normalized_backend,
+                error,
+                error_type=error_type,
             )
             return
         message = {
@@ -869,6 +1038,16 @@ class Scheduler():
             normalized_backend,
             instance_id=message_data.get("instance_id"),
         )
+
+    def _auto_deployment_is_active(self, message_data: dict) -> bool:
+        if not message_data.get("auto_started"):
+            return True
+        is_active = getattr(
+            self.llm_instance_manager,
+            "auto_deployment_has_demand",
+            None,
+        )
+        return True if is_active is None else is_active(message_data["instance_id"])
 
     def _execute_llm_start(self, record: dict) -> dict:
         message_data = record["message_data"]
@@ -953,6 +1132,10 @@ class Scheduler():
             return
 
         instance_id = message_data["instance_id"]
+        if not self._auto_deployment_is_active(message_data):
+            self._clear_auto_model_deploying(message_data, backend)
+            return
+        self._llm_deferred_starts.pop(instance_id, None)
         has_instance = getattr(
             self.llm_instance_manager,
             "has_instance",
@@ -977,6 +1160,9 @@ class Scheduler():
             "gpu_mem": message_data.get("gpu_mem", 0),
         }
         with self.lock:
+            if not self._auto_deployment_is_active(message_data):
+                self._clear_auto_model_deploying(message_data, backend)
+                return
             selection = self.resource_manager.select_node(
                 task_need_resources=need_resources,
                 reservation_kind="instance",
@@ -984,18 +1170,51 @@ class Scheduler():
                 run_id=instance_id,
             )
         if not selection:
-            reason = selection.decision.get(
+            failure_reason = selection.decision.get(
                 "reason",
                 "No node can launch the LLM instance",
             )
+            if (
+                message_data.get("auto_started")
+                and failure_reason in {
+                    "insufficient_cpu",
+                    "insufficient_cpu_mem",
+                    "insufficient_gpu",
+                    "insufficient_gpu_mem",
+                }
+            ):
+                deferred = dict(message_data)
+                deferred["_placement_deferred"] = True
+                deferred["_placement_retry_at"] = (
+                    time.monotonic() + LLM_SCALING_CHECK_SECONDS
+                )
+                self._llm_deferred_starts[instance_id] = deferred
+                if not message_data.get("_placement_deferred"):
+                    logger.info(
+                        "Deferring automatic LLM instance %s: %s",
+                        instance_id,
+                        failure_reason,
+                    )
+                return
+
             self._clear_auto_model_deploying(message_data, backend)
-            self._send_llm_launch_failure(
-                socket_to_main,
-                message_data,
-                backend,
-                reason,
+            terminal_error_type = {
+                "missing_model": "missing_model",
+                "model_backend_unavailable": "model_deployment_failed",
+            }.get(failure_reason)
+            if not message_data.get("auto_started") or terminal_error_type:
+                self._send_llm_launch_failure(
+                    socket_to_main,
+                    message_data,
+                    backend,
+                    failure_reason,
+                    error_type=terminal_error_type or "model_deployment_failed",
+                )
+            logger.info(
+                "Failed to place LLM instance %s: %s",
+                instance_id,
+                failure_reason,
             )
-            logger.info("Failed to place LLM instance %s: %s", instance_id, reason)
             return
 
         selected_node = selection.selected_node
@@ -1009,7 +1228,7 @@ class Scheduler():
                 continue
             if (
                 local_model.get("id") == message_data["model"]
-                and (local_model.get("backend") or "transformers") == backend
+                and local_model_supports_backend(local_model, backend)
             ):
                 matched_local_model = local_model
                 break
@@ -1082,6 +1301,23 @@ class Scheduler():
     def _queue_llm_stop(self, message_data: dict) -> None:
         self._ensure_llm_async_state()
         instance_id = message_data["instance_id"]
+        if message_data.get("cancel_auto_deployment"):
+            is_orphaned = getattr(
+                self.llm_instance_manager,
+                "auto_deployment_is_orphaned",
+                lambda _instance_id: True,
+            )
+            if not is_orphaned(instance_id):
+                return
+            self._llm_deferred_starts.pop(instance_id, None)
+            if (
+                instance_id not in self._llm_pending_starts
+                and not self.llm_instance_manager.has_instance(instance_id)
+            ):
+                self.llm_instance_manager.clear_model_deploying(
+                    instance_id=instance_id
+                )
+                return
         start_request_id = message_data.get("start_request_id")
         pending = self._llm_pending_starts.get(instance_id)
         if pending is not None:
@@ -1095,6 +1331,8 @@ class Scheduler():
                     start_request_id,
                 )
                 return
+            if message_data.get("cancel_auto_deployment"):
+                pending["orphan_cancelled"] = True
             pending["stop_requests"].append(dict(message_data))
             pending["cancel_event"].set()
             existing_state = self.llm_instance_manager.request_start_cancellation(
@@ -1245,6 +1483,10 @@ class Scheduler():
                     "error": str(exc),
                 }
             if result["ok"]:
+                self._wake_model_waiters(
+                    record["message_data"]["model"],
+                    result.get("backend") or record["backend"],
+                )
                 if not record["message_data"].get("auto_started"):
                     response_data = dict(result["instance_info"])
                     request_id = record["message_data"].get("request_id")
@@ -1260,12 +1502,13 @@ class Scheduler():
                     == record["message_data"].get("request_id")
                 ):
                     self._llm_instance_start_request_ids.pop(instance_id, None)
-                self._send_llm_launch_failure(
-                    socket_to_main,
-                    record["message_data"],
-                    result.get("backend"),
-                    result["error"],
-                )
+                if not record.get("orphan_cancelled"):
+                    self._send_llm_launch_failure(
+                        socket_to_main,
+                        record["message_data"],
+                        result.get("backend"),
+                        result["error"],
+                    )
 
             if record["stop_requests"] and record["stop_future"] is None:
                 detail = {
@@ -1430,11 +1673,12 @@ class Scheduler():
             model = recommendation["model"]
             backend = recommendation["backend"]
             instance_id = str(uuid.uuid4())
-            self.llm_instance_manager.mark_model_deploying(
+            if not self.llm_instance_manager.mark_model_deploying(
                 model,
                 backend,
                 instance_id=instance_id,
-            )
+            ):
+                continue
             self.llm_instance_queue.put(LlmInstanceMessage("start_llm_instance", {
                 "instance_id": instance_id,
                 "model": model,
@@ -1484,6 +1728,23 @@ class Scheduler():
         ready_items = [item for item in queued_items if item["status"] == "ready"]
         pending_items = [item for item in queued_items if item["status"] == "pending"]
         retrying_items = [item for item in queued_items if item["status"] == "retrying"]
+        model_waiting_items = []
+        for task in self._model_waiting_snapshot():
+            if task.workflow_id in self._stopped_workflows():
+                continue
+            resume_queue = (
+                getattr(task, "queue_name", None)
+                or getattr(task, "task_kind", "gpu")
+            )
+            item = self._task_queue_snapshot_item(task, now, resume_queue)
+            model_anchor = copy.deepcopy(getattr(task, "model_anchor", None) or {})
+            item.update({
+                "model": model_anchor.get("local_model") or model_anchor.get("model"),
+                "backend": model_anchor.get("backend") or model_anchor.get("engine") or "vllm",
+                "model_anchor": model_anchor,
+                "resume_queue": resume_queue,
+            })
+            model_waiting_items.append(item)
 
         return {
             "snapshot_time": now,
@@ -1498,6 +1759,7 @@ class Scheduler():
                 "retrying": len(retrying_items),
                 "running": len(running_items),
                 "total_queued": len(queued_items),
+                "model_waiting": len(model_waiting_items),
                 "by_queue": {
                     name: {
                         "ready": data["ready"],
@@ -1513,6 +1775,7 @@ class Scheduler():
             "pending_tasks": pending_items,
             "retrying_tasks": retrying_items,
             "running_tasks": running_items,
+            "model_waiting_tasks": model_waiting_items,
         }
 
     def _send_task_exception(
@@ -1541,6 +1804,12 @@ class Scheduler():
                 "fault_tolerance": trace_snapshot(task),
             },
         }
+        if (
+            task.attempt == 0
+            and message["data"]["dispatch_id"] is None
+            and message["data"]["lease_id"] is None
+        ):
+            message["data"]["pre_dispatch"] = True
         if file_manifest and file_manifest.get("published") is True:
             message["data"]["file_manifest"] = file_manifest
         if metrics:
@@ -1592,6 +1861,7 @@ class Scheduler():
             return
 
         self._stopped_workflows().add(workflow_id)
+        self._remove_model_waiters_for_workflow(workflow_id)
         self._clear_model_workflow_state(workflow_id)
         running_before = [
             task
@@ -1732,7 +2002,6 @@ class Scheduler():
         }
         self._release_model_route(task)
         self._stopped_workflows().add(task.workflow_id)
-        self._clear_model_workflow_state(task.workflow_id)
         if (
             getattr(task, "standby_worker_lease", None) is not None
             and error.get("error_type") in {
@@ -1798,6 +2067,8 @@ class Scheduler():
         )
         record_final_failure(task, error)
 
+        self._remove_model_waiters_for_workflow(task.workflow_id)
+        self._clear_model_workflow_state(task.workflow_id)
         canceld_tasks = self.workflow_manager.cancel_workflow(task.workflow_id)
         if len(canceld_tasks) > 0:
             for cancelled_task in canceld_tasks:
@@ -1982,6 +2253,7 @@ class Scheduler():
         try:
             with self.lock:
                 self._stopped_workflows().add(workflow_id)
+                self._remove_model_waiters_for_workflow(workflow_id)
                 self._clear_model_workflow_state(workflow_id)
                 cleanup_states = self.__dict__.setdefault(
                     "_workflow_cleanup_states",
@@ -2115,10 +2387,7 @@ class Scheduler():
                         self._send_task_rejected(socket_to_main, message_data, exc)
                 elif(message_type =="clear_workflow" ):
                     with self.lock:
-                        self._stopped_workflows().add(message_data["workflow_id"])
-                        self._clear_model_workflow_state(message_data["workflow_id"])
-                        self.workflow_manager.clear_workflow(workflow_id=message_data["workflow_id"])
-                        self.resource_manager.release_dag_context(message_data["workflow_id"])
+                        self._clear_workflow_request(message_data)
                 elif(message_type =="stop_workflow" ):
                     response = self._stop_workflow_request(message_data)
                     if response is not None:
@@ -2210,6 +2479,12 @@ class Scheduler():
         self._ensure_llm_async_state()
         while not self._shutdown_requested():
             self._drain_llm_control_futures(socket_to_main)
+            now = time.monotonic()
+            for instance_id, message_data in list(self._llm_deferred_starts.items()):
+                if message_data["_placement_retry_at"] > now:
+                    continue
+                self._llm_deferred_starts.pop(instance_id, None)
+                self._queue_llm_start(socket_to_main, message_data)
             try:
                 llm_instance_message = self.llm_instance_queue.get(
                     timeout=LLM_CONTROL_POLL_SECONDS
@@ -2244,6 +2519,7 @@ class Scheduler():
                     continue
 
                 if self.cur_ready_task.workflow_id in self._stopped_workflows():
+                    self._release_model_route(self.cur_ready_task)
                     self.task_queues.pop_head(queue_name, self.cur_ready_task)
                     self.cur_ready_task = None
                     dispatched_or_removed = True
@@ -2257,6 +2533,7 @@ class Scheduler():
                 self.lock.acquire()
                 try:
                     if self.cur_ready_task.workflow_id in self._stopped_workflows():
+                        self._release_model_route(self.cur_ready_task)
                         self.task_queues.pop_head(queue_name, self.cur_ready_task)
                         self.cur_ready_task = None
                         dispatched_or_removed = True
@@ -2291,6 +2568,9 @@ class Scheduler():
                                 self.cur_ready_task,
                                 outbound_messages,
                             )
+                        self._wait_for_model(self.cur_ready_task, queue_name)
+                        self.cur_ready_task = None
+                        dispatched_or_removed = True
                         continue
                     if not self.workflow_manager.add_task(self.cur_ready_task):
                         self._release_model_route(self.cur_ready_task)

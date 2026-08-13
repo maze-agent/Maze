@@ -5,6 +5,7 @@ import type {
   WorkspaceTaskMeta,
   WorkspaceWorkflowMeta,
   WorkspaceManifest,
+  WorkspaceContextResponse,
   UnifiedRunSnapshot,
 } from '@/types/workflow';
 import { clearWorkflowSource } from '@/utils/workflowBindings';
@@ -72,6 +73,10 @@ interface WorkflowStore {
     workspaceManifestVersion?: number | null;
     manifest?: WorkspaceManifest | null;
   }) => void;
+  activateWorkspace: (
+    workspace: WorkspaceContextResponse,
+    draft?: { name: string; nodes: WorkflowNode[]; edges: WorkflowEdge[] } | null,
+  ) => void;
   setWorkspaceDir: (dir: string) => void;
   setWorkspaceTasks: (tasks: WorkspaceTaskMeta[]) => void;
   setWorkspaceWorkflows: (workflows: WorkspaceWorkflowMeta[]) => void;
@@ -180,6 +185,31 @@ export const useWorkflowStore = create<WorkflowStore>((set) => ({
       ?? workspace.manifest?.manifest_version
       ?? state.workspaceManifestVersion,
   })),
+
+  activateWorkspace: (workspace, draft = null) => set({
+    workspaceId: workspace.workspaceId,
+    workspaceDir: workspace.workspaceDir,
+    workspaceManifest: workspace.manifest,
+    workspaceManifestVersion: workspace.workspaceManifestVersion
+      ?? workspace.manifest?.manifest_version
+      ?? null,
+    workspaceTasks: [],
+    workspaceWorkflows: [],
+    workflowId: createLocalWorkflowId(),
+    workflowName: draft?.name || 'Untitled Workflow',
+    nodes: draft?.nodes || [],
+    edges: draft?.edges || [],
+    selectedNode: null,
+    workflowSaveState: draft?.nodes.length ? 'saved_draft' : 'empty',
+    workflowDraftPath: draft?.nodes.length ? 'workflows/.drafts/current.workflow.json' : null,
+    workflowSavedAt: draft?.nodes.length ? new Date().toISOString() : null,
+    workflowDraftError: null,
+    currentWorkspaceWorkflowPath: null,
+    activeRunId: null,
+    selectedRunId: null,
+    selectedRunTaskId: null,
+    staticRuns: [],
+  }),
 
   setWorkspaceDir: (dir) => set({ workspaceDir: dir }),
 

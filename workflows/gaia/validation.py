@@ -1,4 +1,4 @@
-"""Minimal GAIA validation runner for Maze's reason and file workflows.
+"""Minimal GAIA validation runner for Maze's four workflows.
 
 The runner expects a GAIA directory containing ``gaia_query.jsonl`` and
 ``2023/validation/metadata.jsonl``, plus a running Maze Core service. Reports
@@ -36,9 +36,16 @@ from workflows.gaia.scorer import (
     GAIA_SCORER_SOURCE_URL,
     question_scorer,
 )
+from workflows.gaia.speech import AUDIO_EXTENSIONS, gaia_speech
+from workflows.gaia.vision import IMAGE_EXTENSIONS, gaia_vision
 
 
 SUPPORTED_FILE_EXTENSIONS = frozenset({".txt", ".md", ".pdf"})
+SUPPORTED_EXTENSIONS = {
+    "file": SUPPORTED_FILE_EXTENSIONS,
+    "speech": AUDIO_EXTENSIONS,
+    "vision": IMAGE_EXTENSIONS,
+}
 FINAL_ANSWER_MARKER = "FINAL ANSWER:"
 API_KEY_ENV_PATTERN = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*\Z")
 PRIVATE_STATE_DIR_NAME = ".gaia-validation-state"
@@ -65,6 +72,12 @@ class ValidationConfig:
     base_url: str
     model: str
     api_key: str = ""
+    vision_base_url: str = ""
+    vision_model: str = ""
+    vision_api_key: str = ""
+    transcription_base_url: str = ""
+    transcription_model: str = ""
+    transcription_api_key: str = ""
     limit: int | None = None
     max_in_flight_runs: int | None = None
     timeout: float = 600.0
@@ -86,12 +99,26 @@ class ValidationConfig:
             raise ValueError("timeout must be positive")
         if self.max_tokens < 1:
             raise ValueError("max_tokens must be positive")
-        if not isinstance(self.api_key, str) or (
-            self.api_key and API_KEY_ENV_PATTERN.fullmatch(self.api_key) is None
+        optional_pairs = (
+            ("vision", self.vision_base_url, self.vision_model),
+            ("transcription", self.transcription_base_url, self.transcription_model),
+        )
+        for name, base_url, model in optional_pairs:
+            if bool(base_url.strip()) != bool(model.strip()):
+                raise ValueError(
+                    f"{name}_base_url and {name}_model must be provided together"
+                )
+        for name, api_key in (
+            ("api_key", self.api_key),
+            ("vision_api_key", self.vision_api_key),
+            ("transcription_api_key", self.transcription_api_key),
         ):
-            raise ValueError(
-                "api_key must be empty or an env:VARIABLE_NAME reference"
-            )
+            if not isinstance(api_key, str) or (
+                api_key and API_KEY_ENV_PATTERN.fullmatch(api_key) is None
+            ):
+                raise ValueError(
+                    f"{name} must be empty or an env:VARIABLE_NAME reference"
+                )
 
 def extract_final_answer(raw_answer: str) -> str | None:
     marker_index = raw_answer.rfind(FINAL_ANSWER_MARKER)
@@ -157,7 +184,7 @@ def _safe_dataset_file(validation_dir: Path, value: str) -> Path:
     return candidate
 
 
-def _file_sample(
+def _supplementary_sample(
     *,
     query_index: int,
     dag_id: str,
@@ -166,16 +193,17 @@ def _file_sample(
     query: dict[str, object],
     metadata: dict[str, object],
     validation_dir: Path,
+    workflow: str,
 ) -> GaiaSample:
     raw_files = query.get("dag_supplementary_files", [])
     if not isinstance(raw_files, list) or len(raw_files) != 1:
         return GaiaSample(
             query_index,
             dag_id,
-            "file",
+            workflow,
             question,
             expected,
-            load_error="file workflow requires exactly one supplementary file",
+            load_error=f"{workflow} workflow requires exactly one supplementary file",
         )
     file_name = str(raw_files[0]).strip()
     metadata_name = str(metadata.get("file_name", "")).strip()
@@ -183,7 +211,7 @@ def _file_sample(
         return GaiaSample(
             query_index,
             dag_id,
-            "file",
+            workflow,
             question,
             expected,
             load_error="query and metadata supplementary file names differ",
@@ -194,17 +222,17 @@ def _file_sample(
         return GaiaSample(
             query_index,
             dag_id,
-            "file",
+            workflow,
             question,
             expected,
             load_error=str(exc),
         )
     extension = source_file.suffix.lower()
-    if extension not in SUPPORTED_FILE_EXTENSIONS:
+    if extension not in SUPPORTED_EXTENSIONS[workflow]:
         return GaiaSample(
             query_index,
             dag_id,
-            "file",
+            workflow,
             question,
             expected,
             source_file=source_file,
@@ -214,7 +242,7 @@ def _file_sample(
         return GaiaSample(
             query_index,
             dag_id,
-            "file",
+            workflow,
             question,
             expected,
             source_file=source_file,
@@ -223,7 +251,7 @@ def _file_sample(
     return GaiaSample(
         query_index,
         dag_id,
-        "file",
+        workflow,
         question,
         expected,
         source_file=source_file,
@@ -280,8 +308,8 @@ def load_validation_samples(data_root: Path) -> list[GaiaSample]:
                     load_error=common_error,
                 )
             )
-        elif workflow == "file":
-            sample = _file_sample(
+        elif workflow in SUPPORTED_EXTENSIONS:
+            sample = _supplementary_sample(
                 query_index=query_index,
                 dag_id=dag_id,
                 question=question,
@@ -289,6 +317,7 @@ def load_validation_samples(data_root: Path) -> list[GaiaSample]:
                 query=query,
                 metadata=metadata,
                 validation_dir=validation_dir,
+                workflow=workflow,
             )
             if common_error:
                 sample = replace(sample, load_error=common_error)
@@ -461,6 +490,12 @@ def _validation_identity(
             "base_url": config.base_url,
             "model": config.model,
             "api_key_reference": config.api_key,
+            "vision_base_url": config.vision_base_url,
+            "vision_model": config.vision_model,
+            "vision_api_key_reference": config.vision_api_key,
+            "transcription_base_url": config.transcription_base_url,
+            "transcription_model": config.transcription_model,
+            "transcription_api_key_reference": config.transcription_api_key,
             "limit": config.limit,
             "max_in_flight_runs": config.max_in_flight_runs,
             "timeout": config.timeout,
@@ -719,7 +754,7 @@ def _stage_validation_execution_file(
     output_dir: Path,
 ) -> Path:
     if sample.source_file is None:
-        raise ValueError("file sample has no source file")
+        raise ValueError(f"{sample.workflow} sample has no source file")
     workspace = output_dir / "workspaces" / f"{sample.query_index:05d}"
     if not workspace.exists():
         workspace.mkdir(mode=0o700)
@@ -774,7 +809,7 @@ def _run_sample(
             "max_tokens": config.max_tokens,
         }
         file_context = None
-        if sample.workflow == "file":
+        if sample.workflow in SUPPORTED_EXTENSIONS:
             execution_file = _stage_validation_execution_file(
                 sample,
                 config.output_dir,
@@ -868,8 +903,11 @@ def _run_sample(
         result["latency"] = round(time.perf_counter() - started, 6)
 
 
-def _template_inputs(config: ValidationConfig) -> dict[str, str]:
-    return {
+def _template_inputs(
+    config: ValidationConfig,
+    workflow_name: str,
+) -> dict[str, str]:
+    text_inputs = {
         "qwen_base_url": config.base_url,
         "qwen_model": config.model,
         "qwen_api_key": config.api_key,
@@ -877,6 +915,31 @@ def _template_inputs(config: ValidationConfig) -> dict[str, str]:
         "deepseek_model": config.model,
         "deepseek_api_key": config.api_key,
     }
+    if workflow_name in {"reason", "file"}:
+        return text_inputs
+    if workflow_name == "vision":
+        if not config.vision_base_url or not config.vision_model:
+            raise ValueError(
+                "vision workflow requires --vision-base-url and --vision-model"
+            )
+        return {
+            "vision_base_url": config.vision_base_url,
+            "vision_model": config.vision_model,
+            "vision_api_key": config.vision_api_key,
+        }
+    if workflow_name == "speech":
+        if not config.transcription_base_url or not config.transcription_model:
+            raise ValueError(
+                "speech workflow requires --transcription-base-url and "
+                "--transcription-model"
+            )
+        return {
+            **text_inputs,
+            "transcription_base_url": config.transcription_base_url,
+            "transcription_model": config.transcription_model,
+            "transcription_api_key": config.transcription_api_key,
+        }
+    raise ValueError(f"unsupported GAIA workflow: {workflow_name}")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -947,14 +1010,19 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
             config.server_url,
             request_timeout=min(config.timeout, 60.0),
         )
-        template_definitions = {"reason": gaia_reason, "file": gaia_file}
+        template_definitions = {
+            "reason": gaia_reason,
+            "file": gaia_file,
+            "speech": gaia_speech,
+            "vision": gaia_vision,
+        }
         templates: dict[str, Any] = {}
         template_errors: dict[str, str] = {}
         for workflow_name in sorted({sample.workflow for sample in runnable}):
             try:
                 templates[workflow_name] = client.create_workflow_from(
                     template_definitions[workflow_name],
-                    inputs=_template_inputs(config),
+                    inputs=_template_inputs(config, workflow_name),
                 )
             except Exception as exc:
                 template_errors[workflow_name] = (
@@ -1027,6 +1095,10 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
             "data_root": str(config.data_root.expanduser().resolve()),
             "base_url": config.base_url,
             "model": config.model,
+            "vision_base_url": config.vision_base_url,
+            "vision_model": config.vision_model,
+            "transcription_base_url": config.transcription_base_url,
+            "transcription_model": config.transcription_model,
             "limit": config.limit,
             "max_in_flight_runs": config.max_in_flight_runs,
             "timeout": config.timeout,
@@ -1047,7 +1119,7 @@ def run_validation(config: ValidationConfig) -> dict[str, object]:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Maze GAIA reason/file validation and write scored reports."
+        description="Run Maze GAIA validation and write scored reports."
     )
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--data-root", required=True, type=Path)
@@ -1058,6 +1130,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--api-key",
         default="",
         help="Use env:VARIABLE_NAME for secrets so they are not persisted by Maze.",
+    )
+    parser.add_argument("--vision-base-url", default="")
+    parser.add_argument("--vision-model", default="")
+    parser.add_argument(
+        "--vision-api-key",
+        default="",
+        help="Use env:VARIABLE_NAME for the vision service secret.",
+    )
+    parser.add_argument("--transcription-base-url", default="")
+    parser.add_argument("--transcription-model", default="")
+    parser.add_argument(
+        "--transcription-api-key",
+        default="",
+        help="Use env:VARIABLE_NAME for the transcription service secret.",
     )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--max-in-flight-runs", type=int)
@@ -1076,6 +1162,12 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         model=args.model,
         api_key=args.api_key,
+        vision_base_url=args.vision_base_url,
+        vision_model=args.vision_model,
+        vision_api_key=args.vision_api_key,
+        transcription_base_url=args.transcription_base_url,
+        transcription_model=args.transcription_model,
+        transcription_api_key=args.transcription_api_key,
         limit=args.limit,
         max_in_flight_runs=args.max_in_flight_runs,
         timeout=args.timeout,

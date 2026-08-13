@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import threading
 import time
@@ -13,7 +12,7 @@ from maze.core.workflow.dynamic_store import default_workspace_dir
 from maze.core.workflow.resources import normalize_resources
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GPU_PEAK_KEYS = (
     "gpu_memory_peak_reserved_bytes",
     "gpu_memory_peak_allocated_bytes",
@@ -67,9 +66,14 @@ class ResourceHistoryStore:
                 with self.path.open("r", encoding="utf-8") as handle:
                     data = json.load(handle)
                 if isinstance(data, dict):
+                    data["schema_version"] = SCHEMA_VERSION
                     data.setdefault("models", {})
                     data.setdefault("tasks", {})
                     data.setdefault("recent_observations", [])
+                    for bucket_name in ("models", "tasks"):
+                        for record in data[bucket_name].values():
+                            if isinstance(record, dict):
+                                record.pop("recommended_gpu_mem_mb", None)
                     return data
             except Exception:
                 pass
@@ -90,20 +94,7 @@ class ResourceHistoryStore:
         model_anchor: Dict[str, Any] | None = None,
         task_name: str | None = None,
     ) -> Dict[str, Any]:
-        next_resources = normalize_resources(resources)
-
-        data = self.load()
-        records = []
-        model_key = model_anchor_key(model_anchor)
-        if model_key:
-            records.append(data.get("models", {}).get(model_key) or {})
-        if task_name:
-            records.append(data.get("tasks", {}).get(str(task_name)) or {})
-
-        suggested_gpu_mem = max(_int_value(record.get("recommended_gpu_mem_mb")) for record in records) if records else 0
-        if suggested_gpu_mem:
-            next_resources["gpu_mem"] = max(next_resources["gpu_mem"], suggested_gpu_mem)
-        return next_resources
+        return normalize_resources(resources)
 
     def record(
         self,
@@ -124,8 +115,6 @@ class ResourceHistoryStore:
         peak_bytes = _peak_gpu_bytes(metrics)
         success = status == "succeeded"
         error_type = error.get("error_type") if error else None
-        gpu_mem_requested = _int_value(requested_resources.get("gpu_mem"))
-
         observation = {
             "run_id": run_id,
             "task_id": task_id,
@@ -137,6 +126,7 @@ class ResourceHistoryStore:
             "model_anchor": model_anchor,
             "selected_node": selected_node,
             "metrics": metrics,
+            "error": to_json_safe(error),
             "error_type": error_type,
             "peak_gpu_memory_bytes": peak_bytes,
         }
@@ -160,7 +150,6 @@ class ResourceHistoryStore:
             "successes": 0,
             "failures": 0,
             "peak_gpu_memory_bytes": 0,
-            "recommended_gpu_mem_mb": 0,
         })
         record["runs"] = int(record.get("runs") or 0) + 1
         if observation["success"]:
@@ -171,17 +160,6 @@ class ResourceHistoryStore:
         peak_bytes = int(observation.get("peak_gpu_memory_bytes") or 0)
         if peak_bytes:
             record["peak_gpu_memory_bytes"] = max(int(record.get("peak_gpu_memory_bytes") or 0), peak_bytes)
-            record["recommended_gpu_mem_mb"] = max(
-                int(record.get("recommended_gpu_mem_mb") or 0),
-                int(math.ceil(peak_bytes * 1.15 / (1024 * 1024))),
-            )
-
-        requested = observation.get("requested_resources") or {}
-        if observation.get("error_type") == "resource_insufficient" and requested.get("gpu_mem"):
-            record["recommended_gpu_mem_mb"] = max(
-                int(record.get("recommended_gpu_mem_mb") or 0),
-                int(math.ceil(float(requested["gpu_mem"]) * 1.25)),
-            )
 
         record["last_status"] = observation.get("status")
         record["last_error_type"] = observation.get("error_type")

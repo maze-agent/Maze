@@ -7,7 +7,7 @@ from typing import Any,List,Dict
 from maze.core.scheduler.dag_context import DAGContextManager
 from maze.core.scheduler.runtime import SelectedNode
 from maze.core.scheduler.runtime import TaskRuntime
-from maze.core.local_models import scan_local_model_refs
+from maze.core.local_models import local_model_supports_backend, scan_local_model_refs
 from maze.utils.utils import collect_gpu_info
 
 logger = logging.getLogger(__name__)
@@ -411,11 +411,29 @@ class ResourceManager():
         if all("node_disabled" in candidate.get("reject_reasons", []) for candidate in candidates):
             return "all_candidate_nodes_disabled"
 
+        eligible_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("alive") and not candidate.get("disabled")
+        ]
+        if eligible_candidates and all(
+            "missing_model" in candidate.get("reject_reasons", [])
+            for candidate in eligible_candidates
+        ):
+            return "missing_model"
+        if eligible_candidates and all(
+            any(
+                reason in candidate.get("reject_reasons", [])
+                for reason in ("missing_model", "model_backend_unavailable")
+            )
+            for candidate in eligible_candidates
+        ):
+            return "model_backend_unavailable"
+
         reason_priority = [
             "specified_node_unavailable",
             "node_disabled",
             "missing_capability",
-            "missing_model",
             "avoided_after_failure",
             "insufficient_cpu",
             "insufficient_cpu_mem",
@@ -485,14 +503,19 @@ class ResourceManager():
         assert(gpu_need <= 1)
 
         target_node_id = task_need_resources.get("node_id") or task_need_resources.get("target_node_id")
+        if (model_anchor or {}).get("model_scope") == "head":
+            target_node_id = self.head_node_id
         avoid_node_ids = {
             str(node_id)
             for node_id in (task_need_resources.get("avoid_node_ids") or [])
             if node_id
         }
         required_capability = task_need_resources.get("required_capability")
-        required_model = (model_anchor or {}).get("local_model")
-        required_backend = (model_anchor or {}).get("backend") or "transformers"
+        anchor = model_anchor or {}
+        required_model = anchor.get("local_model") or anchor.get("model")
+        required_backend = str(
+            anchor.get("backend") or anchor.get("engine") or "vllm"
+        ).strip().lower()
         dag_context = self.dag_context_manager.get_context(workflow_id)
         affinity_node_id = dag_context.preferred_node_id if dag_context else None
         self._refresh_head_local_models()
@@ -540,14 +563,18 @@ class ResourceManager():
                 reject_reasons.append("missing_capability")
             if required_model:
                 local_models = node.capabilities.get("local_models") or []
-                has_model = any(
-                    model.get("id") == required_model
-                    and (model.get("backend") or "transformers") == required_backend
+                matching_models = [
+                    model
                     for model in local_models
-                    if isinstance(model, dict)
-                )
-                if not has_model:
+                    if isinstance(model, dict) and model.get("id") == required_model
+                ]
+                if not matching_models:
                     reject_reasons.append("missing_model")
+                elif not any(
+                    local_model_supports_backend(model, required_backend)
+                    for model in matching_models
+                ):
+                    reject_reasons.append("model_backend_unavailable")
 
             if gpu_need > 0:
                 gpu_options = []

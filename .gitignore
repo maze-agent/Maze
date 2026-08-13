@@ -14,6 +14,7 @@ docs/_build/
 
 # Testing
 /tests/
+/benchmarks/
 /web/maze_playground/backend/test/
 /web/maze_playground/frontend/test/
 .pytest_cache/

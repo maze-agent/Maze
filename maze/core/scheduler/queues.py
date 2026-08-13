@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List
 
 from maze.core.scheduler.strategy import SchedulingStrategy
 
@@ -19,54 +19,76 @@ class QueuedTask:
 
 
 class HeterogeneousTaskQueues:
-    """Three resource queues with stable head semantics.
+    """Three resource queues with dispatch-time priority refresh.
 
-    A queue head is only removed via ``pop_head`` after the scheduler has
-    selected resources for that exact task. Resource-pending heads are never
-    popped and reinserted, so their same-queue order cannot drift.
+    HACS scores are refreshed before selection. A selected task is removed by
+    identity so concurrent appends cannot invalidate the scheduler's claim.
     """
 
-    def __init__(self, strategy: SchedulingStrategy):
+    def __init__(
+        self,
+        strategy: SchedulingStrategy,
+        *,
+        clock: Callable[[], float] = time.time,
+    ):
         self.strategy = strategy
-        self._queues: Dict[str, List[QueuedTask]] = {name: [] for name in QUEUE_NAMES}
+        self._clock = clock
+        self._queues: Dict[str, List[QueuedTask]] = {
+            name: [] for name in QUEUE_NAMES
+        }
         self._sequence = 0
         self._lock = threading.Lock()
         self._not_empty = threading.Condition(self._lock)
 
     def put(self, task: Any, queue_name: str | None = None) -> str:
         with self._not_empty:
-            resolved_queue = self._normalize_queue_name(queue_name or self.strategy.queue_name(task))
+            resolved_queue = self._normalize_queue_name(
+                queue_name or self.strategy.queue_name(task)
+            )
             sequence = self._sequence
             self._sequence += 1
-            now = time.time()
-            key = self.strategy.enqueue_key(task, sequence, now)
+            now = self._clock()
             setattr(task, "queue_name", resolved_queue)
             setattr(task, "queue_sequence", sequence)
             setattr(task, "queue_entered_time", now)
+            key = self.strategy.priority_key(task, sequence, now)
             item = QueuedTask(key=key, sequence=sequence, task=task)
             self._queues[resolved_queue].append(item)
-            self._queues[resolved_queue].sort(key=lambda queued: queued.key)
             self._not_empty.notify()
             return resolved_queue
 
     def peek(self, queue_name: str, now: float | None = None) -> Any | None:
         with self._lock:
-            queue = self._queues[self._normalize_queue_name(queue_name)]
+            resolved_queue = self._normalize_queue_name(queue_name)
+            queue = self._refresh_queue(resolved_queue, now)
             if not queue:
                 return None
-            task = queue[0].task
-            self.strategy.refresh_task_metadata(task, now)
-            return task
+            return queue[0].task
 
     def pop_head(self, queue_name: str, task: Any | None = None) -> Any:
+        return self.take(queue_name, task).task
+
+    def take(self, queue_name: str, task: Any | None = None) -> QueuedTask:
         with self._lock:
             queue = self._queues[self._normalize_queue_name(queue_name)]
             if not queue:
                 raise IndexError(f"pop from empty {queue_name} queue")
-            head = queue[0].task
-            if task is not None and head is not task:
-                raise ValueError("cannot pop a non-head task from a resource queue")
-            return queue.pop(0).task
+            if task is None:
+                return queue.pop(0)
+            for index, queued in enumerate(queue):
+                if queued.task is task:
+                    return queue.pop(index)
+            raise ValueError("cannot pop a task that is not in the resource queue")
+
+    def restore(self, queued: QueuedTask, queue_name: str | None = None) -> str:
+        with self._not_empty:
+            resolved_queue = self._normalize_queue_name(
+                queue_name or getattr(queued.task, "queue_name", None)
+            )
+            setattr(queued.task, "queue_name", resolved_queue)
+            self._queues[resolved_queue].append(queued)
+            self._not_empty.notify()
+            return resolved_queue
 
     def wait_for_task(self, timeout: float | None = None) -> bool:
         with self._not_empty:
@@ -80,9 +102,8 @@ class HeterogeneousTaskQueues:
             out: Dict[str, List[Any]] = {}
             for name in QUEUE_NAMES:
                 tasks = []
-                for queued in self._queues[name]:
+                for queued in self._refresh_queue(name, now):
                     task = queued.task
-                    self.strategy.refresh_task_metadata(task, now)
                     setattr(task, "queue_name", name)
                     tasks.append(task)
                 out[name] = tasks
@@ -94,3 +115,19 @@ class HeterogeneousTaskQueues:
     def _normalize_queue_name(self, value: str | None) -> str:
         normalized = str(value or "cpu").strip().lower()
         return normalized if normalized in self._queues else "cpu"
+
+    def _refresh_queue(
+        self,
+        queue_name: str,
+        now: float | None = None,
+    ) -> List[QueuedTask]:
+        refresh_time = self._clock() if now is None else float(now)
+        queue = self._queues[queue_name]
+        for queued in queue:
+            queued.key = self.strategy.priority_key(
+                queued.task,
+                queued.sequence,
+                refresh_time,
+            )
+        queue.sort(key=lambda queued: queued.key)
+        return queue

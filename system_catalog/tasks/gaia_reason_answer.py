@@ -29,6 +29,8 @@ def _model_route() -> tuple[str, str]:
 def gaia_model_answer(
     dag_id: str,
     question: str,
+    context_label: str,
+    context: str,
     style: str,
     temperature: float,
     max_tokens: int,
@@ -39,10 +41,10 @@ def gaia_model_answer(
     base_url, model = _model_route()
     normalized_style = str(style).strip().lower()
     if normalized_style == "reasoned":
-        prompt = gaia_question_prompt(question, "", "")
+        prompt = gaia_question_prompt(question, context_label, context)
     elif normalized_style == "concise":
         prompt = (
-            f"{gaia_question_prompt(question, '', '')}\n"
+            f"{gaia_question_prompt(question, context_label, context)}\n"
             "Solve the question independently and keep the reasoning concise."
         )
     else:

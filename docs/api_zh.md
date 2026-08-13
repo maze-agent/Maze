@@ -1,15 +1,14 @@
 # Maze API 文档（中文）
 
-> 版本：`maze-agent` 1.0.2 · Python ≥ 3.10
-> 适用场景：任务级分布式 Agent / Workflow 框架的开发与集成
-> 最近更新：2026-06-20，补齐 AppSpec、统一 Run/Artifact API、Workbench System Catalog 与 Artifact 下载接口。
+> 版本：`maze-agent` 1.0.2 · Python >= 3.10
+> 最近更新：2026-08-13
 
-本文档汇总 Maze 项目对外提供的 **全部 API**，包含四层：
+本文档说明 Maze 当前接口，分为四层：
 
 1. [Python SDK](#一python-sdk-api)：开发者最常用，定义任务 / 构建工作流 / 启动 Agent。
 2. [Head HTTP & WebSocket API](#二head-服务-http--websocket-api)：FastAPI 提供的底层接口。
-3. [CLI 命令](#三cli-命令)：`maze start`、`maze stop`、`maze status`、`maze doctor`，以及已退役的 `maze-sandbox` 兼容命令。
-4. [Playground 后端 REST API](#四maze-playground-后端-rest-api)：可视化界面专用接口。
+3. [CLI 命令](#三cli-命令)：服务、Run、Artifact、集群、应用与模型操作。
+4. [Workbench 后端 REST API](#四maze-workbench-后端-rest-api)：可视化界面使用的内部接口。
 
 文末附 [事件协议](#五事件协议event-protocol)、[资源配置说明](#六资源配置resources)、[错误码与异常](#七错误处理) 与 [完整示例](#八完整示例)。
 
@@ -24,7 +23,7 @@ from maze import (
     MaClient, MaWorkflow, MaTask, TaskOutput, TaskOutputs,
     DynamicRun, DynamicTaskSpec, DynamicTaskInvocation,
     LanggraphClient,
-    task, get_task_metadata,
+    task, workflow, get_task_metadata,
 )
 ```
 
@@ -37,13 +36,14 @@ from maze import task
 #### 签名
 
 ```python
-task(func: Callable = None, *,
-     resources: Dict[str, Any] | None = None,
-     data_types: Dict[str, str] | None = None,
-     max_retries: int | None = None,
-     retry_backoff_seconds: float = 0,
-     retry_on: list[str] | None = None,
-     timeout_seconds: float | None = None) -> Callable
+def task(func: Callable = None, *,
+         resources: Dict[str, Any] | None = None,
+         task_kind: str | None = None,
+         data_types: Dict[str, str] | None = None,
+         max_retries: int | None = None,
+         retry_backoff_seconds: float = 0,
+         retry_on: list[str] | None = None,
+         timeout_seconds: float | None = None) -> Callable: ...
 ```
 
 #### 行为
@@ -51,14 +51,17 @@ task(func: Callable = None, *,
 - 把普通 Python 函数标记为 Maze 任务，并在函数对象上挂载 `TaskMetadata`。
 - **inputs** 从函数签名自动推断。
 - **outputs** 从函数体内 `return {...}` 字面量 key 自动推断（必须是 dict 字面量，否则抛 `TaskOutputInferenceError`）。
-- **resources** 缺省值：`{"cpu":1,"cpu_mem":0,"gpu":0,"gpu_mem":0}`；如未显式声明 GPU，会通过 `infer_gpu_resources_from_function` 自动推断。
+- **resources** 缺省值：`{"cpu_num":1,"gpu_mem":0,"io_num":0}`；如未显式声明 GPU 显存，会根据函数内容推断。
+- **task_kind** 可取 `cpu`、`gpu`、`io`；省略时，`gpu_mem > 0` 为 `gpu`，否则为 `cpu`。
 - 函数返回 **必须是 dict**，否则运行时抛 `TypeError`。
+- 不支持 `*args`、`**kwargs` 和 positional-only 参数。
 
 #### 参数
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `resources` | `dict` | 资源配置，键：`cpu` / `cpu_mem` / `gpu` / `gpu_mem` |
+| `resources` | `dict` | canonical 字段为 `cpu_num` / `gpu_mem` / `io_num`；`cpu` 仍作为兼容别名。放置约束见[资源配置](#六资源配置resources)。 |
+| `task_kind` | `str \| None` | 队列类型：`cpu` / `gpu` / `io`。 |
 | `data_types` | `dict[str, str]` | 显式覆盖某些 input/output 的类型字符串（默认从 type hint 推断） |
 | `max_retries` | `int \| None` | 单个 task 失败后的最大重试次数；`None` 表示使用服务端默认行为 |
 | `retry_backoff_seconds` | `float` | 每次重试前等待的秒数 |
@@ -68,7 +71,7 @@ task(func: Callable = None, *,
 #### 示例
 
 ```python
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(task_kind="cpu", resources={"cpu_num": 1})
 def greet(text: str = ""):
     return {"result": f"Hello {text}"}
 ```
@@ -76,18 +79,48 @@ def greet(text: str = ""):
 #### 配套函数
 
 ```python
-get_task_metadata(func) -> TaskMetadata
+def get_task_metadata(func) -> TaskMetadata: ...
 ```
 
-返回字段：`func_name / code_str / code_ser (base64-cloudpickle) / inputs / outputs / resources / data_types`。
+返回字段：`func_name / code_str / code_ser / inputs / outputs / resources / task_kind / data_types / max_retries / retry_backoff_seconds / retry_on / timeout_seconds`。
 
 ---
 
-### 1.2 `MaClient`（客户端入口）
+### 1.2 `@workflow` 装饰器
+
+`@workflow` 使用普通 Python 调用语法定义可复用的静态 DAG。构图期间不会执行
+task 函数；每次 task 调用会创建节点与输出引用。
+
+```python
+from maze import task, workflow
+
+@task
+def greet(name: str):
+    return {"message": f"Hello {name}"}
+
+@task
+def upper(message: str):
+    return {"result": message.upper()}
+
+@workflow
+def hello(name: str):
+    greeting = greet(name)
+    return upper(greeting.message)
+```
+
+使用 `MaClient.create_workflow_from()` 构建。传给
+`create_workflow_from(..., inputs={...})` 的参数会固定在模板中；未传入的 workflow
+参数成为每次运行时由 `MaWorkflow.run(inputs=...)` 提供的输入。
+
+### 1.3 `MaClient`（客户端入口）
 
 ```python
 class MaClient:
-    def __init__(self, server_url: str = "http://localhost:8000")
+    def __init__(
+        self,
+        server_url: str = "http://localhost:8000",
+        request_timeout: float | None = None,
+    ): ...
 ```
 
 | 方法 | 返回 | 说明 |
@@ -121,7 +154,7 @@ class MaClient:
 
 ---
 
-### 1.3 `MaWorkflow`（静态 DAG）
+### 1.4 `MaWorkflow`（静态 DAG）
 
 `MaWorkflow` 是本地 DAG 草稿。添加 task 时不访问 Core，`run()` 才通过
 `POST /workflows/submit` 一次提交完整节点、边和运行配置。
@@ -135,11 +168,11 @@ class MaClient:
 执行状态、事件、结果和取消统一使用 `MaClient.get_run()`、`wait_run()`、
 `stream_run()` 和 `cancel_run()`。
 
-### 1.4 `MaTask` / `TaskOutput` / `TaskOutputs`
+### 1.5 `MaTask` / `TaskOutput` / `TaskOutputs`
 
 `MaTask` 只是本地节点句柄；`task.outputs["name"]` 返回 `TaskOutput`，可直接作为
 下游 task 的输入。任务保存、删除和边创建不再通过独立 HTTP 接口。
-### 1.5 `DynamicRun`（动态工作流）
+### 1.6 `DynamicRun`（动态工作流）
 
 ```python
 class DynamicRun:
@@ -154,7 +187,7 @@ class DynamicRun:
 | 方法 | 说明 |
 |---|---|
 | `register_task_spec(task_func, task_spec_id=None, task_name=None) -> DynamicTaskSpec` | 注册一个可复用的任务规格 |
-| `append_task(task, inputs=None, parents=None, request_id=None, task_name=None) -> DynamicTaskInvocation` | 运行时追加任务 |
+| `append_task(task, inputs=None, parents=None, request_id=None, task_name=None, resources=None, model_anchor=None) -> DynamicTaskInvocation` | 运行时追加任务，可覆盖资源或模型锚点 |
 
 `append_task` 的 `task` 参数支持三种：
 
@@ -211,7 +244,7 @@ class DynamicTaskInvocation:
 ```python
 from maze import MaClient, task
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def summarize(topic: str = ""):
     return {"summary": f"Maze can build workflows dynamically for {topic}."}
 
@@ -226,7 +259,7 @@ run.finalize({"status": "done"})
 
 ---
 
-### 1.6 `LanggraphClient`（LangGraph 桥）
+### 1.7 `LanggraphClient`（LangGraph 桥）
 
 ```python
 from maze import LanggraphClient
@@ -241,7 +274,7 @@ def node(state):
 
 - 构造和装饰阶段只在本地生成稳定的一节点 DAG，不访问 Core。
 - 调用被装饰函数时，框架通过 `POST /workflows/submit` 提交标准静态 Run，并通过 `GET /runs/{run_id}` 等待结果。
-- 每次调用都会出现在统一 Runs、events、cancel、retry 和检查界面中，并带有 `langgraph` 标签。
+- 每次调用都会出现在统一 Runs、events、cancel 和检查界面中，并带有 `langgraph` 标签；`/runs/{run_id}/retry` 仍只支持 AppSpec Run。
 - 资源支持 `cpu_num / gpu_mem / io_num` 和兼容别名 `cpu`，默认 `cpu_num=1`。
 
 ---
@@ -251,9 +284,9 @@ def node(state):
 由 `maze start --head --port <PORT>` 启动，默认 `http://localhost:8000`，CORS 全开。
 代码：`maze/core/server.py`。
 
-> 所有响应都遵循 `{"status": "success" \| "error", ...}` 约定；错误时返回 HTTP 500 并附 `detail`。
+> 成功响应通常包含 `{"status":"success", ...}`；校验错误一般返回 400，冲突返回 409，调度器不可用返回 503，其他错误返回相应非 2xx 状态并带 `detail`。
 
-### 2.1 静态 Workflow
+### 2.1 Application Spec
 
 #### `POST /apps/validate`
 校验 AppSpec/RunSpec，不执行。
@@ -304,7 +337,7 @@ def node(state):
 
 ---
 
-### 2.3 外部 DAG WorkflowSpec
+### 2.2 外部 DAG WorkflowSpec
 
 #### `POST /workflows/validate`
 校验外部可视化平台提交的完整 DAG spec，不执行。
@@ -321,7 +354,8 @@ def node(state):
         "code": "def greet(name='Maze'):\n    return {'message': f'Hello {name}'}",
         "inputs": {"name": "Maze"},
         "outputs": ["message"],
-        "resources": {"cpu": 1, "cpu_mem": 128}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       },
       {
         "id": "upper",
@@ -348,9 +382,11 @@ def node(state):
 #### `POST /workflows/submit`
 外部 DAG 平台推荐使用的稳定提交接口。Maze 会一次性校验、构建静态 workflow 并提交执行。
 
-请求体同 `/workflows/validate`，也可额外传 `tags`、`metadata`、`artifact_mode`。
-Python Workflow 会在 spec 中携带稳定的 `workflow_id`、`input_contract` 和
-`final_output_refs`；每次执行的 `inputs`、超时和幂等字段位于 `spec.run`。
+请求体同 `/workflows/validate`，请求级还可传 `tags`、`metadata`、
+`artifact_mode` 和 `file_context`。Python Workflow 会在 spec 中携带稳定的
+`workflow_id`、`input_contract` 和 `final_output_refs`。每次运行的 `inputs`、
+timeout、tags、metadata 和可选 canonical UUID `run_id` 位于 `spec.run`。
+相同 `run_id` 只接受完全一致的重放；冲突提交返回 HTTP 409。
 
 响应：
 
@@ -367,7 +403,7 @@ Python Workflow 会在 spec 中携带稳定的 `workflow_id`、`input_contract` 
 
 ---
 
-### 2.4 统一 Run / Artifact / Cluster API
+### 2.3 统一 Run / Artifact / Cluster API
 
 统一 Run API 同时覆盖静态 workflow、AppSpec run 和 dynamic run；前端 Runs 面板优先使用这组接口。
 
@@ -399,12 +435,14 @@ Artifact store 按 sha256 存储二进制 blob：
 |---|---|---|
 | GET | `/cluster/resources` | 调度器视角下的节点、资源、GPU、未注册 Ray 节点 |
 | GET | `/cluster/queues` | 等待队列、运行中任务、调度诊断 |
+| POST | `/cluster/nodes/{node_id}/disable` | 禁止新任务放置到指定已注册节点 |
+| POST | `/cluster/nodes/{node_id}/enable` | 恢复指定节点的任务放置 |
 | GET | `/cluster/join_command?host=` | 为未注册 worker 生成推荐 `maze start --worker` 命令 |
 | POST | `/cluster/reconcile_workers` | 返回未注册 Ray 节点及推荐接入命令，不会自动执行 |
 
 ---
 
-### 2.5 Dynamic Run
+### 2.4 Dynamic Run
 
 #### `POST /dynamic_runs`
 创建动态 run。
@@ -415,7 +453,7 @@ Artifact store 按 sha256 存储二进制 blob：
 
 ---
 
-#### `GET /dynamic_runs?status=&limit=`
+#### `GET /dynamic_runs?status=&limit=&detail=`
 列出动态 run，可按 `status` 过滤。
 **响应**：
 ```json
@@ -456,7 +494,13 @@ Artifact store 按 sha256 存储二进制 blob：
   "code_ser":     "<base64-cloudpickle, code_str/code_ser 二选一>",
   "inputs":  [{"name": "x", "data_type": "str"}],
   "outputs": [{"name": "y", "data_type": "any"}],
-  "resources": {"cpu": 1, "cpu_mem": 0, "gpu": 0, "gpu_mem": 0}
+  "task_kind": "cpu",
+  "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0},
+  "max_retries": 1,
+  "retry_backoff_seconds": 2,
+  "retry_on": ["node_lost"],
+  "timeout_seconds": 60,
+  "model_anchor": null
 }
 ```
 **响应**：
@@ -485,7 +529,9 @@ Artifact store 按 sha256 存储二进制 blob：
     "y": {"__maze_output_ref__": true, "task_id": "<父task>", "output_key": "out"}
   },
   "parents": ["<额外父task id>"],
-  "request_id": "<可选幂等键>"
+  "request_id": "<可选幂等键>",
+  "resources": {"cpu_num": 1},
+  "model_anchor": null
 }
 ```
 **响应**：
@@ -544,13 +590,64 @@ Artifact store 按 sha256 存储二进制 blob：
 
 ---
 
+### 2.5 模型与模型路由
+
+Maze 默认从 `<repository>/model_cache` 发现 checkpoint。可在启动前设置
+`MAZE_MODEL_DIR`，或调用 `/models/config` 配置 Head 服务器上已存在的绝对目录。
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/models` | 返回模型目录和已发现的 checkpoint |
+| POST | `/models/config` | 设置 Head 模型目录，请求体：`{"model_dir":"/absolute/path"}` |
+| POST | `/models/test` | 检查一个已发现模型，请求体：`{"model_id":"..."}` |
+| GET | `/resource-history` | 返回调度估算使用的实测资源历史 |
+| POST | `/start_llm_instance` | 显式启动 vLLM 或 Transformers 实例 |
+| POST | `/stop_llm_instance` | 停止显式启动的实例 |
+
+通常应在 task 上声明 model anchor，让调度器管理实例生命周期：
+
+```json
+{
+  "task_kind": "gpu",
+  "resources": {"cpu_num": 1, "gpu_mem": 8192, "io_num": 0},
+  "model_anchor": {
+    "local_model": "Qwen2.5-3B-Instruct",
+    "model_scope": "head",
+    "backend": "transformers",
+    "estimated_gpu_mem_mb": 8192
+  }
+}
+```
+
+执行模型路由任务时，Maze 注入 `MAZE_MODEL_ROUTE`、`MAZE_MODEL_ENDPOINT`、
+`MAZE_MODEL_INSTANCE_ID` 和 `MAZE_MODEL_NAME`。`missing_model` 表示没有合格节点
+拥有该 checkpoint，是不可重试的终态错误；`model_instance_unavailable` 表示
+checkpoint 存在但路由尚未就绪，task 会在 GPU 派发队列之外等待，部署成功后重新入队。
+
+显式启动实例的请求体：
+
+```json
+{
+  "model": "Qwen2.5-3B-Instruct",
+  "backend": "vllm",
+  "cpu_nums": 5,
+  "memory_mib": 1024,
+  "gpu_nums": 1,
+  "gpu_mem": 8192,
+  "gpu_memory_utilization": 0.8,
+  "max_model_len": 4096
+}
+```
+
+`backend` 只能是 `vllm` 或 `transformers`；当前每个模型实例固定使用一张 GPU。
+
 ### 2.6 LangGraph 适配器
 
 LangGraph 不再拥有专用 Head 接口。`LanggraphClient` 将函数和调用参数编码成标准的一节点 DAG，通过 `POST /workflows/submit` 提交，并从 `GET /runs/{run_id}` 读取结果。
 
 ---
 
-### 2.7 Worker / LLM 实例（兼容接口）
+### 2.7 Worker 兼容接口
 
 #### `POST /get_head_ray_port`
 **响应**：`{"status":"success","port": <int>}`
@@ -560,20 +657,8 @@ LangGraph 不再拥有专用 Head 接口。`LanggraphClient` 将函数和调用�
 {"node_ip": "192.168.x.x", "node_id": "worker-1", "resources": {"cpu": 8, "gpu": 1, ...}}
 ```
 
-#### `POST /start_llm_instance`
-```json
-{"model": "Qwen2.5-7B", "cpu_nums": 5, "gpu_nums": 1, "memory": 1024, "gpu_mem": 16000}
-```
-**响应**：
-```json
-{"status":"success","host":"...","port":12345,"instance_id":"<uuid>"}
-```
-之后可通过 OpenAI 兼容协议直接访问 `http://host:port/v1/...`。
-
-#### `POST /stop_llm_instance`
-```json
-{"instance_id": "..."}
-```
+`/start_worker` 是 Ray 节点加入后使用的调度器注册接口。普通用户应运行
+`maze start --worker --addr ... --agent`，无需直接调用该端点。
 
 ---
 
@@ -599,6 +684,7 @@ maze start --head \
            --port 8000 \
            --ray-head-port 6379 \
            --strategy least-loaded \
+           --scheduling-algorithm FCFS \
            [--playground] \
            [--playground-port 5173] \
            [--playground-backend-port 3001] \
@@ -610,7 +696,8 @@ maze start --head \
 |---|---|---|
 | `--port` | 8000 | Maze Head FastAPI 端口 |
 | `--ray-head-port` | 6379 | Ray Head 的 GCS 端口 |
-| `--strategy` | `least-loaded` | 调度策略；常用值包括 `least-loaded`、`Default`、`HACS`、`ATLAS` |
+| `--strategy` | `least-loaded` | 节点放置策略：`default`、`least-loaded`、`prefer-gpu-free` 或 `spread` |
+| `--scheduling-algorithm` | `FCFS` | ready task 排序算法：`FCFS` 或 `HACS` |
 | `--playground` |  | 随 Head 一起拉起 Workbench 前端和 Node.js 后端 |
 | `--playground-port` | 5173 | Workbench 页面入口端口 |
 | `--playground-backend-port` | 3001 | Workbench 后端 API 端口；如果未设置且修改了 `--playground-port`，默认使用 `--playground-port + 1` |
@@ -642,7 +729,7 @@ Maze 会在启动前检查端口；如果端口已被占用，或者两个服务
 
 #### Worker 模式
 ```bash
-maze start --worker --addr <HEAD_IP>:<HEAD_PORT>
+maze start --worker --addr <HEAD_IP>:<HEAD_PORT> --agent --heartbeat-interval 20
 ```
 
 ### 3.2 `maze stop`
@@ -666,16 +753,58 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 以及 Core/Workbench HTTP 健康状态；不依赖旧开发命令的 PID 文件，也不再检查
 旧 workspace 嵌套或 `PYTHONPATH`。
 
-### 3.4 `maze-sandbox`（已退役）
+### 3.4 Run、Artifact 与状态命令
+
+```bash
+maze runs list [--status running] [--kind static] [--limit 20]
+maze runs show <run_id>
+maze runs events <run_id> [--after 10]
+maze runs logs <run_id> [--tail 200] [--task-id <task_id>]
+maze runs retry <run_id> [--workspace-dir PATH] [--no-artifacts]
+maze artifacts list <run_id>
+maze status [--watch] [--status running] [--run-id <run_id>]
+```
+
+相关命令按帮助信息支持远程地址和 JSON 输出。`maze runs retry` 仅支持 AppSpec Run。
+
+### 3.5 Application 与模型命令
+
+```bash
+maze app validate maze.yaml [--workspace-dir PATH] [--json]
+maze run maze.yaml [--workspace-dir PATH] [--wait] [--wait-timeout 600]
+
+maze model serve Qwen2.5-3B-Instruct \
+  --backend transformers \
+  --gpu-memory 8192
+maze model stop <instance_id>
+```
+
+`maze model serve` 还支持 `--cpu`、`--memory`、
+`--gpu-memory-utilization`、`--max-model-len` 和 `--timeout`。
+
+### 3.6 集群命令
+
+```bash
+maze cluster resources
+maze cluster queues
+maze cluster join-command [--host HEAD_IP]
+maze cluster reconcile-workers [--host HEAD_IP]
+```
+
+`reconcile-workers` 只报告未注册 Ray 节点和建议命令，不会执行远程命令。
+
+### 3.7 `maze-sandbox`（已退役）
 
 旧的远程 Sandbox 服务已经删除。该命令仅作为兼容提示保留，执行后会给出迁移说明并退出。
 请改用 `maze start --head --playground` 启动维护中的工作流编辑器。
 
 ---
 
-## 四、Maze Playground 后端 REST API
+## 四、Maze Workbench 后端 REST API
 
-由 `maze start --head --playground` 拉起，运行在 Node.js，代码：`web/maze_playground/backend/src/server.js`。Workbench 前端调它，它再调用 Maze Head 和 Python 桥 `maze_bridge.py`。
+由 `maze start --head --playground` 拉起，运行在 Node.js。Workbench 前端调用
+这些路由，后端再代理 Maze Core 并执行 workspace 操作。这些是 Workbench 内部
+接口，不替代稳定的 Core API。
 
 默认端口：
 
@@ -707,11 +836,11 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/workspaces` | 创建 workspace；请求体可传 `workspaceId`、`name`、`mode` |
-| GET | `/api/workspaces/current?workspaceId=&workspaceDir=` | 获取当前 workspace manifest 与目录 |
+| GET | `/api/workspaces` | 列出服务器上的 workspaces |
 | GET | `/api/workspaces/:workspaceId` | 按 id 获取 workspace |
 | GET | `/api/system-catalog?type=workflows|tasks` | 列出系统目录中的 workflow/task 模板 |
 | POST | `/api/system-catalog/import` | 把系统 task 或 workflow JSON 复制到 workspace |
-| POST | `/api/system-catalog/workflows/load` | 加载系统 workflow 模板到画布，同时把随附 task definitions 导入 workspace tasks |
+| POST | `/api/system-catalog/workflows/load` | 加载系统 workflow，并把随附 task definitions 和示例文件导入当前 workspace |
 
 `/api/system-catalog/workflows/load` 请求体：
 
@@ -723,7 +852,8 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 }
 ```
 
-该接口返回 `workflow` 和 `importedTaskDefinitions`。它会把模板依赖的 task 定义导入 workspace，但 workflow 本身作为未保存草稿加载到画布；用户保存后才进入 workspace workflows。
+该接口返回 `workflow`、`importedTaskDefinitions` 和 `importedFiles`。workflow
+本身作为未保存草稿加载到画布；用户保存后才成为 workspace workflow。
 
 ---
 
@@ -734,8 +864,6 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 | GET | `/api/system-catalog?type=tasks` | 列出 canonical 内置任务源码 |
 | GET | `/api/workspace-tasks` | 列出 `workspace/tasks/` 下用户任务 |
 | POST | `/api/workspace-tasks` | 保存（新增/覆盖）一个 workspace task 的 Python 源码 |
-| DELETE | `/api/workspace-tasks` | 删除一个 workspace task |
-| PATCH | `/api/workspace-tasks/rename` | 重命名 task |
 
 请求体里 task 路径都使用相对于 `workspace/tasks/` 的路径。
 
@@ -746,14 +874,8 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/api/workspace-files?path=` | 列目录 |
-| POST | `/api/workspace-files/upload` | 上传文件（multipart 或 base64 字段） |
-| POST | `/api/workspace-files/mkdir` | 创建目录 |
-| DELETE | `/api/workspace-files` | 删除文件/目录 |
-| GET | `/api/workspace-files/preview?path=` | 预览文件（自动识别文本 / 图片 / 表格） |
 | GET | `/api/workspace-files/download?path=` | 下载（二进制） |
-| PUT | `/api/local-workspaces/:workspaceId/manifest` | 写入本地 workspace manifest |
-| GET | `/api/local-workspaces/:workspaceId/manifest` | 读取本地 workspace manifest |
-| POST | `/api/workspace-files/missing` | 检查一组文件路径是否缺失 |
+| POST | `/api/workspace-files/upload` | 将 `contentBase64` 写到 `relativePath`，自动创建父目录 |
 | POST | `/api/artifacts/promote` | 将 Core SHA-256 artifact 复制到 Workspace Files |
 
 ---
@@ -768,10 +890,10 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 `/api/llm/generate-task` 请求体示例：
 ```json
 {
-  "prompt": "Generate a task to count CSV rows",
-  "base_url": "https://api.openai.com/v1",
+  "description": "Generate a task to count CSV rows",
+  "baseUrl": "https://api.openai.com/v1",
   "model": "gpt-4o-mini",
-  "api_key": "<或在 server 端读 env>"
+  "apiKey": "<key>"
 }
 ```
 
@@ -782,8 +904,6 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/api/workspace-workflows` | 列出已保存 workflow |
-| DELETE | `/api/workspace-workflows` | 删除 workflow |
-| PATCH | `/api/workspace-workflows/rename` | 重命名 |
 | POST | `/api/workspace-workflows/save` | 保存（前端 JSON 蓝图） |
 | POST | `/api/workspace-workflows/load` | 加载到画布 |
 | POST | `/api/workspace-workflows/import` | 从上传的 JSON 文件导入 |
@@ -794,29 +914,35 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/runs?status=&kind=&limit=&detail=` | 代理 Head 统一 `/runs` |
+| GET | `/api/runs?workspaceId=&status=&kind=&limit=&detail=` | 列出公开 Core Runs，可按 workspace 过滤 |
 | GET | `/api/runs/:runId` | 统一 run 详情 |
-| GET | `/api/runs/:runId/tasks` | run 内 task 列表 |
-| GET | `/api/runs/:runId/tasks/:taskId` | 单个 task 状态 |
 | GET | `/api/runs/:runId/events?after=` | run 事件 |
 | GET | `/api/runs/:runId/logs?tail=&taskId=` | run/task 日志 |
 | GET | `/api/runs/:runId/artifacts` | run artifact 列表 |
 | GET | `/api/runs/:runId/tasks/:taskId/artifacts` | task artifact 列表 |
 | POST | `/api/runs/:runId/cancel` | 取消 run |
 | POST | `/api/runs/:runId/retry` | 重跑 AppSpec run |
-| GET | `/api/cluster/resources` | 代理 Head `/cluster/resources` |
-| GET | `/api/cluster/queues` | 代理 Head `/cluster/queues` |
-| GET | `/api/artifacts/sha256/:sha256/metadata` | 代理 Head artifact metadata |
 | GET | `/api/artifacts/sha256/:sha256?disposition=inline|attachment` | 下载或内联打开 sha256 artifact |
-| GET | `/api/dynamic-runs` | 列出所有 dynamic runs |
-| GET | `/api/dynamic-runs/:runId` | 单个 run 详情 |
-| GET | `/api/dynamic-runs/:runId/events` | 事件列表（HTTP） |
-| POST | `/api/dynamic-runs/:runId/events` | 写入事件（透传给 Maze Head） |
 | DELETE | `/api/dynamic-runs/:runId` | 删除 |
-| POST | `/api/dynamic-runs/cleanup` | 批量清理 |
----
 
-### 4.7 编辑器
+### 4.7 Cluster、Models 与 Worker Profiles
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/cluster/resources` | 代理 Core 集群资源 |
+| GET | `/api/cluster/queues` | 代理公开队列和 model-wait 诊断 |
+| POST | `/api/cluster/nodes/:nodeId/:action` | `enable` 或 `disable` Core 节点放置 |
+| GET | `/api/models` | 列出 Core 模型目录和 checkpoint |
+| POST | `/api/models/config` | 配置 Core 模型目录 |
+| POST | `/api/models/test` | 测试一个已发现 checkpoint |
+| GET | `/api/cluster/worker-profiles` | 列出 workspace 所属的远程 worker profiles |
+| POST | `/api/cluster/worker-profiles` | 创建或更新 worker profile |
+| POST | `/api/cluster/worker-profiles/test-draft` | 测试未保存的 SSH worker profile |
+| DELETE | `/api/cluster/worker-profiles/:profileId` | 删除 worker profile |
+| POST | `/api/cluster/worker-profiles/:profileId/:action` | 执行 `test`、`start`、`restart`、`stop` 或 `logs` |
+| POST | `/api/cluster/worker-profiles/bulk` | 对多个 profiles 执行一个支持的操作 |
+
+### 4.8 编辑器
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -825,7 +951,7 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 
 ---
 
-### 4.8 健康检查
+### 4.9 健康检查
 
 `GET /health` → `{"status":"ok"}`
 
@@ -837,14 +963,15 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 
 ```json
 {
-  "seq": <int>,           // 单调递增，可用于 ?after=
-  "ts":  <unix-ms>,
+  "seq": 1,
+  "timestamp": "2026-08-13T00:00:00Z",
+  "schema_version": 1,
   "type": "<event_type>",
   "data": { ... }
 }
 ```
 
-### 5.1 调度器与任务事件（来自 `maze/core/path/path.py` 与 `scheduler.py`）
+### 5.1 调度器与任务事件
 
 | `type` | 触发时机 | `data` 关键字段 |
 |---|---|---|
@@ -867,18 +994,20 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 
 | 字段 | 单位 | 默认 | 说明 |
 |---|---|---|---|
-| `cpu` | 核 | 1 | 至少为 1 |
-| `cpu_mem` | MB | 0 | 可为 0 表示不限定 |
-| `gpu` | 张 | 0 | 若 `gpu_mem > 0` 自动至少 1 |
+| `cpu_num` | 核 | 1 | 小于 1 时归一化为 1；`cpu` 是兼容别名 |
 | `gpu_mem` | MB | 0 | 若未声明且 task 用到 GPU 库会自动推断 |
+| `io_num` | slot | 0 | 独立 I/O 队列使用的容量 |
+| `target_node_id` / `node_id` | node id | 未设置 | 指定唯一放置节点 |
+| `avoid_node_ids` | list | 未设置 | 排除节点 |
+| `required_capability` | string | 未设置 | 要求 worker 上报相应 capability |
 
-`_normalize_resources` 规则（`maze/client/maze/decorator.py`）：
+归一化规则：
 
-- 默认 `{cpu:1, cpu_mem:0, gpu:0, gpu_mem:0}`。
-- 用户显式声明字段会覆盖默认值。
-- 若未显式声明 `gpu` 且未显式声明 `gpu_mem`，框架会调用 `infer_gpu_resources_from_function` 静态分析函数体（识别 torch/cuda 等）来推断 GPU 需求。
-- `cpu < 1` 自动夹回 1。
-- `gpu_mem > 0` 时 `gpu` 自动至少 1。
+- 默认 `{"cpu_num":1,"gpu_mem":0,"io_num":0}`。
+- 资源值不能为负；`cpu_num <= 0` 会归一化为 1。
+- `cpu` 或 `io` task 不能请求 `gpu_mem`，也不能声明 `model_anchor.local_model`。
+- 可调度的 `gpu` task 必须有正数 `gpu_mem`，可直接声明，也可由模型或实测资源历史估算。
+- `task_kind` 决定 `cpu`、`gpu`、`io` ready queue；`FCFS` 或 `HACS` 对 ready task 排序，`--strategy` 在任务选出后决定节点放置。
 
 ---
 
@@ -895,14 +1024,29 @@ maze doctor [--server-url http://127.0.0.1:8000] [--json] [--strict]
 | `TaskOutputInferenceError` | `@task` 函数没有 `return {...}` 字面量 |
 | `TypeError("Task ... must return a dict")` | task 运行时返回非 dict |
 | `TypeError("@task no longer accepts ...")` | 用了已废弃参数 |
-| `ValueError("...")` | 参数校验失败（max_steps、工具名重复等） |
+| `ValueError("...")` | 参数校验失败 |
+
+常见结构化 task 错误：
+
+| `error_type` | 可重试 | 含义 |
+|---|---|---|
+| `missing_model` | 否 | 没有合格的已注册节点报告所需 checkpoint |
+| `model_instance_unavailable` | 等待状态 | checkpoint 存在，但部署或路由尚未就绪 |
+| `resource_insufficient` | 默认是 | 执行时资源耗尽，常见为 GPU OOM |
+| `resource_unavailable` | 默认是 | 放置资源暂时不足 |
+| `node_lost` | 默认是 | 执行期间选定 worker 丢失 |
+| `user_code` | 默认否 | 用户 task 代码抛出异常 |
+
+task error envelope 还可能包含 `message`、`retryable`、`origin`、`node_id`、
+`node_ip`、`attempt` 和 `traceback`。实际重试同时受 `max_retries`、
+`retry_backoff_seconds` 与 `retry_on` 限制。
 
 ### 7.2 服务端约定
 
-所有 HTTP 接口在异常时返回：
+Core HTTP 错误通常返回：
 
 ```http
-HTTP/1.1 500 Internal Server Error
+HTTP/1.1 4xx/5xx
 Content-Type: application/json
 
 {"detail": "<exception message>"}
@@ -919,11 +1063,11 @@ WebSocket 出错时服务端会主动 close。
 ```python
 from maze import MaClient, task
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def greet(text: str = ""):
     return {"result": f"Hello {text}"}
 
-@task(resources={"cpu": 1, "cpu_mem": 128})
+@task(resources={"cpu_num": 1})
 def upper(result: str = ""):
     return {"upper": result.upper()}
 
@@ -934,7 +1078,7 @@ u  = wf.add_task(upper, inputs={"result": g.outputs["result"]})
 
 run_id = wf.run()
 out = client.wait_run(run_id)
-print(out["task_results"])
+print(out["result_summary"])
 ```
 
 ### 8.2 动态 Workflow
@@ -963,12 +1107,12 @@ from maze import LanggraphClient
 
 lc = LanggraphClient(addr="localhost:8000")
 
-@lc.task(resources={"cpu": 1})
+@lc.task(resources={"cpu_num": 1})
 def step_a(state):
     state["x"] += 1
     return state
 
-@lc.task(resources={"cpu": 1})
+@lc.task(resources={"cpu_num": 1})
 def step_b(state):
     state["y"] = state["x"] * 2
     return state
@@ -1002,7 +1146,8 @@ curl -s -X POST http://localhost:8000/dynamic_runs/<run_id>/task_specs \
        "code_ser":     "<base64-cloudpickle>",
        "inputs":  [{"name":"topic","data_type":"str"}],
        "outputs": [{"name":"summary","data_type":"any"}],
-       "resources": {"cpu":1, "cpu_mem":128}
+       "task_kind": "cpu",
+       "resources": {"cpu_num":1,"gpu_mem":0,"io_num":0}
      }'
 
 # 3) 追加任务
@@ -1276,7 +1421,8 @@ cat > /tmp/observability_dag.json <<'JSON'
         "code": "def produce(name='Maze'):\n    return {'message': f'Hello {name}', '__maze_metrics__': {'tokens_in': 11, 'tokens_out': 7, 'cost_usd': 0.123, 'model': 'test-model'}}",
         "inputs": {"name": "Maze"},
         "outputs": ["message"],
-        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       },
       {
         "id": "consume",
@@ -1284,7 +1430,8 @@ cat > /tmp/observability_dag.json <<'JSON'
         "code": "def consume(message):\n    return {'upper': message.upper(), '__maze_metrics__': {'tokens_in': 3, 'tokens_out': 2, 'cost_usd': 0.01, 'model': 'test-model'}}",
         "inputs": {"message": {"from": "produce.message"}},
         "outputs": ["upper"],
-        "resources": {"cpu": 1, "cpu_mem": 128, "gpu": 0, "gpu_mem": 0}
+        "task_kind": "cpu",
+        "resources": {"cpu_num": 1, "gpu_mem": 0, "io_num": 0}
       }
     ],
     "edges": [{"from": "produce.message", "to": "consume.message"}],
@@ -1344,7 +1491,7 @@ conda run -n maze python -m maze.cli.cli status --addr http://localhost:8000
 
 ## 十、参考
 
-- 项目主仓库：<https://github.com/QinbinLi/Maze>
+- 项目主仓库：<https://github.com/maze-agent/Maze>
 - 在线文档：<https://maze-doc-new.readthedocs.io/>
 - 官网：<https://mazeagent.net/>
 - 关键源码：

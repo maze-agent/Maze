@@ -1074,8 +1074,7 @@ class LlmInstanceManager():
         self.auto_deploy_by_instance = {}
         self.model_to_instances = defaultdict(set)
         self.workflow_model_affinity = {}
-        self.pending_model_requests = defaultdict(int)
-        self.pending_model_workflows = defaultdict(set)
+        self.pending_model_request_ids = defaultdict(set)
         self.pending_model_anchors = {}
         self.deploying_model_counts = defaultdict(int)
         self.max_requests_per_instance = max(1, int(max_requests_per_instance))
@@ -1334,8 +1333,6 @@ class LlmInstanceManager():
             self.id_to_state[instance_id] = "ready"
             self.model_to_instances[(model, backend)].add(instance_id)
             self._clear_model_deploying_locked(instance_id=instance_id)
-            self.pending_model_requests[(model, backend)] = 0
-            self.pending_model_workflows[(model, backend)].clear()
             return dict(metadata)
 
     def _register_starting_instance(
@@ -1706,25 +1703,24 @@ class LlmInstanceManager():
     def record_model_demand(
         self,
         model_anchor: dict | None,
-        count: int = 1,
         workflow_id: str | None = None,
+        task_id: str | None = None,
     ):
         key = self._model_key_from_anchor(model_anchor)
         if key is None:
             return None
+        request_id = (
+            str(workflow_id or ""),
+            str(task_id if task_id is not None else workflow_id or ""),
+        )
         with self.lock:
-            if workflow_id:
-                self.pending_model_workflows[key].add(str(workflow_id))
-                self.pending_model_requests[key] = len(
-                    self.pending_model_workflows[key]
-                )
-            else:
-                self.pending_model_requests[key] += max(1, int(count))
+            pending_requests = self.pending_model_request_ids[key]
+            pending_requests.add(request_id)
             self.pending_model_anchors[key] = dict(model_anchor or {})
             return {
                 "model": key[0],
                 "backend": key[1],
-                "pending_requests": self.pending_model_requests[key],
+                "pending_requests": len(pending_requests),
             }
 
     def mark_model_deploying(
@@ -1777,6 +1773,37 @@ class LlmInstanceManager():
                 instance_id=instance_id,
             )
 
+    def auto_deployment_has_demand(self, instance_id: str) -> bool:
+        with self.lock:
+            key = self.auto_deploy_by_instance.get(instance_id)
+            return key is not None and bool(self.pending_model_request_ids[key])
+
+    def auto_deployment_is_orphaned(self, instance_id: str) -> bool:
+        with self.lock:
+            key = self.auto_deploy_by_instance.get(instance_id)
+            return key is not None and not self.pending_model_request_ids[key]
+
+    def has_ready_or_deploying_model(
+        self,
+        model: str,
+        backend: str,
+        *,
+        exclude_instance_id: str | None = None,
+    ) -> bool:
+        backend, _ = validate_model_backend(backend)
+        key = (model, backend)
+        with self.lock:
+            deploying_count = self.deploying_model_counts.get(key, 0)
+            if self.auto_deploy_by_instance.get(exclude_instance_id) == key:
+                deploying_count = max(0, deploying_count - 1)
+            return bool(
+                deploying_count > 0
+                or any(
+                    self.id_to_state.get(instance_id) == "ready"
+                    for instance_id in self.model_to_instances.get(key, ())
+                )
+            )
+
     def _estimated_gpu_mem(self, model_anchor: dict | None):
         model_anchor = model_anchor or {}
         for key in ("gpu_mem", "estimated_gpu_mem_mb", "estimated_gpu_memory_mb"):
@@ -1788,11 +1815,21 @@ class LlmInstanceManager():
             return max(1, int(float(weight_bytes) / (1024 * 1024) * 1.2))
         return 0
 
-    def route_model_request(self, workflow_id: str | None, model_anchor: dict | None):
+    def route_model_request(
+        self,
+        workflow_id: str | None,
+        model_anchor: dict | None,
+        *,
+        task_id: str | None = None,
+    ):
         model_anchor = model_anchor or {}
         key = self._model_key_from_anchor(model_anchor)
         if key is None:
             return None
+        request_id = (
+            str(workflow_id or ""),
+            str(task_id if task_id is not None else workflow_id or ""),
+        )
         with self.lock:
             model, backend = key
             affinity_key = (workflow_id, model, backend)
@@ -1807,7 +1844,11 @@ class LlmInstanceManager():
                 )
             ]
             if not candidates:
-                self.record_model_demand(model_anchor, workflow_id=workflow_id)
+                self.record_model_demand(
+                    model_anchor,
+                    workflow_id=workflow_id,
+                    task_id=task_id,
+                )
                 return None
 
             affinity_instance_id = self.workflow_model_affinity.get(affinity_key)
@@ -1834,7 +1875,11 @@ class LlmInstanceManager():
                     < self.max_requests_per_instance
                 ]
                 if not available:
-                    self.record_model_demand(model_anchor, workflow_id=workflow_id)
+                    self.record_model_demand(
+                        model_anchor,
+                        workflow_id=workflow_id,
+                        task_id=task_id,
+                    )
                     return None
                 selected = min(
                     available,
@@ -1856,13 +1901,7 @@ class LlmInstanceManager():
                 selected.get("total_routed_requests", 0) + 1
             )
             selected["last_used_time"] = time.time()
-            if workflow_id:
-                self.pending_model_workflows[key].discard(str(workflow_id))
-                self.pending_model_requests[key] = len(
-                    self.pending_model_workflows[key]
-                )
-            else:
-                self.pending_model_requests[key] = 0
+            self.pending_model_request_ids[key].discard(request_id)
             return {
                 "model": model,
                 "served_model": selected.get("served_model") or model,
@@ -1880,15 +1919,23 @@ class LlmInstanceManager():
 
     def clear_workflow_state(self, workflow_id: str | None):
         if not workflow_id:
-            return
+            return []
         workflow_id = str(workflow_id)
         with self.lock:
-            for key, workflows in self.pending_model_workflows.items():
-                workflows.discard(workflow_id)
-                self.pending_model_requests[key] = len(workflows)
+            for request_ids in self.pending_model_request_ids.values():
+                request_ids.difference_update({
+                    request_id
+                    for request_id in request_ids
+                    if request_id[0] == workflow_id
+                })
             for key in list(self.workflow_model_affinity):
                 if key[0] == workflow_id:
                     del self.workflow_model_affinity[key]
+            return sorted(
+                instance_id
+                for instance_id, key in self.auto_deploy_by_instance.items()
+                if not self.pending_model_request_ids[key]
+            )
 
     def release_model_route(self, model_route: dict | None):
         if not model_route:
@@ -1916,8 +1963,8 @@ class LlmInstanceManager():
                     for key, value in self.workflow_model_affinity.items()
                 },
                 "pending_model_requests": {
-                    "|".join(key): value
-                    for key, value in self.pending_model_requests.items()
+                    "|".join(key): len(request_ids)
+                    for key, request_ids in self.pending_model_request_ids.items()
                 },
                 "deploying_model_counts": {
                     "|".join(key): value
@@ -1940,9 +1987,10 @@ class LlmInstanceManager():
     def scale_out_recommendations(self):
         with self.lock:
             recommendations = []
-            for (model, backend), pending_requests in list(
-                self.pending_model_requests.items()
+            for (model, backend), request_ids in list(
+                self.pending_model_request_ids.items()
             ):
+                pending_requests = len(request_ids)
                 if pending_requests <= 0:
                     continue
                 active_count = len(
@@ -1952,14 +2000,18 @@ class LlmInstanceManager():
                     (model, backend),
                     0,
                 )
-                if deploying_count > 0:
-                    continue
                 denominator = active_count + deploying_count
                 ratio = (
                     float("inf")
                     if denominator == 0
                     else pending_requests / denominator
                 )
+                if denominator > 0:
+                    threshold = self.scale_out_threshold * denominator
+                    if pending_requests < threshold:
+                        continue
+                    if deploying_count > 0 and pending_requests <= threshold:
+                        continue
                 model_anchor = self.pending_model_anchors.get((model, backend), {})
                 recommendations.append({
                     "model": model,
@@ -1972,7 +2024,7 @@ class LlmInstanceManager():
                     "model_anchor": dict(model_anchor),
                     "reason": (
                         "no_active_instance"
-                        if active_count == 0
+                        if denominator == 0
                         else "pending_ratio_exceeded"
                     ),
                 })

@@ -13,6 +13,7 @@ import { api } from '@/api/client';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import CustomTaskEditor from '@/components/CustomTaskEditor';
 import { syncWorkflowInputEdges } from '@/utils/workflowBindings';
+import { errorMessage } from '@/utils/errors';
 import {
   latestRunForWorkflow,
   runWorkflowGraph,
@@ -21,6 +22,7 @@ import {
 import type {
   FaultToleranceTrace,
   LocalModel,
+  ModelAnchor,
   RunArtifact,
   UnifiedRunTaskSnapshot,
   WorkflowEdge,
@@ -64,6 +66,8 @@ export type WorkbenchTask = {
     maxRetries?: number;
     retryBackoffSeconds?: number;
     localModel?: string;
+    modelBackend?: string;
+    modelAnchor?: ModelAnchor;
   };
   resources: {
     cpuNum?: number;
@@ -267,11 +271,11 @@ function localModelLabel(model: LocalModel) {
   ].filter(Boolean).join(' · ');
 }
 
-function modelAnchor(model: LocalModel) {
+function modelAnchor(model: LocalModel, backend?: string) {
   return {
     local_model: model.id,
     model_scope: model.model_scope || 'head',
-    backend: model.backend || 'transformers',
+    backend: backend || model.backend || model.backends?.[0] || 'transformers',
     estimated_weight_memory_bytes: model.estimated_weight_memory_bytes,
     estimated_gpu_mem_mb: model.estimated_gpu_mem_mb,
     estimated_params: model.estimated_params,
@@ -280,17 +284,6 @@ function modelAnchor(model: LocalModel) {
 
 function renderable(value: ReactNode) {
   return value !== undefined && value !== null && value !== '';
-}
-
-function errorMessage(value: any) {
-  if (!value) return undefined;
-  if (typeof value === 'string') return value;
-  if (value.message) return String(value.message);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }
 
 function compactJson(value: unknown) {
@@ -445,6 +438,8 @@ function buildTask(
       maxRetries,
       retryBackoffSeconds: data.retryBackoffSeconds,
       localModel: data.localModel,
+      modelBackend: data.modelAnchor?.backend,
+      modelAnchor: data.modelAnchor,
     },
     resources: {
       cpuNum: cpuNum || undefined,
@@ -864,6 +859,11 @@ function ResourcesPanel({
   onUpdate: (updates: Record<string, unknown>) => void;
   onUpdateResources: (updates: Record<string, number | undefined>) => void;
 }) {
+  const selectedModel = localModels.find((model) => model.id === task.config.localModel);
+  const modelBackends = selectedModel?.backends?.length
+    ? selectedModel.backends
+    : selectedModel?.backend ? [selectedModel.backend] : [];
+
   return (
     <>
       {readOnly && <RunModeNotice />}
@@ -908,6 +908,29 @@ function ResourcesPanel({
             }}
           />
         </FieldRow>
+        {modelBackends.length > 1 && (
+          <FieldRow label="Model backend">
+            <Select
+              size="small"
+              value={task.config.modelBackend || modelBackends[0]}
+              disabled={readOnly}
+              options={modelBackends.map((backend) => ({
+                value: backend,
+                label: backend,
+              }))}
+              onChange={(backend) => {
+                if (selectedModel) {
+                  onUpdate({
+                    modelAnchor: {
+                      ...(task.config.modelAnchor || modelAnchor(selectedModel)),
+                      backend,
+                    },
+                  });
+                }
+              }}
+            />
+          </FieldRow>
+        )}
         <FieldRow label="Timeout sec">
           <Input size="small" type="number" min={0} value={task.config.timeoutSeconds ?? ''} disabled={readOnly} onChange={(event) => onUpdate({ taskTimeout: Number(event.target.value) || undefined })} />
         </FieldRow>

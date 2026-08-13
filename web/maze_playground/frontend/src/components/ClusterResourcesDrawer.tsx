@@ -419,6 +419,15 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     })
   ), [queues?.running_tasks]);
 
+  const modelWaitingRows = useMemo<QueueRow[]>(() => (
+    (queues?.model_waiting_tasks || []).map((task, index) => ({
+      ...task,
+      queue_bucket: task.resume_queue || task.queue_name || task.task_kind || 'gpu',
+      status_bucket: 'pending',
+      row_key: `model-waiting:${task.workflow_id}:${task.task_id}:${index}`,
+    }))
+  ), [queues?.model_waiting_tasks]);
+
   const resourceQueueRows = useMemo(() => (
     RESOURCE_QUEUE_NAMES.reduce<Record<string, QueueRow[]>>((acc, queueName) => {
       acc[queueName] = [
@@ -839,9 +848,14 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
     },
   ];
 
-  const renderQueueTaskRow = (task: QueueRow) => {
+  const renderQueueTaskRow = (task: QueueRow, modelWaiting = false) => {
     const selected = task.selected_node || task.schedule_decision?.selected_node;
     const taskResources: Record<string, any> = task.resources || {};
+    const modelAnchor = task.model_anchor || {};
+    const model = task.model || modelAnchor.local_model || modelAnchor.model;
+    const backend = task.backend || modelAnchor.backend || modelAnchor.engine;
+    const modelVram = taskResources.gpu_mem ?? modelAnchor.estimated_gpu_mem_mb;
+    const resumeQueue = task.resume_queue || task.queue_name || task.task_kind || 'gpu';
     const cpuNum = taskResources.cpu_num ?? (taskResources as any).cpu;
     const reason = task.pending_reason
       || task.schedule_decision?.reason
@@ -895,25 +909,44 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
             {task.task_type && <Tag>{task.task_type}</Tag>}
           </Space>
         </Space>
-        <Space direction="vertical" size={4}>
-          <Text type="secondary" style={{ fontSize: 11 }}>Attempt</Text>
-          <Text>{attemptLabel}</Text>
-          {[elapsed, retryWait, nextEligible, timeout].filter(Boolean).map((item) => (
-            <Text key={item} type="secondary" style={{ fontSize: 12 }}>
-              {item}
-            </Text>
-          ))}
-        </Space>
-        <Space direction="vertical" size={4}>
-          <Text type="secondary" style={{ fontSize: 11 }}>Assigned Node</Text>
-          <Text>{selected?.node_ip || '-'}</Text>
-          <Space size={4} wrap>
-            {selected?.gpu_id !== undefined && selected?.gpu_id !== null && <Tag color="gold">GPU {selected.gpu_id}</Tag>}
-            {cpuNum !== undefined && <Tag>CPU {cpuNum}</Tag>}
-            {taskResources.gpu_mem !== undefined && <Tag>VRAM {formatGpuMemory(taskResources.gpu_mem)}</Tag>}
-            {taskResources.io_num !== undefined && <Tag>I/O {taskResources.io_num}</Tag>}
+        {modelWaiting ? (
+          <Space direction="vertical" size={4}>
+            <Text type="secondary" style={{ fontSize: 11 }}>Model</Text>
+            <Text ellipsis={{ tooltip: model || '-' }}>{model || '-'}</Text>
+            <Space size={4} wrap>
+              {backend && <Tag color="geekblue">{backend}</Tag>}
+              {modelAnchor.model_scope && <Tag>{modelAnchor.model_scope}</Tag>}
+            </Space>
           </Space>
-        </Space>
+        ) : (
+          <Space direction="vertical" size={4}>
+            <Text type="secondary" style={{ fontSize: 11 }}>Attempt</Text>
+            <Text>{attemptLabel}</Text>
+            {[elapsed, retryWait, nextEligible, timeout].filter(Boolean).map((item) => (
+              <Text key={item} type="secondary" style={{ fontSize: 12 }}>
+                {item}
+              </Text>
+            ))}
+          </Space>
+        )}
+        {modelWaiting ? (
+          <Space direction="vertical" size={4}>
+            <Text type="secondary" style={{ fontSize: 11 }}>Deployment Need</Text>
+            <Text>{modelVram !== undefined ? `VRAM ${formatGpuMemory(modelVram)}` : '-'}</Text>
+            <Tag color={queueResourceColor(resumeQueue)}>resume {resumeQueue}</Tag>
+          </Space>
+        ) : (
+          <Space direction="vertical" size={4}>
+            <Text type="secondary" style={{ fontSize: 11 }}>Assigned Node</Text>
+            <Text>{selected?.node_ip || '-'}</Text>
+            <Space size={4} wrap>
+              {selected?.gpu_id !== undefined && selected?.gpu_id !== null && <Tag color="gold">GPU {selected.gpu_id}</Tag>}
+              {cpuNum !== undefined && <Tag>CPU {cpuNum}</Tag>}
+              {taskResources.gpu_mem !== undefined && <Tag>VRAM {formatGpuMemory(taskResources.gpu_mem)}</Tag>}
+              {taskResources.io_num !== undefined && <Tag>I/O {taskResources.io_num}</Tag>}
+            </Space>
+          </Space>
+        )}
         <Space direction="vertical" size={4}>
           <Text type="secondary" style={{ fontSize: 11 }}>Status</Text>
           <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: reason || '-' }}>
@@ -1098,6 +1131,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
             { label: 'running', value: queues?.counts.running || 0, color: '#0958d9', background: '#e6f4ff', border: '#91caff' },
             { label: 'pending', value: queues?.counts.pending || 0, color: '#d4380d', background: '#fff2e8', border: '#ffbb96' },
             { label: 'retrying', value: queues?.counts.retrying || 0, color: '#d46b08', background: '#fff7e6', border: '#ffd591' },
+            { label: 'model wait', value: queues?.counts.model_waiting ?? modelWaitingRows.length, color: '#531dab', background: '#f9f0ff', border: '#d3adf7' },
             { label: 'total', value: queues?.counts.total_queued || 0, color: '#595959', background: '#fff', border: '#d9d9d9' },
           ].map((item) => (
             <div
@@ -1115,6 +1149,41 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
           ))}
         </div>
       </div>
+      <Collapse size="small" bordered={false} defaultActiveKey={['model-waiting']} style={{ background: '#fff' }}>
+        <Collapse.Panel
+          key="model-waiting"
+          header={(
+            <Space size={8}>
+              <Tag color="purple">Model Wait</Tag>
+              <Text strong>{modelWaitingRows.length}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>tasks</Text>
+            </Space>
+          )}
+        >
+          <div
+            style={{
+              border: '1px solid #f0f0f0',
+              borderRadius: 6,
+              overflow: 'hidden',
+              background: '#fff',
+            }}
+          >
+            {queueLoading && !queues ? (
+              <div style={{ padding: 16 }}>
+                <Text type="secondary">Loading model waiters...</Text>
+              </div>
+            ) : modelWaitingRows.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No tasks waiting for model deployment"
+                style={{ margin: '12px 0' }}
+              />
+            ) : (
+              modelWaitingRows.map((task) => renderQueueTaskRow(task, true))
+            )}
+          </div>
+        </Collapse.Panel>
+      </Collapse>
       <Collapse size="small" bordered={false} defaultActiveKey={RESOURCE_QUEUE_NAMES} style={{ background: '#fff' }}>
         {RESOURCE_QUEUE_NAMES.map((queueName) => {
           const rows = resourceQueueRows[queueName] || [];
@@ -1167,7 +1236,7 @@ export default function ClusterResourcesDrawer({ open, onClose }: ClusterResourc
                     style={{ margin: '12px 0' }}
                   />
                 ) : (
-                  rows.map(renderQueueTaskRow)
+                  rows.map((task) => renderQueueTaskRow(task))
                 )}
               </div>
             </Collapse.Panel>

@@ -1,0 +1,526 @@
+{
+  "schema": "maze-playground-bundle",
+  "version": 3,
+  "description": "Read an uploaded document, produce two routed text answers, and fuse the result.",
+  "tags": [
+    "GAIA",
+    "file",
+    "artifact",
+    "LLM"
+  ],
+  "workflow": {
+    "name": "GAIA File",
+    "description": "Read an uploaded document, produce two routed text answers, and fuse the result.",
+    "tags": [
+      "GAIA",
+      "file",
+      "artifact",
+      "LLM"
+    ],
+    "nodes": [
+      {
+        "id": "file",
+        "type": "taskNode",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Read Document",
+          "taskPath": "tasks/gaia_file_prepare.py",
+          "functionName": "gaia_prepare_document",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "any",
+              "source": "user",
+              "value": "gaia-file-ui"
+            },
+            {
+              "name": "question",
+              "dataType": "any",
+              "source": "user",
+              "value": "According to the document, when does the maintenance window begin?"
+            },
+            {
+              "name": "supplementary_path",
+              "dataType": "str",
+              "source": "user",
+              "value": "samples/gaia/file/example.txt"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "dag_id",
+              "dataType": "any"
+            },
+            {
+              "name": "question",
+              "dataType": "any"
+            },
+            {
+              "name": "context_label",
+              "dataType": "any"
+            },
+            {
+              "name": "context",
+              "dataType": "any"
+            },
+            {
+              "name": "file_name",
+              "dataType": "any"
+            },
+            {
+              "name": "content_sha256",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 0,
+            "io_num": 0
+          },
+          "configured": true,
+          "task_kind": "cpu"
+        }
+      },
+      {
+        "id": "answer-one",
+        "type": "taskNode",
+        "position": {
+          "x": 500,
+          "y": 80
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Reasoned Answer",
+          "taskPath": "tasks/gaia_reason_answer.py",
+          "functionName": "gaia_model_answer",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "any",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "context_label",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "context_label"
+              }
+            },
+            {
+              "name": "context",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "context"
+              }
+            },
+            {
+              "name": "style",
+              "dataType": "any",
+              "source": "user",
+              "value": "reasoned"
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "answer",
+              "dataType": "any"
+            },
+            {
+              "name": "answer_feature",
+              "dataType": "any"
+            },
+            {
+              "name": "style",
+              "dataType": "any"
+            },
+            {
+              "name": "dag_id",
+              "dataType": "any"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "any"
+            },
+            {
+              "name": "start_time",
+              "dataType": "any"
+            },
+            {
+              "name": "end_time",
+              "dataType": "any"
+            },
+            {
+              "name": "time_record",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "configured": true,
+          "task_kind": "gpu",
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          }
+        }
+      },
+      {
+        "id": "answer-two",
+        "type": "taskNode",
+        "position": {
+          "x": 500,
+          "y": 360
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Concise Answer",
+          "taskPath": "tasks/gaia_reason_answer.py",
+          "functionName": "gaia_model_answer",
+          "inputs": [
+            {
+              "name": "dag_id",
+              "dataType": "any",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "context_label",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "context_label"
+              }
+            },
+            {
+              "name": "context",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "context"
+              }
+            },
+            {
+              "name": "style",
+              "dataType": "any",
+              "source": "user",
+              "value": "concise"
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "answer",
+              "dataType": "any"
+            },
+            {
+              "name": "answer_feature",
+              "dataType": "any"
+            },
+            {
+              "name": "style",
+              "dataType": "any"
+            },
+            {
+              "name": "dag_id",
+              "dataType": "any"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "any"
+            },
+            {
+              "name": "start_time",
+              "dataType": "any"
+            },
+            {
+              "name": "end_time",
+              "dataType": "any"
+            },
+            {
+              "name": "time_record",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "configured": true,
+          "task_kind": "gpu",
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          }
+        }
+      },
+      {
+        "id": "fuse",
+        "type": "taskNode",
+        "position": {
+          "x": 920,
+          "y": 220
+        },
+        "data": {
+          "category": "workspace",
+          "nodeType": "task",
+          "label": "Fuse Final Answer",
+          "taskPath": "tasks/gaia_reason_fuse.py",
+          "functionName": "gaia_fuse_answers",
+          "inputs": [
+            {
+              "name": "answer_one",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "answer-one",
+                "outputKey": "answer"
+              }
+            },
+            {
+              "name": "answer_two",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "answer-two",
+                "outputKey": "answer"
+              }
+            },
+            {
+              "name": "feature_one",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "answer-one",
+                "outputKey": "answer_feature"
+              }
+            },
+            {
+              "name": "feature_two",
+              "dataType": "dict",
+              "source": "task",
+              "taskSource": {
+                "taskId": "answer-two",
+                "outputKey": "answer_feature"
+              }
+            },
+            {
+              "name": "dag_id",
+              "dataType": "any",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "dag_id"
+              }
+            },
+            {
+              "name": "question",
+              "dataType": "str",
+              "source": "task",
+              "taskSource": {
+                "taskId": "file",
+                "outputKey": "question"
+              }
+            },
+            {
+              "name": "temperature",
+              "dataType": "float",
+              "source": "user",
+              "value": "0"
+            },
+            {
+              "name": "max_tokens",
+              "dataType": "int",
+              "source": "user",
+              "value": "1024"
+            }
+          ],
+          "outputs": [
+            {
+              "name": "dag_id",
+              "dataType": "any"
+            },
+            {
+              "name": "final_answer",
+              "dataType": "any"
+            },
+            {
+              "name": "curr_task_feat",
+              "dataType": "any"
+            },
+            {
+              "name": "start_time",
+              "dataType": "any"
+            },
+            {
+              "name": "end_time",
+              "dataType": "any"
+            },
+            {
+              "name": "time_record",
+              "dataType": "any"
+            }
+          ],
+          "resources": {
+            "cpu_num": 1,
+            "gpu_mem": 8192,
+            "io_num": 0
+          },
+          "configured": true,
+          "task_kind": "gpu",
+          "localModel": "Qwen2.5-3B-Instruct",
+          "modelAnchor": {
+            "local_model": "Qwen2.5-3B-Instruct",
+            "model_scope": "head",
+            "backend": "transformers",
+            "estimated_gpu_mem_mb": 8192
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-file-answer-one",
+        "source": "file",
+        "target": "answer-one"
+      },
+      {
+        "id": "edge-file-answer-two",
+        "source": "file",
+        "target": "answer-two"
+      },
+      {
+        "id": "edge-file-fuse",
+        "source": "file",
+        "target": "fuse"
+      },
+      {
+        "id": "edge-answer-one-fuse",
+        "source": "answer-one",
+        "target": "fuse"
+      },
+      {
+        "id": "edge-answer-two-fuse",
+        "source": "answer-two",
+        "target": "fuse"
+      }
+    ]
+  },
+  "includedTasks": [
+    {
+      "relativePath": "tasks/gaia_file_prepare.py",
+      "sourceId": "gaia_file_prepare.py",
+      "functionName": "gaia_prepare_document",
+      "displayName": "Gaia Prepare Document",
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 0,
+        "io_num": 0
+      },
+      "type": "workspace",
+      "task_kind": "cpu"
+    },
+    {
+      "relativePath": "tasks/gaia_reason_answer.py",
+      "sourceId": "gaia_reason_answer.py",
+      "functionName": "gaia_model_answer",
+      "displayName": "Gaia Model Answer",
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 8192,
+        "io_num": 0
+      },
+      "type": "workspace",
+      "task_kind": "gpu"
+    },
+    {
+      "relativePath": "tasks/gaia_reason_fuse.py",
+      "sourceId": "gaia_reason_fuse.py",
+      "functionName": "gaia_fuse_answers",
+      "displayName": "Gaia Fuse Answers",
+      "resources": {
+        "cpu_num": 1,
+        "gpu_mem": 8192,
+        "io_num": 0
+      },
+      "type": "workspace",
+      "task_kind": "gpu"
+    }
+  ],
+  "includedFiles": [
+    {
+      "sourceId": "gaia/file/example.txt",
+      "targetPath": "samples/gaia/file/example.txt"
+    }
+  ]
+}

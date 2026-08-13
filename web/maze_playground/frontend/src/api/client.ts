@@ -2,6 +2,7 @@ import axios from 'axios';
 import type {
   WorkspaceTasksResponse,
   WorkspaceContextResponse,
+  WorkspacesResponse,
   WorkspaceFilesResponse,
   WorkspaceWorkflowsResponse,
   SystemCatalogResponse,
@@ -35,6 +36,11 @@ export const api = {
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceContextResponse> {
     const response = await axios.get(`${API_BASE}/workspaces/${encodeURIComponent(workspaceId)}`);
+    return response.data;
+  },
+
+  async getWorkspaces(): Promise<WorkspacesResponse> {
+    const response = await axios.get(`${API_BASE}/workspaces`);
     return response.data;
   },
 
@@ -76,6 +82,10 @@ export const api = {
       skipped: Array<{ relativePath: string; reason: string }>;
       remapped?: Array<{ from: string; to: string; reason: string }>;
     };
+    importedFiles?: {
+      imported: Array<{ sourceId: string; relativePath: string }>;
+      skipped: Array<{ sourceId: string; relativePath: string; reason: string }>;
+    };
   }> {
     const response = await axios.post(`${API_BASE}/system-catalog/workflows/load`, data);
     return response.data;
@@ -102,11 +112,17 @@ export const api = {
   },
 
   async getWorkspaceFiles(params?: {
+    workspaceId?: string;
     workspaceDir?: string;
     path?: string;
   }): Promise<WorkspaceFilesResponse> {
     const response = await axios.get(`${API_BASE}/workspace-files`, { params });
     return response.data;
+  },
+
+  workspaceFileDownloadUrl(params: { workspaceId: string; path: string }) {
+    const query = new URLSearchParams({ workspaceId: params.workspaceId, path: params.path });
+    return `${API_BASE}/workspace-files/download?${query.toString()}`;
   },
 
   async uploadWorkspaceFile(data: {
@@ -300,6 +316,7 @@ export const api = {
     kind?: string;
     limit?: number;
     detail?: boolean;
+    workspaceId?: string;
   }): Promise<{ success: boolean; runs: UnifiedRunSnapshot[] }> {
     const response = await axios.get(`${API_BASE}/runs`, { params });
     return response.data;

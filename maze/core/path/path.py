@@ -66,6 +66,23 @@ RUN_WORKFLOW_CLEANUP_RETRY_SECONDS = 0.25
 RUN_WORKFLOW_CLEANUP_MAX_ATTEMPTS = 5
 
 
+def _workflow_completion_data(
+    workflow_id: str,
+    started_time: float | None,
+    finished_time: float | None,
+) -> Dict[str, Any]:
+    data: Dict[str, Any] = {"workflow_id": workflow_id}
+    try:
+        started = float(started_time)
+        finished = float(finished_time)
+    except (TypeError, ValueError):
+        return data
+    if not math.isfinite(started) or not math.isfinite(finished) or finished <= started:
+        return data
+    data["completion_duration_seconds"] = round(finished - started, 6)
+    return data
+
+
 class SchedulerUnavailableError(RuntimeError):
     error_code = "scheduler_unavailable"
 
@@ -2025,7 +2042,14 @@ class MaPath:
             },
         })
 
-        message = {"type":"clear_workflow","data":{"workflow_id":run_id}}
+        message = {
+            "type": "clear_workflow",
+            "data": _workflow_completion_data(
+                run_id,
+                dynamic_run.created_time,
+                dynamic_run.finished_time,
+            ),
+        }
         self._send_scheduler_message(message)
 
     async def cancel_dynamic_run(self, run_id:str, reason:str|None=None):
@@ -2997,6 +3021,29 @@ class MaPath:
         observation_cache[observation_key] = copy.deepcopy(observation)
         return observation
 
+    def _record_retry_resource_observation(
+        self,
+        run_id: str,
+        task_id: str,
+        message_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        error = message_data.get("error")
+        observation = self._resource_observation_from_message(
+            run_id,
+            task_id,
+            status="failed",
+            metrics=message_data.get("metrics") or {},
+            error=error if isinstance(error, dict) else None,
+            schedule_decision=message_data.get("schedule_decision"),
+            node_id=message_data.get("node_id"),
+            attempt_data=message_data,
+        )
+        message_data["resource_observation"] = observation
+        if isinstance(error, dict):
+            error = {**error, "resource_observation": observation}
+            message_data["error"] = error
+        return error
+
     def _duration_seconds_from_message(self, task: CodeTask | None, message_data: Dict[str, Any]) -> float | None:
         duration_ms = message_data.get("duration_ms")
         if duration_ms is not None:
@@ -3543,7 +3590,11 @@ class MaPath:
             if continuation.get("workflow_cleared") != "sent":
                 self._send_scheduler_message({
                     "type": "clear_workflow",
-                    "data": {"workflow_id": run_id},
+                    "data": _workflow_completion_data(
+                        run_id,
+                        static_run.submitted_time or static_run.created_time,
+                        static_run.finished_time,
+                    ),
                 })
                 continuation["workflow_cleared"] = "sent"
                 self._persist_static_run(run_id)
@@ -3627,9 +3678,14 @@ class MaPath:
 
         if message_type == "task_retry":
             message_data.pop("file_manifest", None)
+            error = self._record_retry_resource_observation(
+                run_id,
+                task_id,
+                message_data,
+            )
             dynamic_run.mark_retrying(
                 task_id,
-                message_data.get("error"),
+                error,
                 message_data.get("fault_tolerance"),
             )
             self._persist_dynamic_scheduler_event(run_id, message)
@@ -4182,9 +4238,14 @@ class MaPath:
                                 message = self._record_static_event(submit_id, message)
                         elif message_type == "task_retry":
                             if static_run is not None:
+                                error = self._record_retry_resource_observation(
+                                    submit_id,
+                                    message_data["task_id"],
+                                    message_data,
+                                )
                                 static_run.mark_task_retry(
                                     message_data["task_id"],
-                                    message_data.get("error"),
+                                    error,
                                     message_data.get("attempt"),
                                     message_data.get("fault_tolerance"),
                                     node_info=message_data,

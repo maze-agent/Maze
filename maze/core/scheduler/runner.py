@@ -5,6 +5,7 @@ import base64
 import cloudpickle
 import json
 import os
+import sys
 from maze.core.files.lineage import ArtifactError, TASK_RESULT_ENVELOPE, run_task_with_file_context
 from maze.core.scheduler.error import (
     exception_to_error_envelope,
@@ -97,6 +98,22 @@ def _merge_metrics(*dicts):
             else:
                 merged[key] = value
     return merged
+
+
+def _loaded_torch_cuda_metrics():
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return {}
+    try:
+        cuda = torch.cuda
+        if not cuda.is_initialized():
+            return {}
+        return {
+            "gpu_memory_peak_allocated_bytes": int(cuda.max_memory_allocated()),
+            "gpu_memory_peak_reserved_bytes": int(cuda.max_memory_reserved()),
+        }
+    except Exception:
+        return {}
 
 
 def _wrap_with_envelope(raw_output, started_at, finished_at, reported_metrics):
@@ -296,8 +313,14 @@ def execute_code_task_in_worker(
             file_context=file_context,
         )
         reported = _drain(collector)
+    observed_gpu_metrics = _loaded_torch_cuda_metrics()
     finished_at = time.time()
-    return _wrap_with_envelope(output, started_at, finished_at, reported)
+    envelope = _wrap_with_envelope(output, started_at, finished_at, reported)
+    if observed_gpu_metrics:
+        metrics = envelope.setdefault("metrics", {})
+        for key, value in observed_gpu_metrics.items():
+            metrics.setdefault(key, value)
+    return envelope
 
 
 @ray.remote(max_retries=0)

@@ -14,6 +14,8 @@ ERROR_RETRYABLE_DEFAULTS = {
     "node_lost": True,
     "artifact_error": True,
     "serialization_error": False,
+    "missing_model": False,
+    "model_deployment_failed": False,
     "timeout": False,
     "scheduler_error": False,
     "cancelled": False,

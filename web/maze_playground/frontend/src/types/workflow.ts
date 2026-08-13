@@ -28,7 +28,7 @@ export interface LocalModel {
 export interface ModelAnchor {
   local_model: string;
   model_scope: 'head' | string;
-  backend: 'transformers' | string;
+  backend?: 'transformers' | 'vllm' | string;
   estimated_weight_memory_bytes?: number;
   estimated_gpu_mem_mb?: number;
   estimated_params?: number;
@@ -175,6 +175,19 @@ export interface WorkspaceManifest {
   imports?: Array<Record<string, any>>;
   local_mounts?: Array<Record<string, any>>;
   last_change?: Record<string, any>;
+}
+
+export interface WorkspaceSummary {
+  workspaceId: string;
+  name: string;
+  mode: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkspacesResponse {
+  success: boolean;
+  workspaces: WorkspaceSummary[];
 }
 
 export interface WorkspaceContextResponse {
@@ -405,6 +418,17 @@ export interface ClusterQueueTask {
   pending_reason?: string | null;
   last_error?: any;
   resources?: Resources;
+  model?: string;
+  backend?: string;
+  model_anchor?: {
+    local_model?: string;
+    model?: string;
+    backend?: string;
+    engine?: string;
+    model_scope?: string;
+    estimated_gpu_mem_mb?: number;
+  };
+  resume_queue?: 'gpu' | 'cpu' | 'io' | string;
   schedule_decision?: ClusterScheduleDecision | null;
   fault_tolerance?: FaultToleranceTrace;
   selected_node?: {
@@ -437,6 +461,7 @@ export interface ClusterQueuesResponse {
       retrying: number;
       running: number;
       total_queued: number;
+      model_waiting?: number;
       by_queue?: Record<string, {
         ready: number;
         pending: number;
@@ -449,6 +474,7 @@ export interface ClusterQueuesResponse {
     pending_tasks: ClusterQueueTask[];
     retrying_tasks: ClusterQueueTask[];
     running_tasks: ClusterQueueTask[];
+    model_waiting_tasks?: ClusterQueueTask[];
   };
 }
 
