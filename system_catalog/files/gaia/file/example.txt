@@ -1,6 +1,0 @@
-Maze sample document
-
-Project Atlas is preparing a small service update.
-The maintenance window begins at 09:30 UTC on Friday.
-The operations owner is Jordan Lee.
-No customer action is required before the update.
