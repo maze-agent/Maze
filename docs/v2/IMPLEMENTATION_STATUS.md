@@ -2,6 +2,18 @@
 
 ## 当前状态：按完整文档范围推进
 
+### managed-local 启动回滚（基线 `500654d`）
+
+启动预检或端口绑定失败时不调用 Ray init/shutdown；只有尝试创建本地 Ray 后才进入回滚。
+HTTP 应用与 Server 构造纳入 Engine 清理范围，Ray shutdown 失败仍释放 API socket，
+同时保留异常链，不把清理失败报告为成功。
+新增启动故障测试：token/已有 Ray/地址/进程检查、实际端口冲突、部分初始化和中断、
+HTTP 构造与运行故障、清理自身失败；真实子进程启动 Ray 后注入异常或 KeyboardInterrupt，
+验证 Ray 进程退出和端口可重新绑定。已有 API stop / SIGTERM 在途请求测试继续回归。
+本轮只修改 v2，使用原 maze-v2 环境，无新依赖，未提交推送。
+最终验证：**92 passed in 53.48s**；Ruff 与 wheel 构建通过。
+仍未覆盖 ray.init 内部任意时刻卡死、SIGKILL 遗留恢复或真实多机 SSH 回滚。
+
 ### Attached LLM 与异步连接池（基线 `dbf3713`）
 
 新增 attached ServiceSpec、LLM 节点与部署服务绑定，限定文本非流式 chat。
@@ -11,7 +23,7 @@ usage 进入独立节点 metadata；取消错误区分调用侧 cleanup 与未�
 新增真实 TCP + Ray 测试：连接复用/上限、双请求重叠、usage 缺失、取消/超时隔离、
 HTTP 失败零重试、响应超限、准备失败、凭据环境变量、生成参数和服务协议边界。
 没有下载模型、安装新依赖或调用外部服务；HTTPX 已在原环境中。
-LLM extra 仅声明现有 HTTPX。只修改 v2；本轮未提交推送。
+LLM extra 仅声明现有 HTTPX。只修改 v2；后续已提交推送为 `500654d`。
 这不是 managed Serve LLM / vLLM 或 GPU 推理验收，相关开发与实测仍待完成。
 完整回归 **77 passed in 40.32s**；Ruff 与 wheel 构建通过。
 
@@ -67,12 +79,12 @@ drain，以及单状态所有者的 HTTP API、客户端、前台 managed-local 
 | P2 | 部分：真实 Ray 数据流/多端口/完成信号已有；完整失败/序列化/重试矩阵待补 |
 | P3 | 部分：本地 API/CLI/SDK 与 admission/deadline/drain 闭环已有；错误契约和故障边界待完善 |
 | P4 | 部分：Async Actor、attached HTTP 适配、连接池、usage 已本机验证；managed Serve LLM/vLLM 未完成 |
-| P5 | 部分：正常 managed-local 启停已有；多机、启动故障回滚与恢复管理待补 |
+| P5 | 部分：managed-local 启停、冲突及启动失败回滚已有；多机、强制崩溃恢复管理待补 |
 | P6 | 部分：基础指标、状态释放与小型对照基准已有；压力/故障矩阵和详细指标待补 |
 | P7 | 部分：v2 默认路径、wheel、许可证已有；完整打包 E2E、文档与最终审计待补 |
 
 当前不能宣称已经完成原文档或生产级验收。P1/P2 的更全面协议边界、长期资源收敛、
-启动故障回滚和 managed Serve LLM 配置/所有权适配仍是下一批本机工作。
+强制崩溃恢复和 managed Serve LLM 配置/所有权适配仍是下一批本机工作。
 
 ## 2026-09-08：最小 Python DAG 原型
 

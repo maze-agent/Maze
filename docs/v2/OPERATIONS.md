@@ -6,6 +6,11 @@
 启动前检查 token、现有 Ray 进程及 API 端口；先绑定 API socket，再启动 Ray。
 API 由单个 Uvicorn worker 提供，不支持多 worker 或控制面 HA。
 启动失败或正常退出时关闭本次 Ray 实例；没有后台 PID 管理文件。
+预检和 API 端口冲突均在尝试 Ray init 前结束，不调用 Ray shutdown。
+一旦开始尝试创建 Ray，即使初始化抛异常或 KeyboardInterrupt 也执行 shutdown。
+HTTP 应用/Server 构造和运行失败均关闭 Engine，再回收 Ray 与 API socket。
+shutdown 自身失败时仍关闭 socket，并以异常退出，不能据此推断 Ray 已全部退出。
+这些回滚依赖 Python 清理代码可以运行；尚不保证卡死初始化有界返回或 SIGKILL 后自动恢复。
 
 部署生成新的 ID，验证并复制协议、编译图，进行 worker 代码反序列化探测、
 准备专属 Async Actor 后才 ready。探测不证明代码在所有未来节点都可运行。

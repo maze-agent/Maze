@@ -6,8 +6,8 @@
 
 ## 实际执行
 
-- 最新全量 `python -m pytest -q`：**77 passed in 40.32s**，退出码 0。
-- 随后复查补上重复准备的连接池复用保护，`python -m pytest -q tests/test_services.py`：**15 passed in 13.36s**，退出码 0。
+- 最新全量 `python -m pytest -q`：**92 passed in 53.48s**，退出码 0。
+- 上一轮 attached 服务专项 `python -m pytest -q tests/test_services.py`：**15 passed in 13.36s**；本轮已纳入完整回归。
 - Ruff 检查与格式化通过。
 - `python -m examples.arithmetic`：通过 Engine 部署调用，输出 `{'result': 10}`、`{'result': 22}`，退出码 0。
 - `python -m build --wheel --no-isolation`：成功生成开发版 wheel。
@@ -44,6 +44,12 @@ usage 每请求隔离和缺失不补零；HTTP 503、响应超限和 timeout 均
 未知/重复 service_id、非法资源/模式/默认值。attached 示例编译通过，未连接示例地址。
 这些证据验证 HTTP 协议适配与调用侧资源管理，不证明真实 Serve/vLLM 推理、GPU 取消或模型复用。
 
+启动回滚迭代：预检、初始化失败与 HTTP 构造失败使用确定性故障注入；
+端口冲突使用真实已监听 socket，并确认冲突后原 listener 仍接受连接。
+另外三个独立子进程真实启动 Ray 后，分别注入初始化返回阶段异常、HTTP 构造异常和
+KeyboardInterrupt；测试确认故障点确实到达、进程退出、无 raylet/gcs_server、API 端口可再绑定。
+这不代表已经覆盖 Ray 初始化中间所有故障点、启动期间真实信号竞争或 SIGKILL 恢复。
+
 ## 原文档矩阵对照
 
 “部分”表示已有对应证据，但尚未覆盖该条完整验收。
@@ -63,7 +69,7 @@ usage 每请求隔离和缺失不补零；HTTP 503、响应超限和 timeout 均
 | T18–T19 | 部分：none/basic/detailed 缺失标注；未接入 State 诊断 |
 | T20 | 通过当前用例：真实 TCP await 会合、连接复用、并发/池上限和关闭；未作长期压力验收 |
 | T21–T27 | 未执行：尚无 GPU/模型/多机环境，相关实现也未齐 |
-| T28 | 部分：本地启停及在途有界停止通过；冲突与启动回滚故障注入待补 |
+| T28 | 部分：本地启停、端口冲突和预检隔离、真实 Ray 启动后故障回滚通过；多机 SSH 与完整重复停止矩阵待补 |
 | T29 | 通过当前用例：准备/调用/排队/并发卸载竞争；GPU 尚未验证 |
 | T30 | 部分：SIGTERM 有界关闭通过，非优雅崩溃/SIGKILL 恢复边界待补 |
 | T31 | 部分：5 轮×8 请求后计数归零；长时间 RSS/引用趋势未测 |

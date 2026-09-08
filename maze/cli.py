@@ -13,10 +13,6 @@ from maze.spec import EngineConfig, parse_document
 
 def start(config: EngineConfig) -> None:
     import ray
-    import uvicorn
-
-    from maze.api import create_app
-    from maze.engine import Engine
 
     token = os.environ.get(config.api.token_env)
     if not token:
@@ -32,9 +28,11 @@ def start(config: EngineConfig) -> None:
             "Existing Ray processes detected; use a dedicated host/session"
         )
     listener = socket.socket()
+    init_attempted = False
     try:
         listener.bind((config.api.host, config.api.port))
         listener.listen(128)
+        init_attempted = True
         ray.init(
             address="local",
             num_cpus=config.cluster.num_cpus,
@@ -42,27 +40,36 @@ def start(config: EngineConfig) -> None:
             include_dashboard=False,
         )
 
-        async def serve() -> None:
-            engine = Engine(config)
-            app = create_app(
-                engine, token, stop=lambda: setattr(server, "should_exit", True)
-            )
-            server = uvicorn.Server(
-                uvicorn.Config(
-                    app,
-                    access_log=False,
-                    timeout_graceful_shutdown=config.timeouts.shutdown_grace_s,
-                )
-            )
-            try:
-                await server.serve(sockets=[listener])
-            finally:
-                await engine.close()
-
-        asyncio.run(serve())
+        asyncio.run(serve(config, token, listener))
     finally:
-        listener.close()
-        ray.shutdown()
+        try:
+            if init_attempted:
+                ray.shutdown()
+        finally:
+            listener.close()
+
+
+async def serve(config: EngineConfig, token: str, listener: socket.socket) -> None:
+    import uvicorn
+
+    from maze.api import create_app
+    from maze.engine import Engine
+
+    engine = Engine(config)
+    try:
+        app = create_app(
+            engine, token, stop=lambda: setattr(server, "should_exit", True)
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                access_log=False,
+                timeout_graceful_shutdown=config.timeouts.shutdown_grace_s,
+            )
+        )
+        await server.serve(sockets=[listener])
+    finally:
+        await engine.close()
 
 
 def main() -> None:
