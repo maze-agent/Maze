@@ -1,0 +1,20 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "maze.deployment/v1",
+      "default": "maze.deployment/v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "max_active_invocations": {
+      "default": 8,
+      "maximum": 1024,
+      "minimum": 1,
+      "title": "Max Active Invocations",
+      "type": "integer"
+    }
+  },
+  "title": "DeploymentSpec",
+  "type": "object"
+}

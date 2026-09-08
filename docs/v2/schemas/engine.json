@@ -1,0 +1,157 @@
+{
+  "$defs": {
+    "ApiConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "default": "127.0.0.1",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 8000,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "token_env": {
+          "default": "MAZE_API_TOKEN",
+          "title": "Token Env",
+          "type": "string"
+        }
+      },
+      "title": "ApiConfig",
+      "type": "object"
+    },
+    "ClusterConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "managed-local",
+          "default": "managed-local",
+          "title": "Mode",
+          "type": "string"
+        },
+        "num_cpus": {
+          "default": 2,
+          "minimum": 1,
+          "title": "Num Cpus",
+          "type": "integer"
+        },
+        "object_store_memory": {
+          "default": 268435456,
+          "minimum": 83886080,
+          "title": "Object Store Memory",
+          "type": "integer"
+        }
+      },
+      "title": "ClusterConfig",
+      "type": "object"
+    },
+    "Limits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_active_invocations": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Max Active Invocations",
+          "type": "integer"
+        },
+        "max_waiting_invocations": {
+          "default": 16,
+          "minimum": 0,
+          "title": "Max Waiting Invocations",
+          "type": "integer"
+        },
+        "max_inflight_node_calls": {
+          "default": 2048,
+          "minimum": 1,
+          "title": "Max Inflight Node Calls",
+          "type": "integer"
+        },
+        "max_nodes_per_dag": {
+          "default": 256,
+          "maximum": 256,
+          "minimum": 1,
+          "title": "Max Nodes Per Dag",
+          "type": "integer"
+        },
+        "max_input_bytes": {
+          "default": 1048576,
+          "minimum": 1,
+          "title": "Max Input Bytes",
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "default": 8388608,
+          "minimum": 1,
+          "title": "Max Output Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "Limits",
+      "type": "object"
+    },
+    "Timeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "default_invocation_s": {
+          "default": 120,
+          "exclusiveMinimum": 0,
+          "title": "Default Invocation S",
+          "type": "number"
+        },
+        "max_invocation_s": {
+          "default": 600,
+          "exclusiveMinimum": 0,
+          "title": "Max Invocation S",
+          "type": "number"
+        },
+        "deployment_s": {
+          "default": 60,
+          "exclusiveMinimum": 0,
+          "title": "Deployment S",
+          "type": "number"
+        },
+        "shutdown_grace_s": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "title": "Shutdown Grace S",
+          "type": "number"
+        },
+        "cancellation_grace_s": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Cancellation Grace S",
+          "type": "number"
+        }
+      },
+      "title": "Timeouts",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "maze.engine/v1",
+      "default": "maze.engine/v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "cluster": {
+      "$ref": "#/$defs/ClusterConfig"
+    },
+    "api": {
+      "$ref": "#/$defs/ApiConfig"
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/Timeouts"
+    }
+  },
+  "title": "EngineConfig",
+  "type": "object"
+}

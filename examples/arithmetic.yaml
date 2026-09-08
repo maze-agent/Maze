@@ -1,0 +1,40 @@
+schema: maze.dag/v1
+name: arithmetic
+inputs:
+  x: {type: number}
+nodes:
+  - id: double
+    kind: python
+    callable: maze_examples.arithmetic:double
+    inputs:
+      x: {type: number}
+    outputs:
+      value: {type: number}
+  - id: offset
+    kind: python
+    callable: maze_examples.arithmetic:offset
+    inputs:
+      x: {type: number}
+    outputs:
+      value: {type: number}
+  - id: merge
+    kind: python
+    callable: maze_examples.arithmetic:merge
+    inputs:
+      a: {type: number}
+      b: {type: number}
+    outputs:
+      total: {type: number}
+edges:
+  - from: {input: x}
+    to: {node: double, port: x}
+  - from: {input: x}
+    to: {node: offset, port: x}
+  - from: {node: double, port: value}
+    to: {node: merge, port: a}
+  - from: {node: offset, port: value}
+    to: {node: merge, port: b}
+outputs:
+  result:
+    from: {node: merge, port: total}
+    type: number

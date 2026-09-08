@@ -1,0 +1,724 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Maze v2",
+    "version": "2.0.0.dev0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Healthz Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "summary": "Ready",
+        "operationId": "ready_readyz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Ready Readyz Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deployments": {
+      "get": {
+        "summary": "Deployments",
+        "operationId": "deployments_v1_deployments_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "title": "Response Deployments V1 Deployments Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Deploy",
+        "operationId": "deploy_v1_deployments_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Deploy V1 Deployments Post"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "dag": {
+                    "$ref": "#/components/schemas/DagSpec"
+                  },
+                  "deployment": {
+                    "$ref": "#/components/schemas/DeploymentSpec",
+                    "default": {
+                      "schema": "maze.deployment/v1",
+                      "max_active_invocations": 8
+                    }
+                  }
+                },
+                "required": [
+                  "dag"
+                ],
+                "title": "DeployRequest",
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deployments/{key}": {
+      "get": {
+        "summary": "Show",
+        "operationId": "show_v1_deployments__key__get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Show V1 Deployments  Key  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Undeploy",
+        "operationId": "undeploy_v1_deployments__key__delete",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Undeploy V1 Deployments  Key  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deployments/{key}/invoke": {
+      "post": {
+        "summary": "Invoke",
+        "operationId": "invoke_v1_deployments__key__invoke_post",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Invoke V1 Deployments  Key  Invoke Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "input": {
+                    "additionalProperties": true,
+                    "title": "Input",
+                    "type": "object"
+                  },
+                  "invocation_id": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Invocation Id"
+                  },
+                  "timeout_s": {
+                    "anyOf": [
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Timeout S"
+                  },
+                  "metrics": {
+                    "default": "basic",
+                    "enum": [
+                      "none",
+                      "basic",
+                      "detailed"
+                    ],
+                    "title": "Metrics",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "title": "InvokeRequest",
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invocations/{key}/cancel": {
+      "post": {
+        "summary": "Cancel",
+        "operationId": "cancel_v1_invocations__key__cancel_post",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Cancel V1 Invocations  Key  Cancel Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stop": {
+      "post": {
+        "summary": "Shutdown",
+        "operationId": "shutdown_v1_stop_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Shutdown V1 Stop Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "DagSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "const": "maze.dag/v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "inputs": {
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+                "$ref": "#/components/schemas/Port"
+              }
+            },
+            "title": "Inputs",
+            "type": "object"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeSpec"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "title": "Nodes",
+            "type": "array"
+          },
+          "edges": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "outputs": {
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+                "$ref": "#/components/schemas/FinalOutput"
+              }
+            },
+            "title": "Outputs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema",
+          "name",
+          "nodes",
+          "outputs"
+        ],
+        "title": "DagSpec",
+        "type": "object"
+      },
+      "DeploymentSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "const": "maze.deployment/v1",
+            "default": "maze.deployment/v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "max_active_invocations": {
+            "default": 8,
+            "maximum": 1024,
+            "minimum": 1,
+            "title": "Max Active Invocations",
+            "type": "integer"
+          }
+        },
+        "title": "DeploymentSpec",
+        "type": "object"
+      },
+      "Edge": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphInput"
+              },
+              {
+                "$ref": "#/components/schemas/Endpoint"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "$ref": "#/components/schemas/Endpoint"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "Edge",
+        "type": "object"
+      },
+      "Endpoint": {
+        "additionalProperties": false,
+        "properties": {
+          "node": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Node",
+            "type": "string"
+          },
+          "port": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "port"
+        ],
+        "title": "Endpoint",
+        "type": "object"
+      },
+      "FinalOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "default": "any",
+            "enum": [
+              "any",
+              "number",
+              "integer",
+              "string",
+              "boolean",
+              "array",
+              "object",
+              "null"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "default": {
+            "default": null,
+            "title": "Default"
+          },
+          "from": {
+            "$ref": "#/components/schemas/Endpoint"
+          }
+        },
+        "required": [
+          "from"
+        ],
+        "title": "FinalOutput",
+        "type": "object"
+      },
+      "GraphInput": {
+        "additionalProperties": false,
+        "properties": {
+          "input": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Input",
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "title": "GraphInput",
+        "type": "object"
+      },
+      "NodeSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "python",
+            "default": "python",
+            "title": "Kind",
+            "type": "string"
+          },
+          "callable": {
+            "title": "Callable",
+            "type": "string"
+          },
+          "execution": {
+            "default": "task",
+            "enum": [
+              "task",
+              "async_actor"
+            ],
+            "title": "Execution",
+            "type": "string"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/Resources"
+          },
+          "max_concurrency": {
+            "default": 8,
+            "maximum": 1024,
+            "minimum": 1,
+            "title": "Max Concurrency",
+            "type": "integer"
+          },
+          "inputs": {
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+                "$ref": "#/components/schemas/Port"
+              }
+            },
+            "title": "Inputs",
+            "type": "object"
+          },
+          "constants": {
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {}
+            },
+            "title": "Constants",
+            "type": "object"
+          },
+          "outputs": {
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+                "$ref": "#/components/schemas/Port"
+              }
+            },
+            "title": "Outputs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "callable",
+          "outputs"
+        ],
+        "title": "NodeSpec",
+        "type": "object"
+      },
+      "Port": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "default": "any",
+            "enum": [
+              "any",
+              "number",
+              "integer",
+              "string",
+              "boolean",
+              "array",
+              "object",
+              "null"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "default": {
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "title": "Port",
+        "type": "object"
+      },
+      "Resources": {
+        "additionalProperties": false,
+        "properties": {
+          "num_cpus": {
+            "default": 1,
+            "minimum": 0,
+            "title": "Num Cpus",
+            "type": "number"
+          },
+          "num_gpus": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Num Gpus",
+            "type": "number"
+          },
+          "memory_bytes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Memory Bytes"
+          }
+        },
+        "title": "Resources",
+        "type": "object"
+      }
+    }
+  }
+}

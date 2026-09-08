@@ -1,0 +1,10 @@
+# Validated on macOS ARM64, Python 3.11.16; direct dependencies only.
+ray==2.58.0
+pydantic==2.13.5
+PyYAML==6.0.3
+fastapi==0.141.1
+uvicorn==0.52.4
+httpx==0.28.1
+pytest==9.1.1
+ruff==0.16.6
+build==1.6.0

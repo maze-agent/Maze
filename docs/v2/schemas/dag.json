@@ -1,0 +1,282 @@
+{
+  "$defs": {
+    "Edge": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphInput"
+            },
+            {
+              "$ref": "#/$defs/Endpoint"
+            }
+          ],
+          "title": "From"
+        },
+        "to": {
+          "$ref": "#/$defs/Endpoint"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "Edge",
+      "type": "object"
+    },
+    "Endpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+          "title": "Node",
+          "type": "string"
+        },
+        "port": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+          "title": "Port",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "port"
+      ],
+      "title": "Endpoint",
+      "type": "object"
+    },
+    "FinalOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "default": "any",
+          "enum": [
+            "any",
+            "number",
+            "integer",
+            "string",
+            "boolean",
+            "array",
+            "object",
+            "null"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "default": null,
+          "title": "Default"
+        },
+        "from": {
+          "$ref": "#/$defs/Endpoint"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "title": "FinalOutput",
+      "type": "object"
+    },
+    "GraphInput": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+          "title": "Input",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input"
+      ],
+      "title": "GraphInput",
+      "type": "object"
+    },
+    "NodeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "python",
+          "default": "python",
+          "title": "Kind",
+          "type": "string"
+        },
+        "callable": {
+          "title": "Callable",
+          "type": "string"
+        },
+        "execution": {
+          "default": "task",
+          "enum": [
+            "task",
+            "async_actor"
+          ],
+          "title": "Execution",
+          "type": "string"
+        },
+        "resources": {
+          "$ref": "#/$defs/Resources"
+        },
+        "max_concurrency": {
+          "default": 8,
+          "maximum": 1024,
+          "minimum": 1,
+          "title": "Max Concurrency",
+          "type": "integer"
+        },
+        "inputs": {
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+              "$ref": "#/$defs/Port"
+            }
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "constants": {
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {}
+          },
+          "title": "Constants",
+          "type": "object"
+        },
+        "outputs": {
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+              "$ref": "#/$defs/Port"
+            }
+          },
+          "title": "Outputs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "callable",
+        "outputs"
+      ],
+      "title": "NodeSpec",
+      "type": "object"
+    },
+    "Port": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "default": "any",
+          "enum": [
+            "any",
+            "number",
+            "integer",
+            "string",
+            "boolean",
+            "array",
+            "object",
+            "null"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "default": null,
+          "title": "Default"
+        }
+      },
+      "title": "Port",
+      "type": "object"
+    },
+    "Resources": {
+      "additionalProperties": false,
+      "properties": {
+        "num_cpus": {
+          "default": 1,
+          "minimum": 0,
+          "title": "Num Cpus",
+          "type": "number"
+        },
+        "num_gpus": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Num Gpus",
+          "type": "number"
+        },
+        "memory_bytes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Bytes"
+        }
+      },
+      "title": "Resources",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "maze.dag/v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "name": {
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+      "title": "Name",
+      "type": "string"
+    },
+    "inputs": {
+      "patternProperties": {
+        "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+          "$ref": "#/$defs/Port"
+        }
+      },
+      "title": "Inputs",
+      "type": "object"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/NodeSpec"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    },
+    "edges": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "title": "Edges",
+      "type": "array"
+    },
+    "outputs": {
+      "patternProperties": {
+        "^[A-Za-z_][A-Za-z0-9_-]{0,63}$": {
+          "$ref": "#/$defs/FinalOutput"
+        }
+      },
+      "title": "Outputs",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "nodes",
+    "outputs"
+  ],
+  "title": "DagSpec",
+  "type": "object"
+}

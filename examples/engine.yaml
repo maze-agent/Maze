@@ -1,0 +1,9 @@
+schema: maze.engine/v1
+cluster:
+  mode: managed-local
+  num_cpus: 2
+  object_store_memory: 268435456
+api:
+  host: 127.0.0.1
+  port: 8000
+  token_env: MAZE_API_TOKEN
