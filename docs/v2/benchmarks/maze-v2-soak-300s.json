@@ -1,0 +1,391 @@
+{
+  "elapsed_s": 300.0047705410034,
+  "outcomes": {
+    "succeeded": 27240,
+    "INVOCATION_CANCELLED": 4540,
+    "INVOCATION_TIMEOUT": 4540
+  },
+  "attempts_per_s": 121.06474151895506,
+  "successful_per_s": 90.7985561392163,
+  "unexpected_errors": 0,
+  "cleanup_checks_passed": 4540,
+  "actor_redeployments": 28,
+  "latency": {
+    "success": {
+      "retained_samples": 2048,
+      "p50_ms": 8.258166999439709,
+      "p95_ms": 12.327083000855055,
+      "p99_ms": 13.017500001296867
+    },
+    "cancel": {
+      "retained_samples": 2048,
+      "p50_ms": 31.599917005223688,
+      "p95_ms": 31.839415998547338,
+      "p99_ms": 32.09520800010068
+    },
+    "timeout": {
+      "retained_samples": 2048,
+      "p50_ms": 63.01262500346638,
+      "p95_ms": 63.7734170013573,
+      "p99_ms": 64.32820799818728
+    }
+  },
+  "memory": {
+    "driver_rss_kib": {
+      "first": 105040,
+      "last": 120336,
+      "slope_kib_per_minute": 2005.9647746295032
+    },
+    "descendant_rss_kib": {
+      "first": 932224,
+      "last": 1097952,
+      "slope_kib_per_minute": 44527.9198790828
+    }
+  },
+  "samples": [
+    {
+      "elapsed_s": 0.062200041000323836,
+      "driver_rss_kib": 105040,
+      "descendant_rss_kib": 932224,
+      "descendant_processes": 13,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 10.56123175000539,
+      "driver_rss_kib": 110320,
+      "descendant_rss_kib": 860560,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 21.039349541002593,
+      "driver_rss_kib": 111968,
+      "descendant_rss_kib": 870288,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 31.582747166001354,
+      "driver_rss_kib": 112672,
+      "descendant_rss_kib": 876736,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 42.06025691600371,
+      "driver_rss_kib": 113872,
+      "descendant_rss_kib": 886416,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 52.61270958300156,
+      "driver_rss_kib": 114592,
+      "descendant_rss_kib": 893952,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 63.093357208003,
+      "driver_rss_kib": 115248,
+      "descendant_rss_kib": 900912,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 73.50832100000116,
+      "driver_rss_kib": 115296,
+      "descendant_rss_kib": 913952,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 83.98583020800288,
+      "driver_rss_kib": 115376,
+      "descendant_rss_kib": 921136,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 94.4001092910039,
+      "driver_rss_kib": 115792,
+      "descendant_rss_kib": 928912,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 104.79703687500296,
+      "driver_rss_kib": 116240,
+      "descendant_rss_kib": 935088,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 115.18271229100355,
+      "driver_rss_kib": 116992,
+      "descendant_rss_kib": 943248,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 125.6457508750027,
+      "driver_rss_kib": 117392,
+      "descendant_rss_kib": 952064,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 136.05183745800605,
+      "driver_rss_kib": 117520,
+      "descendant_rss_kib": 965824,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 146.18451829100377,
+      "driver_rss_kib": 117776,
+      "descendant_rss_kib": 1059152,
+      "descendant_processes": 13,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 156.71317295799963,
+      "driver_rss_kib": 118048,
+      "descendant_rss_kib": 979360,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 167.18211979100306,
+      "driver_rss_kib": 118336,
+      "descendant_rss_kib": 987664,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 177.6190382910063,
+      "driver_rss_kib": 118512,
+      "descendant_rss_kib": 995344,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 188.0190192910013,
+      "driver_rss_kib": 118592,
+      "descendant_rss_kib": 1001328,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 198.49154645800445,
+      "driver_rss_kib": 118896,
+      "descendant_rss_kib": 1008496,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 208.93234333299915,
+      "driver_rss_kib": 118896,
+      "descendant_rss_kib": 1015536,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 219.47492387500097,
+      "driver_rss_kib": 119328,
+      "descendant_rss_kib": 1023360,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 229.92888245799986,
+      "driver_rss_kib": 119344,
+      "descendant_rss_kib": 1030336,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 240.45518750000338,
+      "driver_rss_kib": 119632,
+      "descendant_rss_kib": 1038208,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 250.9207309160047,
+      "driver_rss_kib": 119696,
+      "descendant_rss_kib": 1044816,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 261.375817250002,
+      "driver_rss_kib": 119936,
+      "descendant_rss_kib": 1052368,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 271.82613191600103,
+      "driver_rss_kib": 119984,
+      "descendant_rss_kib": 1074304,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 282.28717933300504,
+      "driver_rss_kib": 119984,
+      "descendant_rss_kib": 1081824,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 292.7386196660009,
+      "driver_rss_kib": 120112,
+      "descendant_rss_kib": 1088640,
+      "descendant_processes": 12,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 300.0047705410034,
+      "driver_rss_kib": 120336,
+      "descendant_rss_kib": 1097952,
+      "descendant_processes": 12
+    }
+  ],
+  "limitations": [
+    "RSS sums shared pages and includes benchmark bookkeeping",
+    "Ray ObjectRef totals and object-store usage not measured",
+    "No HTTP/LLM/GPU traffic; CPU tasks and asyncio delay only",
+    "A short soak does not establish long-term leak freedom"
+  ],
+  "environment": {
+    "python": "3.11.16",
+    "ray": "2.58.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "logical_cpus": 2,
+    "object_store_bytes": 268435456
+  },
+  "configuration": {
+    "seconds": 300.0,
+    "concurrency": 8,
+    "sample_s": 10.0,
+    "warmup_batches": 10
+  }
+}

@@ -1,0 +1,224 @@
+{
+  "elapsed_s": 120.04829008399975,
+  "outcomes": {
+    "succeeded": 10638,
+    "INVOCATION_CANCELLED": 1773,
+    "INVOCATION_TIMEOUT": 1773
+  },
+  "attempts_per_s": 118.15245340083747,
+  "successful_per_s": 88.61434005062812,
+  "unexpected_errors": 0,
+  "cleanup_checks_passed": 1773,
+  "actor_redeployments": 11,
+  "latency": {
+    "success": {
+      "retained_samples": 2048,
+      "p50_ms": 9.213500001351349,
+      "p95_ms": 13.42266600113362,
+      "p99_ms": 15.898999998171348
+    },
+    "cancel": {
+      "retained_samples": 1773,
+      "p50_ms": 31.577833004121203,
+      "p95_ms": 32.692375003534835,
+      "p99_ms": 33.28275000239955
+    },
+    "timeout": {
+      "retained_samples": 1773,
+      "p50_ms": 63.44574999820907,
+      "p95_ms": 65.40950000635348,
+      "p99_ms": 67.76362500386313
+    }
+  },
+  "memory": {
+    "driver_rss_kib": {
+      "first": 106304,
+      "last": 112272,
+      "slope_kib_per_minute": 2385.6630469032375
+    },
+    "descendant_rss_kib": {
+      "first": 854624,
+      "last": 857776,
+      "slope_kib_per_minute": 903.8630860390239
+    },
+    "gcs_rss_kib": {
+      "first": 74096,
+      "last": 75456,
+      "slope_kib_per_minute": 457.7548680228092
+    }
+  },
+  "samples": [
+    {
+      "elapsed_s": 0.06350741699861828,
+      "driver_rss_kib": 106304,
+      "descendant_rss_kib": 854624,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 74096,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 10.507342416996835,
+      "driver_rss_kib": 107376,
+      "descendant_rss_kib": 853728,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 74896,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 21.039686459000222,
+      "driver_rss_kib": 110432,
+      "descendant_rss_kib": 853664,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75008,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 31.468957167002372,
+      "driver_rss_kib": 110768,
+      "descendant_rss_kib": 853376,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75040,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 42.09971475000202,
+      "driver_rss_kib": 110928,
+      "descendant_rss_kib": 855648,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75280,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 52.5200295839968,
+      "driver_rss_kib": 111616,
+      "descendant_rss_kib": 852832,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75296,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 62.93025658399711,
+      "driver_rss_kib": 111792,
+      "descendant_rss_kib": 853408,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75312,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 73.36665145900042,
+      "driver_rss_kib": 111888,
+      "descendant_rss_kib": 853376,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75344,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 83.80521970900008,
+      "driver_rss_kib": 112000,
+      "descendant_rss_kib": 853968,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75392,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 94.27281879200018,
+      "driver_rss_kib": 112128,
+      "descendant_rss_kib": 856704,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75424,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 104.7585128339997,
+      "driver_rss_kib": 112240,
+      "descendant_rss_kib": 854608,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75456,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 115.24035645899858,
+      "driver_rss_kib": 112240,
+      "descendant_rss_kib": 853664,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75456,
+      "active": 0,
+      "waiting": 0,
+      "inflight": 0,
+      "requests": 0,
+      "deployments": 2
+    },
+    {
+      "elapsed_s": 120.04829008399975,
+      "driver_rss_kib": 112272,
+      "descendant_rss_kib": 857776,
+      "descendant_processes": 12,
+      "gcs_rss_kib": 75456
+    }
+  ],
+  "limitations": [
+    "RSS sums shared pages and includes benchmark bookkeeping",
+    "Ray ObjectRef totals and object-store usage not measured",
+    "No HTTP/LLM/GPU traffic; CPU tasks and asyncio delay only",
+    "A short soak does not establish long-term leak freedom"
+  ],
+  "environment": {
+    "python": "3.11.16",
+    "ray": "2.58.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "logical_cpus": 2,
+    "object_store_bytes": 268435456
+  },
+  "configuration": {
+    "seconds": 120.0,
+    "concurrency": 8,
+    "sample_s": 10.0,
+    "warmup_batches": 100,
+    "task_events_report_interval_ms": "0",
+    "benchmark_sha256": "7f3dc0ca799f6eba32db1ced24cfb04490e22273a19e3c80af71c668292b1511"
+  }
+}

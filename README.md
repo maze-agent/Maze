@@ -107,7 +107,18 @@ python -m maze invoke <deployment_id> --input examples/chat_input.json
 python -m ruff check .
 python -m build --wheel --no-isolation
 python -m benchmarks.arithmetic --samples 20
+python -m benchmarks.soak --seconds 300 --concurrency 8 --output /tmp/maze-soak.json
 ```
+
+持续压测先预热，混合 CPU/异步成功调用、主动取消和 deadline，并周期性卸载重建 Actor。
+每批验证请求计数归零，记录进程 RSS 趋势与分组延迟；报告只写入显式指定的 output 文件。
+RSS 包含共享页和压测工具自身记录，不能直接等同于泄漏量；该用例不覆盖 HTTP/LLM 流量。
+报告另记录 GCS RSS、压测脚本摘要和实际任务事件配置，便于对照。
+Ray 2.58.0 的诊断实验可以在单次命令前设置
+`RAY_task_events_report_interval_ms=0` 关闭任务事件记录；这会减少任务状态诊断信息，
+只用于独立压测对照，不是本项目的默认运行配置。
+保留事件并限制缓存的对照可使用 `--task-event-capacity 1000`；该参数仅用于压测，
+通过固定 Ray 版本的测试配置接口传递。更小的上限会缩短可查询的任务事件历史。
 
 [开发进度](docs/v2/IMPLEMENTATION_STATUS.md)与[测试报告](docs/v2/TEST_REPORT.md)
 列出实际验证和剩余缺口，不能将 mock、本机或导入 smoke 当作 GPU/多机验收。

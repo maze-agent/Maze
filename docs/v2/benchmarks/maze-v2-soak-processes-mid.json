@@ -1,0 +1,62 @@
+[
+  {
+    "pid": 14917,
+    "rss_kib": 117888,
+    "name": "python"
+  },
+  {
+    "pid": 14921,
+    "rss_kib": 8976,
+    "name": "python"
+  },
+  {
+    "pid": 14922,
+    "rss_kib": 196672,
+    "name": "gcs_server"
+  },
+  {
+    "pid": 14923,
+    "rss_kib": 83200,
+    "name": "python"
+  },
+  {
+    "pid": 14924,
+    "rss_kib": 92832,
+    "name": "python"
+  },
+  {
+    "pid": 14935,
+    "rss_kib": 82240,
+    "name": "python"
+  },
+  {
+    "pid": 14936,
+    "rss_kib": 27504,
+    "name": "raylet"
+  },
+  {
+    "pid": 14937,
+    "rss_kib": 91920,
+    "name": "ray::DashboardAgent"
+  },
+  {
+    "pid": 14938,
+    "rss_kib": 89024,
+    "name": "ray::RuntimeEnvAgent"
+  },
+  {
+    "pid": 14946,
+    "rss_kib": 102384,
+    "name": "ray::IDLE"
+  },
+  {
+    "pid": 14947,
+    "rss_kib": 102448,
+    "name": "ray::IDLE"
+  },
+  {
+    "pid": 15084,
+    "rss_kib": 102160,
+    "name": "ray::_AsyncNode"
+  }
+]
