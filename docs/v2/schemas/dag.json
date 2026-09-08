@@ -154,6 +154,9 @@
           },
           "title": "Outputs",
           "type": "object"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy"
         }
       },
       "required": [
@@ -220,6 +223,30 @@
         }
       },
       "title": "Resources",
+      "type": "object"
+    },
+    "RetryPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "pure": {
+          "default": false,
+          "title": "Pure",
+          "type": "boolean"
+        },
+        "max_retries": {
+          "default": 0,
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "retry_exceptions": {
+          "default": false,
+          "title": "Retry Exceptions",
+          "type": "boolean"
+        }
+      },
+      "title": "RetryPolicy",
       "type": "object"
     }
   },

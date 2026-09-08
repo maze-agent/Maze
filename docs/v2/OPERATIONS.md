@@ -10,8 +10,10 @@ API 由单个 Uvicorn worker 提供，不支持多 worker 或控制面 HA。
 部署生成新的 ID，验证并复制协议、编译图，进行 worker 代码反序列化探测、
 准备专属 Async Actor 后才 ready。探测不证明代码在所有未来节点都可运行。
 输入、代码与资源不能在 invoke 中修改；变更需要新建部署。
+准备任务归部署所有；准备期间卸载会先取消并等待准备清理，避免提前移除或错误 ready。
 
 卸载先进入 draining，拒绝新调用并唤醒等待请求，在有限时间内等待或取消在途工作。
+并发卸载共享同一清理任务；Engine 停止会尝试清理所有部署，再报告失败。
 停止 Engine 后不会继续接纳新部署/调用。不能确认清理完成时返回 503/incomplete，
 保留部署和容量记录，不伪报卸载完成。重复删除已移除 ID 返回 404。
 
@@ -30,6 +32,18 @@ HTTP 断开、主动 cancel、deadline 和卸载都会取消本次引用清单�
 
 没有业务历史查询或持久化幂等性。活动 ID 冲突返回 409，完成后复用不保证去重。
 默认业务重试为 0，不提供 exactly-once。用户函数自行负责外部副作用的幂等性。
+只有显式声明为纯计算的普通 Task 可配置 `retry`，最多重试 3 次：
+
+```yaml
+retry:
+  pure: true
+  max_retries: 2
+  retry_exceptions: true
+```
+
+重试交给 Ray；Maze 不套第二层重试循环。`retry_exceptions` 默认为 false，
+只设置 max_retries 不会自动重试业务异常。Async Actor 不支持此重试配置。
+重复取消不会中断已启动的有界清理；SIGTERM 的 HTTP 请求等待也受 shutdown grace 限制。
 
 ## HTTP
 
@@ -48,10 +62,12 @@ HTTP 断开、主动 cancel、deadline 和卸载都会取消本次引用清单�
 | POST | `/v1/stop` | drain 并停止前台 Engine |
 
 输出：`{invocation_id, deployment_id, status, output, metrics?}`。
-错误：`{error: {code, message, cleanup}}`。422 无效协议/输入，404 不存在，
+错误：`{error: {code, message, cleanup, invocation_id, deployment_id, node_id, retryable}}`。
+无法确定的标识为 null；已注册调用的错误带调用和部署 ID，包装器错误还带节点 ID。
+retryable 仅为提示，不代表已重试。422 无效协议/输入，404 不存在，
 409 ID 冲突/取消，413 输入过大，429 队列满，503 未就绪/清理未完成，
 504 deadline，500 节点或结果错误。默认 HTTP 错误不返回原始输入或 traceback。
-错误标识、cause 和 retryable 的完整文档契约仍待补齐。
+HTTP 默认不公开原始 cause；Python/Ray 异常链保留原因供本机排查。
 
 ## 指标与类型
 
@@ -62,9 +78,11 @@ HTTP 断开、主动 cancel、deadline 和卸载都会取消本次引用清单�
 没有 State API 请求，因而监控不可用不会阻断基础结果。
 
 Port 支持 any、number、integer、string、boolean、array、object、null；
-当前验证图输入和最终输出顶层类型、边声明兼容，不验证任意内部 Python 对象。
+验证图输入、节点输入/输出和最终输出的已声明顶层类型及边声明兼容。
+声明为 number/integer 的端口不接受 bool，数值拒绝 NaN/Infinity。
+any 仍用于 Ray 可序列化的任意内部对象，不声称能证明任意 Python 类型。
 JSON/YAML 拒绝未知字段、重复 key、YAML alias、非 JSON 常量和过深配置。
-完整端口边界约束、每个远端输出值验证仍待补齐。
+嵌套 schema、数值范围、数组长度等完整端口边界约束仍待补齐。
 
 ## 环境和剩余能力
 

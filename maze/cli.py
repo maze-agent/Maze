@@ -47,7 +47,13 @@ def start(config: EngineConfig) -> None:
             app = create_app(
                 engine, token, stop=lambda: setattr(server, "should_exit", True)
             )
-            server = uvicorn.Server(uvicorn.Config(app, access_log=False))
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app,
+                    access_log=False,
+                    timeout_graceful_shutdown=config.timeouts.shutdown_grace_s,
+                )
+            )
             try:
                 await server.serve(sockets=[listener])
             finally:

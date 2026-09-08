@@ -1,7 +1,7 @@
 """The graph is data. Compilation validates it and fixes submission order."""
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from graphlib import CycleError, TopologicalSorter
 from inspect import iscoroutinefunction, signature
 from math import isfinite
@@ -11,6 +11,7 @@ from typing import Literal as Choice
 # Values between arbitrary user functions may be any Ray-serializable object.
 Values: TypeAlias = Mapping[str, Any]
 Function: TypeAlias = Callable[..., Values | Awaitable[Values]]
+Check: TypeAlias = Callable[[Any], None]
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,11 @@ class Node:
     execution: Choice["task", "async_actor"] = "task"
     max_concurrency: int = 8
     memory_bytes: int | None = None
+    input_checks: Mapping[str, Check] = field(default_factory=dict)
+    output_checks: Mapping[str, Check] = field(default_factory=dict)
+    pure: bool = False
+    max_retries: int = 0
+    retry_exceptions: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,10 @@ class Step:
     execution: Choice["task", "async_actor"]
     max_concurrency: int
     memory_bytes: int | None
+    input_checks: tuple[tuple[str, Check], ...]
+    output_checks: tuple[tuple[str, Check], ...]
+    max_retries: int
+    retry_exceptions: bool
 
 
 @dataclass(frozen=True)
@@ -97,6 +107,13 @@ def compile(dag: DAG) -> Plan:
             raise ValueError(f"Invalid resources: {node.id}")
         if node.execution not in ("task", "async_actor"):
             raise ValueError(f"Unsupported execution: {node.execution}")
+        if not 0 <= node.max_retries <= 3 or (
+            (node.max_retries or node.retry_exceptions)
+            and (not node.pure or node.execution != "task")
+        ):
+            raise ValueError("Only explicitly pure Tasks may enable up to 3 retries")
+        if node.retry_exceptions and not node.max_retries:
+            raise ValueError("Exception retries require a positive retry count")
         if not callable(node.function) or (
             iscoroutinefunction(node.function) != (node.execution == "async_actor")
         ):
@@ -146,6 +163,10 @@ def compile(dag: DAG) -> Plan:
             node.execution,
             node.max_concurrency,
             node.memory_bytes,
+            tuple(node.input_checks.items()),
+            tuple(node.output_checks.items()),
+            node.max_retries,
+            node.retry_exceptions,
         )
         for node_id in order
         for node in (nodes[node_id],)

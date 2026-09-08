@@ -2,6 +2,7 @@
 
 import json
 from importlib import import_module
+from math import isfinite
 from typing import Annotated, Any, Self
 from typing import Literal as Choice
 
@@ -36,6 +37,14 @@ class Port(Model):
         }[self.type]
         if not valid:
             raise ValueError(f"Expected port type {self.type}")
+        if isinstance(value, float) and not isfinite(value):
+            raise ValueError("Numeric port values must be finite")
+
+
+class RetryPolicy(Model):
+    pure: bool = False
+    max_retries: int = Field(default=0, ge=0, le=3)
+    retry_exceptions: bool = False
 
 
 class Resources(Model):
@@ -54,6 +63,7 @@ class NodeSpec(Model):
     inputs: dict[Name, Port] = Field(default_factory=dict)
     constants: dict[Name, Any] = Field(default_factory=dict)
     outputs: dict[Name, Port]
+    retry: RetryPolicy = Field(default_factory=RetryPolicy)
 
 
 class Endpoint(Model):
@@ -138,6 +148,11 @@ class DagSpec(Model):
                     node.execution,
                     node.max_concurrency,
                     node.resources.memory_bytes,
+                    {name: port.check for name, port in node.inputs.items()},
+                    {name: port.check for name, port in node.outputs.items()},
+                    node.retry.pure,
+                    node.retry.max_retries,
+                    node.retry.retry_exceptions,
                 )
             )
         graph = DAG(

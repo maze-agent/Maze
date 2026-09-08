@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from maze.runtime import Invocation, Runtime
+from maze.runtime import Invocation, NodeContractError, NodeExecutionError, Runtime
 from maze.spec import DagSpec, DeploymentSpec, EngineConfig, InvokeRequest
 
 
@@ -17,6 +17,9 @@ class EngineError(Exception):
     def __init__(self, code: str, status: int, message: str, cleanup: str = "complete"):
         super().__init__(message)
         self.code, self.status, self.cleanup = code, status, cleanup
+        self.invocation_id: str | None = None
+        self.deployment_id: str | None = None
+        self.node_id: str | None = None
 
 
 def check_size(value: Any, maximum: int, code: str, status: int) -> None:
@@ -39,6 +42,8 @@ class Deployment:
     runtime: Runtime
     state: str = "preparing"
     active: int = 0
+    preparation: asyncio.Task[None] | None = None
+    removal: asyncio.Task[None] | None = None
 
 
 @dataclass
@@ -79,15 +84,30 @@ class Engine:
         deployment_id = "dep_" + uuid4().hex
         deployment = Deployment(snapshot, config or DeploymentSpec(), runtime)
         self.deployments[deployment_id] = deployment
+        deployment.preparation = asyncio.create_task(
+            runtime.prepare(self.config.timeouts.deployment_s)
+        )
         try:
-            await runtime.prepare(self.config.timeouts.deployment_s)
+            await deployment.preparation
             if not self.accepting or deployment.state == "draining":
                 raise EngineError("DEPLOYMENT_NOT_READY", 503, "Deployment is draining")
             deployment.state = "ready"
-        except BaseException:
+        except BaseException as exc:
             runtime.close()
-            deployment.state = "failed"
-            raise
+            if deployment.state != "draining":
+                deployment.state = "failed"
+            if (
+                isinstance(exc, asyncio.CancelledError)
+                and deployment.state != "draining"
+            ):
+                raise
+            error = EngineError(
+                "DEPLOYMENT_NOT_READY", 503, "Deployment preparation failed"
+            )
+            error.deployment_id = deployment_id
+            raise error from exc
+        finally:
+            deployment.preparation = None
         return deployment_id
 
     def show(self, deployment_id: str) -> dict[str, Any]:
@@ -97,6 +117,10 @@ class Engine:
             "name": deployment.spec.name,
             "status": deployment.state,
             "active_invocations": deployment.active,
+            "waiting_invocations": sum(
+                self.requests[key].deployment_id == deployment_id
+                for key in self.waiting
+            ),
         }
 
     def _get(self, deployment_id: str) -> Deployment:
@@ -136,6 +160,17 @@ class Engine:
         )
 
     async def invoke(self, deployment_id: str, body: InvokeRequest) -> dict[str, Any]:
+        invocation_id = body.invocation_id or "inv_" + uuid4().hex
+        try:
+            return await self._invoke(deployment_id, body, invocation_id)
+        except EngineError as exc:
+            exc.invocation_id = invocation_id
+            exc.deployment_id = deployment_id
+            raise
+
+    async def _invoke(
+        self, deployment_id: str, body: InvokeRequest, invocation_id: str
+    ) -> dict[str, Any]:
         deployment = self._get(deployment_id)
         if not self.accepting or deployment.state != "ready":
             raise EngineError("DEPLOYMENT_NOT_READY", 503, "Deployment is not ready")
@@ -153,7 +188,6 @@ class Engine:
             raise EngineError(
                 "INPUT_INVALID", 422, "Invalid invocation inputs"
             ) from exc
-        invocation_id = body.invocation_id or "inv_" + uuid4().hex
         started = time.monotonic()
         self._reap()
         if invocation_id in self.requests:
@@ -239,12 +273,18 @@ class Engine:
         except EngineError:
             raise
         except Exception as exc:
-            raise EngineError(
-                "NODE_FAILED",
+            cause = getattr(exc, "cause", None)
+            error = EngineError(
+                "RESULT_INVALID"
+                if isinstance(cause, NodeContractError)
+                else "NODE_FAILED",
                 500,
                 "Node execution failed",
                 "complete" if request.scope.cleanup_complete else "incomplete",
-            ) from exc
+            )
+            if isinstance(cause, NodeExecutionError):
+                error.node_id = cause.node_id
+            raise error from exc
         finally:
             async with self.condition:
                 if invocation_id in self.waiting:
@@ -265,7 +305,19 @@ class Engine:
 
     async def undeploy(self, deployment_id: str) -> None:
         deployment = self._get(deployment_id)
+        if deployment.removal is None or deployment.removal.done():
+            deployment.state = "draining"
+            deployment.removal = asyncio.create_task(
+                self._undeploy(deployment_id, deployment)
+            )
+        # HTTP caller cancellation must not abandon deployment-owned cleanup.
+        await asyncio.shield(deployment.removal)
+
+    async def _undeploy(self, deployment_id: str, deployment: Deployment) -> None:
         deployment.state = "draining"
+        if deployment.preparation is not None:
+            deployment.preparation.cancel()
+            await asyncio.gather(deployment.preparation, return_exceptions=True)
         async with self.condition:
             self.condition.notify_all()
         tasks = [
@@ -293,9 +345,14 @@ class Engine:
                 "incomplete",
             )
         deployment.runtime.close()
-        del self.deployments[deployment_id]
+        self.deployments.pop(deployment_id, None)
 
     async def close(self) -> None:
         self.accepting = False
-        for key in tuple(self.deployments):
-            await self.undeploy(key)
+        results = await asyncio.gather(
+            *(self.undeploy(key) for key in tuple(self.deployments)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

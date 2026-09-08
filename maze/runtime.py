@@ -20,6 +20,31 @@ class NodeResult:
     metrics: Mapping[str, int | float] = field(default_factory=dict)
 
 
+class NodeExecutionError(RuntimeError):
+    """A single constructor argument keeps Ray exception serialization reliable."""
+
+    def __init__(self, node_id: str):
+        super().__init__(node_id)
+        self.node_id = node_id
+
+    def __str__(self) -> str:
+        return f"Node execution failed: {self.node_id}"
+
+
+class NodeContractError(NodeExecutionError):
+    pass
+
+
+def _arguments(step: Step, values: tuple) -> dict[str, Any]:
+    arguments = dict(zip((n for n, _ in step.inputs), values, strict=True))
+    try:
+        for name, check in step.input_checks:
+            check(arguments[name])
+    except (TypeError, ValueError) as exc:
+        raise NodeContractError(step.id) from exc
+    return arguments
+
+
 def _pack(
     step: Step, result: Values | NodeResult, started: float, metrics: bool
 ) -> tuple:
@@ -28,7 +53,12 @@ def _pack(
         custom = dict(result.metrics)
         result = result.outputs
     if not isinstance(result, Mapping) or set(result) != set(step.outputs):
-        raise ValueError(f"Invalid output ports for node {step.id}")
+        raise NodeContractError(step.id)
+    try:
+        for name, check in step.output_checks:
+            check(result[name])
+    except (TypeError, ValueError) as exc:
+        raise NodeContractError(step.id) from exc
     if len(custom) > 32 or any(type(v) not in (int, float) for v in custom.values()):
         raise ValueError("Custom metrics must contain at most 32 numeric fields")
     if len(json.dumps(custom, allow_nan=False).encode()) > 4096:
@@ -46,10 +76,13 @@ def _pack(
 @ray.remote
 def _execute(step: Step, metrics: bool, *values: Any) -> tuple:
     started = time.perf_counter()
-    result = step.function(
-        **dict(zip((n for n, _ in step.inputs), values, strict=True))
-    )
-    return _pack(step, result, started, metrics)
+    try:
+        result = step.function(**_arguments(step, values))
+        return _pack(step, result, started, metrics)
+    except NodeExecutionError:
+        raise
+    except Exception as exc:
+        raise NodeExecutionError(step.id) from exc
 
 
 @ray.remote(num_cpus=0, max_retries=0)
@@ -68,10 +101,13 @@ class _AsyncNode:
 
     async def execute(self, metrics: bool, *values: Any) -> tuple:
         started = time.perf_counter()
-        result = await self.step.function(
-            **dict(zip((n for n, _ in self.step.inputs), values, strict=True))
-        )
-        return _pack(self.step, result, started, metrics)
+        try:
+            result = await self.step.function(**_arguments(self.step, values))
+            return _pack(self.step, result, started, metrics)
+        except NodeExecutionError:
+            raise
+        except Exception as exc:
+            raise NodeExecutionError(self.step.id) from exc
 
 
 @dataclass
@@ -92,6 +128,16 @@ class Invocation:
 
     async def cleanup(self, grace_s: float) -> None:
         self.cleanup_complete = False
+        task = asyncio.create_task(self._cleanup(grace_s))
+        # A second cancellation must not cut short the bounded remote cleanup.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+
+    async def _cleanup(self, grace_s: float) -> None:
         # Future cancellation only stops waiting; explicitly cancel every remote call.
         for future in self.futures:
             future.cancel()
@@ -212,8 +258,8 @@ class Runtime:
                             num_cpus=step.num_cpus,
                             num_gpus=step.num_gpus,
                             num_returns=len(step.outputs) + 1,
-                            max_retries=0,
-                            retry_exceptions=False,
+                            max_retries=step.max_retries,
+                            retry_exceptions=step.retry_exceptions,
                             **(
                                 {"memory": step.memory_bytes}
                                 if step.memory_bytes

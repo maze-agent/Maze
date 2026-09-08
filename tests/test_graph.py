@@ -6,6 +6,19 @@ from examples.arithmetic import dag, double
 from maze import DAG, Input, Literal, Node, Output, compile
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"max_retries": 1},
+        {"pure": True, "max_retries": 4},
+        {"pure": True, "retry_exceptions": True},
+    ],
+)
+def test_invalid_retry_policies(changes: dict) -> None:
+    with pytest.raises(ValueError, match="retr"):
+        compile(replace(dag, nodes=(replace(dag.nodes[0], **changes), *dag.nodes[1:])))
+
+
 def test_compile_orders_dependencies_and_snapshots_bindings() -> None:
     bindings = {"x": Input("x")}
     graph = replace(

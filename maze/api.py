@@ -10,6 +10,8 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from maze.engine import Engine, EngineError
 from maze.spec import DagSpec, DeploymentSpec, InvokeRequest, Model, parse_document
@@ -20,10 +22,30 @@ class DeployRequest(Model):
     deployment: DeploymentSpec = DeploymentSpec()
 
 
+class TokenAuth:
+    """Authenticate without wrapping ASGI receive or consuming disconnect events."""
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and not hmac.compare_digest(
+            Headers(scope=scope).get("authorization", "").encode(), self.expected
+        ):
+            response = JSONResponse(
+                status_code=401, content={"error": {"code": "UNAUTHORIZED"}}
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def create_app(
     engine: Engine, token: str, stop: Callable[[], None] | None = None
 ) -> FastAPI:
     app = FastAPI(title="Maze v2", version="2.0.0.dev0")
+    app.add_middleware(TokenAuth, token=token)
 
     @app.exception_handler(EngineError)
     async def engine_error(request: Request, exc: EngineError) -> JSONResponse:
@@ -34,19 +56,14 @@ def create_app(
                     "code": exc.code,
                     "message": str(exc),
                     "cleanup": exc.cleanup,
+                    "invocation_id": exc.invocation_id,
+                    "deployment_id": exc.deployment_id,
+                    "node_id": exc.node_id,
+                    "retryable": exc.code
+                    in ("OVERLOADED", "DEPLOYMENT_NOT_READY", "ENGINE_UNAVAILABLE"),
                 }
             },
         )
-
-    @app.middleware("http")
-    async def authenticate(request: Request, call_next: Callable) -> Any:
-        if not hmac.compare_digest(
-            request.headers.get("authorization", ""), f"Bearer {token}"
-        ):
-            return JSONResponse(
-                status_code=401, content={"error": {"code": "UNAUTHORIZED"}}
-            )
-        return await call_next(request)
 
     async def body(request: Request, model: type[Model]) -> Any:
         maximum = engine.config.limits.max_input_bytes + 65536
@@ -97,13 +114,15 @@ def create_app(
         try:
             while not task.done():
                 if await request.is_disconnected():
-                    task.cancel()
+                    if not task.cancelling():
+                        task.cancel()
                     break
                 await asyncio.wait({task}, timeout=0.05)
             return await task
         finally:
             if not task.done():
-                task.cancel()
+                if not task.cancelling():
+                    task.cancel()
                 with suppress(EngineError, asyncio.CancelledError):
                     await task
 
