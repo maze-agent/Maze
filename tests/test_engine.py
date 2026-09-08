@@ -202,3 +202,26 @@ def test_repeated_calls_release_state_and_deployments_are_isolated() -> None:
             await engine.close()
 
     asyncio.run(scenario())
+
+
+def test_python_deployment_revalidates_and_owns_its_snapshot() -> None:
+    async def scenario() -> None:
+        engine = Engine()
+        spec = arithmetic_spec()
+        invalid = spec.model_copy(update={"schema_version": "maze.dag/v999"})
+        try:
+            with pytest.raises(EngineError) as error:
+                await engine.deploy(invalid)
+            assert error.value.code == "DAG_INVALID"
+            assert not engine.deployments
+            key = await engine.deploy(spec)
+            spec.inputs.clear()
+            spec.nodes[0].inputs.clear()
+            spec.outputs.clear()
+            assert (await engine.invoke(key, InvokeRequest(input={"x": 3})))[
+                "output"
+            ] == {"result": 10}
+        finally:
+            await engine.close()
+
+    asyncio.run(scenario())

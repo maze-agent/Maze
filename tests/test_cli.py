@@ -10,8 +10,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from examples.arithmetic import spec as python_spec
+from maze.client import MazeClient
+from maze.spec import InvokeRequest
 from tests.test_engine import delay_spec
-from tests.test_spec import arithmetic_spec
 
 
 def send_invocation(port: int, key: str, invocation_id: str) -> socket.socket:
@@ -87,21 +89,13 @@ def test_managed_local_cli_starts_and_stops_owned_process(
                         pass
                     assert time.monotonic() < deadline, log.read_text()
                     time.sleep(0.1)
-                deployed = client.post(
-                    "/v1/deployments",
-                    json={
-                        "dag": arithmetic_spec().model_dump(
-                            by_alias=True, exclude_unset=True
-                        )
-                    },
-                )
-                assert deployed.status_code == 200, deployed.text
-                key = deployed.json()["deployment_id"]
-                result = client.post(
-                    f"/v1/deployments/{key}/invoke", json={"input": {"x": 3}}
-                )
-                assert result.status_code == 200, result.text
-                assert result.json()["output"] == {"result": 10}
+                with MazeClient(
+                    f"http://127.0.0.1:{port}", "temporary-test-token"
+                ) as sdk:
+                    key = sdk.deploy(python_spec)["deployment_id"]
+                    result = sdk.invoke(key, InvokeRequest(input={"x": 3}))
+                    assert result["output"] == {"result": 10}
+                    assert sdk.undeploy(key) == {"status": "removed"}
                 delayed = client.post(
                     "/v1/deployments",
                     json={

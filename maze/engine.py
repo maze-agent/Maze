@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from maze.runtime import Invocation, NodeContractError, NodeExecutionError, Runtime
-from maze.spec import DagSpec, DeploymentSpec, EngineConfig, InvokeRequest
+from maze.spec import DagSpec, DeploymentSpec, EngineConfig, InvokeRequest, check_json
 
 
 class EngineError(Exception):
@@ -24,6 +24,7 @@ class EngineError(Exception):
 
 def check_size(value: Any, maximum: int, code: str, status: int) -> None:
     try:
+        check_json(value)
         size = len(json.dumps(value, allow_nan=False).encode())
     except (TypeError, ValueError, RecursionError) as exc:
         raise EngineError(
@@ -77,7 +78,9 @@ class Engine:
         ):
             raise EngineError("DAG_INVALID", 422, "DAG exceeds node budget")
         try:
-            snapshot = spec.model_copy(deep=True)
+            snapshot = DagSpec.model_validate(
+                spec.model_dump(by_alias=True)
+            ).model_copy(deep=True)
             runtime = Runtime(snapshot.to_dag())
         except (ValueError, TypeError, ImportError, AttributeError) as exc:
             raise EngineError("DAG_INVALID", 422, "Invalid DAG or callable") from exc

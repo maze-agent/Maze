@@ -54,9 +54,29 @@ Maze 启动和关闭自己的 Ray 实例；发现已有 Ray 进程时拒绝 mana
 入口只等待最终输出与小型完成信号，不转发中间业务结果。
 默认业务任务不重试。异步节点的 Actor 在部署内复用，取消单次调用不杀共享 Actor。
 
-Python 的简便图定义见 `examples/arithmetic.py`；标准协议见
-`examples/arithmetic.yaml`。目前简便 Python API 的校验范围小于正式协议，
-需要部署管理时请使用 `DagSpec` / Engine。
+Python 图定义见 `examples/arithmetic.py`，直接构建与
+`examples/arithmetic.yaml` 相同的 `DagSpec`；运行示例使用 Engine 部署与调用。
+底层 `DAG` / `Runtime` 保留为执行接口，正式部署使用标准模型。
+默认值、常量和输入采用受限 JSON；内部节点间仍可以传递 Ray 支持的对象。
+
+Python 客户端连接已经启动的 Engine：
+
+```python
+import os
+from examples.arithmetic import spec
+from maze.client import MazeClient
+from maze.spec import InvokeRequest
+
+with MazeClient("http://127.0.0.1:8000", os.environ["MAZE_API_TOKEN"]) as client:
+    deployment_id = client.deploy(spec)["deployment_id"]
+    try:
+        print(client.invoke(deployment_id, InvokeRequest(input={"x": 3}))["output"])
+    finally:
+        client.undeploy(deployment_id)
+```
+
+`spec.document()` 导出标准 JSON 字典，保留显式 `null` 与未声明默认值的区别。
+Engine 部署时重新校验并复制模型；之后修改调用方的字典不会改变已部署的图。
 
 ## 依赖与验证
 

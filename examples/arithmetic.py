@@ -1,36 +1,78 @@
-"""Run with: python -m examples.arithmetic"""
+"""Python builds the same versioned model as examples/arithmetic.yaml."""
+
+import asyncio
 
 import ray
 
-from maze import DAG, Input, Node, Output, Runtime
+from maze.engine import Engine
+from maze.spec import (
+    DagSpec,
+    Edge,
+    Endpoint,
+    FinalOutput,
+    GraphInput,
+    InvokeRequest,
+    NodeSpec,
+    Port,
+)
+from maze_examples.arithmetic import double, merge, offset  # noqa: F401
 
-
-def double(x: int) -> dict[str, int]:
-    return {"value": 2 * x}
-
-
-def offset(x: int) -> dict[str, int]:
-    return {"value": x + 1}
-
-
-def merge(a: int, b: int) -> dict[str, int]:
-    return {"total": a + b}
-
-
-dag = DAG(
-    inputs=("x",),
+spec = DagSpec(
+    schema_version="maze.dag/v1",
+    name="arithmetic",
+    inputs={"x": Port(type="number")},
     nodes=(
-        Node("double", double, {"x": Input("x")}),
-        Node("offset", offset, {"x": Input("x")}),
-        Node(
-            "merge",
-            merge,
-            {"a": Output("double"), "b": Output("offset")},
-            outputs=("total",),
+        NodeSpec(
+            id="double",
+            callable="maze_examples.arithmetic:double",
+            inputs={"x": Port(type="number")},
+            outputs={"value": Port(type="number")},
+        ),
+        NodeSpec(
+            id="offset",
+            callable="maze_examples.arithmetic:offset",
+            inputs={"x": Port(type="number")},
+            outputs={"value": Port(type="number")},
+        ),
+        NodeSpec(
+            id="merge",
+            callable="maze_examples.arithmetic:merge",
+            inputs={"a": Port(type="number"), "b": Port(type="number")},
+            outputs={"total": Port(type="number")},
         ),
     ),
-    outputs={"result": Output("merge", "total")},
+    edges=(
+        Edge(source=GraphInput(input="x"), to=Endpoint(node="double", port="x")),
+        Edge(source=GraphInput(input="x"), to=Endpoint(node="offset", port="x")),
+        Edge(
+            source=Endpoint(node="double", port="value"),
+            to=Endpoint(node="merge", port="a"),
+        ),
+        Edge(
+            source=Endpoint(node="offset", port="value"),
+            to=Endpoint(node="merge", port="b"),
+        ),
+    ),
+    outputs={
+        "result": FinalOutput(
+            source=Endpoint(node="merge", port="total"), type="number"
+        )
+    },
 )
+
+# Low-level Runtime examples/tests reuse the graph compiled from this model.
+dag = spec.to_dag()
+
+
+async def main() -> None:
+    engine = Engine()
+    try:
+        key = await engine.deploy(spec)
+        for x in (3, 7):
+            result = await engine.invoke(key, InvokeRequest(input={"x": x}))
+            print(result["output"])
+    finally:
+        await engine.close()
 
 
 if __name__ == "__main__":
@@ -41,8 +83,6 @@ if __name__ == "__main__":
         include_dashboard=False,
     )
     try:
-        runtime = Runtime(dag)
-        print(runtime.invoke({"x": 3}))  # {'result': 10}
-        print(runtime.invoke({"x": 7}))  # {'result': 22}
+        asyncio.run(main())
     finally:
         ray.shutdown()

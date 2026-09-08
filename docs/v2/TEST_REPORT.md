@@ -6,13 +6,14 @@
 
 ## 实际执行
 
-- 最新 `python -m pytest -q`：**44 passed in 26.88s**，退出码 0。
+- 最新 `python -m pytest -q`：**62 passed in 27.88s**，退出码 0。
 - Ruff 检查与格式化通过。
+- `python -m examples.arithmetic`：通过 Engine 部署调用，输出 `{'result': 10}`、`{'result': 22}`，退出码 0。
 - `python -m build --wheel --no-isolation`：成功生成开发版 wheel。
 - 上一检查点 wheel 安装到 `/private/tmp/maze-wheel-j1sc4bcx`，在源码目录外以同一环境
   `python -I` 导入通过；未启动 Ray，未导入 Torch/vLLM/Transformers。
   这是 wheel 路径隔离 smoke，**不是另建干净环境的完整安装验收**。
-- 新增 Linux CI 工作流尚未推送或远程执行。
+- Linux CI 工作流已随之前提交推送；尚未核查远程执行结果。
 
 真实集成覆盖：Task 多进程并行、并行汇合、多端口映射、多请求结果隔离、
 上游失败不执行下游、8 MiB 中间对象不在入口反序列化、Async Actor 取消隔离、
@@ -29,13 +30,17 @@ ASGI receive 后，相同 TCP 测试通过。SIGTERM 在当前 Ray 环境可能�
 测试同时验证清理与进程退出，避免只用退出码推断清理成功。
 确定性生命周期竞态和部分提交故障使用局部故障注入，其余执行依赖真实 Ray。
 
+协议迭代增加 Python / YAML 模型等价、最终输出类型冲突、默认值与常量验证、
+非 JSON 数据拒绝、显式 null 的序列化语义、可变默认值隔离、部署快照隔离。
+真实前台 CLI 的 arithmetic 部署/调用/卸载现在通过类型化 `MazeClient` 完成。
+
 ## 原文档矩阵对照
 
 “部分”表示已有对应证据，但尚未覆盖该条完整验收。
 
 | 编号 | 状态与证据/缺口 |
 |---|---|
-| T01 | 部分：版本、资源、绑定、循环验证；全协议矩阵未齐 |
+| T01 | 部分：版本、资源、绑定、循环、默认值、最终输出类型和 Python/YAML 等价验证；含 LLM 的全协议矩阵未齐 |
 | T02–T03 | 通过：arithmetic 与真实双 worker 会合测试 |
 | T04 | 部分：顶层引用通过；复杂嵌套参数场景未全覆盖 |
 | T05 | 通过当前用例：多端口与大对象不回流分别实测 |

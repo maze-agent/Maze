@@ -1,13 +1,20 @@
 """Versioned JSON/YAML contracts. All frontends lower to the same Python graph."""
 
-import json
+from copy import deepcopy
 from importlib import import_module
 from math import isfinite
 from typing import Annotated, Any, Self
 from typing import Literal as Choice
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from maze.graph import DAG, Input, Literal, Node, Output, compile
 
@@ -17,12 +24,54 @@ Name = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")]
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
 
+    def document(self) -> dict[str, Any]:
+        """Wire representation preserving omitted defaults versus explicit null."""
+        return self.model_dump(mode="json", by_alias=True)
+
+
+def check_json(value: Any, depth: int = 0) -> None:
+    """Validate the shared JSON boundary without coercing Python objects or keys."""
+    if depth > 32:
+        raise ValueError("JSON data too deeply nested")
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("JSON object keys must be strings")
+            check_json(item, depth + 1)
+    elif type(value) is list:
+        for item in value:
+            check_json(item, depth + 1)
+    elif type(value) not in (str, int, float, bool, type(None)):
+        raise ValueError("Expected JSON data")
+    elif type(value) is float and not isfinite(value):
+        raise ValueError("JSON numbers must be finite")
+
+
+def check_types(source: str, target: str) -> None:
+    if source != target and "any" not in (source, target):
+        if (source, target) != ("integer", "number"):
+            raise ValueError("Incompatible port types")
+
 
 class Port(Model):
     type: Choice[
         "any", "number", "integer", "string", "boolean", "array", "object", "null"
     ] = "any"
     default: Any = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result = handler(self)
+        if "default" not in self.model_fields_set:
+            result.pop("default", None)
+        return result
+
+    @model_validator(mode="after")
+    def check_default(self) -> Self:
+        if "default" in self.model_fields_set:
+            check_json(self.default)
+            self.check(self.default)
+        return self
 
     def check(self, value: Any) -> None:
         valid = {
@@ -65,6 +114,11 @@ class NodeSpec(Model):
     outputs: dict[Name, Port]
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
 
+    @model_validator(mode="after")
+    def check_constants(self) -> Self:
+        check_json(self.constants)
+        return self
+
 
 class Endpoint(Model):
     node: Name
@@ -94,6 +148,15 @@ class DagSpec(Model):
 
     def to_dag(self) -> DAG:
         nodes = {node.id: node for node in self.nodes}
+        if len(nodes) != len(self.nodes):
+            raise ValueError("Duplicate node IDs")
+        for port in self.inputs.values():
+            port.check_default()
+        for port in self.outputs.values():
+            parent = nodes.get(port.source.node)
+            if parent is None or port.source.port not in parent.outputs:
+                raise ValueError("Unknown final output")
+            check_types(parent.outputs[port.source.port].type, port.type)
         bindings: dict[str, dict[str, Input | Output | Literal]] = {
             node.id: {} for node in self.nodes
         }
@@ -115,16 +178,17 @@ class DagSpec(Model):
                 source_type = parent.outputs[edge.source.port].type
                 source = Output(edge.source.node, edge.source.port)
             target_type = nodes[target.node].inputs[target.port].type
-            if source_type != target_type and "any" not in (source_type, target_type):
-                if (source_type, target_type) != ("integer", "number"):
-                    raise ValueError("Incompatible edge types")
+            check_types(source_type, target_type)
             bindings[target.node][target.port] = source
         result = []
         for node in self.nodes:
             current = bindings[node.id]
+            for port in (*node.inputs.values(), *node.outputs.values()):
+                port.check_default()
             for name, value in node.constants.items():
                 if name not in node.inputs or name in current:
                     raise ValueError("Invalid constant binding")
+                check_json(value)
                 node.inputs[name].check(value)
                 current[name] = Literal(value)
             for name, port in node.inputs.items():
@@ -172,7 +236,7 @@ class DagSpec(Model):
             raise ValueError("Unknown invocation inputs")
         for name, port in self.inputs.items():
             if name not in result and "default" in port.model_fields_set:
-                result[name] = port.default
+                result[name] = deepcopy(port.default)
             if name not in result:
                 raise ValueError(f"Missing invocation input: {name}")
             port.check(result[name])
@@ -241,6 +305,11 @@ class InvokeRequest(Model):
     timeout_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     metrics: Choice["none", "basic", "detailed"] = "basic"
 
+    @model_validator(mode="after")
+    def check_input(self) -> Self:
+        check_json(self.input)
+        return self
+
 
 def parse_document(text: str, max_bytes: int = 1048576) -> Any:
     """Reject duplicate keys, YAML aliases and excessive nesting before construction."""
@@ -262,11 +331,13 @@ def parse_document(text: str, max_bytes: int = 1048576) -> Any:
             result = {}
             for key_node, value_node in node.value:
                 key = self.construct_object(key_node, deep=deep)
+                if type(key) is not str:
+                    raise ValueError("JSON object keys must be strings")
                 if key in result:
                     raise ValueError("Duplicate document key")
                 result[key] = self.construct_object(value_node, deep=deep)
             return result
 
     data = yaml.load(text, Loader=Loader)
-    json.dumps(data, allow_nan=False)  # JSON-compatible configuration only.
+    check_json(data)
     return data

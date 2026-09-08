@@ -2,6 +2,18 @@
 
 ## 当前状态：按完整文档范围推进
 
+### Python / JSON / YAML 协议统一（基线 `630f5f6`）
+
+Python arithmetic 示例直接构建 `DagSpec`，与 YAML 模型等价，并通过 Engine 执行。
+客户端新增类型化 deploy / invoke / undeploy；`document()` 输出统一协议，保留
+未声明默认值与显式 null 的区别，不遗漏默认容器字段的修改。
+部署前检查默认值、最终输出类型、重复节点和 JSON 常量；Engine 重新校验模型并复制，
+避免 Python `model_copy` 绕过协议以及调用方后续修改污染已有部署。
+JSON 边界拒绝非字符串键、元组、非有限数值和过深嵌套；内部 Ray 对象传递不受此限制。
+新增协议回归、默认值隔离、部署快照隔离，真实 CLI 测试使用类型化客户端。
+本轮仍仅使用原 Conda 环境，未新增依赖，未提交或推送。
+最终验证：**62 passed in 27.88s**；Ruff、wheel 构建通过，导出的 JSON Schema / OpenAPI 与现有文件一致。
+
 ### 后续本机可靠性迭代（基线 `74bcc61`）
 
 修复部署准备/卸载竞态、并发卸载、单个清理失败阻断 Engine 后续清理的问题。
@@ -15,7 +27,7 @@ Uvicorn 增加有界优雅停止，覆盖在途请求时 API stop 和 SIGTERM，
 新增 `tests/test_reliability.py`：部分提交故障、输出与异常序列化故障、有限重试、
 重复取消、准备/卸载竞态、清理失败隔离、JSON 大小与 drain 用例。
 生命周期钩子的人工故障注入用于确定性重现竞态；Task/Actor 和序列化路径使用真实 Ray。
-此次没有新增依赖、没有改其他环境或分支，没有提交或推送。
+此次没有新增依赖、没有改其他环境或分支；后续已提交并推送为 `630f5f6`。
 最终验证：`python -m pytest -q` 为 **44 passed in 26.88s**；Ruff 和 wheel 构建通过。
 
 用户已确认以完整实施计划为目标，同时继续使用 Python、类型标注和直接易读的代码。
@@ -38,7 +50,7 @@ drain，以及单状态所有者的 HTTP API、客户端、前台 managed-local 
 | 阶段 | 状态 |
 |---|---|
 | P0 | 部分：本机版本/依赖/测试/CI 基础已有；Linux 与 GPU 兼容组合待实测 |
-| P1 | 部分：CPU 协议、schema、绑定/类型验证已有；ServiceSpec、完整边界及 Python builder 统一待补 |
+| P1 | 部分：CPU 协议、schema、Python 模型构建及绑定/类型验证已有；ServiceSpec、完整边界待补 |
 | P2 | 部分：真实 Ray 数据流/多端口/完成信号已有；完整失败/序列化/重试矩阵待补 |
 | P3 | 部分：本地 API/CLI/SDK 与 admission/deadline/drain 闭环已有；错误契约和故障边界待完善 |
 | P4 | 部分：Async Actor 已验证；LLM 服务、连接池、usage 尚未实现 |

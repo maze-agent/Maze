@@ -257,7 +257,10 @@ def test_result_size_and_json_limits() -> None:
                 await engine.invoke(key, InvokeRequest(input={"x": "a" * 30}))
             assert error.value.code == "RESULT_TOO_LARGE"
             with pytest.raises(EngineError) as error:
-                await engine.invoke(key, InvokeRequest(input={"x": float("nan")}))
+                # Engine also guards SDK callers that bypass model validation.
+                await engine.invoke(
+                    key, InvokeRequest.model_construct(input={"x": float("nan")})
+                )
             assert error.value.code == "INPUT_INVALID"
             assert not engine.requests and engine.active == 0
         finally:
