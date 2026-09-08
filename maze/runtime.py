@@ -11,13 +11,23 @@ from typing import Literal as Choice
 
 import ray
 
-from maze.graph import DAG, Input, Literal, Output, Step, Values, compile
+from maze.graph import (
+    DAG,
+    AsyncOperation,
+    Input,
+    Literal,
+    Output,
+    Step,
+    Values,
+    compile,
+)
 
 
 @dataclass(frozen=True)
 class NodeResult:
     outputs: Values
     metrics: Mapping[str, int | float] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class NodeExecutionError(RuntimeError):
@@ -49,8 +59,10 @@ def _pack(
     step: Step, result: Values | NodeResult, started: float, metrics: bool
 ) -> tuple:
     custom = {}
+    metadata = {}
     if isinstance(result, NodeResult):
         custom = dict(result.metrics)
+        metadata = dict(result.metadata)
         result = result.outputs
     if not isinstance(result, Mapping) or set(result) != set(step.outputs):
         raise NodeContractError(step.id)
@@ -63,6 +75,8 @@ def _pack(
         raise ValueError("Custom metrics must contain at most 32 numeric fields")
     if len(json.dumps(custom, allow_nan=False).encode()) > 4096:
         raise ValueError("Custom metrics too large")
+    if len(json.dumps(metadata, allow_nan=False).encode()) > 4096:
+        raise ValueError("Node metadata too large")
     signal = {"node": step.id}
     if metrics:
         signal.update(
@@ -70,6 +84,8 @@ def _pack(
             source="node_wrapper",
             custom=custom,
         )
+        if metadata:
+            signal["metadata"] = metadata
     return (*(result[name] for name in step.outputs), signal)
 
 
@@ -97,7 +113,13 @@ class _AsyncNode:
         self.step = step
 
     async def ready(self) -> bool:
+        if isinstance(self.step.function, AsyncOperation):
+            await self.step.function.ready()
         return True
+
+    async def close(self) -> None:
+        if isinstance(self.step.function, AsyncOperation):
+            await self.step.function.aclose()
 
     async def execute(self, metrics: bool, *values: Any) -> tuple:
         started = time.perf_counter()
@@ -199,6 +221,19 @@ class Runtime:
         for actor in self.actors.values():
             ray.kill(actor, no_restart=True)
         self.actors.clear()
+
+    async def aclose(self, timeout_s: float = 2) -> None:
+        """Drain first, close Actor-owned clients, then terminate owned Actors."""
+        try:
+            async with asyncio.timeout(timeout_s):
+                await asyncio.gather(
+                    *(
+                        asyncio.wrap_future(actor.close.remote().future())
+                        for actor in self.actors.values()
+                    )
+                )
+        finally:
+            self.close()
 
     def invoke(self, inputs: Values) -> dict[str, Any]:
         try:

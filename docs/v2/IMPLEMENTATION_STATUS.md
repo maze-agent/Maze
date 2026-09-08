@@ -2,6 +2,19 @@
 
 ## 当前状态：按完整文档范围推进
 
+### Attached LLM 与异步连接池（基线 `dbf3713`）
+
+新增 attached ServiceSpec、LLM 节点与部署服务绑定，限定文本非流式 chat。
+Worker 内复用 HTTPX 客户端，准备时检查模型声明；配置限定连接、timeout、token 与响应大小。
+显式 AsyncOperation 生命周期支持准备/关闭，卸载先关闭客户端再终止自有 Actor。
+usage 进入独立节点 metadata；取消错误区分调用侧 cleanup 与未确认的 backend_cleanup。
+新增真实 TCP + Ray 测试：连接复用/上限、双请求重叠、usage 缺失、取消/超时隔离、
+HTTP 失败零重试、响应超限、准备失败、凭据环境变量、生成参数和服务协议边界。
+没有下载模型、安装新依赖或调用外部服务；HTTPX 已在原环境中。
+LLM extra 仅声明现有 HTTPX。只修改 v2；本轮未提交推送。
+这不是 managed Serve LLM / vLLM 或 GPU 推理验收，相关开发与实测仍待完成。
+完整回归 **77 passed in 40.32s**；Ruff 与 wheel 构建通过。
+
 ### Python / JSON / YAML 协议统一（基线 `630f5f6`）
 
 Python arithmetic 示例直接构建 `DagSpec`，与 YAML 模型等价，并通过 Engine 执行。
@@ -11,7 +24,7 @@ Python arithmetic 示例直接构建 `DagSpec`，与 YAML 模型等价，并通�
 避免 Python `model_copy` 绕过协议以及调用方后续修改污染已有部署。
 JSON 边界拒绝非字符串键、元组、非有限数值和过深嵌套；内部 Ray 对象传递不受此限制。
 新增协议回归、默认值隔离、部署快照隔离，真实 CLI 测试使用类型化客户端。
-本轮仍仅使用原 Conda 环境，未新增依赖，未提交或推送。
+本轮仅使用原 Conda 环境，未新增依赖；后续已提交推送为 `dbf3713`。
 最终验证：**62 passed in 27.88s**；Ruff、wheel 构建通过，导出的 JSON Schema / OpenAPI 与现有文件一致。
 
 ### 后续本机可靠性迭代（基线 `74bcc61`）
@@ -50,16 +63,16 @@ drain，以及单状态所有者的 HTTP API、客户端、前台 managed-local 
 | 阶段 | 状态 |
 |---|---|
 | P0 | 部分：本机版本/依赖/测试/CI 基础已有；Linux 与 GPU 兼容组合待实测 |
-| P1 | 部分：CPU 协议、schema、Python 模型构建及绑定/类型验证已有；ServiceSpec、完整边界待补 |
+| P1 | 部分：CPU/attached LLM 协议、schema、Python 模型及类型验证已有；managed ServiceSpec 和完整边界待补 |
 | P2 | 部分：真实 Ray 数据流/多端口/完成信号已有；完整失败/序列化/重试矩阵待补 |
 | P3 | 部分：本地 API/CLI/SDK 与 admission/deadline/drain 闭环已有；错误契约和故障边界待完善 |
-| P4 | 部分：Async Actor 已验证；LLM 服务、连接池、usage 尚未实现 |
+| P4 | 部分：Async Actor、attached HTTP 适配、连接池、usage 已本机验证；managed Serve LLM/vLLM 未完成 |
 | P5 | 部分：正常 managed-local 启停已有；多机、启动故障回滚与恢复管理待补 |
 | P6 | 部分：基础指标、状态释放与小型对照基准已有；压力/故障矩阵和详细指标待补 |
 | P7 | 部分：v2 默认路径、wheel、许可证已有；完整打包 E2E、文档与最终审计待补 |
 
 当前不能宣称已经完成原文档或生产级验收。P1/P2 的更全面协议边界、长期资源收敛、
-启动故障回滚和 P4 HTTP/LLM 连接池与服务适配仍是下一批本机工作。
+启动故障回滚和 managed Serve LLM 配置/所有权适配仍是下一批本机工作。
 
 ## 2026-09-08：最小 Python DAG 原型
 

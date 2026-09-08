@@ -1,0 +1,26 @@
+schema: maze.dag/v1
+name: attached_chat
+inputs:
+  messages: {type: array}
+nodes:
+  - id: chat
+    kind: llm
+    service_id: chat_model
+    execution: async_actor
+    resources: {num_cpus: 0, num_gpus: 0}
+    max_concurrency: 4
+    inputs:
+      messages: {type: array}
+    outputs:
+      text: {type: string}
+      response: {type: object}
+edges:
+  - from: {input: messages}
+    to: {node: chat, port: messages}
+outputs:
+  text:
+    from: {node: chat, port: text}
+    type: string
+  response:
+    from: {node: chat, port: response}
+    type: object

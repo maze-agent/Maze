@@ -1,0 +1,14 @@
+schema: maze.deployment/v1
+max_active_invocations: 4
+services:
+  - service_id: chat_model
+    mode: attached
+    model: replace-with-advertised-model-id
+    endpoint: http://127.0.0.1:8001/v1
+    # Set this environment variable on Ray workers before starting Maze.
+    # Omit api_key_env only when the service needs no authentication.
+    api_key_env: MAZE_MODEL_API_KEY
+    timeout_s: 30
+    max_connections: 4
+    max_output_tokens: 256
+    max_response_bytes: 1048576

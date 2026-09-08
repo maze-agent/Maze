@@ -102,14 +102,38 @@
           "type": "string"
         },
         "kind": {
-          "const": "python",
           "default": "python",
+          "enum": [
+            "python",
+            "llm"
+          ],
           "title": "Kind",
           "type": "string"
         },
         "callable": {
-          "title": "Callable",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Callable"
+        },
+        "service_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Id"
         },
         "execution": {
           "default": "task",
@@ -161,7 +185,6 @@
       },
       "required": [
         "id",
-        "callable",
         "outputs"
       ],
       "title": "NodeSpec",

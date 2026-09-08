@@ -102,7 +102,8 @@
                     "$ref": "#/components/schemas/DeploymentSpec",
                     "default": {
                       "schema": "maze.deployment/v1",
-                      "max_active_invocations": 8
+                      "max_active_invocations": 8,
+                      "services": []
                     }
                   }
                 },
@@ -492,6 +493,15 @@
             "minimum": 1,
             "title": "Max Active Invocations",
             "type": "integer"
+          },
+          "services": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ServiceSpec"
+            },
+            "maxItems": 256,
+            "title": "Services",
+            "type": "array"
           }
         },
         "title": "DeploymentSpec",
@@ -599,14 +609,38 @@
             "type": "string"
           },
           "kind": {
-            "const": "python",
             "default": "python",
+            "enum": [
+              "python",
+              "llm"
+            ],
             "title": "Kind",
             "type": "string"
           },
           "callable": {
-            "title": "Callable",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Callable"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Service Id"
           },
           "execution": {
             "default": "task",
@@ -658,7 +692,6 @@
         },
         "required": [
           "id",
-          "callable",
           "outputs"
         ],
         "title": "NodeSpec",
@@ -744,6 +777,82 @@
           }
         },
         "title": "RetryPolicy",
+        "type": "object"
+      },
+      "ServiceSpec": {
+        "additionalProperties": false,
+        "description": "An existing service; managed Serve LLM ownership is a separate pending mode.",
+        "properties": {
+          "service_id": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$",
+            "title": "Service Id",
+            "type": "string"
+          },
+          "mode": {
+            "const": "attached",
+            "default": "attached",
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "endpoint": {
+            "maxLength": 2048,
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "api_key_env": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Api Key Env"
+          },
+          "timeout_s": {
+            "default": 60,
+            "exclusiveMinimum": 0,
+            "maximum": 600,
+            "title": "Timeout S",
+            "type": "number"
+          },
+          "max_connections": {
+            "default": 8,
+            "maximum": 1024,
+            "minimum": 1,
+            "title": "Max Connections",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "default": 1024,
+            "maximum": 32768,
+            "minimum": 1,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "max_response_bytes": {
+            "default": 8388608,
+            "maximum": 67108864,
+            "minimum": 1,
+            "title": "Max Response Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "service_id",
+          "model",
+          "endpoint"
+        ],
+        "title": "ServiceSpec",
         "type": "object"
       }
     }

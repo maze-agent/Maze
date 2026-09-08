@@ -6,7 +6,8 @@
 
 ## 实际执行
 
-- 最新 `python -m pytest -q`：**62 passed in 27.88s**，退出码 0。
+- 最新全量 `python -m pytest -q`：**77 passed in 40.32s**，退出码 0。
+- 随后复查补上重复准备的连接池复用保护，`python -m pytest -q tests/test_services.py`：**15 passed in 13.36s**，退出码 0。
 - Ruff 检查与格式化通过。
 - `python -m examples.arithmetic`：通过 Engine 部署调用，输出 `{'result': 10}`、`{'result': 22}`，退出码 0。
 - `python -m build --wheel --no-isolation`：成功生成开发版 wheel。
@@ -34,6 +35,15 @@ ASGI receive 后，相同 TCP 测试通过。SIGTERM 在当前 Ray 环境可能�
 非 JSON 数据拒绝、显式 null 的序列化语义、可变默认值隔离、部署快照隔离。
 真实前台 CLI 的 arithmetic 部署/调用/卸载现在通过类型化 `MazeClient` 完成。
 
+Attached LLM 迭代使用真实本地 TCP HTTP/1.1 fixture + Ray Async Actor，未下载模型。
+验证同一 TCP 连接跨请求复用、连接数上限、双请求会合（确证 await 重叠）、
+usage 每请求隔离和缺失不补零；HTTP 503、响应超限和 timeout 均不自动重试。
+取消和 deadline 用例故意让服务端工作继续，确认调用侧释放、兄弟请求与 Actor 后续可用，
+同时返回 backend_cleanup=unconfirmed。卸载后服务仍存活，客户端连接已关闭。
+还覆盖 Worker 环境变量凭据、另一个部署准备失败的隔离、生成上限、禁止输入覆盖 endpoint、
+未知/重复 service_id、非法资源/模式/默认值。attached 示例编译通过，未连接示例地址。
+这些证据验证 HTTP 协议适配与调用侧资源管理，不证明真实 Serve/vLLM 推理、GPU 取消或模型复用。
+
 ## 原文档矩阵对照
 
 “部分”表示已有对应证据，但尚未覆盖该条完整验收。
@@ -51,7 +61,7 @@ ASGI receive 后，相同 TCP 测试通过。SIGTERM 在当前 Ray 环境可能�
 | T14 | 通过当前 Async Actor 单请求取消隔离用例 |
 | T15–T17 | 通过当前用例：部分提交后清理、结果/异常序列化失败、JSON 尺寸/类型限制 |
 | T18–T19 | 部分：none/basic/detailed 缺失标注；未接入 State 诊断 |
-| T20 | 部分：真实 Async Actor await；HTTP 连接池与关闭未实现 |
+| T20 | 通过当前用例：真实 TCP await 会合、连接复用、并发/池上限和关闭；未作长期压力验收 |
 | T21–T27 | 未执行：尚无 GPU/模型/多机环境，相关实现也未齐 |
 | T28 | 部分：本地启停及在途有界停止通过；冲突与启动回滚故障注入待补 |
 | T29 | 通过当前用例：准备/调用/排队/并发卸载竞争；GPU 尚未验证 |

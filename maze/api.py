@@ -56,6 +56,7 @@ def create_app(
                     "code": exc.code,
                     "message": str(exc),
                     "cleanup": exc.cleanup,
+                    "backend_cleanup": exc.backend_cleanup,
                     "invocation_id": exc.invocation_id,
                     "deployment_id": exc.deployment_id,
                     "node_id": exc.node_id,

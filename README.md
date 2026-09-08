@@ -2,7 +2,7 @@
 
 用 Python 实现静态 Agent DAG 运行时：Maze 描述图与管理调用，Ray 负责依赖、
 资源放置和执行。目标范围见原实施计划；目前是已通过本机测试的 CPU 开发版，
-尚未完成 LLM、GPU、多机和全部可靠性要求。
+已实现 attached LLM HTTP 适配；managed LLM、GPU、多机和全部可靠性要求尚未完成。
 
 ## 本机运行
 
@@ -46,6 +46,7 @@ Maze 启动和关闭自己的 Ray 实例；发现已有 Ray 进程时拒绝 mana
 | `maze/graph.py` | Python 图、拓扑验证与不可变执行步骤 |
 | `maze/spec.py` | 有版本的 JSON/YAML 协议，转换到同一个执行图 |
 | `maze/runtime.py` | Task、Async Actor、多端口、完成信号、取消 |
+| `maze/services.py` | attached chat completion、异步连接池与 usage |
 | `maze/engine.py` | 当前部署、请求额度、等待队列、deadline、drain |
 | `maze/api.py` | HTTP 和 OpenAPI；无第二套业务状态 |
 | `maze/client.py`、`maze/cli.py` | 薄客户端和本地管理入口 |
@@ -78,10 +79,29 @@ with MazeClient("http://127.0.0.1:8000", os.environ["MAZE_API_TOKEN"]) as client
 `spec.document()` 导出标准 JSON 字典，保留显式 `null` 与未声明默认值的区别。
 Engine 部署时重新校验并复制模型；之后修改调用方的字典不会改变已部署的图。
 
+## 绑定现有模型服务
+
+`examples/attached_chat.yaml` 是非流式文本 chat DAG；
+`examples/attached_service.yaml` 配置固定 endpoint、模型名和调用上限。
+先修改服务配置中的占位模型名和地址；凭据环境变量需要在启动 Ray 前设置，
+或由集群管理员预置到 Worker。Maze 不会为这个示例下载或启动模型。
+
+```bash
+python -m maze deploy examples/attached_chat.yaml --deployment-config examples/attached_service.yaml
+python -m maze invoke <deployment_id> --input examples/chat_input.json
+```
+
+部署时从 Worker 请求 `/models` 并检查模型 ID；调用 `/chat/completions`，
+返回 `text` 和原始 `response`。basic/detailed 指标中的
+`nodes.<node_id>.metadata.llm` 包含模型标识和实际返回的 usage，缺失 usage 不补零。
+这里只完成本地 HTTP fixture 验证；真实 Serve LLM / vLLM 推理尚未验收。
+取消后的 `cleanup` 描述调用侧清理，`backend_cleanup: unconfirmed` 表示无法确认后端推理停止。
+
 ## 依赖与验证
 
 基础：Ray、Pydantic、PyYAML。HTTP 层使用可选的 FastAPI、Uvicorn、HTTPX；
-不安装 Torch、vLLM、Transformers。项目当前可构建 wheel，尚未发布。
+`llm` extra 仅需要 HTTPX（本机已安装），不安装 Torch、vLLM、Transformers。
+项目当前可构建 wheel，尚未发布。
 
 ```bash
 python -m ruff check .

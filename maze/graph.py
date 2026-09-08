@@ -14,6 +14,19 @@ Function: TypeAlias = Callable[..., Values | Awaitable[Values]]
 Check: TypeAlias = Callable[[Any], None]
 
 
+class AsyncOperation:
+    """Explicit lifecycle for an async callable owned by one node Actor."""
+
+    async def ready(self) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class Input:
     name: str
@@ -115,7 +128,11 @@ def compile(dag: DAG) -> Plan:
         if node.retry_exceptions and not node.max_retries:
             raise ValueError("Exception retries require a positive retry count")
         if not callable(node.function) or (
-            iscoroutinefunction(node.function) != (node.execution == "async_actor")
+            (
+                iscoroutinefunction(node.function)
+                or isinstance(node.function, AsyncOperation)
+            )
+            != (node.execution == "async_actor")
         ):
             raise ValueError(f"Function does not match execution mode: {node.id}")
         if node.max_concurrency < 1 or (

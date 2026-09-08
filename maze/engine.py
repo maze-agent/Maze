@@ -20,6 +20,7 @@ class EngineError(Exception):
         self.invocation_id: str | None = None
         self.deployment_id: str | None = None
         self.node_id: str | None = None
+        self.backend_cleanup: str | None = None
 
 
 def check_size(value: Any, maximum: int, code: str, status: int) -> None:
@@ -81,11 +82,14 @@ class Engine:
             snapshot = DagSpec.model_validate(
                 spec.model_dump(by_alias=True)
             ).model_copy(deep=True)
-            runtime = Runtime(snapshot.to_dag())
+            settings = DeploymentSpec.model_validate(
+                (config or DeploymentSpec()).model_dump(by_alias=True)
+            ).model_copy(deep=True)
+            runtime = Runtime(snapshot.to_dag(settings.services))
         except (ValueError, TypeError, ImportError, AttributeError) as exc:
             raise EngineError("DAG_INVALID", 422, "Invalid DAG or callable") from exc
         deployment_id = "dep_" + uuid4().hex
-        deployment = Deployment(snapshot, config or DeploymentSpec(), runtime)
+        deployment = Deployment(snapshot, settings, runtime)
         self.deployments[deployment_id] = deployment
         deployment.preparation = asyncio.create_task(
             runtime.prepare(self.config.timeouts.deployment_s)
@@ -169,6 +173,14 @@ class Engine:
         except EngineError as exc:
             exc.invocation_id = invocation_id
             exc.deployment_id = deployment_id
+            deployment = self.deployments.get(deployment_id)
+            if (
+                deployment
+                and exc.code
+                in ("INVOCATION_CANCELLED", "INVOCATION_TIMEOUT", "NODE_FAILED")
+                and any(node.kind == "llm" for node in deployment.spec.nodes)
+            ):
+                exc.backend_cleanup = "unconfirmed"
             raise
 
     async def _invoke(
@@ -347,7 +359,12 @@ class Engine:
                 "Deployment still has pending cleanup",
                 "incomplete",
             )
-        deployment.runtime.close()
+        try:
+            await deployment.runtime.aclose(self.config.timeouts.cancellation_grace_s)
+        except Exception as exc:
+            raise EngineError(
+                "CLEANUP_INCOMPLETE", 503, "Actor resource cleanup failed", "incomplete"
+            ) from exc
         self.deployments.pop(deployment_id, None)
 
     async def close(self) -> None:

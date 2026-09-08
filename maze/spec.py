@@ -5,6 +5,7 @@ from importlib import import_module
 from math import isfinite
 from typing import Annotated, Any, Self
 from typing import Literal as Choice
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import (
@@ -102,10 +103,42 @@ class Resources(Model):
     memory_bytes: int | None = Field(default=None, gt=0)
 
 
+class ServiceSpec(Model):
+    """An existing service; managed Serve LLM ownership is a separate pending mode."""
+
+    service_id: Name
+    mode: Choice["attached"] = "attached"
+    model: str = Field(min_length=1, max_length=256)
+    endpoint: str = Field(max_length=2048)
+    api_key_env: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    timeout_s: float = Field(default=60, gt=0, le=600, allow_inf_nan=False)
+    max_connections: int = Field(default=8, ge=1, le=1024)
+    max_output_tokens: int = Field(default=1024, ge=1, le=32768)
+    max_response_bytes: int = Field(default=8388608, ge=1, le=67108864)
+
+    @model_validator(mode="after")
+    def check_endpoint(self) -> Self:
+        url = urlsplit(self.endpoint)
+        _ = url.port  # Also reject malformed/out-of-range ports before preparation.
+        if (
+            url.scheme not in ("http", "https")
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "Expected an HTTP base URL without credentials, query or fragment"
+            )
+        return self
+
+
 class NodeSpec(Model):
     id: Name
-    kind: Choice["python"] = "python"
-    callable: str
+    kind: Choice["python", "llm"] = "python"
+    callable: str | None = None
+    service_id: Name | None = None
     execution: Choice["task", "async_actor"] = "task"
     resources: Resources = Field(default_factory=Resources)
     max_concurrency: int = Field(default=8, ge=1, le=1024)
@@ -117,6 +150,33 @@ class NodeSpec(Model):
     @model_validator(mode="after")
     def check_constants(self) -> Self:
         check_json(self.constants)
+        if self.kind == "python":
+            if self.callable is None or self.service_id is not None:
+                raise ValueError("Python nodes require callable and no service_id")
+        elif (
+            self.callable is not None
+            or self.service_id is None
+            or self.execution != "async_actor"
+            or self.resources.num_gpus != 0
+            or self.retry != RetryPolicy()
+            or "messages" not in self.inputs
+            or self.inputs.keys() - {"messages", "max_tokens", "temperature"}
+            or set(self.outputs) != {"text", "response"}
+        ):
+            raise ValueError(
+                "LLM nodes require a zero-GPU async adapter with messages, text "
+                "and response; retries are disabled"
+            )
+        if self.kind == "llm":
+            for name, expected in (("text", "string"), ("response", "object")):
+                check_types(expected, self.outputs[name].type)
+            for name, accepted in (
+                ("messages", {"any", "array"}),
+                ("max_tokens", {"any", "integer"}),
+                ("temperature", {"any", "number", "integer"}),
+            ):
+                if name in self.inputs and self.inputs[name].type not in accepted:
+                    raise ValueError("Invalid LLM input port type")
         return self
 
 
@@ -146,7 +206,10 @@ class DagSpec(Model):
     edges: tuple[Edge, ...] = ()
     outputs: dict[Name, FinalOutput]
 
-    def to_dag(self) -> DAG:
+    def to_dag(self, services: tuple[ServiceSpec, ...] = ()) -> DAG:
+        service_map = {s.service_id: s for s in services}
+        if len(service_map) != len(services):
+            raise ValueError("Duplicate service IDs")
         nodes = {node.id: node for node in self.nodes}
         if len(nodes) != len(self.nodes):
             raise ValueError("Duplicate node IDs")
@@ -197,10 +260,25 @@ class DagSpec(Model):
                         raise ValueError(f"Missing input binding: {node.id}.{name}")
                     port.check(port.default)
                     current[name] = Literal(port.default)
-            module, separator, attribute = node.callable.partition(":")
-            if not separator or not attribute.isidentifier():
-                raise ValueError("Callable must be package.module:function")
-            function = getattr(import_module(module), attribute)
+            if node.kind == "llm":
+                from maze.services import ChatCompletion
+
+                if node.service_id not in service_map:
+                    raise ValueError("Unknown LLM service")
+                function = ChatCompletion(service_map[node.service_id])
+                function.parameters(
+                    **{
+                        name: source.value
+                        for name, source in current.items()
+                        if name in ("max_tokens", "temperature")
+                        and isinstance(source, Literal)
+                    }
+                )
+            else:
+                module, separator, attribute = (node.callable or "").partition(":")
+                if not separator or not attribute.isidentifier():
+                    raise ValueError("Callable must be package.module:function")
+                function = getattr(import_module(module), attribute)
             result.append(
                 Node(
                     node.id,
@@ -252,6 +330,7 @@ class DeploymentSpec(Model):
         default="maze.deployment/v1", alias="schema"
     )
     max_active_invocations: int = Field(default=8, ge=1, le=1024)
+    services: tuple[ServiceSpec, ...] = Field(default=(), max_length=256)
 
 
 class Limits(Model):

@@ -27,7 +27,7 @@ Async Actor 并发还受部署级调用额度和 Ray max_pending_calls 限制。
 deadline 包含 Engine 接收并验证后的排队和执行时间；不含 HTTP 上传及代理时间。
 HTTP 断开、主动 cancel、deadline 和卸载都会取消本次引用清单中的调用。
 普通 Task 先协作取消，grace 后可 force；Actor 方法不 force、不为取消单请求杀 Actor。
-完成引用终结是当前清理确认依据，不承诺物理副作用回滚或未来 LLM 后端即时终止。
+完成引用终结是当前清理确认依据，不承诺物理副作用回滚或 LLM 后端即时终止。
 未终结调用仍计入容量；下一次接纳或等待唤醒时重新检查，记录量受总容量限制。
 
 没有业务历史查询或持久化幂等性。活动 ID 冲突返回 409，完成后复用不保证去重。
@@ -62,7 +62,7 @@ retry:
 | POST | `/v1/stop` | drain 并停止前台 Engine |
 
 输出：`{invocation_id, deployment_id, status, output, metrics?}`。
-错误：`{error: {code, message, cleanup, invocation_id, deployment_id, node_id, retryable}}`。
+错误：`{error: {code, message, cleanup, backend_cleanup, invocation_id, deployment_id, node_id, retryable}}`。
 无法确定的标识为 null；已注册调用的错误带调用和部署 ID，包装器错误还带节点 ID。
 retryable 仅为提示，不代表已重试。422 无效协议/输入，404 不存在，
 409 ID 冲突/取消，413 输入过大，429 队列满，503 未就绪/清理未完成，
@@ -84,8 +84,41 @@ any 仍用于 Ray 可序列化的任意内部对象，不声称能证明任意 P
 JSON/YAML 拒绝未知字段、重复 key、YAML alias、非 JSON 常量和过深配置。
 嵌套 schema、数值范围、数组长度等完整端口边界约束仍待补齐。
 
+## Attached LLM 服务
+
+DeploymentSpec.services 定义 ServiceSpec，LLM 节点通过 service_id 引用。
+目前仅接受 `mode: attached`，managed 配置会拒绝；Maze 不拥有或删除 attached 服务。
+模型服务本身可以被多个节点和部署引用；每个 LLM 节点拥有自己的 Async Actor 和连接池。
+`max_connections` 限制每个适配器的连接数，不是模型服务的全局并发额度。
+Actor 并发还受节点 max_concurrency 及 Engine admission 限制。
+
+LLM 节点必须明确配置 async_actor、零 GPU、messages 输入以及 text/response 输出。
+可声明额外输入 max_tokens、temperature；其余生成选项暂不支持。
+max_tokens 在 1 到 ServiceSpec.max_output_tokens 之间；未提供时使用部署上限。
+temperature 若提供，范围为 0 到 2；不提供时不替用户修改服务默认采样参数。
+messages 目前仅支持 system/user/assistant 的字符串 content，不支持多模态、工具和流式输出。
+
+endpoint 是固定 HTTP(S) base URL，例如 `http://worker-reachable-host:8001/v1`。
+禁止 URL 内嵌凭据、query 和 fragment；不跟随重定向，不使用代理环境变量。
+api_key_env 只记录环境变量名，密钥在 Worker 创建客户端时读取，不放入 DAG 或调用输入。
+多机时地址必须从 Worker 可达；示例 loopback 仅用于单机。当前没有跨机密钥分发机制。
+
+准备时从 Worker 检查 `/models` 中的模型 ID，失败则部署不能 ready。
+这个探测确认 HTTP 可达和模型声明，不证明后端推理健康或 GPU 容量足够。
+HTTPX 与 Ray Actor 业务重试均关闭；总 timeout 包含连接池等待、网络和响应读取，
+同时限制响应字节数。卸载先 drain，再有界关闭客户端连接，最后终止自有 Actor。
+API stop 和其他 DAG 卸载不会删除 attached endpoint。
+
+LLM usage 放入 `metrics.nodes.<id>.metadata.llm`，原始结构仍保留在 response 输出。
+不把 HTTP 首字节当 TTFT，不返回推测的 TPOT；metrics=none 时不返回 metadata。
+取消、deadline 或节点失败时，含 LLM 的 DAG 报告 `backend_cleanup: unconfirmed`：
+即使 `cleanup: complete`，也仅说明调用侧引用已终结，不能确认模型后端停止。
+
+实现依据：[HTTPX async 客户端生命周期](https://www.python-httpx.org/async/)、
+[HTTPX 显式 transport/retries](https://www.python-httpx.org/advanced/transports/)。
+
 ## 环境和剩余能力
 
 当前仅 managed-local，CPU 路径在 macOS ARM64 实测。
-还没有 managed-onprem、ServiceSpec/LLM、runtime_env 制品配置、配置恢复、
+还没有 managed-onprem、managed Serve LLM、runtime_env 制品配置、配置恢复、
 GPU worker 就绪验证或多机 advertised endpoint。不要将这些视为可用功能。
