@@ -5,6 +5,12 @@ from typing import Any, Dict
 
 from maze.core.scheduler.error import looks_like_oom, utc_timestamp
 from maze.core.scheduler.result_summary import to_json_safe
+from maze.core.resource_policy import (
+    ResourceContext,
+    context_for_task,
+    recommend_resources,
+    ResourceLimitExceeded,
+)
 
 
 def init_fault_tolerance_trace() -> Dict[str, Any]:
@@ -105,6 +111,45 @@ def apply_repair_action(task: Any, error: Dict[str, Any], diagnosis: Dict[str, A
 
     category = diagnosis.get("category")
     if category == "resource":
+        failure = error.get("memory_failure") or {}
+        if failure.get("device_type") == "cuda" and failure.get("scope", "task") in {
+            "task",
+            "model_instance",
+        }:
+            context = (
+                ResourceContext.from_dict(task.resource_context)
+                if getattr(task, "resource_context", None)
+                else context_for_task(
+                    code_str=getattr(task, "code_str", None),
+                    model_anchor=getattr(task, "model_anchor", None),
+                )
+            )
+            try:
+                decision = recommend_resources(
+                    context,
+                    task.resources,
+                    model_anchor=task.model_anchor,
+                    failure=failure,
+                )
+            except ResourceLimitExceeded as exc:
+                return {
+                    "type": "none",
+                    "applied": False,
+                    "reason": "resource_limit_exceeded",
+                    "message": str(exc),
+                }
+            decision_data = decision.to_dict()
+            decision_data["declared"] = dict(
+                getattr(task, "declared_resources", task.resources)
+            )
+            return {
+                "type": "resource_reanchor",
+                "applied": True,
+                "scope": failure.get("scope", "task"),
+                "adjusted_resources": decision.effective,
+                "resource_decision": decision_data,
+                "reason": "cuda_oom",
+            }
         return {
             "type": "retry_without_resource_change",
             "applied": True,

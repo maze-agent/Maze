@@ -534,7 +534,11 @@ class DynamicRun:
             "finish_time": task.finish_time,
             "inputs": _task_io_snapshot(task.task_input),
             "outputs": _task_io_snapshot(task.task_output),
-            "resources": to_json_safe(task.resources),
+            "resources": to_json_safe(task.effective_resources or task.resources),
+            "declared_resources": to_json_safe(
+                task.declared_resources or task.resources
+            ),
+            "resource_decision": to_json_safe(task.resource_decision),
             "model_anchor": to_json_safe(task.model_anchor),
             "error": to_json_safe(self.task_errors.get(task_id)),
             "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
@@ -542,7 +546,6 @@ class DynamicRun:
                 self.task_fault_tolerance.get(task_id) or _default_fault_tolerance()
             ),
         }
-
 
 
 def merge_dynamic_resources(
@@ -578,7 +581,9 @@ def merge_dynamic_resources(
     if required_capability:
         resources["required_capability"] = str(required_capability)
 
-    return resources
+    if override_resources.get("gpu_mem_limit") is not None:
+        resources["gpu_mem_limit"] = override_resources["gpu_mem_limit"]
+    return normalize_task_semantics(resources=resources)[1]
 
 
 def _default_fault_tolerance() -> Dict[str, Any]:

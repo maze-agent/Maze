@@ -372,6 +372,12 @@ class StaticRun:
         task["started_time"] = time.time()
         task["pending_reason"] = None
         task["schedule_decision"] = to_json_safe(schedule_decision)
+        task["declared_resources"] = to_json_safe(
+            schedule_decision.get("declared_resources")
+        )
+        task["resource_decision"] = to_json_safe(
+            schedule_decision.get("resource_decision")
+        )
         if schedule_decision.get("requested_resources"):
             task["resources"] = to_json_safe(schedule_decision.get("requested_resources"))
         task["selected_node"] = {

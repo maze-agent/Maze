@@ -264,6 +264,11 @@ Maze discovers checkpoints in `<repository>/model_cache` by default; configure a
 - Workflows consume the injected OpenAI-compatible endpoint and model route; they do not start or stop model processes themselves.
 - Scheduler-managed instances reuse GPU leases, support progressive scale-out, and release idle instances through LRU scale-in.
 
+GPU tasks also learn memory demand from execution observations and can recover
+from CUDA OOM through verified cleanup and resource re-anchoring. Managed model
+services recover at the instance layer. See [resource adaptation and validation](docs/resource_adaptation.md)
+for memory limits, ownership, retry behavior and tests.
+
 The system catalog includes GAIA `reason`, `file`, `speech`, and `vision` as ordinary workflows. Text and vision paths use standard chat interfaces; speech uses a standard transcription interface and requires an available transcription checkpoint. These templates exercise Maze workflow integration and are not a claim of reproduced GAIA benchmark accuracy.
 
 ## Run Operations

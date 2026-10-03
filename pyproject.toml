@@ -49,6 +49,7 @@ dependencies = [
     "networkx==3.4.2",
     "websocket-client==1.9.0",
     "cloudpickle==3.1.1",
+    "traitlets>=5.0",
     "requests>=2.31.0",
     "PyYAML>=6.0",
     "PyPDF2>=3.0.0",

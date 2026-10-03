@@ -51,6 +51,17 @@ from maze.core.fault_tolerance import (
     trace_snapshot,
 )
 from maze.core.files.lineage import TASK_RESULT_ENVELOPE
+from maze.core.scheduler.recovery import (
+    RecoveryCoordinator,
+    prepare_cleanup,
+    plan_model_load_retry,
+)
+from maze.core.resource_policy import (
+    ResourceContext,
+    ResourceLimitExceeded,
+    context_for_task,
+)
+from maze.core.scheduler.error import memory_failure_from_message
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +285,7 @@ class Scheduler():
         self.llm_instance_manager = LlmInstanceManager(owner_id=self.owner_id)
         self.standby_worker_pool = StandbyWorkerPoolManager.from_env()
         self.workflow_manager = WorkflowRuntimeManager(standby_worker_pool=self.standby_worker_pool)
+        self.resource_recovery = RecoveryCoordinator()
 
         self.scheduling_strategy = create_scheduling_strategy(strategy)
         self.strategy = self.scheduling_strategy.name
@@ -855,6 +867,9 @@ class Scheduler():
         decision = copy.deepcopy(decision)
         decision["internal_requested_resources"] = decision.get("requested_resources")
         decision["requested_resources"] = copy.deepcopy(task.resources)
+        decision["declared_resources"] = copy.deepcopy(task.declared_resources)
+        decision["resource_context"] = copy.deepcopy(task.resource_context)
+        decision["resource_decision"] = copy.deepcopy(task.resource_decision)
         decision["queue_name"] = getattr(task, "queue_name", None)
         if getattr(task, "scheduling_metadata", None):
             decision["scheduling"] = copy.deepcopy(task.scheduling_metadata)
@@ -1079,6 +1094,11 @@ class Scheduler():
                 startup_timeout=remaining_startup,
                 return_info=True,
             )
+            self.llm_instance_manager.set_resource_decision(
+                message_data["instance_id"],
+                message_data["resource_context"],
+                message_data.get("resource_decision", {}),
+            )
             if record["cancel_event"].is_set():
                 self.llm_instance_manager.request_start_cancellation(
                     message_data["instance_id"]
@@ -1100,6 +1120,9 @@ class Scheduler():
                 "backend": backend,
                 "error": str(exc),
                 "cancelled": record["cancel_event"].is_set(),
+                "memory_failure": memory_failure_from_message(
+                    str(exc), scope="model_instance"
+                ),
                 "rollback_complete": rollback_complete,
             }
         finally:
@@ -1113,6 +1136,14 @@ class Scheduler():
 
     def _queue_llm_start(self, socket_to_main, message_data: dict) -> None:
         self._ensure_llm_async_state()
+        if not message_data.get("resource_context"):
+            anchor = {
+                **(message_data.get("model_anchor") or {}),
+                "local_model": message_data["model"],
+                "backend": message_data.get("backend", "vllm"),
+            }
+            context = context_for_task(model_anchor=anchor)
+            message_data = {**message_data, "resource_context": context.to_dict()}
         backend = None
         try:
             backend, backend_args = validate_model_backend(
@@ -1201,6 +1232,7 @@ class Scheduler():
             terminal_error_type = {
                 "missing_model": "missing_model",
                 "model_backend_unavailable": "model_deployment_failed",
+                "resource_capacity_exceeded": "resource_capacity_exceeded",
             }.get(failure_reason)
             if not message_data.get("auto_started") or terminal_error_type:
                 self._send_llm_launch_failure(
@@ -1482,7 +1514,71 @@ class Scheduler():
                     "backend": record["backend"],
                     "error": str(exc),
                 }
+            if not result["ok"]:
+                message_data = record["message_data"]
+                try:
+                    retry = plan_model_load_retry(
+                        message_data,
+                        result.get("memory_failure"),
+                        cleaned=bool(result.get("rollback_complete")),
+                        cancelled=bool(result.get("cancelled")),
+                    )
+                except ResourceLimitExceeded as exc:
+                    retry = None
+                    result["error"] = str(exc)
+                if retry is not None:
+                    result["memory_failure"]["phase"] = "load"
+                    if retry.get("auto_started"):
+                        self.llm_instance_manager.mark_model_deploying(
+                            retry["model"], retry["backend"], instance_id=instance_id
+                        )
+                    self.llm_instance_queue.put(
+                        LlmInstanceMessage("start_llm_instance", retry)
+                    )
+                    self._send_scheduler_event(
+                        socket_to_main,
+                        {
+                            "type": "resource_observation",
+                            "data": {
+                                "run_id": instance_id,
+                                "task_id": "model_load",
+                                "task_name": message_data["model"],
+                                "status": "failed",
+                                "requested_resources": {
+                                    "gpu_mem": message_data["gpu_mem"]
+                                },
+                                "context": message_data["resource_context"],
+                                "observation_id": instance_id + ":load:0",
+                                "required_gpu_mem_mib": retry["gpu_mem"],
+                                "error": {"memory_failure": result["memory_failure"]},
+                            },
+                        },
+                    )
+                    continue
             if result["ok"]:
+                self._send_scheduler_event(
+                    socket_to_main,
+                    {
+                        "type": "resource_observation",
+                        "data": {
+                            "run_id": instance_id,
+                            "task_id": "model_load",
+                            "task_name": record["message_data"]["model"],
+                            "status": "succeeded",
+                            "requested_resources": {
+                                "gpu_mem": record["need_resources"]["gpu_mem"],
+                                "cpu_num": record["need_resources"]["cpu"],
+                            },
+                            "context": record["message_data"]["resource_context"],
+                            "observation_id": instance_id
+                            + ":load:"
+                            + str(record["message_data"].get("_oom_retries", 0)),
+                            "metrics": result["instance_info"].get(
+                                "memory_metrics", {}
+                            ),
+                        },
+                    },
+                )
                 self._wake_model_waiters(
                     record["message_data"]["model"],
                     result.get("backend") or record["backend"],
@@ -1672,6 +1768,16 @@ class Scheduler():
         for recommendation in self.llm_instance_manager.scale_out_recommendations():
             model = recommendation["model"]
             backend = recommendation["backend"]
+            for candidate in self.llm_instance_manager.undersized_idle_instances(
+                model,
+                backend,
+                recommendation.get("gpu_mem", 0),
+                recommendation.get("model_anchor"),
+            ):
+                if self.llm_instance_manager.claim_lru_scale_in(
+                    candidate["instance_id"], idle_seconds=0
+                ):
+                    self._submit_runtime_llm_cleanup(candidate)
             instance_id = str(uuid.uuid4())
             if not self.llm_instance_manager.mark_model_deploying(
                 model,
@@ -1819,6 +1925,20 @@ class Scheduler():
         ).items():
             if value is not None:
                 message["data"][field] = value
+        if task.attempt == 0:
+            message["data"]["pre_dispatch"] = True
+        elif (
+            error.get("error_type") == "resource_capacity_exceeded"
+            and task.dispatch_id is None
+        ):
+            previous = task.previous_attempt_identity
+            if previous:
+                message["data"].update(
+                    attempt=previous[0],
+                    dispatch_id=previous[1],
+                    lease_id=previous[2],
+                    capacity_rejection=True,
+                )
         self._send_or_defer_scheduler_event(
             socket_to_main,
             message,
@@ -2000,6 +2120,7 @@ class Scheduler():
             "finished_at": attempt_finished_at,
             "duration_ms": duration_ms,
         }
+        failed_route = copy.deepcopy(task.model_route)
         self._release_model_route(task)
         self._stopped_workflows().add(task.workflow_id)
         if (
@@ -2024,6 +2145,18 @@ class Scheduler():
 
         if should_retry:
             self._stopped_workflows().discard(task.workflow_id)
+            if repair_action["type"] == "resource_reanchor":
+                task.failed_model_route = failed_route
+                try:
+                    cleanup = self._resource_cleanup(task, repair_action)
+                    self.resource_recovery.submit(task, error, repair_action, cleanup)
+                except Exception as exc:
+                    error = exception_to_error_envelope("resource_cleanup_failed", exc)
+                    task.max_retries = 0
+                    self._retry_or_fail_task(
+                        socket_to_main, task, error, outbound_messages=outbound_messages
+                    )
+                return
             self._release_task_attempt_resource(task, original_resources)
             error["repair_action"] = copy.deepcopy(repair_action)
             if repair_action.get("adjusted_resources"):
@@ -2086,6 +2219,66 @@ class Scheduler():
     def _release_task_attempt_resource(self, task: TaskRuntime, resources: Dict[str, Any]):
         self.resource_manager.release_lease(getattr(task, "lease_id", None))
 
+    def _resource_cleanup(self, task: TaskRuntime, repair: dict):
+        return prepare_cleanup(
+            task,
+            repair,
+            instances=self.llm_instance_manager,
+            stop_instance=self._stop_and_finalize_llm_instance,
+            shutting_down=self._shutdown_requested,
+        )
+
+    def _drain_resource_recoveries(self, socket_to_main, outbound_messages):
+        for recovery in self.resource_recovery.completed():
+            task = recovery.task
+            current = self.workflow_manager.workflows.get(task.workflow_id)
+            valid = (
+                current is not None
+                and current.tasks.get(task.task_id) is task
+                and (task.attempt, task.dispatch_id, task.lease_id) == recovery.identity
+            )
+            try:
+                recovery.future.result()
+            except Exception as exc:
+                if valid:
+                    if recovery.repair.get("scope") == "model_instance":
+                        # The completed HTTP caller owns no GPU; the instance lease stays reserved.
+                        self.resource_manager.release_lease(recovery.identity[2])
+                    error = exception_to_error_envelope("resource_cleanup_failed", exc)
+                    self._retry_or_fail_task(
+                        socket_to_main, task, error, outbound_messages=outbound_messages
+                    )
+                continue
+            self.resource_manager.release_lease(recovery.identity[2])
+            if not valid or task.workflow_id in self._stopped_workflows():
+                continue
+            task.resources = dict(recovery.repair["adjusted_resources"])
+            task.resource_decision = recovery.repair["resource_decision"]
+            if task.model_anchor and recovery.repair["type"] == "resource_reanchor":
+                task.model_anchor = {
+                    **task.model_anchor,
+                    "gpu_mem": task.resources["gpu_mem"],
+                    "estimated_gpu_mem_mb": task.resources["gpu_mem"],
+                }
+            error = {**recovery.error, "repair_action": recovery.repair}
+            task.schedule_retry(error)
+            record_retry_decision(
+                task,
+                error,
+                diagnose_failure(error, task),
+                recovery.repair,
+                retry_scheduled=True,
+                next_attempt=task.attempt + 1,
+            )
+
+            def enqueue_retry(task=task):
+                task.clear_attempt_identity()
+                self.task_queues.put(task)
+
+            self._send_task_retry(
+                socket_to_main, task, error, outbound_messages, enqueue_retry
+            )
+
     def _run_task_with_lease(
         self,
         task: TaskRuntime,
@@ -2147,6 +2340,7 @@ class Scheduler():
 
         with exit_lock:
             producers_stopped = self._join_scheduler_producers()
+            self.resource_recovery.close()
             self._stop_scheduler_event_sender()
             instance_cleanup_complete = False
             try:
@@ -2357,21 +2551,26 @@ class Scheduler():
                                 f"Unsupported task_type: {message_data.get('task_type')!r}"
                             )
                         task_runtime = TaskRuntime(
-                            workflow_id=message_data['workflow_id'],
-                            task_id=message_data['task_id'],
-                            task_input=message_data['task_input'],
-                            task_output=message_data['task_output'],
-                            resources=message_data['resources'],
-                            task_kind=message_data.get('task_kind'),
-                            model_anchor=message_data.get('model_anchor'),
-                            code_str=message_data.get('code_str'),
-                            code_ser=message_data.get('code_ser'),
-                            file_context=message_data.get('file_context'),
-                            max_retries=message_data.get('max_retries'),
-                            retry_backoff_seconds=message_data.get('retry_backoff_seconds', 0),
-                            retry_on=message_data.get('retry_on'),
-                            timeout_seconds=message_data.get('timeout_seconds'),
-                            scheduling_context=message_data.get('scheduling_context'),
+                            workflow_id=message_data["workflow_id"],
+                            task_id=message_data["task_id"],
+                            task_input=message_data["task_input"],
+                            task_output=message_data["task_output"],
+                            resources=message_data["resources"],
+                            task_kind=message_data.get("task_kind"),
+                            model_anchor=message_data.get("model_anchor"),
+                            code_str=message_data.get("code_str"),
+                            code_ser=message_data.get("code_ser"),
+                            file_context=message_data.get("file_context"),
+                            max_retries=message_data.get("max_retries"),
+                            retry_backoff_seconds=message_data.get(
+                                "retry_backoff_seconds", 0
+                            ),
+                            retry_on=message_data.get("retry_on"),
+                            timeout_seconds=message_data.get("timeout_seconds"),
+                            scheduling_context=message_data.get("scheduling_context"),
+                            resource_context=message_data.get("resource_context"),
+                            resource_decision=message_data.get("resource_decision"),
+                            declared_resources=message_data.get("declared_resources"),
                         )
                         task_runtime.set_priority(message_data.get('priority', 0))
                         self.task_queues.put(task_runtime)
@@ -2539,6 +2738,28 @@ class Scheduler():
                         dispatched_or_removed = True
                         continue
                     self.cur_ready_task.set_task_status("ready")
+                    capacity = self.resource_manager.gpu_capacity_mib(
+                        self.cur_ready_task.scheduler_resources,
+                        self.cur_ready_task.model_anchor,
+                    )
+                    if (
+                        capacity is not None
+                        and self.cur_ready_task.resources["gpu_mem"] > capacity
+                    ):
+                        self.task_queues.pop_head(queue_name, self.cur_ready_task)
+                        error = make_error_envelope(
+                            "resource_capacity_exceeded",
+                            f"Requested {self.cur_ready_task.resources['gpu_mem']} MiB exceeds eligible capacity {capacity} MiB",
+                        )
+                        self._retry_or_fail_task(
+                            socket_to_main,
+                            self.cur_ready_task,
+                            error,
+                            outbound_messages=outbound_messages,
+                        )
+                        self.cur_ready_task = None
+                        dispatched_or_removed = True
+                        continue
                     model_route_decision = {}
                     model_anchor = getattr(self.cur_ready_task, "model_anchor", None)
                     requires_model_route = bool(
@@ -2584,7 +2805,7 @@ class Scheduler():
                         dispatched_or_removed = True
                         continue
 
-                    #Get the node can run the task
+                    # Get the node can run the task
                     dispatch_id = str(uuid.uuid4())
                     selection = self.resource_manager.select_node(
                         task_need_resources=self._task_execution_resources(
@@ -2608,7 +2829,7 @@ class Scheduler():
                         selection.decision.update(model_route_decision)
                         selection.decision = self._public_schedule_decision(self.cur_ready_task, selection.decision)
                         self.cur_ready_task.last_schedule_decision = selection.decision
-                        #Run task
+                        # Run task
                         try:
                             self._run_task_with_lease(
                                 self.cur_ready_task,
@@ -2632,7 +2853,7 @@ class Scheduler():
                             dispatched_or_removed = True
                             continue
 
-                        #Send message to main
+                        # Send message to main
                         message = {
                             "type":"start_task",
                             "data":{
@@ -2667,6 +2888,24 @@ class Scheduler():
                         dispatched_or_removed = True
                     else:
                         self._release_model_route(self.cur_ready_task)
+                        if (
+                            selection.decision.get("reason")
+                            == "resource_capacity_exceeded"
+                        ):
+                            self.task_queues.pop_head(queue_name, self.cur_ready_task)
+                            error = make_error_envelope(
+                                "resource_capacity_exceeded",
+                                f"Requested {self.cur_ready_task.resources['gpu_mem']} MiB exceeds every eligible GPU's capacity",
+                            )
+                            self._retry_or_fail_task(
+                                socket_to_main,
+                                self.cur_ready_task,
+                                error,
+                                outbound_messages=outbound_messages,
+                            )
+                            self.cur_ready_task = None
+                            dispatched_or_removed = True
+                            continue
                         previous_pending_reason = self.cur_ready_task.pending_reason
                         pending_reason = selection.decision.get("reason")
                         self.cur_ready_task.set_task_status("pending")
@@ -2698,6 +2937,7 @@ class Scheduler():
             outbound_messages = []
             self._manage_llm_instance_scaling()
             with self.lock:
+                self._drain_resource_recoveries(socket_to_main, outbound_messages)
                 self.resource_manager.check_dead_node()
                 self.resource_manager.show_all_node_resource()
                 self._manage_standby_workers()
@@ -2730,6 +2970,10 @@ class Scheduler():
                         continue # The workflow of task is deleted
                     try:
                         raw_result = ray.get(finished_task_ref)
+                        if isinstance(raw_result, dict):
+                            finished_task.worker_identity = raw_result.get(
+                                "worker_identity"
+                            )
                         if is_task_error_result(raw_result):
                             error = raw_result["error"]
                             file_manifest = raw_result.get("file_manifest")
@@ -2769,7 +3013,7 @@ class Scheduler():
                         self.workflow_manager.clear_task_ref(finished_task)
                         fault_tolerance = record_success(finished_task)
 
-                        #Send message to main
+                        # Send message to main
                         node_id = None
                         try:
                             node_id = finished_task.selected_node.node_id if finished_task.selected_node else None

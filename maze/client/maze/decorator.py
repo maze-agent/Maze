@@ -72,7 +72,13 @@ def _normalize_resources(resources: Dict[str, Any] = None, func: Callable | None
         normalized["gpu_mem"] = resources["gpu_mem"]
     if "io_num" in resources:
         normalized["io_num"] = resources["io_num"]
-    for key in ("target_node_id", "node_id", "avoid_node_ids", "required_capability"):
+    for key in (
+        "target_node_id",
+        "node_id",
+        "avoid_node_ids",
+        "required_capability",
+        "gpu_mem_limit",
+    ):
         if key in resources and resources[key] not in (None, ""):
             normalized[key] = copy.deepcopy(resources[key])
 

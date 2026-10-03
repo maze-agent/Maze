@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import hashlib
@@ -532,6 +532,7 @@ def _launch_model_subprocess(command: list[str], env: dict, owner_state_file=Non
         popen_command,
         env=popen_env,
         start_new_session=os.name == "posix",
+        stderr=subprocess.PIPE,
         **popen_kwargs,
     )
 
@@ -930,6 +931,13 @@ class LLMServerActor:
         self.process_group_id = None
         self.ready = False
         self.stop_requested = False
+        self.stderr_tail = deque(maxlen=64)
+
+    def _read_stderr(self, stream):
+        for line in iter(stream.readline, b""):
+            text = line.decode("utf-8", errors="replace")
+            self.stderr_tail.append(text[-2048:])
+            sys.stderr.write(text)
 
     def _get_free_port(self):
         self.port, self._port_reservation_fd = _reserve_llm_port()
@@ -1007,6 +1015,9 @@ class LLMServerActor:
                         env["HUGGINGFACE_HUB_CACHE"] = cache_dir
                         env["HF_HUB_OFFLINE"] = "1"
                 self.proc = _launch_model_subprocess(command, env, owner_state_file)
+                threading.Thread(
+                    target=self._read_stderr, args=(self.proc.stderr,), daemon=True
+                ).start()
                 if os.name == "posix":
                     self.process_group_id = self.proc.pid
         except BaseException:
@@ -1024,6 +1035,7 @@ class LLMServerActor:
             "return_code": return_code,
             "ready": self.ready,
             "running": self.proc is not None and return_code is None,
+            "stderr_tail": "".join(self.stderr_tail),
         }
 
     def mark_ready(self):
@@ -1034,6 +1046,40 @@ class LLMServerActor:
         self.ready = True
         self._release_port_reservation()
         return True
+
+    def memory_metrics(self):
+        """Measure this server's process group, rather than the caller or whole GPU."""
+        if self.proc is None:
+            return {}
+        try:
+            output = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                timeout=3,
+            )
+            amount = 0
+            for line in output.splitlines():
+                pid, mib = (piece.strip() for piece in line.split(","))
+                try:
+                    if os.getpgid(int(pid)) == self.process_group_id:
+                        amount += int(mib) * 1024 * 1024
+                except (ProcessLookupError, ValueError):
+                    continue
+            return (
+                {
+                    "memory_scope": "model_instance",
+                    "memory_source": "nvml_process_group",
+                    "gpu_memory_observed_bytes": amount,
+                }
+                if amount
+                else {}
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}
 
     def stop_server(self, timeout: int = LLM_PROCESS_STOP_TIMEOUT):
         self.stop_requested = True
@@ -1076,6 +1122,8 @@ class LlmInstanceManager():
         self.workflow_model_affinity = {}
         self.pending_model_request_ids = defaultdict(set)
         self.pending_model_anchors = {}
+        self.pending_request_anchors = defaultdict(dict)
+        self.model_admission_limits = {}
         self.deploying_model_counts = defaultdict(int)
         self.max_requests_per_instance = max(1, int(max_requests_per_instance))
         self.scale_out_threshold = max(0.1, float(scale_out_threshold))
@@ -1319,6 +1367,10 @@ class LlmInstanceManager():
                 "addr": addr,
                 "endpoint": endpoint,
                 "status": "ready",
+                "admission_limit": self.model_admission_limits.get(
+                    (model, backend), self.max_requests_per_instance
+                ),
+                "generation_id": generation_id or existing_detail.get("generation_id"),
                 "inflight_requests": previous_metadata.get("inflight_requests", 0),
                 "total_routed_requests": previous_metadata.get(
                     "total_routed_requests",
@@ -1441,7 +1493,17 @@ class LlmInstanceManager():
             }
             if detail.get("served_model") != detail["model"]:
                 info["served_model"] = detail["served_model"]
+            info["memory_metrics"] = detail.get("memory_metrics", {})
             return info
+
+    def set_resource_decision(
+        self, instance_id: str, context: dict, decision: dict
+    ) -> None:
+        with self.lock:
+            for index in (self.id_to_resource_detail, self.id_to_instance_metadata):
+                index[instance_id].update(
+                    resource_context=dict(context), resource_decision=dict(decision)
+                )
 
     def _cleanup_remote(
         self,
@@ -1508,6 +1570,9 @@ class LlmInstanceManager():
                 "messages": [{"role": "user", "content": "Reply with READY."}],
                 "max_tokens": 8,
                 "temperature": 0,
+                # Keep reasoning models from spending the entire probe budget
+                # on thinking and returning an empty final answer.
+                "chat_template_kwargs": {"enable_thinking": False},
             },
             timeout=timeout,
         )
@@ -1550,7 +1615,8 @@ class LlmInstanceManager():
             )
             if process_status["return_code"] is not None:
                 last_error = RuntimeError(
-                    f"{backend} exited with code {process_status['return_code']}"
+                    f"{backend} exited with code {process_status['return_code']}: "
+                    + process_status.get("stderr_tail", "")
                 )
                 break
             try:
@@ -1716,7 +1782,8 @@ class LlmInstanceManager():
         with self.lock:
             pending_requests = self.pending_model_request_ids[key]
             pending_requests.add(request_id)
-            self.pending_model_anchors[key] = dict(model_anchor or {})
+            self.pending_request_anchors[key][request_id] = dict(model_anchor or {})
+            self._refresh_pending_anchor(key)
             return {
                 "model": key[0],
                 "backend": key[1],
@@ -1805,15 +1872,9 @@ class LlmInstanceManager():
             )
 
     def _estimated_gpu_mem(self, model_anchor: dict | None):
-        model_anchor = model_anchor or {}
-        for key in ("gpu_mem", "estimated_gpu_mem_mb", "estimated_gpu_memory_mb"):
-            value = model_anchor.get(key)
-            if value:
-                return int(float(value))
-        weight_bytes = model_anchor.get("estimated_weight_memory_bytes")
-        if weight_bytes:
-            return max(1, int(float(weight_bytes) / (1024 * 1024) * 1.2))
-        return 0
+        from maze.core.resource_policy import model_memory_mib
+
+        return model_memory_mib(model_anchor)
 
     def route_model_request(
         self,
@@ -1832,6 +1893,17 @@ class LlmInstanceManager():
         )
         with self.lock:
             model, backend = key
+            required_mib = self._estimated_gpu_mem(model_anchor)
+            from maze.core.resource_policy import context_for_task
+
+            expected_identity = (
+                context_for_task(model_anchor=model_anchor).identity
+                if (
+                    model_anchor.get("checkpoint_fingerprint")
+                    or model_anchor.get("revision")
+                )
+                else None
+            )
             affinity_key = (workflow_id, model, backend)
             candidates = [
                 self.id_to_instance_metadata[instance_id]
@@ -1841,6 +1913,17 @@ class LlmInstanceManager():
                 if (
                     instance_id in self.id_to_instance_metadata
                     and self.id_to_state.get(instance_id) == "ready"
+                    and self.id_to_resource_detail[instance_id]["resources"].get(
+                        "gpu_mem", 0
+                    )
+                    >= required_mib
+                    and (
+                        expected_identity is None
+                        or self.id_to_instance_metadata[instance_id]
+                        .get("resource_context", {})
+                        .get("identity")
+                        in (None, expected_identity)
+                    )
                 )
             ]
             if not candidates:
@@ -1860,9 +1943,10 @@ class LlmInstanceManager():
                 affinity_candidate = self.id_to_instance_metadata[
                     affinity_instance_id
                 ]
-                if (
-                    affinity_candidate.get("inflight_requests", 0)
-                    < self.max_requests_per_instance
+                if affinity_candidate.get(
+                    "inflight_requests", 0
+                ) < affinity_candidate.get(
+                    "admission_limit", self.max_requests_per_instance
                 ):
                     selected = affinity_candidate
                     affinity_hit = True
@@ -1872,7 +1956,7 @@ class LlmInstanceManager():
                     candidate
                     for candidate in candidates
                     if candidate.get("inflight_requests", 0)
-                    < self.max_requests_per_instance
+                    < candidate.get("admission_limit", self.max_requests_per_instance)
                 ]
                 if not available:
                     self.record_model_demand(
@@ -1902,6 +1986,8 @@ class LlmInstanceManager():
             )
             selected["last_used_time"] = time.time()
             self.pending_model_request_ids[key].discard(request_id)
+            self.pending_request_anchors[key].pop(request_id, None)
+            self._refresh_pending_anchor(key)
             return {
                 "model": model,
                 "served_model": selected.get("served_model") or model,
@@ -1912,6 +1998,7 @@ class LlmInstanceManager():
                 "node_id": selected["node_id"],
                 "node_ip": selected["node_ip"],
                 "gpu_id": selected["gpu_id"],
+                "generation_id": selected.get("generation_id"),
                 "workflow_id": workflow_id,
                 "affinity_hit": affinity_hit,
                 "inflight_requests": selected["inflight_requests"],
@@ -1922,12 +2009,20 @@ class LlmInstanceManager():
             return []
         workflow_id = str(workflow_id)
         with self.lock:
-            for request_ids in self.pending_model_request_ids.values():
+            for model_key, request_ids in self.pending_model_request_ids.items():
                 request_ids.difference_update({
                     request_id
                     for request_id in request_ids
                     if request_id[0] == workflow_id
                 })
+                self.pending_request_anchors[model_key] = {
+                    request: anchor
+                    for request, anchor in self.pending_request_anchors[
+                        model_key
+                    ].items()
+                    if request in request_ids
+                }
+                self._refresh_pending_anchor(model_key)
             for key in list(self.workflow_model_affinity):
                 if key[0] == workflow_id:
                     del self.workflow_model_affinity[key]
@@ -1983,6 +2078,85 @@ class LlmInstanceManager():
                 "scale_out_threshold": self.scale_out_threshold,
                 "idle_scale_in_seconds": self.idle_scale_in_seconds,
             }
+
+    def prepare_memory_recovery(self, instance_id: str) -> bool:
+        """Preserve shared in-flight work; serialize admission after concurrent OOM."""
+        with self.lock:
+            metadata = self.id_to_instance_metadata[instance_id]
+            if self.id_to_state.get(instance_id) != "ready":
+                raise RuntimeError(
+                    "Model instance is already being recovered or stopped"
+                )
+            if metadata.get("inflight_requests", 0) > 0:
+                metadata["admission_limit"] = 1
+                self.model_admission_limits[
+                    (metadata["model"], metadata["backend"])
+                ] = 1
+                return True
+            self.id_to_state[instance_id] = "draining"
+            self._remove_routing_registration(instance_id, status="draining")
+            return False
+
+    def _refresh_pending_anchor(self, key):
+        anchors = self.pending_request_anchors[key]
+        if anchors:
+            self.pending_model_anchors[key] = dict(
+                max(anchors.values(), key=self._estimated_gpu_mem)
+            )
+        else:
+            self.pending_model_anchors.pop(key, None)
+
+    def undersized_idle_instances(
+        self, model: str, backend: str, required_mib: int, model_anchor=None
+    ) -> list[dict]:
+        from maze.core.resource_policy import context_for_task
+
+        expected = (
+            context_for_task(model_anchor=model_anchor).identity
+            if model_anchor
+            and (
+                model_anchor.get("revision")
+                or model_anchor.get("checkpoint_fingerprint")
+            )
+            else None
+        )
+        with self.lock:
+            return [
+                dict(self.id_to_instance_metadata[identifier])
+                for identifier in self.model_to_instances.get((model, backend), ())
+                if self.id_to_state.get(identifier) == "ready"
+                and self.id_to_instance_metadata[identifier].get("inflight_requests", 0)
+                == 0
+                and (
+                    self.id_to_resource_detail[identifier]["resources"].get(
+                        "gpu_mem", 0
+                    )
+                    < required_mib
+                    or expected is not None
+                    and self.id_to_instance_metadata[identifier]
+                    .get("resource_context", {})
+                    .get("identity")
+                    not in (None, expected)
+                )
+            ]
+
+    def wait_for_admission(
+        self, instance_id: str, timeout: float = 60, cancelled=None
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if cancelled is not None and cancelled():
+                return
+            with self.lock:
+                metadata = self.id_to_instance_metadata.get(instance_id)
+                if metadata is None:
+                    return
+                if metadata.get("inflight_requests", 0) < metadata.get(
+                    "admission_limit", self.max_requests_per_instance
+                ):
+                    return
+            time.sleep(0.05)
+        raise RuntimeError("Model instance did not drain before the recovery deadline")
 
     def scale_out_recommendations(self):
         with self.lock:
@@ -2386,6 +2560,15 @@ class LlmInstanceManager():
                 backend_args,
                 timeout=remaining,
             )
+            try:
+                metrics = ray.get(actor.memory_metrics.remote(), timeout=5)
+            except Exception:
+                logger.debug(
+                    "Model process memory measurement unavailable", exc_info=True
+                )
+                metrics = {}
+            with self.lock:
+                self.id_to_resource_detail[instance_id]["memory_metrics"] = metrics
             self._mark_ready(instance_id, actor)
         except Exception as start_error:
             try:

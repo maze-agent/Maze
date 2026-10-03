@@ -4,21 +4,24 @@ import json
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict
 
 from maze.core.scheduler.result_summary import to_json_safe
 from maze.core.workflow.dynamic_store import default_workspace_dir
 from maze.core.workflow.resources import normalize_resources
-
-
-SCHEMA_VERSION = 2
-GPU_PEAK_KEYS = (
-    "gpu_memory_peak_reserved_bytes",
-    "gpu_memory_peak_allocated_bytes",
-    "peak_cuda_reserved_bytes",
-    "peak_cuda_allocated_bytes",
+from maze.core.resource_policy import (
+    GPU_PEAK_KEYS,
+    ResourceContext,
+    observed_peak_bytes,
+    recommend_resources,
 )
+
+
+SCHEMA_VERSION = 3
+MAX_PROFILES = 1024
+MAX_OBSERVATION_IDS = 8192
 
 
 def _int_value(value: Any, default: int = 0) -> int:
@@ -58,6 +61,8 @@ class ResourceHistoryStore:
             "models": {},
             "tasks": {},
             "recent_observations": [],
+            "profiles": {},
+            "observation_ids": [],
         }
 
     def load(self) -> Dict[str, Any]:
@@ -66,18 +71,21 @@ class ResourceHistoryStore:
                 with self.path.open("r", encoding="utf-8") as handle:
                     data = json.load(handle)
                 if isinstance(data, dict):
+                    if int(data.get("schema_version", 1)) > SCHEMA_VERSION:
+                        raise ValueError(
+                            "Resource history was written by a newer Maze version"
+                        )
                     data["schema_version"] = SCHEMA_VERSION
                     data.setdefault("models", {})
                     data.setdefault("tasks", {})
                     data.setdefault("recent_observations", [])
-                    for bucket_name in ("models", "tasks"):
-                        for record in data[bucket_name].values():
-                            if isinstance(record, dict):
-                                record.pop("recommended_gpu_mem_mb", None)
+                    # Old aggregates remain diagnostic; only scoped profiles feed decisions.
+                    data.setdefault("profiles", {})
+                    data.setdefault("observation_ids", [])
                     return data
-            except Exception:
-                pass
-            return self._empty()
+                raise ValueError("Resource history must contain an object")
+            except FileNotFoundError:
+                return self._empty()
 
     def _save(self, data: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,8 +101,26 @@ class ResourceHistoryStore:
         resources: Dict[str, Any] | None,
         model_anchor: Dict[str, Any] | None = None,
         task_name: str | None = None,
+        context: ResourceContext | None = None,
     ) -> Dict[str, Any]:
-        return normalize_resources(resources)
+        if context is None:
+            return normalize_resources(resources)
+        return recommend_resources(
+            context, resources or {}, self.lookup(context), model_anchor=model_anchor
+        ).effective
+
+    def lookup(self, context: ResourceContext) -> Dict[str, Any]:
+        with self._lock:
+            profiles = self.load()["profiles"]
+            result = dict(profiles.get(context.key, {}))
+            if context.scope == "model_instance" and context.features:
+                base = profiles.get(replace(context, features=()).key, {})
+                for key in ("success_peak_bytes", "oom_lower_bound_mib"):
+                    result[key] = max(int(result.get(key, 0)), int(base.get(key, 0)))
+                result["success_samples"] = int(result.get("success_samples", 0)) + int(
+                    base.get("success_samples", 0)
+                )
+            return result
 
     def record(
         self,
@@ -108,6 +134,9 @@ class ResourceHistoryStore:
         metrics: Dict[str, Any] | None = None,
         error: Dict[str, Any] | None = None,
         selected_node: Dict[str, Any] | None = None,
+        context: ResourceContext | None = None,
+        observation_id: str | None = None,
+        required_gpu_mem_mib: int = 0,
     ) -> Dict[str, Any]:
         requested_resources = normalize_resources(requested_resources)
         metrics = dict(metrics or {})
@@ -129,17 +158,71 @@ class ResourceHistoryStore:
             "error": to_json_safe(error),
             "error_type": error_type,
             "peak_gpu_memory_bytes": peak_bytes,
+            "observation_id": observation_id,
+            "resource_context": context.to_dict() if context else None,
         }
 
         with self._lock:
             data = self.load()
+            if observation_id and observation_id in data["observation_ids"]:
+                return to_json_safe(observation)
             self._update_record(data.setdefault("tasks", {}), str(task_name or task_id), observation)
             model_key = model_anchor_key(model_anchor)
             if model_key:
                 self._update_record(data.setdefault("models", {}), model_key, observation)
+            if context:
+                profile = data["profiles"].setdefault(
+                    context.key,
+                    {
+                        "context": context.to_dict(),
+                        "success_samples": 0,
+                        "success_peak_bytes": 0,
+                        "oom_lower_bound_mib": 0,
+                    },
+                )
+                peak = observed_peak_bytes(metrics)
+                # A routed caller's allocator statistics belong to its worker, not the instance.
+                measurement_scope = metrics.get("memory_scope", "task")
+                if success and peak is not None and measurement_scope == context.scope:
+                    profile["success_samples"] += 1
+                    profile["success_peak_bytes"] = max(
+                        profile["success_peak_bytes"], peak
+                    )
+                if (
+                    not success
+                    and required_gpu_mem_mib
+                    and (
+                        context.scope == "task"
+                        or context.features
+                        or (error or {}).get("memory_failure", {}).get("phase")
+                        == "load"
+                    )
+                ):
+                    profile["oom_lower_bound_mib"] = max(
+                        profile["oom_lower_bound_mib"], required_gpu_mem_mib
+                    )
+                profile["last_observed_time"] = observation["recorded_time"]
+                if len(data["profiles"]) > MAX_PROFILES:
+                    oldest = min(
+                        data["profiles"],
+                        key=lambda k: data["profiles"][k].get("last_observed_time", 0),
+                    )
+                    del data["profiles"][oldest]
+            if observation_id:
+                data["observation_ids"].append(observation_id)
+                del data["observation_ids"][:-MAX_OBSERVATION_IDS]
             recent = data.setdefault("recent_observations", [])
             recent.append(to_json_safe(observation))
             del recent[:-100]
+            for bucket_name in ("models", "tasks"):
+                bucket = data[bucket_name]
+                if len(bucket) > MAX_PROFILES:
+                    del bucket[
+                        min(
+                            bucket,
+                            key=lambda key: bucket[key].get("last_observed_time", 0),
+                        )
+                    ]
             self._save(data)
         return to_json_safe(observation)
 

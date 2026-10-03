@@ -111,6 +111,8 @@ def _loaded_torch_cuda_metrics():
         return {
             "gpu_memory_peak_allocated_bytes": int(cuda.max_memory_allocated()),
             "gpu_memory_peak_reserved_bytes": int(cuda.max_memory_reserved()),
+            "memory_scope": "task",
+            "memory_source": "torch_allocator",
         }
     except Exception:
         return {}
@@ -304,6 +306,10 @@ def execute_code_task_in_worker(
     _apply_model_route_env(model_route)
     _apply_cuda_visible_devices(cuda_visible_devices)
 
+    torch = sys.modules.get("torch")
+    if torch is not None and cuda_visible_devices and torch.cuda.is_initialized():
+        torch.cuda.reset_peak_memory_stats()
+
     started_at = time.time()
     with _metrics_scope() as collector:
         output = run_code_task(
@@ -320,6 +326,22 @@ def execute_code_task_in_worker(
         metrics = envelope.setdefault("metrics", {})
         for key, value in observed_gpu_metrics.items():
             metrics.setdefault(key, value)
+        if is_task_error_result(envelope):
+            failure = envelope["error"].get("memory_failure")
+            if failure and failure.get("scope") == "task":
+                failure["peak_bytes"] = max(
+                    observed_gpu_metrics["gpu_memory_peak_allocated_bytes"],
+                    observed_gpu_metrics["gpu_memory_peak_reserved_bytes"],
+                )
+    from maze.core.scheduler.recovery import process_start_ticks
+
+    envelope["worker_identity"] = {
+        "pid": os.getpid(),
+        "start_ticks": process_start_ticks(os.getpid()),
+        "node_id": (
+            ray.get_runtime_context().get_node_id() if ray.is_initialized() else None
+        ),
+    }
     return envelope
 
 

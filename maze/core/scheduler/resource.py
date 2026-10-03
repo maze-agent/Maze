@@ -120,7 +120,7 @@ class Node():
             )
         self.last_resource_update_time = time.time()
         return "updated"
-  
+
 class ResourceManager():
     def __init__(self):
         self.head_node_id = None
@@ -133,7 +133,7 @@ class ResourceManager():
         self.scheduling_policy = "default"
         self.worker_stale_after_seconds = 30
         self._last_dead_node_check_monotonic = float("-inf")
-        
+
         self.last_time = time.time()
         self.interval = 3
 
@@ -170,9 +170,10 @@ class ResourceManager():
                 gpu_id = gpu["index"]
                 gpu_mem = gpu["memory_free"]
                 head_resource["gpu_resource"][gpu_id] = {
-                    "gpu_id" : gpu_id,
-                    "gpu_mem":gpu_mem,
-                    "gpu_num":1
+                    "gpu_id": gpu_id,
+                    "gpu_mem": gpu_mem,
+                    "gpu_capacity": gpu["memory_total"],
+                    "gpu_num": 1,
                 }
 
         return head_resource
@@ -186,7 +187,7 @@ class ResourceManager():
         self.head_node_ip = ray.util.get_node_ip_address()
         head_node_resource = self._get_head_node_resource()
 
-        #Wait for ray head launch
+        # Wait for ray head launch
         while True:
             for node in ray.nodes():
                 if node["NodeID"] == self.head_node_id and node["Alive"]:     
@@ -202,7 +203,7 @@ class ResourceManager():
                     )
                     self.running_task_counts.setdefault(self.head_node_id, 0)
                     return
-                    
+
     def check_dead_node(self):
         now = time.monotonic()
         if (
@@ -224,7 +225,7 @@ class ResourceManager():
             self.disabled_node_ids.discard(node_id)
             self.dag_context_manager.release_node_contexts(node_id)
         return True
-                
+
     def show_all_node_resource(self):
         '''
         Show all node resource
@@ -232,7 +233,7 @@ class ResourceManager():
         cur_time = time.time()
         if cur_time - self.last_time >= self.interval:
             self.last_time = cur_time
-            
+
             logger.debug("===Show All Node===")
             logger.debug("Total Node: %s", len(self.nodes))
             for node_id,node in self.nodes.items():
@@ -382,8 +383,7 @@ class ResourceManager():
             "disabled": node_id in self.disabled_node_ids,
             "cluster": self.get_cluster_resources(),
         }
-            
-            
+
     def stop_worker(self,node_id:str):
         '''
         Stop worker node
@@ -391,7 +391,7 @@ class ResourceManager():
         del self.nodes[node_id]
         self.disabled_node_ids.discard(node_id)
         self.dag_context_manager.release_node_contexts(node_id)
-        
+
     def _node_resource_snapshot(self, node: Node) -> Dict[str, Any]:
         return {
             "cpu": node.available_resources.get("cpu", 0),
@@ -480,6 +480,36 @@ class ResourceManager():
                 candidate.get("node_ip") or "",
             )
         return (*dag_context_key, candidate.get("order", 0))
+
+    def gpu_capacity_mib(
+        self, resources: dict, model_anchor: dict | None = None
+    ) -> int | None:
+        target = resources.get("target_node_id") or resources.get("node_id")
+        anchor = model_anchor or {}
+        if anchor.get("model_scope") == "head":
+            target = self.head_node_id
+        capacities = []
+        for node_id, node in self.nodes.items():
+            if node_id in self.disabled_node_ids or (target and node_id != target):
+                continue
+            if node_id in resources.get("avoid_node_ids", ()):
+                continue
+            model = anchor.get("local_model") or anchor.get("model")
+            if model and not any(
+                item.get("id") == model
+                and local_model_supports_backend(item, anchor.get("backend", "vllm"))
+                for item in node.capabilities.get("local_models", ())
+            ):
+                continue
+            if resources.get("required_capability") and not node.capabilities.get(
+                resources["required_capability"]
+            ):
+                continue
+            capacities.extend(
+                gpu.get("gpu_capacity")
+                for gpu in node.total_resources.get("gpu_resource", {}).values()
+            )
+        return max(capacities) if capacities and all(capacities) else None
 
     def select_node(
         self,
@@ -633,6 +663,36 @@ class ResourceManager():
 
         if not runnable_candidates:
             decision["reason"] = self._candidate_failure_reason(candidates, target_node_id)
+            eligible = [
+                c
+                for c in candidates
+                if c["alive"]
+                and not c["disabled"]
+                and not any(
+                    reason in c["reject_reasons"]
+                    for reason in (
+                        "missing_model",
+                        "model_backend_unavailable",
+                        "missing_capability",
+                        "avoided_after_failure",
+                    )
+                )
+            ]
+            capacities = [
+                g.get("gpu_capacity")
+                for c in eligible
+                for g in self.nodes[c["node_id"]]
+                .total_resources.get("gpu_resource", {})
+                .values()
+            ]
+            if (
+                gpu_need
+                and capacities
+                and all(capacities)
+                and gpu_mem_need > max(capacities)
+            ):
+                decision["reason"] = "resource_capacity_exceeded"
+                decision["max_gpu_capacity_mib"] = max(capacities)
             return ResourceSelection(None, decision)
 
         selected_candidate = sorted(
@@ -763,7 +823,6 @@ class ResourceManager():
         Release an instance reservation.
         '''
         self.release_lease(resource_detail.get("lease_id"))
-        
 
     def start_worker(self,node_id:str,node_ip:str,resources:dict,capabilities:dict | None = None):
         '''

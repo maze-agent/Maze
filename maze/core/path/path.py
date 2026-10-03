@@ -46,6 +46,12 @@ from maze.core.scheduler.runtime_estimator import RuntimeEstimator, RuntimePredi
 from maze.core.files.artifact_store import LocalCASArtifactStore
 from maze.core.files.lineage import ArtifactError, publish_task_file_manifest
 from maze.core.resource_history import ResourceHistoryStore
+from maze.core.resource_policy import (
+    ResourceContext,
+    context_for_task,
+    recommend_resources,
+)
+from maze.core.local_models import enrich_model_anchor
 from maze.core.workflow.resources import ResourceSpecError, normalize_task_semantics, require_schedulable_resources
 from maze.utils.utils import get_available_ports
 
@@ -418,7 +424,7 @@ class MaPath:
         self.global_metrics.rebuild(self.static_run_store.list_runs())
         self.resource_history = ResourceHistoryStore()
         self.runtime_estimator = RuntimeEstimator()
-         
+
     def cleanup(self):
         '''
         Clean up the main process and scheduler process.
@@ -941,7 +947,14 @@ class MaPath:
             if identity == current_identity and (
                 current["state"] != "running" or message_type == "start_task"
             ):
-                return False
+                if not (
+                    current["state"] == "retrying"
+                    and message_type == "task_exception"
+                    and data.get("capacity_rejection") is True
+                    and (data.get("error") or {}).get("error_type")
+                    == "resource_capacity_exceeded"
+                ):
+                    return False
 
         previous = current if current is not None and current["identity"] == identity else {}
         error = None
@@ -1020,7 +1033,7 @@ class MaPath:
             },
             manifest,
         )
-        
+
     def create_workflow(self,workflow_id:str):
         '''
         Create a workflow.
@@ -1060,7 +1073,7 @@ class MaPath:
         Get a workflow.
         '''
         return self.workflows[workflow_id]
-  
+
     def _get_hacs_priority(self, workflow: Workflow, task_id: str):
         node_info = workflow.graph.nodes[task_id]
         n_desc = node_info.get("n_desc", 0)
@@ -1143,19 +1156,34 @@ class MaPath:
 
         return 0
 
-    def _task_run_payload(self, workflow: Workflow, task: CodeTask, submit_id: str, file_context: Dict[str, Any] | None = None):
-        data = task.to_json()
-        data['workflow_id'] = submit_id
-        data["resources"] = self.resource_history.apply(
-            data.get("resources"),
-            data.get("model_anchor"),
-            data.get("task_name"),
-        )
+    def _prepare_task_resources(self, data: Dict[str, Any]) -> None:
+        declared = dict(data.get("declared_resources") or data.get("resources") or {})
+        data["model_anchor"] = enrich_model_anchor(data.get("model_anchor"))
         data["task_kind"], data["resources"] = normalize_task_semantics(
             task_kind=data.get("task_kind"),
             resources=data.get("resources"),
             model_anchor=data.get("model_anchor"),
         )
+        context = context_for_task(
+            code_str=data.get("code_str"),
+            code_ser=data.get("code_ser"),
+            task_input=data.get("task_input"),
+            model_anchor=data.get("model_anchor"),
+        )
+        decision = recommend_resources(
+            context,
+            declared,
+            self.resource_history.lookup(context),
+            model_anchor=data.get("model_anchor"),
+        )
+        data["declared_resources"] = dict(decision.declared)
+        data["resources"] = decision.effective
+        data["resource_context"] = context.to_dict()
+        data["resource_decision"] = decision.to_dict()
+        if data["model_anchor"]:
+            data["model_anchor"]["gpu_mem"] = decision.effective["gpu_mem"]
+        if data["model_anchor"] and data["resources"].get("gpu_mem_limit"):
+            data["model_anchor"]["gpu_mem_limit"] = data["resources"]["gpu_mem_limit"]
         try:
             require_schedulable_resources(
                 data["task_kind"],
@@ -1163,7 +1191,18 @@ class MaPath:
                 data.get("model_anchor"),
             )
         except ResourceSpecError as exc:
-            raise ValueError(f"task {task.task_name}: {exc}") from exc
+            raise ValueError(f"task {data.get('task_name')}: {exc}") from exc
+
+    def _task_run_payload(
+        self,
+        workflow: Workflow,
+        task: CodeTask,
+        submit_id: str,
+        file_context: Dict[str, Any] | None = None,
+    ):
+        data = task.to_json()
+        data["workflow_id"] = submit_id
+        self._prepare_task_resources(data)
 
         if file_context and file_context.get("enabled"):
             task_node_ids = file_context.get("task_node_ids") or {}
@@ -2765,24 +2804,7 @@ class MaPath:
     def _dynamic_task_run_payload(self, dynamic_run: DynamicRun, task: CodeTask):
         data = task.to_json()
         data['workflow_id'] = task.workflow_id
-        data["resources"] = self.resource_history.apply(
-            data.get("resources"),
-            data.get("model_anchor"),
-            data.get("task_name"),
-        )
-        data["task_kind"], data["resources"] = normalize_task_semantics(
-            task_kind=data.get("task_kind"),
-            resources=data.get("resources"),
-            model_anchor=data.get("model_anchor"),
-        )
-        try:
-            require_schedulable_resources(
-                data["task_kind"],
-                data["resources"],
-                data.get("model_anchor"),
-            )
-        except ResourceSpecError as exc:
-            raise ValueError(f"task {task.task_name}: {exc}") from exc
+        self._prepare_task_resources(data)
         file_context = dynamic_run.file_context
         if file_context and file_context.get("enabled"):
             parent_task_ids = sorted(dynamic_run.task_parents.get(task.task_id, set()))
@@ -3017,6 +3039,33 @@ class MaPath:
             metrics=metrics,
             error=error,
             selected_node=selected_node,
+            context=(
+                ResourceContext.from_dict(schedule_decision["resource_context"])
+                if (schedule_decision or {}).get("resource_context")
+                else None
+            ),
+            observation_id=hashlib.sha256(
+                json.dumps(
+                    [
+                        run_id,
+                        task_id,
+                        attempt_data.get("attempt"),
+                        attempt_data.get("dispatch_id"),
+                        attempt_data.get("lease_id"),
+                    ]
+                ).encode()
+            ).hexdigest(),
+            required_gpu_mem_mib=(
+                int(
+                    (error or {})
+                    .get("repair_action", {})
+                    .get("adjusted_resources", {})
+                    .get("gpu_mem", 0)
+                )
+                if (error or {}).get("repair_action", {}).get("type")
+                == "resource_reanchor"
+                else 0
+            ),
         )
         observation_cache[observation_key] = copy.deepcopy(observation)
         return observation
@@ -3618,6 +3667,12 @@ class MaPath:
             self._rollback_task_attempt_event_transaction(attempt_transaction)
             return
 
+        decision = message_data.get("schedule_decision") or {}
+        task = dynamic_run.tasks.get(task_id)
+        if task is not None and decision.get("requested_resources"):
+            task.effective_resources = copy.deepcopy(decision["requested_resources"])
+            task.resource_decision = copy.deepcopy(decision.get("resource_decision"))
+
         if message_type == "start_task":
             dynamic_run.mark_started(task_id)
             self._persist_dynamic_scheduler_event(run_id, message)
@@ -3883,7 +3938,7 @@ class MaPath:
                 task,
             )
             self._send_scheduler_message({"type": "run_task", "data": data})
-        
+
     def get_ray_head_port(self):
         '''
         Get the ray head port.
@@ -3961,7 +4016,7 @@ class MaPath:
             return result
         finally:
             self.cluster_control_requests.pop(request_id, None)
-    
+
     async def start_worker(self,node_ip:str,node_id:str,resources:Dict, capabilities: Dict | None = None, timeout: float = 5.0):
         self._require_scheduler_available()
         request_id = str(uuid.uuid4())
@@ -4026,11 +4081,11 @@ class MaPath:
         self.node_scheduling_policy = node_scheduling_policy
         self.ray_head_port = ray_head_port
         available_ports = get_available_ports(2)
-      
+
         port1 = available_ports[0]
         port2 = available_ports[1]
-        
-        #Create the scheduler process and wait for it to be ready
+
+        # Create the scheduler process and wait for it to be ready
         self.ready_queue = mp.Queue()
         self.scheduler_process = mp.Process(
             target=scheduler_process,
@@ -4067,7 +4122,7 @@ class MaPath:
         except Exception:
             self._abort_scheduler_start()
             raise
- 
+
     async def monitor_coroutine(self):
         '''
         Monitor the task from the scheduler process.
@@ -4087,11 +4142,18 @@ class MaPath:
                 else:
                     message = retry_message
                     retry_message = None
- 
+
                 message_type = message["type"]
                 message_data = message.get("data", {})
-              
+
                 async with self.lock:
+                    if message_type == "resource_observation":
+                        observation = dict(message_data)
+                        observation["context"] = ResourceContext.from_dict(
+                            observation["context"]
+                        )
+                        self.resource_history.record(**observation)
+                        continue
                     if message_type == "cluster_resources":
                         request_id = message_data.get("request_id")
                         response_queue = self.cluster_resource_requests.get(request_id)
@@ -4286,7 +4348,7 @@ class MaPath:
                         que: Queue[Any] = self.async_que[submit_id]
                         await que.put(message)
                         self._stop_workflow_after_artifact_failure(message_data)
-                    
+
                     elif message_type in {
                         "finish_llm_instance_launch",
                         "fail_llm_instance_launch",
@@ -4312,7 +4374,7 @@ class MaPath:
             except Exception:
                 self._rollback_task_attempt_event_transaction(attempt_transaction)
                 logger.exception("Error in scheduler monitor")
-      
+
     async def get_dynamic_run_res(self, run_id:str, websocket:WebSocket):
         dynamic_run = self.get_dynamic_run(run_id)
         que = self.async_que[run_id]
@@ -4336,7 +4398,7 @@ class MaPath:
                 await asyncio.wait_for(que.get(), timeout=timeout)
             except asyncio.TimeoutError:
                 await self._refresh_dynamic_timeout(run_id)
-          
+
     async def stop_workflow(self,submit_id:str):
         '''
         Stop workflow
@@ -4373,7 +4435,7 @@ class MaPath:
 
         message = {"type":"stop_workflow","data":{"workflow_id":submit_id}}
         self._send_scheduler_message(message)
-    
+
     async def start_llm_instance(
         self,
         instance_id: str,
@@ -4386,6 +4448,15 @@ class MaPath:
         backend_args: dict | None = None,
         timeout: float = SCHEDULER_RESPONSE_TIMEOUT_SECONDS,
     ):
+        anchor = enrich_model_anchor({"local_model": model, "backend": backend})
+        context = context_for_task(model_anchor=anchor)
+        decision = recommend_resources(
+            context,
+            {"cpu_num": cpu_nums, "gpu_mem": gpu_mem},
+            self.resource_history.lookup(context),
+            model_anchor=anchor,
+        )
+        gpu_mem = decision.effective["gpu_mem"]
         request_id = str(uuid.uuid4())
         response_queue = asyncio.Queue(maxsize=1)
         self.llm_instance_async_que[request_id] = response_queue
@@ -4401,6 +4472,8 @@ class MaPath:
                 "gpu_mem": gpu_mem,
                 "memory": memory,
                 "backend_args": backend_args or {},
+                "resource_context": context.to_dict(),
+                "resource_decision": decision.to_dict(),
             },
         }
         terminal_received = False

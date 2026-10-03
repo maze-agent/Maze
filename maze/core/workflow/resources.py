@@ -18,6 +18,7 @@ RESOURCE_HINT_KEYS = {
     "node_id",
     "avoid_node_ids",
     "required_capability",
+    "gpu_mem_limit",
 }
 
 
@@ -60,21 +61,20 @@ def normalize_resources(resources: Dict[str, Any] | None) -> Dict[str, Any]:
     for key in RESOURCE_HINT_KEYS:
         if key in raw and raw[key] not in (None, ""):
             normalized[key] = copy.deepcopy(raw[key])
+    if "gpu_mem_limit" in normalized:
+        normalized["gpu_mem_limit"] = _int_value(normalized["gpu_mem_limit"])
+        if normalized["gpu_mem_limit"] <= 0:
+            raise ResourceSpecError(
+                "resources.gpu_mem_limit must be a positive MiB limit"
+            )
 
     return normalized
 
 
 def model_anchor_gpu_mem_mb(model_anchor: Dict[str, Any] | None) -> int:
-    if not isinstance(model_anchor, dict):
-        return 0
-    for key in ("estimated_gpu_mem_mb", "gpu_mem", "gpu_memory_mb"):
-        value = model_anchor.get(key)
-        if value:
-            return max(0, int(math.ceil(float(value))))
-    bytes_value = model_anchor.get("estimated_weight_memory_bytes") or model_anchor.get("weight_bytes")
-    if bytes_value:
-        return max(0, int(math.ceil(float(bytes_value) * 1.2 / (1024 * 1024))))
-    return 0
+    from maze.core.resource_policy import model_memory_mib
+
+    return model_memory_mib(model_anchor)
 
 
 def apply_model_anchor_estimate(

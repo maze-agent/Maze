@@ -5,8 +5,21 @@ from __future__ import annotations
 import json
 import os
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 import requests
+from maze.core.scheduler.error import ModelInferenceError, memory_failure_from_message
+
+
+def _raise_model_error(message: str, base_url: str) -> None:
+    failure = memory_failure_from_message(message, scope="external_service")
+    if not failure:
+        return
+    failure["phase"] = "inference"
+    route = json.loads(os.environ.get("MAZE_MODEL_ROUTE") or "{}")
+    if route and route.get("endpoint", "").rstrip("/") == base_url.rstrip("/"):
+        failure.update(scope="model_instance", instance_id=route["instance_id"])
+    raise ModelInferenceError(message, failure)
 
 
 def chat(
@@ -45,8 +58,15 @@ def chat(
         headers=headers,
         method="POST",
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        message = exc.read(65536).decode("utf-8", errors="replace")
+        _raise_model_error(message, base_url)
+        raise
+    if isinstance(payload, dict) and ("error" in payload or "detail" in payload):
+        _raise_model_error(json.dumps(payload, ensure_ascii=False), base_url)
 
     try:
         content = payload["choices"][0]["message"]["content"]

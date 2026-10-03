@@ -1,4 +1,3 @@
-
 import copy
 import ray
 import time
@@ -38,23 +37,27 @@ def _normalize_retry_on(retry_on: List[str] | tuple[str, ...] | None) -> tuple[s
 
 
 class TaskRuntime():
+
     def __init__(
         self,
-        workflow_id:str,
-        task_id:str,
-        task_input:Dict,
-        task_output:Dict,
-        resources:Dict,
-        task_kind:str|None=None,
-        model_anchor:Dict|None=None,
-        code_str:str=None,
-        code_ser:str=None,
-        file_context:Dict|None=None,
-        max_retries:int|None=None,
-        retry_backoff_seconds:float=0,
-        retry_on:List[str]|None=None,
-        timeout_seconds:float|None=None,
-        scheduling_context:Dict|None=None,
+        workflow_id: str,
+        task_id: str,
+        task_input: Dict,
+        task_output: Dict,
+        resources: Dict,
+        task_kind: str | None = None,
+        model_anchor: Dict | None = None,
+        code_str: str = None,
+        code_ser: str = None,
+        file_context: Dict | None = None,
+        max_retries: int | None = None,
+        retry_backoff_seconds: float = 0,
+        retry_on: List[str] | None = None,
+        timeout_seconds: float | None = None,
+        scheduling_context: Dict | None = None,
+        resource_context: Dict | None = None,
+        resource_decision: Dict | None = None,
+        declared_resources: Dict | None = None,
     ):
         self.status = "ready" #ready,running,finished
         self.workflow_id: str = workflow_id
@@ -63,6 +66,9 @@ class TaskRuntime():
         self.task_output: Dict[Any, Any] = task_output
         self.task_kind: str = normalize_task_kind(task_kind, resources=resources, model_anchor=model_anchor)
         self.resources: Dict[str, Any] = normalize_resources(resources)
+        self.declared_resources = normalize_resources(declared_resources or resources)
+        self.resource_context = dict(resource_context or {})
+        self.resource_decision = dict(resource_decision or {})
         require_schedulable_resources(self.task_kind, self.resources, model_anchor)
         self.scheduler_resources: Dict[str, Any] = to_internal_scheduler_resources(
             self.resources,
@@ -88,6 +94,7 @@ class TaskRuntime():
         self.attempt = 0
         self.dispatch_id = None
         self.lease_id = None
+        self.previous_attempt_identity = None
         self.last_error: Dict[str, Any] | None = None
         self.last_metrics: Dict[str, Any] | None = None
         self.next_eligible_time = 0.0
@@ -105,7 +112,7 @@ class TaskRuntime():
         self.execution_backend = None
 
         self.priority = 0
-    
+
     def set_priority(self, priority):
         self.priority = priority
 
@@ -145,13 +152,19 @@ class TaskRuntime():
         self.next_eligible_time = time.time() + self.retry_backoff_seconds
 
     def clear_attempt_identity(self):
+        if self.dispatch_id is not None:
+            self.previous_attempt_identity = (
+                self.attempt,
+                self.dispatch_id,
+                self.lease_id,
+            )
         self.dispatch_id = None
         self.lease_id = None
         self.started_time = None
         self.object_ref = None
         self.selected_node = None
         self.last_schedule_decision = None
-        
+
 class WorkflowRuntime():
     def __init__(self,workflow_id):
         self.workflow_id: str = workflow_id
@@ -213,7 +226,7 @@ class WorkflowRuntime():
         object_ref = getattr(task, "object_ref", None)
         if object_ref in self.ref_to_taskid:
             del self.ref_to_taskid[object_ref]
-        
+
 class WorkflowRuntimeManager():
     def __init__(self, standby_worker_pool=None):
         self.workflows = {}
@@ -427,4 +440,3 @@ class WorkflowRuntimeManager():
         object_ref = getattr(task, "object_ref", None)
         if object_ref in self.ref_to_workflow_id:
             del self.ref_to_workflow_id[object_ref]
- 

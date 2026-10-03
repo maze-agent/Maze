@@ -282,6 +282,7 @@ class Worker():
                     gpu_resource[gpu_id] = {
                         "gpu_id": gpu_id,
                         "gpu_mem": gpu["memory_free"],
+                        "gpu_capacity": gpu["memory_total"],
                         "gpu_num": 1,
                     }
             payload = {
@@ -488,7 +489,7 @@ class Worker():
                 print(stderr)
             print(f"Failed to start worker: {e}")
             raise
-    
+
     @staticmethod
     def stop_worker():
         command = build_ray_command("stop", "--force")
