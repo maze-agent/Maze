@@ -7,6 +7,10 @@ __pycache__/
 dist/
 build/
 *.pyd
+*.tsbuildinfo
+
+# JavaScript dependencies (at any package location)
+node_modules/
 
 # MkDocs build output (keep docs/ source tracked)
 site/
@@ -33,10 +37,15 @@ htmlcov/
 *.sqlite
 *.db
 logs/
+*.log
 .maze_runtime.json
 
 # Environment files
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
 .venv/
 venv/
 env/

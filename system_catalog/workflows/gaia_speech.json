@@ -274,17 +274,17 @@
           ],
           "resources": {
             "cpu_num": 1,
-            "gpu_mem": 8192,
+            "gpu_mem": 18748,
             "io_num": 0
           },
           "configured": true,
           "task_kind": "gpu",
-          "localModel": "Qwen2.5-3B-Instruct",
+          "localModel": "Qwen3-8B",
           "modelAnchor": {
-            "local_model": "Qwen2.5-3B-Instruct",
+            "local_model": "Qwen3-8B",
             "model_scope": "head",
             "backend": "transformers",
-            "estimated_gpu_mem_mb": 8192
+            "estimated_gpu_mem_mb": 18748
           }
         }
       },
@@ -393,17 +393,17 @@
           ],
           "resources": {
             "cpu_num": 1,
-            "gpu_mem": 8192,
+            "gpu_mem": 18748,
             "io_num": 0
           },
           "configured": true,
           "task_kind": "gpu",
-          "localModel": "Qwen2.5-3B-Instruct",
+          "localModel": "Qwen3-8B",
           "modelAnchor": {
-            "local_model": "Qwen2.5-3B-Instruct",
+            "local_model": "Qwen3-8B",
             "model_scope": "head",
             "backend": "transformers",
-            "estimated_gpu_mem_mb": 8192
+            "estimated_gpu_mem_mb": 18748
           }
         }
       },
@@ -516,17 +516,17 @@
           ],
           "resources": {
             "cpu_num": 1,
-            "gpu_mem": 8192,
+            "gpu_mem": 18748,
             "io_num": 0
           },
           "configured": true,
           "task_kind": "gpu",
-          "localModel": "Qwen2.5-3B-Instruct",
+          "localModel": "Qwen3-8B",
           "modelAnchor": {
-            "local_model": "Qwen2.5-3B-Instruct",
+            "local_model": "Qwen3-8B",
             "model_scope": "head",
             "backend": "transformers",
-            "estimated_gpu_mem_mb": 8192
+            "estimated_gpu_mem_mb": 18748
           }
         }
       }

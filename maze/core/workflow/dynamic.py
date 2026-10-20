@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from maze.core.scheduler.result_summary import to_json_safe
+from maze.metrics.usage import resource_usage
 from maze.core.workflow.resources import DEFAULT_RESOURCES, normalize_task_semantics
 from maze.core.workflow.task import CodeTask
 
@@ -108,6 +109,7 @@ class DynamicRun:
         self.completed_tasks: set[str] = set()
         self.failed_tasks: set[str] = set()
         self.task_errors: Dict[str, Any] = {}
+        self.task_metrics: Dict[str, Dict[str, Any]] = {}
         self.task_file_manifests: Dict[str, Dict[str, Any]] = {}
         self.task_fault_tolerance: Dict[str, Dict[str, Any]] = {}
         self.request_ids: Dict[str, str] = {}
@@ -541,6 +543,13 @@ class DynamicRun:
             "resource_decision": to_json_safe(task.resource_decision),
             "model_anchor": to_json_safe(task.model_anchor),
             "error": to_json_safe(self.task_errors.get(task_id)),
+            "metrics": to_json_safe(self.task_metrics.get(task_id, {})),
+            "resource_usage": resource_usage(
+                self.task_metrics.get(task_id),
+                task.finish_time - task.start_time
+                if task.start_time is not None and task.finish_time is not None
+                else None,
+            ),
             "file_manifest": to_json_safe(self.task_file_manifests.get(task_id)),
             "fault_tolerance": to_json_safe(
                 self.task_fault_tolerance.get(task_id) or _default_fault_tolerance()

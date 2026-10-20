@@ -9,6 +9,7 @@ interface WorkbenchShellProps {
   canvas: ReactNode;
   runsInspector: ReactNode;
   clusterDrawer: ReactNode;
+  inspector?: ReactNode;
 }
 
 export default function WorkbenchShell({
@@ -17,6 +18,7 @@ export default function WorkbenchShell({
   canvas,
   runsInspector,
   clusterDrawer,
+  inspector,
 }: WorkbenchShellProps) {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
 
@@ -51,7 +53,7 @@ export default function WorkbenchShell({
               onClick={() => setInspectorCollapsed((value) => !value)}
             />
           </Tooltip>
-          {!inspectorCollapsed && <TaskInspector />}
+          {!inspectorCollapsed && (inspector ?? <TaskInspector />)}
         </aside>
       </div>
 

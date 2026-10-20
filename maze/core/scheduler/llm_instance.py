@@ -2,6 +2,8 @@ from collections import defaultdict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import hashlib
+import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,9 +17,12 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 
 import ray
 import requests
+
+from maze.metrics.model_resources import ModelResourceMonitor
 
 try:
     import fcntl
@@ -600,6 +605,13 @@ def _transformers_cache_root(instance_id: str) -> Path:
     return Path(tempfile.gettempdir()) / f"maze-transformers-{cache_key}"
 
 
+def _uses_transcription_api(model: str) -> bool:
+    config_path = Path(model) / "config.json"
+    if not config_path.is_file():
+        return False
+    return json.loads(config_path.read_text()).get("model_type") == "whisper"
+
+
 def validate_transformers_model(model: str) -> str | None:
     raw_model_path = Path(model)
     model_path = raw_model_path.expanduser()
@@ -932,6 +944,7 @@ class LLMServerActor:
         self.ready = False
         self.stop_requested = False
         self.stderr_tail = deque(maxlen=64)
+        self.resource_monitor = None
 
     def _read_stderr(self, stream):
         for line in iter(stream.readline, b""):
@@ -1020,6 +1033,12 @@ class LLMServerActor:
                 ).start()
                 if os.name == "posix":
                     self.process_group_id = self.proc.pid
+                try:
+                    self.resource_monitor = ModelResourceMonitor(
+                        self.proc.pid, self.gpu_id
+                    ).start()
+                except Exception:
+                    logger.debug("Model resource monitor unavailable", exc_info=True)
         except BaseException:
             self._release_port_reservation()
             raise
@@ -1049,40 +1068,33 @@ class LLMServerActor:
 
     def memory_metrics(self):
         """Measure this server's process group, rather than the caller or whole GPU."""
-        if self.proc is None:
+        if self.resource_monitor is None:
             return {}
-        try:
-            output = subprocess.check_output(
-                [
-                    "nvidia-smi",
-                    "--query-compute-apps=pid,used_gpu_memory",
-                    "--format=csv,noheader,nounits",
-                ],
-                text=True,
-                timeout=3,
-            )
-            amount = 0
-            for line in output.splitlines():
-                pid, mib = (piece.strip() for piece in line.split(","))
-                try:
-                    if os.getpgid(int(pid)) == self.process_group_id:
-                        amount += int(mib) * 1024 * 1024
-                except (ProcessLookupError, ValueError):
-                    continue
-            return (
-                {
-                    "memory_scope": "model_instance",
-                    "memory_source": "nvml_process_group",
-                    "gpu_memory_observed_bytes": amount,
-                }
-                if amount
-                else {}
-            )
-        except (OSError, subprocess.SubprocessError):
+        current = self.resource_monitor.current()
+        return {
+            **current,
+            "memory_scope": "model_instance",
+            "memory_source": "nvml_process_tree",
+        }
+
+    def begin_resource_observation(self, observation_id: str):
+        if self.resource_monitor is None:
+            raise RuntimeError("Model resource monitor unavailable")
+        return self.resource_monitor.begin(observation_id)
+
+    def end_resource_observation(self, observation_id: str):
+        if self.resource_monitor is None:
             return {}
+        return self.resource_monitor.end(observation_id)
+
+    def discard_resource_observation(self, observation_id: str):
+        if self.resource_monitor is not None:
+            self.resource_monitor.discard(observation_id)
 
     def stop_server(self, timeout: int = LLM_PROCESS_STOP_TIMEOUT):
         self.stop_requested = True
+        if self.resource_monitor is not None:
+            self.resource_monitor.stop()
         try:
             self._stop_process(timeout)
             cleanup_transformers_cache(self.generation_id)
@@ -1293,6 +1305,35 @@ class LlmInstanceManager():
     def get_instance_resource_detail(self, instance_id:str):
         with self.lock:
             return dict(self.id_to_resource_detail[instance_id])
+
+    def resource_metrics_for_route(self, route: dict) -> dict:
+        """Snapshot shared model measurements without attributing them to a caller."""
+        with self.lock:
+            detail = self.id_to_resource_detail.get(route.get("instance_id"), {})
+            if detail.get("generation_id") != route.get("generation_id"):
+                return {}
+            metrics = detail.get("memory_metrics")
+            if not metrics:
+                return {}
+            return {
+                **metrics,
+                "instance_id": route["instance_id"],
+                "model": detail["model"],
+                "backend": detail["backend"],
+                "node_id": detail["node_id"],
+                "gpu_id": detail.get("gpu_id"),
+                "generation_id": detail.get("generation_id"),
+            }
+
+    def resource_observer_for_route(self, route: dict, observation_id: str):
+        with self.lock:
+            detail = self.id_to_resource_detail.get(route.get("instance_id"), {})
+            actor = self.id_to_instance_actor.get(route.get("instance_id"))
+            if actor is None or detail.get("generation_id") != route.get("generation_id"):
+                return None
+            return {key: route.get(key) for key in (
+                "instance_id", "generation_id", "model", "backend", "node_id", "gpu_id"
+            )} | {"actor": actor, "observation_id": observation_id}
 
     def get_instance_state(self, instance_id: str):
         with self.lock:
@@ -1551,7 +1592,9 @@ class LlmInstanceManager():
         response.raise_for_status()
         model_ids = [item.get("id") for item in response.json().get("data", [])]
         expected_model = backend_args.get("served_model_name") or model
-        if expected_model not in model_ids:
+        # Transformers' model listing only includes text and vision generators.
+        # Whisper readiness is verified by its transcription warmup instead.
+        if expected_model not in model_ids and not _uses_transcription_api(model):
             raise RuntimeError(
                 f"Model server returned {model_ids!r}, expected {expected_model!r}"
             )
@@ -1563,6 +1606,25 @@ class LlmInstanceManager():
         model_id: str,
         timeout: float = 120,
     ) -> None:
+        if _uses_transcription_api(model_id):
+            audio = io.BytesIO()
+            with wave.open(audio, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\0\0" * 16000)
+            response = requests.post(
+                f"{base_url}/v1/audio/transcriptions",
+                data={"model": model_id},
+                files={"file": ("warmup.wav", audio.getvalue(), "audio/wav")},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            # Silence may correctly produce an empty transcript.
+            if not isinstance(response.json().get("text"), str):
+                raise RuntimeError("Model warmup returned an invalid transcription")
+            return
+
         response = requests.post(
             f"{base_url}/v1/chat/completions",
             json={
@@ -1734,6 +1796,21 @@ class LlmInstanceManager():
                 failure = str(exc) or type(exc).__name__
 
             if failure is None:
+                # This probe runs on the maintenance executor, outside dispatch.
+                # Measurement failure must not make a healthy model unavailable.
+                try:
+                    metrics = ray.get(actor.memory_metrics.remote(), timeout=5)
+                    if metrics:
+                        with self.lock:
+                            if self.id_to_instance_actor.get(instance_id) is actor:
+                                self.id_to_resource_detail[instance_id][
+                                    "memory_metrics"
+                                ] = {
+                                    **metrics,
+                                    "measurement_phase": "runtime",
+                                }
+                except Exception:
+                    logger.debug("Model memory sample unavailable", exc_info=True)
                 continue
 
             with self.lock:
@@ -2245,19 +2322,25 @@ class LlmInstanceManager():
         expected_idle_since: float | None = None,
         now: float | None = None,
         idle_seconds: float | None = None,
+        require_no_pending_requests: bool = False,
     ) -> bool:
         """Atomically remove an idle instance from routing before cleanup."""
         now = time.time() if now is None else float(now)
         idle_seconds = (
-            self.idle_scale_in_seconds
-            if idle_seconds is None
-            else float(idle_seconds)
+            self.idle_scale_in_seconds if idle_seconds is None else float(idle_seconds)
         )
         with self.lock:
             if self.id_to_state.get(instance_id) != "ready":
                 return False
             metadata = self.id_to_instance_metadata.get(instance_id)
             if metadata is None or metadata.get("inflight_requests", 0) != 0:
+                return False
+            if (
+                require_no_pending_requests
+                and self.pending_model_request_ids[
+                    (metadata["model"], metadata["backend"])
+                ]
+            ):
                 return False
             idle_since = (
                 metadata.get("last_used_time")
@@ -2568,7 +2651,9 @@ class LlmInstanceManager():
                 )
                 metrics = {}
             with self.lock:
-                self.id_to_resource_detail[instance_id]["memory_metrics"] = metrics
+                self.id_to_resource_detail[instance_id]["memory_metrics"] = (
+                    {**metrics, "measurement_phase": "warmup"} if metrics else {}
+                )
             self._mark_ready(instance_id, actor)
         except Exception as start_error:
             try:

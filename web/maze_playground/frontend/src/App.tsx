@@ -6,6 +6,7 @@ import Toolbar from './components/Toolbar';
 import BuiltinTasksSidebar from './components/BuiltinTasksSidebar';
 import WorkflowCanvas from './components/WorkflowCanvas';
 import RunsInspector from './components/RunsInspector';
+import RunWorkbench from './components/RunWorkbench';
 import ClusterResourcesDrawer from './components/ClusterResourcesDrawer';
 import WorkbenchShell from './components/WorkbenchShell';
 import { api } from './api/client';
@@ -23,6 +24,11 @@ function App() {
   const latestWorkflowFingerprintRef = useRef('');
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
+  const [linkedRunId] = useState(() => new URLSearchParams(window.location.search).get('run_id'));
+  const [linkedCanvas] = useState(() => new URLSearchParams(window.location.search).get('view') === 'canvas');
+  const [canvasRunId, setCanvasRunId] = useState<string | null>(null);
+  const [runCanvasOpen, setRunCanvasOpen] = useState(false);
+  const [focusDynamicRunId, setFocusDynamicRunId] = useState<string | null>(null);
   const [clusterResourcesOpen, setClusterResourcesOpen] = useState(false);
   const {
     workflowId,
@@ -49,8 +55,49 @@ function App() {
     acquireWorkflowOperation,
     releaseWorkflowOperation,
     upsertStaticRun,
+    setSelectedRunId,
     removeStaticRun,
   } = useWorkflowStore();
+
+  const openRunCanvas = useCallback((runId: string) => {
+    setCanvasRunId(runId);
+    setRunCanvasOpen(true);
+    setRunsOpen(false);
+    setSelectedRunId(null);
+    setFocusDynamicRunId(null);
+    const url = new URL(window.location.href);
+    url.searchParams.set('run_id', runId);
+    url.searchParams.set('view', 'canvas');
+    window.history.replaceState(null, '', url);
+  }, [setSelectedRunId]);
+
+  const showDesign = useCallback(() => {
+    setRunCanvasOpen(false);
+    setSelectedRunId(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('run_id');
+    url.searchParams.delete('view');
+    window.history.replaceState(null, '', url);
+  }, [setSelectedRunId]);
+
+  useEffect(() => {
+    if (!workspaceReady || !linkedRunId) return;
+    if (linkedCanvas) {
+      openRunCanvas(linkedRunId);
+      return;
+    }
+    let disposed = false;
+    setRunsOpen(true);
+    void api.getRun(linkedRunId).then(({ run }) => {
+      if (disposed) return;
+      if (run.kind === 'dynamic') setFocusDynamicRunId(run.run_id);
+      else {
+        upsertStaticRun(run);
+        setSelectedRunId(run.run_id);
+      }
+    }).catch(() => { if (!disposed) message.error('The linked run could not be loaded.'); });
+    return () => { disposed = true; };
+  }, [workspaceReady, linkedRunId, linkedCanvas, openRunCanvas, setSelectedRunId, upsertStaticRun]);
 
   const workflowFingerprint = useMemo(
     () => workflowDraftFingerprint(workflowName, nodes, edges),
@@ -297,7 +344,7 @@ function App() {
   ]);
 
   const saveWorkflowToWorkspace = useCallback(async () => {
-    if (selectedRunId) {
+    if (runCanvasOpen || selectedRunId) {
       message.info('Switch to Design mode to save the workflow draft');
       return;
     }
@@ -365,6 +412,7 @@ function App() {
     setWorkspaceDir,
     setWorkspaceWorkflows,
     selectedRunId,
+    runCanvasOpen,
     workflowId,
     workflowName,
     workspaceDir,
@@ -435,12 +483,31 @@ function App() {
     };
   }, [removeStaticRun, trackedRunIds, upsertStaticRun]);
 
+  const runsInspector = <RunsInspector
+    open={runsOpen} onClose={() => setRunsOpen(false)}
+    focusStaticRunId={selectedRunId} focusDynamicRunId={focusDynamicRunId}
+    initialShowAllRuns={Boolean(linkedRunId) || runCanvasOpen}
+    onOpenCanvas={openRunCanvas}
+  />;
+  const clusterDrawer = <ClusterResourcesDrawer open={clusterResourcesOpen} onClose={() => setClusterResourcesOpen(false)} />;
+
   return (
     <ConfigProvider locale={enUS}>
-      <WorkbenchShell
+      {runCanvasOpen && canvasRunId ? <RunWorkbench
+        runId={canvasRunId} onSelectRun={openRunCanvas} onDesign={showDesign}
+        onOpenHistory={(run) => {
+          if (run?.kind === 'dynamic') setFocusDynamicRunId(run.run_id);
+          else if (run) { upsertStaticRun(run); setSelectedRunId(run.run_id); }
+          setRunsOpen(true);
+        }}
+        onOpenCluster={() => setClusterResourcesOpen(true)}
+        runsInspector={runsInspector} clusterDrawer={clusterDrawer}
+      /> : <WorkbenchShell
         topBar={(
           <Toolbar
             onOpenClusterResources={() => setClusterResourcesOpen(true)}
+            onOpenRunMode={() => canvasRunId ? openRunCanvas(canvasRunId) : setRunsOpen(true)}
+            onShowDesign={showDesign}
           />
         )}
         leftSidebar={(
@@ -451,20 +518,9 @@ function App() {
           />
         )}
         canvas={<WorkflowCanvas />}
-        runsInspector={(
-          <RunsInspector
-            open={runsOpen}
-            onClose={() => setRunsOpen(false)}
-            focusStaticRunId={selectedRunId}
-          />
-        )}
-        clusterDrawer={(
-          <ClusterResourcesDrawer
-            open={clusterResourcesOpen}
-            onClose={() => setClusterResourcesOpen(false)}
-          />
-        )}
-      />
+        runsInspector={runsInspector}
+        clusterDrawer={clusterDrawer}
+      />}
     </ConfigProvider>
   );
 }

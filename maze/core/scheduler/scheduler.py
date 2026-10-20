@@ -898,6 +898,17 @@ class Scheduler():
         return resources
 
     def _release_model_route(self, task: TaskRuntime):
+        observer = getattr(task, "model_resource_observer", None)
+        if observer is not None:
+            try:
+                observer["actor"].discard_resource_observation.remote(
+                    observer["observation_id"]
+                )
+            except Exception:
+                logger.debug(
+                    "Model resource observation cleanup unavailable", exc_info=True
+                )
+            task.model_resource_observer = None
         route = getattr(task, "model_route", None)
         if not route:
             return
@@ -1220,6 +1231,8 @@ class Scheduler():
                     time.monotonic() + LLM_SCALING_CHECK_SECONDS
                 )
                 self._llm_deferred_starts[instance_id] = deferred
+                if failure_reason in {"insufficient_gpu", "insufficient_gpu_mem"}:
+                    self._reclaim_idle_llm_for_placement(message_data, selection.decision)
                 if not message_data.get("_placement_deferred"):
                     logger.info(
                         "Deferring automatic LLM instance %s: %s",
@@ -1704,6 +1717,53 @@ class Scheduler():
                     candidate.get("reason", "unknown error"),
                 )
             self._forget_llm_stop_future(instance_id, future)
+
+    def _reclaim_idle_llm_for_placement(
+        self, message_data: dict, decision: dict
+    ) -> None:
+        """Make room for a waiting model using the existing verified idle cleanup."""
+        blocked_nodes = {
+            node["node_id"]
+            for node in decision.get("candidate_nodes", [])
+            if node.get("reject_reasons")
+            and set(node["reject_reasons"])
+            <= {"insufficient_gpu", "insufficient_gpu_mem"}
+        }
+        if not blocked_nodes:
+            return
+        with self._llm_stop_future_lock:
+            if any(
+                candidate.get("node_id") in blocked_nodes
+                for _, candidate in self._llm_runtime_cleanup_futures.values()
+            ):
+                return
+        manager = self.llm_instance_manager
+        for candidate in manager.lru_scale_in_candidates(idle_seconds=0):
+            if candidate.get("node_id") not in blocked_nodes:
+                continue
+            if (candidate["model"], candidate["backend"]) == (
+                message_data["model"],
+                message_data.get("backend", "vllm"),
+            ):
+                continue
+            instance_id = candidate["instance_id"]
+            if not manager.claim_lru_scale_in(
+                instance_id,
+                expected_idle_since=candidate.get("idle_since"),
+                idle_seconds=0,
+                require_no_pending_requests=True,
+            ):
+                continue
+            try:
+                self._submit_runtime_llm_cleanup(
+                    {**candidate, "reason": "waiting_model_placement"}
+                )
+            except Exception:
+                manager.cancel_lru_scale_in_claim(instance_id)
+                logger.exception(
+                    "Failed to reclaim idle model instance %s", instance_id
+                )
+            return
 
     def _manage_llm_instance_scaling(self, now: float | None = None):
         if self._shutdown_requested():
@@ -2286,6 +2346,12 @@ class Scheduler():
         dispatch_id: str,
     ):
         try:
+            if task.model_route:
+                task.model_resource_observer = (
+                    self.llm_instance_manager.resource_observer_for_route(
+                        task.model_route, dispatch_id
+                    )
+                )
             self.workflow_manager.run_task(
                 task=task,
                 node=selection.selected_node,
@@ -2974,6 +3040,14 @@ class Scheduler():
                             finished_task.worker_identity = raw_result.get(
                                 "worker_identity"
                             )
+                            if finished_task.model_route:
+                                model_metrics = self.llm_instance_manager.resource_metrics_for_route(
+                                    finished_task.model_route
+                                )
+                                if model_metrics:
+                                    raw_result.setdefault("metrics", {}).setdefault(
+                                        "model_instance", model_metrics
+                                    )
                         if is_task_error_result(raw_result):
                             error = raw_result["error"]
                             file_manifest = raw_result.get("file_manifest")

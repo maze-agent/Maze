@@ -57,6 +57,7 @@ def gaia_model_answer(
         api_key="",
         temperature=float(temperature),
         max_tokens=int(max_tokens),
+        chat_template_kwargs={"enable_thinking": False},
     )
     return {
         "answer": answer,

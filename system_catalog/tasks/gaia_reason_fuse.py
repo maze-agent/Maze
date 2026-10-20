@@ -54,6 +54,7 @@ def gaia_fuse_answers(
         api_key="",
         temperature=float(temperature),
         max_tokens=int(max_tokens),
+        chat_template_kwargs={"enable_thinking": False},
     )
     prompt_features = text_features(prompt)
     return {

@@ -14,6 +14,7 @@ import { useWorkflowStore } from '@/stores/workflowStore';
 import CustomTaskEditor from '@/components/CustomTaskEditor';
 import { syncWorkflowInputEdges } from '@/utils/workflowBindings';
 import { errorMessage } from '@/utils/errors';
+import { resolveResourceUsage, resourceUsageRows } from '@/utils/resourceUsage';
 import {
   latestRunForWorkflow,
   runWorkflowGraph,
@@ -24,6 +25,7 @@ import type {
   LocalModel,
   ModelAnchor,
   RunArtifact,
+  ResourceUsage,
   UnifiedRunTaskSnapshot,
   WorkflowEdge,
   WorkflowNode,
@@ -93,6 +95,7 @@ export type WorkbenchTask = {
     queueReason?: string;
     lastHeartbeat?: string;
     schedulingReason?: string;
+    resourceUsage: ResourceUsage;
   };
   faultTolerance?: FaultToleranceTrace;
   placement?: {
@@ -469,12 +472,13 @@ function buildTask(
       queueReason,
       lastHeartbeat: formatTimestamp((runtime as any)?.last_heartbeat || (runtime as any)?.heartbeat_time),
       schedulingReason: runtime?.schedule_decision?.reason || undefined,
+      resourceUsage: resolveResourceUsage(runtime),
     },
     faultTolerance: runtime?.fault_tolerance,
     placement: {
       worker: selectedNode?.node_ip || selectedNode?.node_id || undefined,
       node: selectedNode?.node_id || undefined,
-      gpuDevice: selectedNode?.gpu_id ?? undefined,
+      gpuDevice: selectedNode?.gpu_id ?? runtime?.metrics?.model_instance?.gpu_id ?? undefined,
       zone: (runtime as any)?.zone,
       host: (runtime as any)?.host,
       address: selectedNode?.node_ip || undefined,
@@ -999,13 +1003,21 @@ function RuntimePanel({ task, runTiming }: { task: WorkbenchTask; runTiming: Run
         ]}
       />
       <KeyValueSection
-        title="RESOURCES (ALLOCATED)"
+        title="RESOURCE RESERVATIONS"
         rows={[
           ['CPU', task.resources.cpuNum ? `${task.resources.cpuNum} cores` : undefined],
           ['GPU Memory', formatStorageGiB(task.resources.gpuMemoryGiB)],
           ['I/O', task.resources.ioNum ? `${task.resources.ioNum}` : undefined],
         ]}
       />
+      <KeyValueSection
+        title="TASK RESOURCE USAGE"
+        rows={resourceUsageRows(task.runtime.resourceUsage)}
+      />
+      <InspectorNote>
+        {task.config.localModel ? 'Shared model service usage during this task.' : 'Task process usage.'}
+        {' GPU utilization is device-wide.'}
+      </InspectorNote>
       <KeyValueSection
         title="TIMING"
         rows={[

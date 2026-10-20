@@ -465,6 +465,11 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
     project_root = Path(__file__).parent.parent.parent
     backend_dir = project_root / "web" / "maze_playground" / "backend"
     frontend_dir = project_root / "web" / "maze_playground" / "frontend"
+    frontend_mode = os.environ.get("MAZE_PLAYGROUND_FRONTEND_MODE", "dev").strip().lower()
+    if frontend_mode not in {"dev", "preview"}:
+        raise ValueError("MAZE_PLAYGROUND_FRONTEND_MODE must be dev or preview")
+    if frontend_mode == "preview" and not (frontend_dir / "dist" / "index.html").is_file():
+        raise RuntimeError("Build the Playground frontend with npm run build before using preview mode")
 
     print("\n" + "="*60)
     print("🎮 Starting Maze Playground...")
@@ -488,14 +493,14 @@ def start_playground(core_port: int = 8000, frontend_port: int = 5173, backend_p
             print("✅ Playground backend started")
 
         if frontend_dir.exists():
-            print(f"🎨 starting playground frontend (http://localhost:{frontend_port})...")
+            print(f"🎨 starting playground frontend (http://localhost:{frontend_port}, {frontend_mode})...")
             npm_cmd = "npm.cmd" if sys.platform == 'win32' else "npm"
             frontend_env = {
                 **os.environ,
                 "VITE_MAZE_BACKEND_URL": backend_url,
             }
             frontend_process = _start_playground_process(
-                [npm_cmd, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(frontend_port)],
+                [npm_cmd, "run", frontend_mode, "--", "--host", "0.0.0.0", "--port", str(frontend_port), "--strictPort"],
                 cwd=frontend_dir,
                 env=frontend_env,
             )

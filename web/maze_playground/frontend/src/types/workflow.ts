@@ -573,6 +573,58 @@ export type UnifiedRunStatus =
   | 'timed_out'
   | 'interrupted';
 
+export interface ResourceUsage {
+  duration_seconds: number | null;
+  cpu: { time: number | null; average_cores: number | null; peak_cores: number | null };
+  memory: { process_rss_peak_bytes: number | null };
+  gpu: { memory_peak: number | null; utilization_peak: number | null };
+  disk: { read_bytes: number | null; write_bytes: number | null };
+}
+
+export interface ProcessResourceMetrics {
+  cpu_time_seconds?: number;
+  cpu_average_cores?: number;
+  cpu_peak_cores?: number;
+  process_rss_peak_bytes?: number;
+  process_io_read_bytes?: number;
+  process_io_write_bytes?: number;
+}
+
+export interface ModelInstanceResourceMetrics extends ProcessResourceMetrics {
+  instance_id?: string;
+  model?: string;
+  backend?: string;
+  node_id?: string;
+  gpu_id?: string | number | null;
+  gpu_memory_observed_bytes?: number;
+  observed_at?: number;
+  measurement_phase?: 'warmup' | 'runtime' | 'task_execution';
+  measurement_status?: string;
+  started_at?: number;
+  finished_at?: number;
+  duration_seconds?: number;
+  sample_interval_seconds?: number;
+  sample_count?: number;
+  max_concurrent_observations?: number;
+  gpu_memory_peak_observed_bytes?: number;
+  gpu_utilization_peak_percent?: number;
+  memory_scope?: string;
+  memory_source?: string;
+}
+
+export interface TaskResourceMetrics extends ProcessResourceMetrics {
+  resource_usage?: ResourceUsage;
+  gpu_memory_peak_observed_bytes?: number;
+  gpu_utilization_peak_percent?: number;
+  gpu_memory_peak_allocated_bytes?: number;
+  gpu_memory_peak_reserved_bytes?: number;
+  peak_cuda_allocated_bytes?: number;
+  peak_cuda_reserved_bytes?: number;
+  memory_scope?: string;
+  model_instance?: ModelInstanceResourceMetrics;
+  [key: string]: unknown;
+}
+
 export interface UnifiedRunTaskSnapshot {
   task_id: string;
   node_id?: string;
@@ -591,6 +643,8 @@ export interface UnifiedRunTaskSnapshot {
   finished_time?: number | null;
   finish_time?: number | null;
   duration_seconds?: number | null;
+  metrics?: TaskResourceMetrics;
+  resource_usage?: ResourceUsage;
   resources?: Resources | Record<string, any>;
   inputs?: any[];
   outputs?: any[];

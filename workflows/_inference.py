@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -31,6 +32,7 @@ def chat(
     temperature: float = 0.0,
     max_tokens: int = 4096,
     timeout: float = 120.0,
+    chat_template_kwargs: dict[str, object] | None = None,
 ) -> str:
     """Call an OpenAI-compatible ``chat/completions`` endpoint."""
 
@@ -39,14 +41,15 @@ def chat(
     if not model.strip():
         raise ValueError("model is required")
 
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-    ).encode("utf-8")
+    request_body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if chat_template_kwargs is not None:
+        request_body["chat_template_kwargs"] = chat_template_kwargs
+    body = json.dumps(request_body).encode("utf-8")
     resolved_api_key = _resolve_api_key(api_key)
     headers = {"Content-Type": "application/json"}
     if resolved_api_key:
@@ -74,6 +77,10 @@ def chat(
         raise ValueError("chat response is missing choices[0].message.content") from exc
     if not isinstance(content, str):
         raise ValueError("chat response content must be a string")
+    if not content.strip():
+        raise ValueError(
+            "chat response content is empty; check the generation token budget"
+        )
     return content
 
 
@@ -95,6 +102,21 @@ def transcribe(
     if not model.strip():
         raise ValueError("model is required")
 
+    config_path = Path(model) / "config.json"
+    if config_path.is_file():
+        config = json.loads(config_path.read_text())
+        if (
+            any(
+                name.endswith("ForCausalLM") for name in config.get("architectures", [])
+            )
+            and not (config_path.parent / "preprocessor_config.json").is_file()
+        ):
+            raise ValueError(
+                f"Transcription requires an audio model, but {model!r} is a text model "
+                f"({config.get('model_type', 'unknown')}). Bind the transcription node "
+                "to an audio model such as Whisper-large-v3."
+            )
+
     resolved_api_key = _resolve_api_key(api_key)
     headers = {}
     if resolved_api_key:
@@ -106,7 +128,16 @@ def transcribe(
         files={"file": (file_name, content)},
         timeout=timeout,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = response.text[:65536]
+        _raise_model_error(detail, base_url)
+        raise requests.HTTPError(
+            f"Audio transcription failed for model {model!r}: "
+            f"HTTP {response.status_code}: {detail[:1024]}",
+            response=response,
+        ) from exc
     payload = response.json()
     text = payload.get("text") if isinstance(payload, dict) else None
     if not isinstance(text, str) or not text.strip():

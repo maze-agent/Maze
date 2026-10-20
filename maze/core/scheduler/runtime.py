@@ -79,6 +79,7 @@ class TaskRuntime():
         self.scheduling_context: Dict[str, Any] = dict(scheduling_context or {})
         self.scheduling_metadata: Dict[str, Any] = {}
         self.model_route: Dict[str, Any] | None = None
+        self.model_resource_observer: Dict[str, Any] | None = None
         self.code_str: str = code_str
         self.code_ser: str = code_ser 
         self.file_context: Dict[str, Any] | None = file_context
@@ -290,6 +291,7 @@ class WorkflowRuntimeManager():
                 cuda_visible_devices=cuda_visible_devices,
                 file_context=file_context,
                 model_route=task.model_route,
+                model_resource_observer=task.model_resource_observer,
             )
         except Exception:
             pool.release(lease, discard=True)
@@ -394,6 +396,7 @@ class WorkflowRuntimeManager():
                 cuda_visible_devices=cuda_visible_devices,
                 file_context=attempt_file_context,
                 model_route=task.model_route,
+                model_resource_observer=task.model_resource_observer,
             )
             task.execution_backend = "ray_task"
 

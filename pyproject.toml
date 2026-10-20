@@ -51,6 +51,8 @@ dependencies = [
     "cloudpickle==3.1.1",
     "traitlets>=5.0",
     "requests>=2.31.0",
+    "psutil>=5.9.0",
+    "nvidia-ml-py>=12.0",
     "PyYAML>=6.0",
     "PyPDF2>=3.0.0",
     "openai>=2.15.0",
@@ -67,6 +69,11 @@ dev = [
 ]
 inference-vllm = [
     "vllm==0.26.0",
+]
+inference-audio = [
+    "librosa>=0.11.0",
+    "soundfile>=0.13.0",
+    "python-multipart>=0.0.20",
 ]
 
 [project.urls]

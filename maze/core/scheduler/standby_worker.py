@@ -85,6 +85,7 @@ class StandbyWorker:
         cuda_visible_devices: str | None = None,
         file_context: dict | None = None,
         model_route: dict | None = None,
+        model_resource_observer: dict | None = None,
     ):
         return execute_code_task_in_worker(
             code_str=code_str,
@@ -93,6 +94,7 @@ class StandbyWorker:
             cuda_visible_devices=cuda_visible_devices,
             file_context=file_context,
             model_route=model_route,
+            model_resource_observer=model_resource_observer,
         )
 
 class StandbyWorkerPoolManager:

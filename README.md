@@ -320,6 +320,13 @@ Core exposes the corresponding `/runs`, `/runs/{run_id}`, `/runs/{run_id}/tasks`
 
 ## Maze Workbench
 
+In **Runs**, select a run and choose **Open in canvas** to inspect its execution
+in the full Workbench layout. The run list is on the left, the live DAG is in
+the center, and selecting a node opens its results, resources, logs and artifacts
+in the right inspector. Both side panels can collapse. **Design** returns to the
+current workflow draft; **Run** restores the execution view. Direct links use
+`?run_id=<RUN_ID>&view=canvas` and restore that view after a refresh.
+
 Start Workbench together with the Head:
 
 ```bash

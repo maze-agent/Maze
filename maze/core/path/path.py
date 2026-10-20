@@ -2876,6 +2876,12 @@ class MaPath:
         event: Dict[str, Any],
     ) -> Dict[str, Any]:
         dynamic_run = self.get_dynamic_run(run_id)
+        data = event.get("data") or {}
+        task_id = data.get("task_id")
+        if event.get("type") == "start_task":
+            dynamic_run.task_metrics.pop(task_id, None)
+        elif isinstance(data.get("metrics"), dict):
+            dynamic_run.task_metrics[task_id] = copy.deepcopy(data["metrics"])
         stored_event = dynamic_run.append_event(event)
         snapshot = self._dynamic_run_snapshot(run_id)
         self._append_scheduler_event_once(
@@ -2952,6 +2958,13 @@ class MaPath:
         static_run = self.static_runs.get(run_id)
         if static_run is None:
             return event
+        data = event.get("data") or {}
+        task = static_run.task_nodes.get(data.get("task_id"))
+        if task is not None:
+            if event.get("type") == "start_task":
+                task.pop("metrics", None)
+            elif isinstance(data.get("metrics"), dict):
+                task["metrics"] = copy.deepcopy(data["metrics"])
         stored_event = static_run.append_event(event)
         self._append_scheduler_event_once(
             self.static_run_store,

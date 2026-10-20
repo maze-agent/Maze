@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import mimetypes
 import os
 import shutil
@@ -8,6 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict
+from urllib.parse import urlsplit
 
 from maze.core.files.artifact_store import LocalCASArtifactStore, artifact_uri
 
@@ -142,6 +144,28 @@ def _artifact_headers(file_context: Dict[str, Any]) -> Dict[str, str]:
     return {"Authorization": f"Bearer {capability}"}
 
 
+def _artifact_http_session(file_context: Dict[str, Any]):
+    """Keep private cluster transfers off ambient Internet proxies."""
+    import requests
+
+    session = requests.Session()
+    host = urlsplit(_artifact_base_url(file_context)).hostname or ""
+    try:
+        address = ipaddress.ip_address(host)
+        internal = address.is_private or address.is_loopback or address.is_link_local
+    except ValueError:
+        internal = host == "localhost" or host.endswith(".localhost")
+    if internal:
+        session.trust_env = False
+        # Proxy bypass must not disable a configured CA bundle for private HTTPS.
+        session.verify = (
+            os.environ.get("REQUESTS_CA_BUNDLE")
+            or os.environ.get("CURL_CA_BUNDLE")
+            or True
+        )
+    return session
+
+
 def _private_artifacts(file_context: Dict[str, Any]) -> bool:
     artifact_store = file_context.get("artifact_store") or {}
     return bool(file_context.get("private") or artifact_store.get("private"))
@@ -225,15 +249,14 @@ def _download_artifact(file_context: Dict[str, Any], file_info: Dict[str, Any], 
             cache_store.get_file(sha256, target)
             return
 
-    import requests
-
     try:
-        response = requests.get(
-            f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}",
-            headers=_artifact_headers(file_context),
-            timeout=60,
-        )
-        response.raise_for_status()
+        with _artifact_http_session(file_context) as session:
+            response = session.get(
+                f"{_artifact_base_url(file_context)}/artifacts/sha256/{sha256}",
+                headers=_artifact_headers(file_context),
+                timeout=60,
+            )
+            response.raise_for_status()
     except Exception as exc:
         raise ArtifactError(f"Failed to download artifact {sha256} for {file_info.get('path')}: {exc}") from exc
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -390,11 +413,9 @@ def _upload_artifact(file_context: Dict[str, Any], source: Path, expected_sha256
     if actual != expected_sha256:
         raise ArtifactError(f"Artifact checksum changed before upload: expected {expected_sha256}, got {actual}")
 
-    import requests
-
     try:
-        with source.open("rb") as handle:
-            response = requests.put(
+        with _artifact_http_session(file_context) as session, source.open("rb") as handle:
+            response = session.put(
                 f"{_artifact_base_url(file_context)}/artifacts/sha256/{expected_sha256}",
                 data=handle,
                 headers={

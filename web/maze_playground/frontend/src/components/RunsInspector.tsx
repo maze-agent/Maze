@@ -12,6 +12,7 @@ import {
   Popconfirm,
   Space,
   Statistic,
+  Switch,
   Tag,
   Typography,
   message,
@@ -20,6 +21,7 @@ import {
   DownloadOutlined,
   DeleteOutlined,
   EyeOutlined,
+  ExpandOutlined,
   HistoryOutlined,
   InboxOutlined,
   PlayCircleOutlined,
@@ -28,6 +30,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
+import RunGraph from '@/components/RunGraph';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import {
   latestRunForWorkflow,
@@ -176,6 +179,8 @@ interface RunsInspectorProps {
   onClose: () => void;
   focusDynamicRunId?: string | null;
   focusStaticRunId?: string | null;
+  initialShowAllRuns?: boolean;
+  onOpenCanvas?: (runId: string) => void;
 }
 
 function runKey(item: RunItem) {
@@ -542,6 +547,8 @@ export default function RunsInspector({
   onClose,
   focusDynamicRunId,
   focusStaticRunId,
+  initialShowAllRuns = false,
+  onOpenCanvas,
 }: RunsInspectorProps) {
   const workspaceId = useWorkflowStore((state) => state.workspaceId);
   const workspaceDir = useWorkflowStore((state) => state.workspaceDir);
@@ -562,12 +569,13 @@ export default function RunsInspector({
   const [dynamicEvents, setDynamicEvents] = useState<DynamicRunEvent[]>([]);
   const [lastAppliedFocusKey, setLastAppliedFocusKey] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
+  const [showAllRuns, setShowAllRuns] = useState(initialShowAllRuns);
   const [loading, setLoading] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [runActionLoading, setRunActionLoading] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreviewState | null>(null);
   const [promotingArtifactKey, setPromotingArtifactKey] = useState<string | null>(null);
-  const runsRequestRef = useRef<{ workspaceId: string; promise: Promise<void> } | null>(null);
+  const runsRequestRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const runsRequestVersionRef = useRef(0);
   const detailRequestRef = useRef<{
     key: string;
@@ -626,7 +634,7 @@ export default function RunsInspector({
     return runItems.filter((item) => {
       const label = item.kind === 'static'
         ? appRunName(item.run)
-        : getRunMode(item.run) || 'dynamic';
+        : String(item.run.metadata?.workflow_name || getRunMode(item.run) || 'dynamic');
       return [
         item.id,
         item.kind,
@@ -654,7 +662,9 @@ export default function RunsInspector({
   const selectedDynamicEdges = selectedDynamicRun?.graph?.edges || [];
 
   const loadRuns = useCallback((silent = false) => {
-    if (runsRequestRef.current?.workspaceId === workspaceId) {
+    const linkedFocus = initialShowAllRuns && showAllRuns ? focusDynamicRunId || focusStaticRunId : null;
+    const scopeKey = `${showAllRuns ? '*' : workspaceId}:${linkedFocus || ''}`;
+    if (runsRequestRef.current?.key === scopeKey) {
       return runsRequestRef.current.promise;
     }
     const version = ++runsRequestVersionRef.current;
@@ -667,10 +677,20 @@ export default function RunsInspector({
         const result = await api.getRuns({
           limit: 100,
           detail: false,
-          workspaceId: workspaceId || undefined,
+          workspaceId: showAllRuns ? undefined : workspaceId || undefined,
         });
         if (version !== runsRequestVersionRef.current) return;
         const fetchedRuns = result.runs || [];
+        // A bookmarked run may be older than the list's 100-run page.
+        if (linkedFocus && !fetchedRuns.some((run) => run.run_id === linkedFocus)) {
+          try {
+            const linked = await api.getRun(linkedFocus);
+            if (version !== runsRequestVersionRef.current) return;
+            fetchedRuns.unshift(linked.run);
+          } catch {
+            // App reports an unavailable bookmark; keep other runs browsable.
+          }
+        }
         setRuns(fetchedRuns);
         setStaticRuns(fetchedRuns.filter((run) => run.kind === 'static'));
       } catch (error: any) {
@@ -680,7 +700,7 @@ export default function RunsInspector({
           message.error(error.response?.data?.error || 'Failed to load runs');
         }
       } finally {
-        if (runsRequestRef.current?.workspaceId === workspaceId) {
+        if (runsRequestRef.current?.key === scopeKey) {
           runsRequestRef.current = null;
         }
         if (!silent && version === runsRequestVersionRef.current) {
@@ -688,9 +708,9 @@ export default function RunsInspector({
         }
       }
     })();
-    runsRequestRef.current = { workspaceId, promise: request };
+    runsRequestRef.current = { key: scopeKey, promise: request };
     return request;
-  }, [setStaticRuns, workspaceId]);
+  }, [setStaticRuns, workspaceId, showAllRuns, initialShowAllRuns, focusDynamicRunId, focusStaticRunId]);
 
   useEffect(() => {
     runsRequestVersionRef.current += 1;
@@ -1101,6 +1121,10 @@ export default function RunsInspector({
         value={filterText}
         onChange={(event) => setFilterText(event.target.value)}
       />
+      <Space style={{ marginTop: 10 }}>
+        <Switch size="small" checked={showAllRuns} onChange={setShowAllRuns} />
+        <Text type="secondary">All workspaces and external runs</Text>
+      </Space>
 
       <List
         size="small"
@@ -1113,7 +1137,7 @@ export default function RunsInspector({
           const isStatic = item.kind === 'static';
           const title = isStatic
             ? appRunName(item.run)
-            : `Dynamic ${shortId(item.id)}`;
+            : String(item.run.metadata?.workflow_name || `Dynamic ${shortId(item.id)}`);
           const detail = isStatic
             ? `${completedCount(item.run.task_counts)}/${item.run.task_counts?.total || 0} completed`
             : `${item.run.task_counts?.total || 0} task(s), ${item.run.event_count || 0} event(s)`;
@@ -1686,12 +1710,13 @@ export default function RunsInspector({
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space style={{ justifyContent: 'space-between', width: '100%' }} align="start">
           <div>
-            <Title level={4} style={{ margin: 0 }}>Dynamic Run {shortId(selectedDynamicRun.run_id)}</Title>
+            <Title level={4} style={{ margin: 0 }}>{String(selectedDynamicRun.metadata?.workflow_name || `Dynamic Run ${shortId(selectedDynamicRun.run_id)}`)}</Title>
             <Space size={6} wrap>
               <Tag color="purple">dynamic</Tag>
               {runModeTag(selectedDynamicRun)}
               <Tag color={dynamicStatusColors[selectedDynamicRun.status] || 'default'}>{selectedDynamicRun.status}</Tag>
               <Text copyable style={{ fontSize: 12 }}>{selectedDynamicRun.run_id}</Text>
+              <Text copyable={{ text: `${window.location.origin}${window.location.pathname}?run_id=${encodeURIComponent(selectedDynamicRun.run_id)}` }}>Run link</Text>
             </Space>
           </div>
           <Space>
@@ -1790,8 +1815,13 @@ export default function RunsInspector({
 
         {renderArtifacts()}
 
+        <div>
+          <Title level={5}>Execution graph</Title>
+          <RunGraph run={selectedDynamicRun} events={dynamicEvents} />
+        </div>
+
        <div>
-          <Title level={5}>Task Graph</Title>
+          <Title level={5}>Tasks</Title>
           {selectedDynamicTaskNodes.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No appended tasks" />
           ) : (
@@ -1945,6 +1975,9 @@ export default function RunsInspector({
         width={1040}
         extra={
           <Space>
+            {onOpenCanvas && <Button icon={<ExpandOutlined />} disabled={!selectedItem} onClick={() => selectedItem && onOpenCanvas(selectedItem.id)}>
+              Open in canvas
+            </Button>}
             <Button icon={<ReloadOutlined />} onClick={() => loadRuns()} loading={loading}>
               Refresh
             </Button>

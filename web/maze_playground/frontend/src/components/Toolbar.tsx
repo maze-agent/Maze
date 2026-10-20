@@ -12,16 +12,21 @@ import {
 } from '@ant-design/icons';
 import { createLocalWorkflowId, useWorkflowStore } from '@/stores/workflowStore';
 import { api } from '@/api/client';
-import type { TaskDefinition, WorkflowNode } from '@/types/workflow';
+import type { TaskDefinition, UnifiedRunSnapshot, WorkflowNode } from '@/types/workflow';
 import { runWorkflowName } from '@/utils/runSnapshot';
 
 const { Text } = Typography;
 
 interface ToolbarProps {
   onOpenClusterResources?: () => void;
+  executionRunId?: string;
+  executionRun?: UnifiedRunSnapshot | null;
+  onShowDesign?: () => void;
+  onOpenRunMode?: () => void;
+  onOpenRuns?: () => void;
 }
 
-export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
+export default function Toolbar({ onOpenClusterResources, executionRunId, executionRun, onShowDesign, onOpenRunMode, onOpenRuns }: ToolbarProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const { 
     workflowId, 
@@ -58,10 +63,10 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
   const [validatingWorkflow, setValidatingWorkflow] = useState(false);
   const [savingWorkflow, setSavingWorkflow] = useState(false);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
-  const selectedRun = selectedRunId
+  const selectedRun = executionRun ?? (selectedRunId
     ? staticRuns.find((run) => run.run_id === selectedRunId) || null
-    : null;
-  const isRunMode = Boolean(selectedRunId);
+    : null);
+  const isRunMode = Boolean(executionRunId || selectedRunId);
   const displayWorkflowName = isRunMode ? runWorkflowName(selectedRun) : workflowName;
 
   useEffect(() => {
@@ -559,7 +564,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           {
             value: 'Run',
             label: <span className="workbench-topbar-mode-option">Run</span>,
-            disabled: !isRunMode,
+            disabled: !isRunMode && !onOpenRunMode,
           },
           {
             value: 'Cluster',
@@ -569,6 +574,10 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
         onChange={(value) => {
           if (value === 'Design') {
             setSelectedRunId(null);
+            onShowDesign?.();
+          }
+          if (value === 'Run') {
+            onOpenRunMode?.();
           }
           if (value === 'Cluster') {
             onOpenClusterResources?.();
@@ -579,7 +588,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
       <div className="workbench-toolbar-right">
         {isRunMode ? (
           <>
-            <Tag color={selectedRun?.status === 'succeeded' ? 'green' : 'blue'}>
+            <Tag color={['succeeded', 'finalized'].includes(selectedRun?.status || '') ? 'green' : selectedRun?.status === 'failed' ? 'red' : 'blue'}>
               {selectedRun?.status || 'Loading Run'}
             </Tag>
             {(selectedRun?.metadata?.workspace_id || selectedRun?.workspace_id) && (
@@ -588,6 +597,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
           </>
         ) : saveStateTag()}
 
+        {executionRunId ? <Button onClick={onOpenRuns}>Run history</Button> : <>
         <input
           ref={importInputRef}
           type="file"
@@ -646,6 +656,7 @@ export default function Toolbar({ onOpenClusterResources }: ToolbarProps) {
             disabled={isRunMode || Boolean(workflowOperation)}
           />
         </Dropdown>
+        </>}
       </div>
     </div>
   );

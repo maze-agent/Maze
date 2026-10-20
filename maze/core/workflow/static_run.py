@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from maze.core.scheduler.result_summary import to_json_safe
+from maze.metrics.usage import resource_usage
 from maze.core.workflow.dynamic_store import (
     _EventLogState,
     _event_log_needs_separator,
@@ -649,7 +650,15 @@ class StaticRun:
                 "fraction": round(completed / total, 6),
             },
             "task_counts": task_counts,
-            "task_nodes": self.task_nodes,
+            "task_nodes": {
+                task_id: {
+                    **task,
+                    "resource_usage": resource_usage(
+                        task.get("metrics"), task.get("duration_seconds")
+                    ),
+                }
+                for task_id, task in self.task_nodes.items()
+            },
             "graph": self.graph,
             "event_count": len(self.event_log),
             "last_event_seq": self.event_seq,

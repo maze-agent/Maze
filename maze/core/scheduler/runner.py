@@ -15,6 +15,9 @@ from maze.core.scheduler.error import (
     task_error_result,
 )
 from maze.metrics.collector import _drain, _metrics_scope
+from maze.metrics.resources import ProcessResourceSampler
+from maze.metrics.model_resources import RemoteModelObservation
+from maze.metrics.usage import resource_usage
 
 # Special key used by users in their `return {...}` to attach metrics
 # without calling metrics.report(). The framework strips this key before
@@ -302,16 +305,21 @@ def execute_code_task_in_worker(
     cuda_visible_devices: str | None = None,
     file_context: dict | None = None,
     model_route: dict | None = None,
+    model_resource_observer: dict | None = None,
 ):
     _apply_model_route_env(model_route)
     _apply_cuda_visible_devices(cuda_visible_devices)
 
     torch = sys.modules.get("torch")
-    if torch is not None and cuda_visible_devices and torch.cuda.is_initialized():
+    if torch is not None and torch.cuda.is_initialized():
         torch.cuda.reset_peak_memory_stats()
 
     started_at = time.time()
-    with _metrics_scope() as collector:
+    with (
+        ProcessResourceSampler() as resource_sampler,
+        RemoteModelObservation(model_resource_observer) as model_observation,
+        _metrics_scope() as collector,
+    ):
         output = run_code_task(
             code_str=code_str,
             code_ser=code_ser,
@@ -322,6 +330,9 @@ def execute_code_task_in_worker(
     observed_gpu_metrics = _loaded_torch_cuda_metrics()
     finished_at = time.time()
     envelope = _wrap_with_envelope(output, started_at, finished_at, reported)
+    envelope.setdefault("metrics", {}).update(resource_sampler.metrics)
+    if model_observation.metrics:
+        envelope["metrics"]["model_instance"] = model_observation.metrics
     if observed_gpu_metrics:
         metrics = envelope.setdefault("metrics", {})
         for key, value in observed_gpu_metrics.items():
@@ -335,6 +346,10 @@ def execute_code_task_in_worker(
                 )
     from maze.core.scheduler.recovery import process_start_ticks
 
+    envelope["metrics"].pop("resource_usage", None)
+    envelope["metrics"]["resource_usage"] = resource_usage(
+        envelope["metrics"], finished_at - started_at
+    )
     envelope["worker_identity"] = {
         "pid": os.getpid(),
         "start_ticks": process_start_ticks(os.getpid()),
@@ -353,6 +368,7 @@ def remote_task_runner(
     cuda_visible_devices: str | None = None,
     file_context: dict | None = None,
     model_route: dict | None = None,
+    model_resource_observer: dict | None = None,
 ):
     return execute_code_task_in_worker(
         code_str=code_str,
@@ -361,6 +377,7 @@ def remote_task_runner(
         cuda_visible_devices=cuda_visible_devices,
         file_context=file_context,
         model_route=model_route,
+        model_resource_observer=model_resource_observer,
     )
 
 
@@ -372,6 +389,7 @@ def remote_gpu_task_runner(
     cuda_visible_devices: str | None = None,
     file_context: dict | None = None,
     model_route: dict | None = None,
+    model_resource_observer: dict | None = None,
 ):
     return execute_code_task_in_worker(
         code_str=code_str,
@@ -380,6 +398,7 @@ def remote_gpu_task_runner(
         cuda_visible_devices=cuda_visible_devices,
         file_context=file_context,
         model_route=model_route,
+        model_resource_observer=model_resource_observer,
     )
 
 
